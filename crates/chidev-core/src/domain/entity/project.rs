@@ -1,0 +1,513 @@
+//! The Project: the root that holds the Contexts of one repository and the rules between them.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use thiserror::Error;
+
+use super::context::{Context, ContextError};
+use super::harness::CaseFound;
+use super::interface::ItemFound;
+use crate::domain::vo::clause::ClauseContent;
+use crate::domain::vo::id::{
+    CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
+};
+use crate::domain::vo::name::ContextName;
+use crate::domain::vo::source::Source;
+use crate::domain::vo::title::Title;
+
+/// Which rule of the Project a change would break. The change is not made.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProjectError {
+    /// No Context has this id.
+    #[error("the context {0} is not in the project")]
+    UnknownContext(ContextId),
+    /// A Context with this id is already in the Project.
+    #[error("the context {0} is already in the project")]
+    DuplicateId(ContextId),
+    /// Two Contexts would have one name.
+    #[error("the context name `{0}` is taken")]
+    DuplicateName(ContextName),
+    /// A Context uses a Context that is not in the Project.
+    #[error("the context {context} uses {used}, which is not in the project")]
+    UnknownUse {
+        /// The Context that uses it.
+        context: ContextId,
+        /// The id that is not there.
+        used: ContextId,
+    },
+    /// Contexts would use each other in a ring; the ids are those on it, in the order of use.
+    #[error("the contexts would use each other in a cycle: {0:?}")]
+    Cycle(Vec<ContextId>),
+    /// A Case cites an Item that is neither in its Context's Interface nor in that of a Context it uses.
+    #[error(
+        "the case {case} of the context {context} cites the item {item}, which it cannot reach"
+    )]
+    ItemNotReached {
+        /// The Context that owns the Case.
+        context: ContextId,
+        /// The Case.
+        case: CaseId,
+        /// The Item cited.
+        item: ItemId,
+    },
+    /// A Case cites a Clause that is neither in its Context's Contract nor in that of a Context it uses.
+    #[error(
+        "the case {case} of the context {context} cites the clause {clause}, which it cannot reach"
+    )]
+    ClauseNotReached {
+        /// The Context that owns the Case.
+        context: ContextId,
+        /// The Case.
+        case: CaseId,
+        /// The Clause cited.
+        clause: ClauseId,
+    },
+    /// The change breaks a rule of one Context.
+    #[error(transparent)]
+    Context(#[from] ContextError),
+}
+
+/// The Contexts of one repository. Every change is made on a copy and kept only when the Project still holds:
+/// names are unique, every Context it uses is in the Project, `uses` forms no ring, and every Case cites only
+/// Items and Clauses its Context owns or uses. A change to one Context can break a citation in another (an Item
+/// removed from an Interface that another Context's Case cites), so the whole Project is checked each time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    id: ProjectId,
+    contexts: BTreeMap<ContextId, Context>,
+}
+
+impl Project {
+    /// A Project with no Contexts.
+    pub fn new(id: ProjectId) -> Project {
+        Project {
+            id,
+            contexts: BTreeMap::new(),
+        }
+    }
+
+    /// Its id.
+    pub fn id(&self) -> ProjectId {
+        self.id
+    }
+
+    /// The Context with this id.
+    pub fn context(&self, id: ContextId) -> Option<&Context> {
+        self.contexts.get(&id)
+    }
+
+    /// The Context with this name.
+    pub fn context_by_name(&self, name: &ContextName) -> Option<&Context> {
+        self.contexts.values().find(|c| c.name() == name)
+    }
+
+    /// The Contexts, in the order of their ids.
+    pub fn contexts(&self) -> impl Iterator<Item = &Context> {
+        self.contexts.values()
+    }
+
+    /// Adds a Context.
+    pub fn add_context(&mut self, context: Context) -> Result<(), ProjectError> {
+        if self.contexts.contains_key(&context.id()) {
+            return Err(ProjectError::DuplicateId(context.id()));
+        }
+        let mut next = self.contexts.clone();
+        next.insert(context.id(), context);
+        self.keep(next)
+    }
+
+    /// Sets the Contexts a Context uses.
+    pub fn set_uses(
+        &mut self,
+        context: ContextId,
+        uses: BTreeSet<ContextId>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, |c| c.set_uses(uses))
+    }
+
+    /// Bases a Context on its Contract, which it must have. There is no way back.
+    pub fn base_on_contract(&mut self, context: ContextId) -> Result<(), ProjectError> {
+        self.change(context, Context::base_on_contract)
+    }
+
+    /// Makes or revises the Contract of a Context.
+    pub fn put_contract(
+        &mut self,
+        context: ContextId,
+        id: ContractId,
+        title: Title,
+        clauses: Vec<(ClauseId, ClauseContent)>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, |c| c.put_contract(id, title, clauses))
+    }
+
+    /// Makes or revises the Interface of a Context.
+    pub fn put_interface(
+        &mut self,
+        context: ContextId,
+        id: InterfaceId,
+        source: Source,
+        items: Vec<ItemFound>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, |c| c.put_interface(id, source, items))
+    }
+
+    /// Makes or revises the Harness of a Context.
+    pub fn put_harness(
+        &mut self,
+        context: ContextId,
+        id: HarnessId,
+        source: Source,
+        cases: Vec<CaseFound>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, |c| c.put_harness(id, source, cases))
+    }
+
+    /// Applies `f` to a copy of the Context and keeps the result when the Project still holds.
+    fn change(
+        &mut self,
+        context: ContextId,
+        f: impl FnOnce(&mut Context) -> Result<(), ContextError>,
+    ) -> Result<(), ProjectError> {
+        let mut next = self.contexts.clone();
+        let c = next
+            .get_mut(&context)
+            .ok_or(ProjectError::UnknownContext(context))?;
+        f(c)?;
+        self.keep(next)
+    }
+
+    /// Takes `next` as the Contexts when it breaks no rule of the Project.
+    fn keep(&mut self, next: BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
+        check(&next)?;
+        self.contexts = next;
+        Ok(())
+    }
+}
+
+/// The rules of the Project over `contexts`.
+fn check(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
+    let mut names = BTreeSet::new();
+    for c in contexts.values() {
+        if !names.insert(c.name()) {
+            return Err(ProjectError::DuplicateName(c.name().clone()));
+        }
+        if let Some(used) = c.uses().iter().find(|u| !contexts.contains_key(u)) {
+            return Err(ProjectError::UnknownUse {
+                context: c.id(),
+                used: *used,
+            });
+        }
+    }
+    if let Some(ring) = find_cycle(contexts) {
+        return Err(ProjectError::Cycle(ring));
+    }
+    for c in contexts.values() {
+        check_cites(c, contexts)?;
+    }
+    Ok(())
+}
+
+/// Every Item and Clause a Case of `context` cites is in `context` or in a Context it uses.
+fn check_cites(
+    context: &Context,
+    contexts: &BTreeMap<ContextId, Context>,
+) -> Result<(), ProjectError> {
+    let Some(harness) = context.harness() else {
+        return Ok(());
+    };
+    let reach: Vec<&Context> = std::iter::once(context)
+        .chain(context.uses().iter().filter_map(|u| contexts.get(u)))
+        .collect();
+    let has_item = |item: &ItemId| {
+        reach
+            .iter()
+            .any(|c| c.interface().is_some_and(|i| i.item(*item).is_some()))
+    };
+    let has_clause = |clause: &ClauseId| {
+        reach
+            .iter()
+            .any(|c| c.contract().is_some_and(|k| k.clause(*clause).is_some()))
+    };
+    for case in harness.cases() {
+        if let Some(item) = case.cites().items().keys().find(|i| !has_item(i)) {
+            return Err(ProjectError::ItemNotReached {
+                context: context.id(),
+                case: case.id(),
+                item: *item,
+            });
+        }
+        if let Some(clause) = case.cites().clauses().keys().find(|k| !has_clause(k)) {
+            return Err(ProjectError::ClauseNotReached {
+                context: context.id(),
+                case: case.id(),
+                clause: *clause,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The ids on one cycle of `uses`, in the order of use, or `None` when there is none. Every id in a `uses` is in
+/// `contexts` (checked before).
+fn find_cycle(contexts: &BTreeMap<ContextId, Context>) -> Option<Vec<ContextId>> {
+    fn visit(
+        id: ContextId,
+        contexts: &BTreeMap<ContextId, Context>,
+        path: &mut Vec<ContextId>,
+        done: &mut BTreeSet<ContextId>,
+    ) -> Option<Vec<ContextId>> {
+        if let Some(at) = path.iter().position(|p| *p == id) {
+            return Some(path[at..].to_vec());
+        }
+        if done.contains(&id) {
+            return None;
+        }
+        path.push(id);
+        for next in contexts[&id].uses() {
+            if let Some(ring) = visit(*next, contexts, path, done) {
+                return Some(ring);
+            }
+        }
+        path.pop();
+        done.insert(id);
+        None
+    }
+    let mut done = BTreeSet::new();
+    contexts
+        .keys()
+        .find_map(|id| visit(*id, contexts, &mut Vec::new(), &mut done))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::entity::context::Basis;
+    use crate::domain::vo::case::{CaseCites, CaseName};
+    use crate::domain::vo::clause::{ClauseLabel, ClauseText};
+    use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::line_range::LineRange;
+    use crate::domain::vo::revision::Revision;
+    use crate::domain::vo::signature::Signature;
+
+    fn ctx_id(n: u128) -> ContextId {
+        ContextId::from_uuid(test_uuid(n))
+    }
+
+    fn item(n: u128) -> ItemId {
+        ItemId::from_uuid(test_uuid(n))
+    }
+
+    fn clause(n: u128) -> ClauseId {
+        ClauseId::from_uuid(test_uuid(n))
+    }
+
+    fn context(n: u128, name: &str, uses: &[u128]) -> Context {
+        Context::new(
+            ctx_id(n),
+            ContextName::try_from(name).unwrap(),
+            uses.iter().map(|u| ctx_id(*u)).collect(),
+        )
+        .unwrap()
+    }
+
+    /// A Project with `core` (1) using `base` (2); `base` has the Interface with Item 20 and the Contract with
+    /// Clause 30, and `core` has the Interface with Item 10 and the Contract with Clause 11.
+    fn project() -> Project {
+        let mut p = Project::new(ProjectId::from_uuid(test_uuid(1000)));
+        p.add_context(context(2, "base", &[])).unwrap();
+        p.add_context(context(1, "core", &[2])).unwrap();
+        put_interface(&mut p, 1, 101, 10);
+        put_interface(&mut p, 2, 201, 20);
+        put_contract(&mut p, 1, 102, 11);
+        put_contract(&mut p, 2, 202, 30);
+        p
+    }
+
+    fn put_interface(p: &mut Project, ctx: u128, id: u128, item_id: u128) {
+        p.put_interface(
+            ctx_id(ctx),
+            InterfaceId::from_uuid(test_uuid(id)),
+            Source::new("fn f()\n".to_string()),
+            vec![(
+                item(item_id),
+                Signature::try_from("fn f()").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+            )],
+        )
+        .unwrap();
+    }
+
+    fn put_contract(p: &mut Project, ctx: u128, id: u128, clause_id: u128) {
+        p.put_contract(
+            ctx_id(ctx),
+            ContractId::from_uuid(test_uuid(id)),
+            Title::try_from("T").unwrap(),
+            vec![(
+                clause(clause_id),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C1").unwrap(),
+                    ClauseText::try_from("a").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+    }
+
+    /// Puts on `core` a Harness with one Case citing `items` and `clauses`.
+    fn put_harness(p: &mut Project, items: &[u128], clauses: &[u128]) -> Result<(), ProjectError> {
+        let cites = CaseCites::new(
+            items
+                .iter()
+                .map(|i| (item(*i), Revision::first()))
+                .collect(),
+            clauses
+                .iter()
+                .map(|k| (clause(*k), Revision::first()))
+                .collect(),
+        )
+        .unwrap();
+        p.put_harness(
+            ctx_id(1),
+            HarnessId::from_uuid(test_uuid(103)),
+            Source::new("fn t() {}\n".to_string()),
+            vec![(
+                CaseId::from_uuid(test_uuid(50)),
+                CaseName::try_from("t").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+                cites,
+            )],
+        )
+    }
+
+    #[test]
+    fn contexts_are_found_by_id_and_by_name() {
+        let p = project();
+        assert_eq!(p.context(ctx_id(1)).unwrap().name().as_str(), "core");
+        let base = ContextName::try_from("base").unwrap();
+        assert_eq!(p.context_by_name(&base).unwrap().id(), ctx_id(2));
+        assert_eq!(p.contexts().count(), 2);
+    }
+
+    #[test]
+    fn a_duplicate_id_or_name_is_refused() {
+        let mut p = project();
+        assert_eq!(
+            p.add_context(context(1, "other", &[])),
+            Err(ProjectError::DuplicateId(ctx_id(1)))
+        );
+        assert_eq!(
+            p.add_context(context(3, "core", &[])),
+            Err(ProjectError::DuplicateName(
+                ContextName::try_from("core").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_use_of_a_missing_context_or_a_cycle_is_refused_and_changes_nothing() {
+        let mut p = project();
+        let before = p.clone();
+        assert_eq!(
+            p.add_context(context(3, "x", &[9])),
+            Err(ProjectError::UnknownUse {
+                context: ctx_id(3),
+                used: ctx_id(9)
+            })
+        );
+        assert!(matches!(
+            p.set_uses(ctx_id(2), BTreeSet::from([ctx_id(1)])),
+            Err(ProjectError::Cycle(_))
+        ));
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_case_may_cite_its_own_and_its_used_contexts_items_and_clauses() {
+        let mut p = project();
+        put_harness(&mut p, &[10, 20], &[11, 30]).unwrap();
+        assert!(p.context(ctx_id(1)).unwrap().harness().is_some());
+    }
+
+    #[test]
+    fn a_case_that_cites_what_it_cannot_reach_is_refused() {
+        let mut p = project();
+        let core = ctx_id(1);
+        let case = CaseId::from_uuid(test_uuid(50));
+        assert_eq!(
+            put_harness(&mut p, &[99], &[]),
+            Err(ProjectError::ItemNotReached {
+                context: core,
+                case,
+                item: item(99)
+            })
+        );
+        assert_eq!(
+            put_harness(&mut p, &[10], &[99]),
+            Err(ProjectError::ClauseNotReached {
+                context: core,
+                case,
+                clause: clause(99)
+            })
+        );
+        // `base` does not use `core`, so a Case of `base` cannot cite Item 10 of `core`
+        let cites = CaseCites::new(
+            BTreeMap::from([(item(10), Revision::first())]),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let found = vec![(
+            case,
+            CaseName::try_from("t").unwrap(),
+            LineRange::new(1, 1).unwrap(),
+            cites,
+        )];
+        assert!(matches!(
+            p.put_harness(
+                ctx_id(2),
+                HarnessId::from_uuid(test_uuid(203)),
+                Source::new("t\n".to_string()),
+                found
+            ),
+            Err(ProjectError::ItemNotReached { .. })
+        ));
+    }
+
+    #[test]
+    fn a_change_elsewhere_that_would_orphan_a_citation_is_refused_and_changes_nothing() {
+        let mut p = project();
+        put_harness(&mut p, &[10, 20], &[]).unwrap();
+        let before = p.clone();
+        // `base` drops Item 20, which a Case of `core` cites
+        assert!(matches!(
+            p.put_interface(
+                ctx_id(2),
+                InterfaceId::from_uuid(test_uuid(201)),
+                Source::new("x\n".to_string()),
+                Vec::new()
+            ),
+            Err(ProjectError::ItemNotReached { .. })
+        ));
+        // `core` stops using `base`
+        assert!(matches!(
+            p.set_uses(ctx_id(1), BTreeSet::new()),
+            Err(ProjectError::ItemNotReached { .. })
+        ));
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_context_is_based_on_its_contract_through_the_project() {
+        let mut p = project();
+        p.base_on_contract(ctx_id(1)).unwrap();
+        assert_eq!(p.context(ctx_id(1)).unwrap().basis(), Basis::Contract);
+        assert_eq!(
+            p.base_on_contract(ctx_id(1)),
+            Err(ProjectError::Context(ContextError::AlreadyOnContract))
+        );
+        assert_eq!(
+            p.base_on_contract(ctx_id(9)),
+            Err(ProjectError::UnknownContext(ctx_id(9)))
+        );
+    }
+}
