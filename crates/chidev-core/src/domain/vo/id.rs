@@ -71,8 +71,8 @@ uuid_id!(
     PinId
 );
 uuid_id!(
-    /// The identity of a Crux.
-    CruxId
+    /// The identity of a change request.
+    ChangeRequestId
 );
 
 /// A fixed uuid for the tests: the domain does not make ids, so a test makes them from a number.
@@ -90,7 +90,7 @@ mod tests {
         let u = test_uuid(7);
         assert_eq!(ContextId::from_uuid(u).as_uuid(), u);
         assert_eq!(ClauseId::from_uuid(u).as_uuid(), u);
-        assert_eq!(CruxId::from_uuid(u).to_string(), u.to_string());
+        assert_eq!(ChangeRequestId::from_uuid(u).to_string(), u.to_string());
     }
 
     #[test]

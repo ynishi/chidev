@@ -5,10 +5,10 @@ use std::io::{self, BufRead, Write};
 
 use chidev_core::app::ports::{AssetNames, IdSource};
 use chidev_core::app::{
-    App, AppError, CaseInput, ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput,
-    ItemInput, ItemRef, OptionInput, PinState, ReasonedInput, SourceInput,
+    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
+    DecisionInput, Intent, ItemInput, ItemRef, OptionInput, PinState, ReasonedInput,
 };
-use chidev_core::domain::repository::{CruxRepository, PinRepository, ProjectRepository};
+use chidev_core::domain::repository::{ChangeRequestRepository, PinRepository, ProjectRepository};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -55,10 +55,10 @@ enum Op {
         interface: String,
         code: String,
     },
-    /// Raises a Crux.
-    CruxRaise(Box<RaiseDto>),
-    /// Decides a Crux: exactly one of `choice`, `wording` and `unspecified`.
-    CruxDecide {
+    /// Opens a change request.
+    CrOpen(Box<OpenDto>),
+    /// Decides the Crux of a change request: exactly one of `choice`, `wording` and `unspecified`.
+    CrDecide {
         title: String,
         #[serde(default)]
         choice: Option<String>,
@@ -69,30 +69,56 @@ enum Op {
         #[serde(default)]
         reason: Option<String>,
     },
-    /// Closes the record of a Crux whose decision is applied.
-    CruxResolve { title: String },
+    /// Closes the record of a change request whose change is applied.
+    CrResolve { title: String },
     /// Where the project stands.
     Status,
 }
 
-/// The fields of `crux_raise`, boxed: they are far larger than any other operation's.
+/// The fields of `cr_open`, boxed: they are far larger than any other operation's.
 #[derive(Debug, Deserialize)]
-struct RaiseDto {
-    kind: KindDto,
+struct OpenDto {
     title: String,
     #[serde(default)]
     situation: Option<String>,
+    intent: IntentDto,
     #[serde(default)]
-    source: Option<SourceDto>,
+    parent: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    items: Vec<ItemRefDto>,
+    #[serde(default)]
+    clauses: Vec<ClauseRefDto>,
+    /// The question for a person; none: the machine resolves it.
+    #[serde(default)]
+    crux: Option<CruxDto>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IntentDto {
+    ChangeBehavior,
+    KeepBehavior,
+}
+
+impl From<IntentDto> for Intent {
+    fn from(i: IntentDto) -> Intent {
+        match i {
+            IntentDto::ChangeBehavior => Intent::ChangeBehavior,
+            IntentDto::KeepBehavior => Intent::KeepBehavior,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CruxDto {
+    kind: KindDto,
     options: Vec<OptionDto>,
     #[serde(default)]
     default: Option<ReasonedDto>,
     #[serde(default)]
     recommended: Option<ReasonedDto>,
-    #[serde(default)]
-    items: Vec<ItemRefDto>,
-    #[serde(default)]
-    clauses: Vec<ClauseRefDto>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -113,20 +139,6 @@ impl From<KindDto> for CruxKind {
             KindDto::Disagreement => CruxKind::Disagreement,
         }
     }
-}
-
-/// `{"request": "..."}` or `{"finding": {"rule": "...", "item": {...}}}`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SourceDto {
-    Request(String),
-    Finding {
-        rule: String,
-        #[serde(default)]
-        item: Option<ItemRefDto>,
-        #[serde(default)]
-        clause: Option<ClauseRefDto>,
-    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,7 +231,7 @@ impl From<ClauseRefDto> for ClauseRef {
 /// on. Returns whether every operation succeeded; an error is only a failure to read or write.
 pub fn run<S, G>(app: &mut App<S, G>, input: impl BufRead, out: &mut impl Write) -> io::Result<bool>
 where
-    S: ProjectRepository + PinRepository + CruxRepository + AssetNames,
+    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
     G: IdSource,
 {
     let mut all_ok = true;
@@ -251,7 +263,7 @@ where
 
 fn apply<S, G>(app: &mut App<S, G>, op: Op) -> Result<Value, AppError>
 where
-    S: ProjectRepository + PinRepository + CruxRepository + AssetNames,
+    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
     G: IdSource,
 {
     Ok(match op {
@@ -325,32 +337,21 @@ where
         } => {
             json!({ "op": "pin", "pin": app.pin(&context, &interface, &code)?.to_string() })
         }
-        Op::CruxRaise(raise) => {
-            let RaiseDto {
-                kind,
+        Op::CrOpen(open) => {
+            let OpenDto {
                 title,
                 situation,
-                source,
-                options,
-                default,
-                recommended,
+                intent,
+                parent,
+                issuer,
                 items,
                 clauses,
-            } = *raise;
-            let source = source.map(|s| match s {
-                SourceDto::Request(text) => SourceInput::Request(text),
-                SourceDto::Finding { rule, item, clause } => SourceInput::Finding {
-                    rule,
-                    item: item.map(ItemRef::from),
-                    clause: clause.map(ClauseRef::from),
-                },
-            });
-            let input = CruxInput {
-                kind: kind.into(),
-                title,
-                situation,
-                source,
-                options: options
+                crux,
+            } = *open;
+            let crux = crux.map(|q| CruxInput {
+                kind: q.kind.into(),
+                options: q
+                    .options
                     .into_iter()
                     .map(|o| OptionInput {
                         choice: o.choice,
@@ -358,15 +359,23 @@ where
                         consequence: o.consequence,
                     })
                     .collect(),
-                default: default.map(ReasonedInput::from),
-                recommended: recommended.map(ReasonedInput::from),
+                default: q.default.map(ReasonedInput::from),
+                recommended: q.recommended.map(ReasonedInput::from),
+            });
+            let input = ChangeRequestInput {
+                title,
+                situation,
+                intent: intent.into(),
+                parent,
+                issuer,
                 items: items.into_iter().map(ItemRef::from).collect(),
                 clauses: clauses.into_iter().map(ClauseRef::from).collect(),
+                crux,
             };
-            let id = app.raise_crux(&input)?;
-            json!({ "op": "crux_raise", "crux": id.to_string() })
+            let id = app.open_change_request(&input)?;
+            json!({ "op": "cr_open", "cr": id.to_string() })
         }
-        Op::CruxDecide {
+        Op::CrDecide {
             title,
             choice,
             wording,
@@ -385,12 +394,12 @@ where
                     ));
                 }
             };
-            app.decide_crux(&title, &decision)?;
-            json!({ "op": "crux_decide" })
+            app.decide_change_request(&title, &decision)?;
+            json!({ "op": "cr_decide" })
         }
-        Op::CruxResolve { title } => {
-            app.resolve_crux(&title)?;
-            json!({ "op": "crux_resolve" })
+        Op::CrResolve { title } => {
+            app.resolve_change_request(&title)?;
+            json!({ "op": "cr_resolve" })
         }
         Op::Status => {
             let s = app.status()?;
@@ -412,17 +421,22 @@ where
                 .iter()
                 .map(|c| json!({ "case": c.case, "target": c.target, "cited": c.cited, "now": c.now }))
                 .collect();
-            let cruxes: Vec<Value> = s
-                .cruxes
+            let crs: Vec<Value> = s
+                .change_requests
                 .iter()
-                .map(|c| json!({ "title": c.title, "kind": c.kind, "state": c.state, "decision": c.decision }))
+                .map(|c| {
+                    json!({
+                        "title": c.title, "intent": c.intent, "parent": c.parent, "issuer": c.issuer,
+                        "crux": c.crux, "state": c.state, "decision": c.decision,
+                    })
+                })
                 .collect();
             let open: Vec<Value> = s
                 .unapplied
                 .iter()
-                .map(|u| json!({ "crux": u.crux, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
+                .map(|u| json!({ "cr": u.cr, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
                 .collect();
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "cruxes": cruxes, "unapplied": open })
+            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open })
         }
     })
 }

@@ -1,7 +1,7 @@
 //! Runs `tests/flow.jsonl` through `chidev exec`: two Contexts get their Contract, Interfaces and Harnesses, are
-//! pinned, a Crux is raised from a request and decided against its default, the change is made and the Crux
-//! resolved, the Pins and citations go stale, the Harnesses are brought up to date, the code is pinned again, and a
-//! change that would orphan a citation is refused.
+//! pinned; a change request is opened, with a part a person decides through its Crux against the default; the
+//! change is made and both change requests resolved; the Pins and citations go stale, the Harnesses are brought up
+//! to date, the code is pinned again, and a change that would orphan a citation is refused.
 
 use std::process::Command;
 
@@ -53,9 +53,9 @@ fn states(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     let (results, code) = run();
-    assert_eq!(results.len(), 25);
+    assert_eq!(results.len(), 27);
     assert!(
-        results[..24].iter().all(|r| r["ok"] == true),
+        results[..26].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
 
@@ -66,16 +66,24 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
         states(&[("price", "fresh"), ("print", "fresh")])
     );
 
-    // the decision differs from the default and the clause written on the default has not changed yet
-    let decided = at(&results, 15);
-    assert_eq!(decided["cruxes"][0]["state"], "decided");
-    assert_eq!(decided["cruxes"][0]["decision"], "half to even");
+    // the request is open; its part decided against the default, with the clause written on the default unchanged
+    let decided = at(&results, 16);
+    let crs = &decided["change_requests"];
+    assert_eq!(crs[0]["title"], "Fair totals");
+    assert_eq!(crs[0]["state"], "open");
+    assert_eq!(crs[0]["crux"], Value::Null);
+    assert_eq!(crs[1]["parent"], "Fair totals");
+    assert_eq!(crs[1]["issuer"], "designer");
+    assert_eq!(crs[1]["crux"], "ambiguity");
+    assert_eq!(crs[1]["state"], "decided");
+    assert_eq!(crs[1]["decision"], "half to even");
     assert_eq!(decided["unapplied"][0]["unchanged"][0], "rounding C1");
 
-    // the clause changed (line 16), so the Crux resolves (line 17); then the interface changes too: the pins and
-    // the citations are behind, and the Crux stays resolved
-    let changed = at(&results, 19);
-    assert_eq!(changed["cruxes"][0]["state"], "resolved");
+    // the clause changed (line 17), so both change requests resolve (lines 18, 19); then the interface changes
+    // too: the pins and the citations are behind, and the change requests stay resolved
+    let changed = at(&results, 21);
+    assert_eq!(changed["change_requests"][0]["state"], "resolved");
+    assert_eq!(changed["change_requests"][1]["state"], "resolved");
     assert_eq!(
         pin_states(changed),
         states(&[("price", "stale"), ("print", "stale")])
@@ -91,12 +99,12 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
     assert_eq!(changed["unapplied"], serde_json::json!([]));
     // the interface was revised, not replaced; its item kept its id across the signature change (`replaces`),
-    // or line 18 would have been refused for orphaning the cases that cite it
-    assert_eq!(at(&results, 18)["revision"], 2);
-    assert_eq!(at(&results, 18)["id"], at(&results, 6)["id"]);
+    // or line 20 would have been refused for orphaning the cases that cite it
+    assert_eq!(at(&results, 20)["revision"], 2);
+    assert_eq!(at(&results, 20)["id"], at(&results, 6)["id"]);
 
     // the harnesses brought up to date and the code pinned again: everything is fresh
-    let again = at(&results, 24);
+    let again = at(&results, 26);
     assert_eq!(
         pin_states(again),
         states(&[("price", "fresh"), ("print", "fresh")])
@@ -104,7 +112,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(again["stale_cites"], serde_json::json!([]));
 
     // dropping the item the harnesses cite is refused, and the run reports the failure
-    let refused = at(&results, 25);
+    let refused = at(&results, 27);
     assert_eq!(refused["ok"], false);
     assert!(
         refused["error"]

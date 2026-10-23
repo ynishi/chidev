@@ -1,12 +1,12 @@
-//! The repositories: how each aggregate (the Project, a Pin, a Crux) is kept and found again. They are declared
-//! here, beside the aggregates they keep, and implemented outside the domain; the domain never calls one.
+//! The repositories: how each aggregate (the Project, a Pin, a change request) is kept and found again. They are
+//! declared here, beside the aggregates they keep, and implemented outside the domain; the domain never calls one.
 
 use thiserror::Error;
 
-use super::entity::crux::Crux;
+use super::entity::change_request::ChangeRequest;
 use super::entity::pin::Pin;
 use super::entity::project::Project;
-use super::vo::id::{CruxId, InterfaceId};
+use super::vo::id::{ChangeRequestId, InterfaceId};
 
 /// Why a repository could not keep or give back an aggregate (the store is unreadable, a write failed). It holds
 /// the store's own words: the domain does not interpret them.
@@ -35,14 +35,14 @@ pub trait PinRepository {
     fn save_pin(&mut self, pin: &Pin) -> Result<(), StoreError>;
 }
 
-/// Keeps the Cruxes.
-pub trait CruxRepository {
-    /// The Crux with this id.
-    fn crux(&self, id: CruxId) -> Result<Option<Crux>, StoreError>;
+/// Keeps the change requests.
+pub trait ChangeRequestRepository {
+    /// The change request with this id.
+    fn change_request(&self, id: ChangeRequestId) -> Result<Option<ChangeRequest>, StoreError>;
 
-    /// Every Crux, in the order of their ids.
-    fn cruxes(&self) -> Result<Vec<Crux>, StoreError>;
+    /// Every change request, in the order of their ids.
+    fn change_requests(&self) -> Result<Vec<ChangeRequest>, StoreError>;
 
-    /// Keeps `crux`, replacing the one with the same id.
-    fn save_crux(&mut self, crux: &Crux) -> Result<(), StoreError>;
+    /// Keeps `cr`, replacing the one with the same id.
+    fn save_change_request(&mut self, cr: &ChangeRequest) -> Result<(), StoreError>;
 }

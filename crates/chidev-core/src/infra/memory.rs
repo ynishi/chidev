@@ -5,18 +5,20 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::app::ports::{AssetKind, AssetNames};
-use crate::domain::entity::crux::Crux;
+use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
-use crate::domain::repository::{CruxRepository, PinRepository, ProjectRepository, StoreError};
-use crate::domain::vo::id::{ContextId, CruxId, InterfaceId};
+use crate::domain::repository::{
+    ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
+};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId};
 
-/// Keeps the Project, the Pins, the Cruxes and the asset names in memory. Nothing it does fails.
+/// Keeps the Project, the Pins, the change requests and the asset names in memory. Nothing it does fails.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryStore {
     project: Option<Project>,
     pins: BTreeMap<InterfaceId, Pin>,
-    cruxes: BTreeMap<CruxId, Crux>,
+    crs: BTreeMap<ChangeRequestId, ChangeRequest>,
     names: BTreeMap<(ContextId, AssetKind, String), Uuid>,
 }
 
@@ -46,17 +48,17 @@ impl PinRepository for MemoryStore {
     }
 }
 
-impl CruxRepository for MemoryStore {
-    fn crux(&self, id: CruxId) -> Result<Option<Crux>, StoreError> {
-        Ok(self.cruxes.get(&id).cloned())
+impl ChangeRequestRepository for MemoryStore {
+    fn change_request(&self, id: ChangeRequestId) -> Result<Option<ChangeRequest>, StoreError> {
+        Ok(self.crs.get(&id).cloned())
     }
 
-    fn cruxes(&self) -> Result<Vec<Crux>, StoreError> {
-        Ok(self.cruxes.values().cloned().collect())
+    fn change_requests(&self) -> Result<Vec<ChangeRequest>, StoreError> {
+        Ok(self.crs.values().cloned().collect())
     }
 
-    fn save_crux(&mut self, crux: &Crux) -> Result<(), StoreError> {
-        self.cruxes.insert(crux.id(), crux.clone());
+    fn save_change_request(&mut self, cr: &ChangeRequest) -> Result<(), StoreError> {
+        self.crs.insert(cr.id(), cr.clone());
         Ok(())
     }
 }

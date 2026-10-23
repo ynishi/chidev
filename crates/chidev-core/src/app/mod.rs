@@ -18,23 +18,28 @@ use std::fmt::Display;
 use thiserror::Error;
 
 use self::ports::{AssetKind, AssetNames, IdSource};
-use crate::domain::entity::crux::{Crux, CruxDraft, CruxError, CruxState};
+use crate::domain::entity::change_request::{
+    ChangeRequest, ChangeRequestDraft, ChangeRequestError, ChangeRequestState, Crux, Route,
+};
 use crate::domain::entity::project::{Project, ProjectError};
-use crate::domain::repository::{CruxRepository, PinRepository, ProjectRepository, StoreError};
+use crate::domain::repository::{
+    ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
+};
+use crate::domain::service::change_request::{decide, resolve, revisions_now, unapplied};
 use crate::domain::service::cite::stale_cites;
-use crate::domain::service::crux::{decide, resolve, revisions_now, unapplied};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 pub use crate::domain::vo::crux::CruxKind;
-use crate::domain::vo::crux::{CruxOption, CruxSource, Decision, Reasoned};
+use crate::domain::vo::crux::{CruxOption, Decision, Reasoned};
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::finding::{FindingRef, RuleId};
 use crate::domain::vo::id::{
-    CaseId, ClauseId, ContextId, ContractId, CruxId, HarnessId, InterfaceId, ItemId, PinId,
-    ProjectId,
+    CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
+    PinId, ProjectId,
 };
+pub use crate::domain::vo::intent::Intent;
+use crate::domain::vo::intent::Issuer;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::prose::Prose;
@@ -82,9 +87,12 @@ pub enum AppError {
         /// The label looked for.
         label: String,
     },
-    /// No Crux has this title.
-    #[error("no crux is titled `{0}`")]
-    UnknownCrux(String),
+    /// No change request has this title.
+    #[error("no change request is titled `{0}`")]
+    UnknownChangeRequest(String),
+    /// A change request has this title already; a change request is addressed by its title.
+    #[error("a change request is titled `{0}` already")]
+    TitleTaken(String),
     /// A citation outside a Harness does not say which Context it is in.
     #[error("a citation outside a harness names its context")]
     ContextNotGiven,
@@ -97,9 +105,9 @@ pub enum AppError {
     /// The code cannot be pinned.
     #[error(transparent)]
     Pin(#[from] PinError),
-    /// The Crux cannot be made or answered.
+    /// The change request cannot be opened, decided or resolved.
     #[error(transparent)]
-    Crux(#[from] CruxError),
+    ChangeRequest(#[from] ChangeRequestError),
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -231,43 +239,39 @@ pub struct ReasonedInput {
     pub reason: Option<String>,
 }
 
-/// Where a Crux came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceInput {
-    /// A finding of a check: the rule, and the Item or Clause it is about (none: the Project as a whole).
-    Finding {
-        /// The rule's id.
-        rule: String,
-        /// The Item it is about.
-        item: Option<ItemRef>,
-        /// The Clause it is about.
-        clause: Option<ClauseRef>,
-    },
-    /// A request for change, in the requester's words.
-    Request(String),
-}
-
-/// A Crux as a person raises it. Citations outside a Harness name their Context.
+/// The question of a change request a person settles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CruxInput {
     /// What kind of question it is.
     pub kind: CruxKind,
-    /// The question.
-    pub title: String,
-    /// Why it is a question.
-    pub situation: Option<String>,
-    /// Where it came from.
-    pub source: Option<SourceInput>,
     /// The options.
     pub options: Vec<OptionInput>,
     /// The option work goes on with until the person decides.
     pub default: Option<ReasonedInput>,
     /// The option recommended.
     pub recommended: Option<ReasonedInput>,
-    /// The Items the question is about.
+}
+
+/// A change request as it is opened. Citations name their Context. A change request is addressed by its title,
+/// which is unique among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeRequestInput {
+    /// What is asked, in a line.
+    pub title: String,
+    /// Why it is needed.
+    pub situation: Option<String>,
+    /// Whether it means to change the behaviour.
+    pub intent: Intent,
+    /// The title of the broader change request it is a part of.
+    pub parent: Option<String>,
+    /// Who raises it.
+    pub issuer: Option<String>,
+    /// The Items it is about.
     pub items: Vec<ItemRef>,
-    /// The Clauses the question is about.
+    /// The Clauses it is about.
     pub clauses: Vec<ClauseRef>,
+    /// The question for a person; none: the machine resolves it.
+    pub crux: Option<CruxInput>,
 }
 
 /// What the person decided about a Crux.
@@ -289,43 +293,49 @@ pub enum DecisionInput {
     },
 }
 
-/// Where one Crux stands.
+/// Where one change request stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CruxStatus {
+pub struct ChangeRequestStatus {
     /// Its title.
     pub title: String,
-    /// Its kind.
-    pub kind: &'static str,
+    /// `change_behavior` or `keep_behavior`.
+    pub intent: &'static str,
+    /// The title of the change request it is a part of.
+    pub parent: Option<String>,
+    /// Who raised it.
+    pub issuer: Option<String>,
+    /// The kind of its Crux; none: the machine resolves it.
+    pub crux: Option<&'static str>,
     /// `open`, `decided` or `resolved`.
     pub state: &'static str,
-    /// The decision, in words.
+    /// The decision on its Crux, in words.
     pub decision: Option<String>,
 }
 
-/// A decided Crux whose definitions have not followed its decision.
+/// An unresolved change request the definitions have not followed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnappliedStatus {
-    /// The Crux's title.
-    pub crux: String,
-    /// The decision, in words.
-    pub decision: String,
-    /// The definitions not changed since the decision, described.
+    /// The change request's title.
+    pub cr: String,
+    /// The decision on its Crux, in words.
+    pub decision: Option<String>,
+    /// The definitions not changed since, described.
     pub unchanged: Vec<String>,
     /// The definitions gone, described.
     pub gone: Vec<String>,
 }
 
-/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, the Cruxes,
-/// and the decisions not yet applied.
+/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, the change
+/// requests, and those not yet applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     /// Every Interface, and every Pin whose Interface is gone.
     pub pins: Vec<PinStatus>,
     /// The citations behind their targets.
     pub stale_cites: Vec<StaleCiteStatus>,
-    /// Every Crux.
-    pub cruxes: Vec<CruxStatus>,
-    /// The decisions not yet applied.
+    /// Every change request.
+    pub change_requests: Vec<ChangeRequestStatus>,
+    /// The change requests not yet applied.
     pub unapplied: Vec<UnappliedStatus>,
 }
 
@@ -360,7 +370,7 @@ pub struct App<S, G> {
 
 impl<S, G> App<S, G>
 where
-    S: ProjectRepository + PinRepository + CruxRepository + AssetNames,
+    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
     G: IdSource,
 {
     /// The use cases over `store`, with fresh ids from `ids`.
@@ -567,10 +577,29 @@ where
         Ok(id)
     }
 
-    /// Raises a Crux: the question, why, where from, the options, the default and the recommendation, and the
-    /// definitions it is about (each citation names its Context).
-    pub fn raise_crux(&mut self, c: &CruxInput) -> Result<CruxId, AppError> {
+    /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
+    /// it is a part of, who raises it, the definitions it is about (each citation names its Context), and the
+    /// question for a person when the machine cannot resolve it.
+    pub fn open_change_request(
+        &mut self,
+        c: &ChangeRequestInput,
+    ) -> Result<ChangeRequestId, AppError> {
         let p = self.project()?;
+        let title = Title::try_from(c.title.as_str()).map_err(input)?;
+        let existing = self.store.change_requests()?;
+        if existing.iter().any(|cr| *cr.title() == title) {
+            return Err(AppError::TitleTaken(title.to_string()));
+        }
+        let parent = match &c.parent {
+            None => None,
+            Some(t) => Some(
+                existing
+                    .iter()
+                    .find(|cr| cr.title().as_str() == t.trim())
+                    .map(|cr| cr.id())
+                    .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))?,
+            ),
+        };
         let mut targets = Vec::new();
         for r in &c.items {
             targets.push(Target::Item(self.item(&p, None, r)?.0));
@@ -578,58 +607,55 @@ where
         for r in &c.clauses {
             targets.push(Target::Clause(self.clause(&p, None, r)?.0));
         }
-        let source = match &c.source {
-            None => None,
-            Some(SourceInput::Request(text)) => Some(CruxSource::Request(
-                Prose::try_from(text.as_str()).map_err(input)?,
-            )),
-            Some(SourceInput::Finding { rule, item, clause }) => {
-                let target = match (item, clause) {
-                    (Some(_), Some(_)) => {
-                        return Err(AppError::Input(
-                            "a finding is about one item or one clause, not both".to_string(),
-                        ));
-                    }
-                    (Some(r), None) => Some(Target::Item(self.item(&p, None, r)?.0)),
-                    (None, Some(r)) => Some(Target::Clause(self.clause(&p, None, r)?.0)),
-                    (None, None) => None,
-                };
-                Some(CruxSource::Finding(FindingRef::new(
-                    RuleId::try_from(rule.as_str()).map_err(input)?,
-                    target,
-                )))
+        let route = match &c.crux {
+            None => Route::Machine,
+            Some(q) => {
+                let mut options = Vec::with_capacity(q.options.len());
+                for o in &q.options {
+                    options.push(CruxOption::new(
+                        Choice::try_from(o.choice.as_str()).map_err(input)?,
+                        prose(&o.change)?,
+                        prose(&o.consequence)?,
+                    ));
+                }
+                Route::Person(Crux::new(
+                    q.kind,
+                    options,
+                    q.default.as_ref().map(reasoned).transpose()?,
+                    q.recommended.as_ref().map(reasoned).transpose()?,
+                )?)
             }
         };
-        let mut options = Vec::with_capacity(c.options.len());
-        for o in &c.options {
-            options.push(CruxOption::new(
-                Choice::try_from(o.choice.as_str()).map_err(input)?,
-                prose(&o.change)?,
-                prose(&o.consequence)?,
-            ));
-        }
-        let id = CruxId::from_uuid(self.ids.next_uuid());
-        let crux = Crux::new(
+        let issuer = c
+            .issuer
+            .as_deref()
+            .map(|i| Issuer::try_from(i).map_err(input))
+            .transpose()?;
+        let id = ChangeRequestId::from_uuid(self.ids.next_uuid());
+        let cr = ChangeRequest::open(
             id,
-            CruxDraft {
-                kind: c.kind,
-                title: Title::try_from(c.title.as_str()).map_err(input)?,
+            ChangeRequestDraft {
+                title,
                 situation: prose(&c.situation)?,
-                source,
-                options,
-                default: c.default.as_ref().map(reasoned).transpose()?,
-                recommended: c.recommended.as_ref().map(reasoned).transpose()?,
+                intent: c.intent,
+                parent,
+                issuer,
                 lines: revisions_now(&p, targets),
+                route,
             },
-        )?;
-        self.store.save_crux(&crux)?;
+        );
+        self.store.save_change_request(&cr)?;
         Ok(id)
     }
 
-    /// Takes the person's decision on the Crux titled `title`.
-    pub fn decide_crux(&mut self, title: &str, decision: &DecisionInput) -> Result<(), AppError> {
+    /// Takes the person's decision on the Crux of the change request titled `title`.
+    pub fn decide_change_request(
+        &mut self,
+        title: &str,
+        decision: &DecisionInput,
+    ) -> Result<(), AppError> {
         let p = self.project()?;
-        let mut crux = self.crux_titled(title)?;
+        let mut cr = self.change_request_titled(title)?;
         let decision = match decision {
             DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
             DecisionInput::Worded { wording, reason } => Decision::Worded {
@@ -643,27 +669,27 @@ where
                     .collect::<Result<_, _>>()?,
             },
         };
-        decide(&mut crux, decision, &p)?;
-        self.store.save_crux(&crux)?;
+        decide(&mut cr, decision, &p)?;
+        self.store.save_change_request(&cr)?;
         Ok(())
     }
 
-    /// Closes the record of the Crux titled `title`, once its decision is applied.
-    pub fn resolve_crux(&mut self, title: &str) -> Result<(), AppError> {
+    /// Closes the record of the change request titled `title`, once the change is applied.
+    pub fn resolve_change_request(&mut self, title: &str) -> Result<(), AppError> {
         let p = self.project()?;
-        let mut crux = self.crux_titled(title)?;
-        resolve(&mut crux, &p)?;
-        self.store.save_crux(&crux)?;
+        let mut cr = self.change_request_titled(title)?;
+        resolve(&mut cr, &p)?;
+        self.store.save_change_request(&cr)?;
         Ok(())
     }
 
-    /// The Crux titled `title`.
-    fn crux_titled(&self, title: &str) -> Result<Crux, AppError> {
+    /// The change request titled `title`.
+    fn change_request_titled(&self, title: &str) -> Result<ChangeRequest, AppError> {
         self.store
-            .cruxes()?
+            .change_requests()?
             .into_iter()
             .find(|c| c.title().as_str() == title.trim())
-            .ok_or_else(|| AppError::UnknownCrux(title.to_string()))
+            .ok_or_else(|| AppError::UnknownChangeRequest(title.to_string()))
     }
 
     /// Where the Project stands.
@@ -711,28 +737,39 @@ where
                 now: s.now.number(),
             });
         }
-        let cruxes = self.store.cruxes()?;
-        let records = cruxes
+        let crs = self.store.change_requests()?;
+        let title_of = |id: ChangeRequestId| {
+            crs.iter()
+                .find(|c| c.id() == id)
+                .map(|c| c.title().to_string())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let decision_of =
+            |c: &ChangeRequest| c.crux().and_then(|q| q.decision()).map(decision_text);
+        let records = crs
             .iter()
-            .map(|c| CruxStatus {
+            .map(|c| ChangeRequestStatus {
                 title: c.title().to_string(),
-                kind: c.kind().word(),
+                intent: c.intent().word(),
+                parent: c.parent().map(title_of),
+                issuer: c.issuer().map(|i| i.to_string()),
+                crux: c.crux().map(|q| q.kind().word()),
                 state: match c.state() {
-                    CruxState::Open => "open",
-                    CruxState::Decided => "decided",
-                    CruxState::Resolved => "resolved",
+                    ChangeRequestState::Open => "open",
+                    ChangeRequestState::Decided => "decided",
+                    ChangeRequestState::Resolved => "resolved",
                 },
-                decision: c.decision().map(decision_text),
+                decision: decision_of(c),
             })
             .collect();
         let mut open = Vec::new();
-        for u in unapplied(cruxes.iter(), &p) {
-            let Some(crux) = cruxes.iter().find(|c| c.id() == u.crux) else {
+        for u in unapplied(crs.iter(), &p) {
+            let Some(cr) = crs.iter().find(|c| c.id() == u.cr) else {
                 continue;
             };
             open.push(UnappliedStatus {
-                crux: crux.title().to_string(),
-                decision: crux.decision().map(decision_text).unwrap_or_default(),
+                cr: cr.title().to_string(),
+                decision: decision_of(cr),
                 unchanged: u
                     .unchanged
                     .iter()
@@ -748,7 +785,7 @@ where
         Ok(Status {
             pins,
             stale_cites: stale,
-            cruxes: records,
+            change_requests: records,
             unapplied: open,
         })
     }

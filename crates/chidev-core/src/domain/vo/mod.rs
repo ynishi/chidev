@@ -7,6 +7,7 @@ pub mod crux;
 pub mod digest;
 pub mod finding;
 pub mod id;
+pub mod intent;
 pub mod line_range;
 pub mod name;
 pub mod pin_basis;

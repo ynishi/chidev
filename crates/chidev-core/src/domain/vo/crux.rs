@@ -1,7 +1,7 @@
-//! The values a Crux is made of: its kind, where it came from, its options, and the decision taken.
+//! The values of a Crux, the question a person settles for a change request: its kind, its options, and the
+//! decision taken.
 
 use super::choice::Choice;
-use super::finding::FindingRef;
 use super::prose::Prose;
 
 /// What kind of question a Crux is. The kind says whether work may go on with a default until the person answers,
@@ -39,15 +39,6 @@ impl CruxKind {
             CruxKind::Disagreement => "disagreement",
         }
     }
-}
-
-/// Where a Crux came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CruxSource {
-    /// A finding of a check that could not be resolved without the person.
-    Finding(FindingRef),
-    /// A request for change, in the requester's words.
-    Request(Prose),
 }
 
 /// One answer a Crux offers: the choice, the change it makes to the definitions the Crux is about (none when it

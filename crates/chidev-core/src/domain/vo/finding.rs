@@ -23,7 +23,7 @@ pub enum RuleIdError {
 }
 
 /// The id of a rule a check applies (`uncited-clause`). The rules themselves come with the checks; the id is what
-/// a finding, and a Crux raised from one, is filed under.
+/// a finding, and a change request raised from one, is filed under.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RuleId(String);
 
@@ -59,9 +59,9 @@ impl fmt::Display for RuleId {
     }
 }
 
-/// A finding a Crux was raised from: the rule that found it and the definition it is about (none when it is about
-/// the Project as a whole). The same rule about the same definition is the same finding, so a check can tell that
-/// a Crux decided it.
+/// A finding a change request was raised from: the rule that found it and the definition it is about (none when it
+/// is about the Project as a whole). The same rule about the same definition is the same finding, so a check can
+/// tell that a change request deals with it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FindingRef {
     rule: RuleId,
