@@ -1,5 +1,6 @@
 //! Values: compared by what they hold, never changed in place, and checked when made.
 
+pub mod case;
 pub mod clause;
 pub mod digest;
 pub mod id;
