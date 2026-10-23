@@ -9,9 +9,11 @@
 //! The model is split by what a type is: [`entity`] holds what is kept over
 //! time and known by an id (the assets and the definitions inside them), [`vo`]
 //! holds the values (ids, names, labels, revisions, texts), compared by what
-//! they hold, and [`service`] holds the decisions that read more than one
-//! aggregate.
+//! they hold, [`service`] holds the decisions that read more than one
+//! aggregate, and [`repository`] declares how the aggregates are kept (the
+//! implementations are outside the domain).
 
 pub mod entity;
+pub mod repository;
 pub mod service;
 pub mod vo;
