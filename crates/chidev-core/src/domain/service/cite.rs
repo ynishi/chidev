@@ -1,17 +1,23 @@
 //! Citations a Case has not been brought up to: the cited Item or Clause changed after the Case was written.
 
-use crate::domain::entity::context::Context;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::id::{CaseId, ClauseId, ItemId};
+use crate::domain::vo::id::CaseId;
 use crate::domain::vo::revision::Revision;
+use crate::domain::vo::target::Target;
 
-/// What a citation points at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Target {
-    /// An Item of an Interface.
-    Item(ItemId),
-    /// A Clause of a Contract.
-    Clause(ClauseId),
+/// The revision `target` has in `project` now; `None` when no asset of the Project has it. Ids are given once in
+/// the whole Project, so the first one found is the one.
+pub fn revision_of(project: &Project, target: Target) -> Option<Revision> {
+    project.contexts().find_map(|c| match target {
+        Target::Item(id) => c
+            .interface_of(id)
+            .and_then(|i| i.item(id))
+            .map(|i| i.revision()),
+        Target::Clause(id) => c
+            .contract_of(id)
+            .and_then(|k| k.clause(id))
+            .map(|k| k.revision()),
+    })
 }
 
 /// A citation whose target moved past the revision the Case recorded. It is not refused (the Project holds
@@ -33,40 +39,30 @@ pub struct StaleCite {
 /// Project refuses that state.
 pub fn stale_cites(project: &Project) -> Vec<StaleCite> {
     let mut out = Vec::new();
-    for context in project.contexts() {
-        let reach: Vec<&Context> = std::iter::once(context)
-            .chain(context.uses().iter().filter_map(|u| project.context(*u)))
-            .collect();
-        for case in context.harnesses().flat_map(|h| h.cases()) {
-            for (item, cited) in case.cites().items() {
-                let now = reach
+    for case in project
+        .contexts()
+        .flat_map(|c| c.harnesses())
+        .flat_map(|h| h.cases())
+    {
+        let cites = case.cites();
+        let targets = cites
+            .items()
+            .iter()
+            .map(|(id, rev)| (Target::Item(*id), *rev))
+            .chain(
+                cites
+                    .clauses()
                     .iter()
-                    .find_map(|c| c.interface_of(*item))
-                    .and_then(|i| i.item(*item))
-                    .map(|i| i.revision());
-                if let Some(now) = now.filter(|now| now > cited) {
-                    out.push(StaleCite {
-                        case: case.id(),
-                        target: Target::Item(*item),
-                        cited: *cited,
-                        now,
-                    });
-                }
-            }
-            for (clause, cited) in case.cites().clauses() {
-                let now = reach
-                    .iter()
-                    .find_map(|c| c.contract_of(*clause))
-                    .and_then(|k| k.clause(*clause))
-                    .map(|k| k.revision());
-                if let Some(now) = now.filter(|now| now > cited) {
-                    out.push(StaleCite {
-                        case: case.id(),
-                        target: Target::Clause(*clause),
-                        cited: *cited,
-                        now,
-                    });
-                }
+                    .map(|(id, rev)| (Target::Clause(*id), *rev)),
+            );
+        for (target, cited) in targets {
+            if let Some(now) = revision_of(project, target).filter(|now| *now > cited) {
+                out.push(StaleCite {
+                    case: case.id(),
+                    target,
+                    cited,
+                    now,
+                });
             }
         }
     }
@@ -78,10 +74,11 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+    use crate::domain::entity::context::Context;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::id::{
-        ContextId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid,
+        ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId, test_uuid,
     };
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;

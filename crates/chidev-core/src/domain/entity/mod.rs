@@ -3,6 +3,7 @@
 
 pub mod context;
 pub mod contract;
+pub mod crux;
 pub mod harness;
 pub mod interface;
 pub mod pin;
