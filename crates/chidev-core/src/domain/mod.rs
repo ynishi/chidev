@@ -5,3 +5,8 @@
 //! (a file's contents, the current time) is passed in by the caller.
 //! A value with rules is a type, not a `String`: an enum for a closed set,
 //! a newtype that checks its input for anything else.
+//!
+//! The model is split by what a type is: [`vo`] holds the values (ids, names,
+//! digests, texts), compared by what they hold.
+
+pub mod vo;
