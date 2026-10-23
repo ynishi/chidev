@@ -7,9 +7,11 @@
 //! a newtype that checks its input for anything else.
 //!
 //! The model is split by what a type is: [`entity`] holds what is kept over
-//! time and known by an id (the assets and the definitions inside them), and
-//! [`vo`] holds the values (ids, names, labels, revisions, texts), compared by
-//! what they hold.
+//! time and known by an id (the assets and the definitions inside them), [`vo`]
+//! holds the values (ids, names, labels, revisions, texts), compared by what
+//! they hold, and [`service`] holds the decisions that read more than one
+//! aggregate.
 
 pub mod entity;
+pub mod service;
 pub mod vo;
