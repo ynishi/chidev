@@ -1,4 +1,5 @@
-//! The fingerprint of some bytes, which a Pin records and a Crux keeps to know that what it points at changed.
+//! The fingerprint of the code a Pin accepts. The code is a cache kept outside the domain, so a Pin can only
+//! record what its bytes were; the assets, whose content the domain holds, count their changes in a `Revision`.
 
 use std::fmt;
 

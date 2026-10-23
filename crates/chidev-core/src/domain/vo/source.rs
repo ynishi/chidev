@@ -1,10 +1,9 @@
 //! The text of an asset as a person wrote it, which is what the asset is kept as.
 
-use super::digest::Digest;
 use super::line_range::LineRange;
 
-/// The whole text of an asset (a Contract, an Interface or a Harness). The text is the asset; what is read from
-/// it (Clauses, Items, Cases) is built from it, so its digest is the digest of the asset.
+/// The whole text of an asset that is code (an Interface or a Harness): the code is what compiles, so the text is
+/// the content, and the definitions in it (Items, Cases) are shown by their lines.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Source(String);
 
@@ -17,11 +16,6 @@ impl Source {
     /// The text.
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// The digest of the text, byte for byte.
-    pub fn digest(&self) -> Digest {
-        Digest::of(self.0.as_bytes())
     }
 
     /// How many lines the text has.
@@ -62,11 +56,5 @@ mod tests {
     fn a_range_past_the_last_line_gives_nothing() {
         assert_eq!(Source::new("a\nb".to_string()).lines(range(2, 3)), None);
         assert_eq!(Source::new(String::new()).lines(range(1, 1)), None);
-    }
-
-    #[test]
-    fn the_digest_is_the_digest_of_the_text() {
-        let s = Source::new("# T\n".to_string());
-        assert_eq!(s.digest(), Digest::of(b"# T\n"));
     }
 }
