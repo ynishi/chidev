@@ -1,0 +1,18 @@
+[package]
+name = "chidev-cli"
+description = "Command-line interface of chidev: Contract, Interface and Harness as the assets of a codebase; the code is a cache pinned to them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/chidev-cli"
+readme.workspace = true
+
+[[bin]]
+name = "chidev"
+path = "src/main.rs"
+
+[dependencies]
+chidev-core.workspace = true

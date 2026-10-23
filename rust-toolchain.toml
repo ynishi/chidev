@@ -1,0 +1,4 @@
+# The Rust the crates are built and tested with. llvm-tools is for cargo-llvm-cov (coverage).
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt", "llvm-tools"]
