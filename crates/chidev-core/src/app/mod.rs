@@ -18,22 +18,26 @@ use std::fmt::Display;
 use thiserror::Error;
 
 use self::ports::{AssetKind, AssetNames, IdSource};
-use crate::domain::entity::crux::{Crux, CruxError};
+use crate::domain::entity::crux::{Crux, CruxDraft, CruxError, CruxState};
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::{CruxRepository, PinRepository, ProjectRepository, StoreError};
 use crate::domain::service::cite::stale_cites;
-use crate::domain::service::crux::{answer, revisions_now, unapplied};
+use crate::domain::service::crux::{decide, resolve, revisions_now, unapplied};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+pub use crate::domain::vo::crux::CruxKind;
+use crate::domain::vo::crux::{CruxOption, CruxSource, Decision, Reasoned};
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::finding::{FindingRef, RuleId};
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, CruxId, HarnessId, InterfaceId, ItemId, PinId,
     ProjectId,
 };
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
+use crate::domain::vo::prose::Prose;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
@@ -207,29 +211,144 @@ pub struct StaleCiteStatus {
     pub now: u64,
 }
 
-/// A Crux answered other than its default whose definitions have not followed.
+/// An option of a Crux, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionInput {
+    /// The choice.
+    pub choice: String,
+    /// The change it makes to the definitions the Crux is about (the exact new wording); none: it changes none.
+    pub change: Option<String>,
+    /// What else it affects.
+    pub consequence: Option<String>,
+}
+
+/// A choice and why (a default, a recommendation, a decision).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasonedInput {
+    /// The choice.
+    pub choice: String,
+    /// Why.
+    pub reason: Option<String>,
+}
+
+/// Where a Crux came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceInput {
+    /// A finding of a check: the rule, and the Item or Clause it is about (none: the Project as a whole).
+    Finding {
+        /// The rule's id.
+        rule: String,
+        /// The Item it is about.
+        item: Option<ItemRef>,
+        /// The Clause it is about.
+        clause: Option<ClauseRef>,
+    },
+    /// A request for change, in the requester's words.
+    Request(String),
+}
+
+/// A Crux as a person raises it. Citations outside a Harness name their Context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CruxInput {
+    /// What kind of question it is.
+    pub kind: CruxKind,
+    /// The question.
+    pub title: String,
+    /// Why it is a question.
+    pub situation: Option<String>,
+    /// Where it came from.
+    pub source: Option<SourceInput>,
+    /// The options.
+    pub options: Vec<OptionInput>,
+    /// The option work goes on with until the person decides.
+    pub default: Option<ReasonedInput>,
+    /// The option recommended.
+    pub recommended: Option<ReasonedInput>,
+    /// The Items the question is about.
+    pub items: Vec<ItemRef>,
+    /// The Clauses the question is about.
+    pub clauses: Vec<ClauseRef>,
+}
+
+/// What the person decided about a Crux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionInput {
+    /// One of the options.
+    Chosen(ReasonedInput),
+    /// The behaviour in the person's own words.
+    Worded {
+        /// The behaviour.
+        wording: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// The behaviour left free, as long as these hold.
+    Unspecified {
+        /// What must still hold.
+        keep: Vec<String>,
+    },
+}
+
+/// Where one Crux stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CruxStatus {
+    /// Its title.
+    pub title: String,
+    /// Its kind.
+    pub kind: &'static str,
+    /// `open`, `decided` or `resolved`.
+    pub state: &'static str,
+    /// The decision, in words.
+    pub decision: Option<String>,
+}
+
+/// A decided Crux whose definitions have not followed its decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnappliedStatus {
     /// The Crux's title.
     pub crux: String,
-    /// The answer.
-    pub answer: String,
-    /// The definitions not changed since the answer, described.
+    /// The decision, in words.
+    pub decision: String,
+    /// The definitions not changed since the decision, described.
     pub unchanged: Vec<String>,
     /// The definitions gone, described.
     pub gone: Vec<String>,
 }
 
-/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, and the
-/// answers not yet applied.
+/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, the Cruxes,
+/// and the decisions not yet applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     /// Every Interface, and every Pin whose Interface is gone.
     pub pins: Vec<PinStatus>,
     /// The citations behind their targets.
     pub stale_cites: Vec<StaleCiteStatus>,
-    /// The answers not yet applied.
+    /// Every Crux.
+    pub cruxes: Vec<CruxStatus>,
+    /// The decisions not yet applied.
     pub unapplied: Vec<UnappliedStatus>,
+}
+
+/// A decision, in words.
+fn decision_text(d: &Decision) -> String {
+    match d {
+        Decision::Chosen(c) => c.choice().to_string(),
+        Decision::Worded { wording, .. } => format!("in other words: {wording}"),
+        Decision::Unspecified { .. } => "left unspecified".to_string(),
+    }
+}
+
+fn prose(text: &Option<String>) -> Result<Option<Prose>, AppError> {
+    text.as_deref()
+        .map(|t| Prose::try_from(t).map_err(input))
+        .transpose()
+}
+
+fn reasoned(r: &ReasonedInput) -> Result<Reasoned, AppError> {
+    Ok(Reasoned::new(
+        Choice::try_from(r.choice.as_str()).map_err(input)?,
+        prose(&r.reason)?,
+    ))
 }
 
 /// The use cases over one store and one source of ids.
@@ -448,52 +567,103 @@ where
         Ok(id)
     }
 
-    /// Raises a Crux: a question with its choices, the default work goes on with, and the definitions written on
-    /// the default (each citation names its Context).
-    pub fn raise_crux(
-        &mut self,
-        title: &str,
-        choices: &[String],
-        default: &str,
-        items: &[ItemRef],
-        clauses: &[ClauseRef],
-    ) -> Result<CruxId, AppError> {
+    /// Raises a Crux: the question, why, where from, the options, the default and the recommendation, and the
+    /// definitions it is about (each citation names its Context).
+    pub fn raise_crux(&mut self, c: &CruxInput) -> Result<CruxId, AppError> {
         let p = self.project()?;
         let mut targets = Vec::new();
-        for r in items {
+        for r in &c.items {
             targets.push(Target::Item(self.item(&p, None, r)?.0));
         }
-        for r in clauses {
+        for r in &c.clauses {
             targets.push(Target::Clause(self.clause(&p, None, r)?.0));
         }
-        let choices = choices
-            .iter()
-            .map(|c| Choice::try_from(c.as_str()).map_err(input))
-            .collect::<Result<Vec<_>, _>>()?;
+        let source = match &c.source {
+            None => None,
+            Some(SourceInput::Request(text)) => Some(CruxSource::Request(
+                Prose::try_from(text.as_str()).map_err(input)?,
+            )),
+            Some(SourceInput::Finding { rule, item, clause }) => {
+                let target = match (item, clause) {
+                    (Some(_), Some(_)) => {
+                        return Err(AppError::Input(
+                            "a finding is about one item or one clause, not both".to_string(),
+                        ));
+                    }
+                    (Some(r), None) => Some(Target::Item(self.item(&p, None, r)?.0)),
+                    (None, Some(r)) => Some(Target::Clause(self.clause(&p, None, r)?.0)),
+                    (None, None) => None,
+                };
+                Some(CruxSource::Finding(FindingRef::new(
+                    RuleId::try_from(rule.as_str()).map_err(input)?,
+                    target,
+                )))
+            }
+        };
+        let mut options = Vec::with_capacity(c.options.len());
+        for o in &c.options {
+            options.push(CruxOption::new(
+                Choice::try_from(o.choice.as_str()).map_err(input)?,
+                prose(&o.change)?,
+                prose(&o.consequence)?,
+            ));
+        }
         let id = CruxId::from_uuid(self.ids.next_uuid());
         let crux = Crux::new(
             id,
-            Title::try_from(title).map_err(input)?,
-            choices,
-            Choice::try_from(default).map_err(input)?,
-            revisions_now(&p, targets),
+            CruxDraft {
+                kind: c.kind,
+                title: Title::try_from(c.title.as_str()).map_err(input)?,
+                situation: prose(&c.situation)?,
+                source,
+                options,
+                default: c.default.as_ref().map(reasoned).transpose()?,
+                recommended: c.recommended.as_ref().map(reasoned).transpose()?,
+                lines: revisions_now(&p, targets),
+            },
         )?;
         self.store.save_crux(&crux)?;
         Ok(id)
     }
 
-    /// Takes the person's answer to the Crux titled `title`.
-    pub fn answer_crux(&mut self, title: &str, choice: &str) -> Result<(), AppError> {
+    /// Takes the person's decision on the Crux titled `title`.
+    pub fn decide_crux(&mut self, title: &str, decision: &DecisionInput) -> Result<(), AppError> {
         let p = self.project()?;
-        let mut crux = self
-            .store
+        let mut crux = self.crux_titled(title)?;
+        let decision = match decision {
+            DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
+            DecisionInput::Worded { wording, reason } => Decision::Worded {
+                wording: Prose::try_from(wording.as_str()).map_err(input)?,
+                reason: prose(reason)?,
+            },
+            DecisionInput::Unspecified { keep } => Decision::Unspecified {
+                keep: keep
+                    .iter()
+                    .map(|k| Prose::try_from(k.as_str()).map_err(input))
+                    .collect::<Result<_, _>>()?,
+            },
+        };
+        decide(&mut crux, decision, &p)?;
+        self.store.save_crux(&crux)?;
+        Ok(())
+    }
+
+    /// Closes the record of the Crux titled `title`, once its decision is applied.
+    pub fn resolve_crux(&mut self, title: &str) -> Result<(), AppError> {
+        let p = self.project()?;
+        let mut crux = self.crux_titled(title)?;
+        resolve(&mut crux, &p)?;
+        self.store.save_crux(&crux)?;
+        Ok(())
+    }
+
+    /// The Crux titled `title`.
+    fn crux_titled(&self, title: &str) -> Result<Crux, AppError> {
+        self.store
             .cruxes()?
             .into_iter()
             .find(|c| c.title().as_str() == title.trim())
-            .ok_or_else(|| AppError::UnknownCrux(title.to_string()))?;
-        answer(&mut crux, Choice::try_from(choice).map_err(input)?, &p)?;
-        self.store.save_crux(&crux)?;
-        Ok(())
+            .ok_or_else(|| AppError::UnknownCrux(title.to_string()))
     }
 
     /// Where the Project stands.
@@ -542,6 +712,19 @@ where
             });
         }
         let cruxes = self.store.cruxes()?;
+        let records = cruxes
+            .iter()
+            .map(|c| CruxStatus {
+                title: c.title().to_string(),
+                kind: c.kind().word(),
+                state: match c.state() {
+                    CruxState::Open => "open",
+                    CruxState::Decided => "decided",
+                    CruxState::Resolved => "resolved",
+                },
+                decision: c.decision().map(decision_text),
+            })
+            .collect();
         let mut open = Vec::new();
         for u in unapplied(cruxes.iter(), &p) {
             let Some(crux) = cruxes.iter().find(|c| c.id() == u.crux) else {
@@ -549,7 +732,7 @@ where
             };
             open.push(UnappliedStatus {
                 crux: crux.title().to_string(),
-                answer: crux.answer().map(|a| a.to_string()).unwrap_or_default(),
+                decision: crux.decision().map(decision_text).unwrap_or_default(),
                 unchanged: u
                     .unchanged
                     .iter()
@@ -565,6 +748,7 @@ where
         Ok(Status {
             pins,
             stale_cites: stale,
+            cruxes: records,
             unapplied: open,
         })
     }

@@ -5,7 +5,8 @@ use std::io::{self, BufRead, Write};
 
 use chidev_core::app::ports::{AssetNames, IdSource};
 use chidev_core::app::{
-    App, AppError, CaseInput, ClauseInput, ClauseRef, ItemInput, ItemRef, PinState,
+    App, AppError, CaseInput, ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput,
+    ItemInput, ItemRef, OptionInput, PinState, ReasonedInput, SourceInput,
 };
 use chidev_core::domain::repository::{CruxRepository, PinRepository, ProjectRepository};
 use serde::Deserialize;
@@ -55,19 +56,102 @@ enum Op {
         code: String,
     },
     /// Raises a Crux.
-    CruxRaise {
+    CruxRaise(Box<RaiseDto>),
+    /// Decides a Crux: exactly one of `choice`, `wording` and `unspecified`.
+    CruxDecide {
         title: String,
-        choices: Vec<String>,
-        default: String,
         #[serde(default)]
-        items: Vec<ItemRefDto>,
+        choice: Option<String>,
         #[serde(default)]
-        clauses: Vec<ClauseRefDto>,
+        wording: Option<String>,
+        #[serde(default)]
+        unspecified: Option<Vec<String>>,
+        #[serde(default)]
+        reason: Option<String>,
     },
-    /// Answers a Crux.
-    CruxAnswer { title: String, choice: String },
+    /// Closes the record of a Crux whose decision is applied.
+    CruxResolve { title: String },
     /// Where the project stands.
     Status,
+}
+
+/// The fields of `crux_raise`, boxed: they are far larger than any other operation's.
+#[derive(Debug, Deserialize)]
+struct RaiseDto {
+    kind: KindDto,
+    title: String,
+    #[serde(default)]
+    situation: Option<String>,
+    #[serde(default)]
+    source: Option<SourceDto>,
+    options: Vec<OptionDto>,
+    #[serde(default)]
+    default: Option<ReasonedDto>,
+    #[serde(default)]
+    recommended: Option<ReasonedDto>,
+    #[serde(default)]
+    items: Vec<ItemRefDto>,
+    #[serde(default)]
+    clauses: Vec<ClauseRefDto>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum KindDto {
+    Ambiguity,
+    Conflict,
+    Model,
+    Disagreement,
+}
+
+impl From<KindDto> for CruxKind {
+    fn from(k: KindDto) -> CruxKind {
+        match k {
+            KindDto::Ambiguity => CruxKind::Ambiguity,
+            KindDto::Conflict => CruxKind::Conflict,
+            KindDto::Model => CruxKind::Model,
+            KindDto::Disagreement => CruxKind::Disagreement,
+        }
+    }
+}
+
+/// `{"request": "..."}` or `{"finding": {"rule": "...", "item": {...}}}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceDto {
+    Request(String),
+    Finding {
+        rule: String,
+        #[serde(default)]
+        item: Option<ItemRefDto>,
+        #[serde(default)]
+        clause: Option<ClauseRefDto>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct OptionDto {
+    choice: String,
+    #[serde(default)]
+    change: Option<String>,
+    #[serde(default)]
+    consequence: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasonedDto {
+    choice: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl From<ReasonedDto> for ReasonedInput {
+    fn from(r: ReasonedDto) -> ReasonedInput {
+        ReasonedInput {
+            choice: r.choice,
+            reason: r.reason,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,21 +325,72 @@ where
         } => {
             json!({ "op": "pin", "pin": app.pin(&context, &interface, &code)?.to_string() })
         }
-        Op::CruxRaise {
-            title,
-            choices,
-            default,
-            items,
-            clauses,
-        } => {
-            let items: Vec<ItemRef> = items.into_iter().map(ItemRef::from).collect();
-            let clauses: Vec<ClauseRef> = clauses.into_iter().map(ClauseRef::from).collect();
-            let id = app.raise_crux(&title, &choices, &default, &items, &clauses)?;
+        Op::CruxRaise(raise) => {
+            let RaiseDto {
+                kind,
+                title,
+                situation,
+                source,
+                options,
+                default,
+                recommended,
+                items,
+                clauses,
+            } = *raise;
+            let source = source.map(|s| match s {
+                SourceDto::Request(text) => SourceInput::Request(text),
+                SourceDto::Finding { rule, item, clause } => SourceInput::Finding {
+                    rule,
+                    item: item.map(ItemRef::from),
+                    clause: clause.map(ClauseRef::from),
+                },
+            });
+            let input = CruxInput {
+                kind: kind.into(),
+                title,
+                situation,
+                source,
+                options: options
+                    .into_iter()
+                    .map(|o| OptionInput {
+                        choice: o.choice,
+                        change: o.change,
+                        consequence: o.consequence,
+                    })
+                    .collect(),
+                default: default.map(ReasonedInput::from),
+                recommended: recommended.map(ReasonedInput::from),
+                items: items.into_iter().map(ItemRef::from).collect(),
+                clauses: clauses.into_iter().map(ClauseRef::from).collect(),
+            };
+            let id = app.raise_crux(&input)?;
             json!({ "op": "crux_raise", "crux": id.to_string() })
         }
-        Op::CruxAnswer { title, choice } => {
-            app.answer_crux(&title, &choice)?;
-            json!({ "op": "crux_answer" })
+        Op::CruxDecide {
+            title,
+            choice,
+            wording,
+            unspecified,
+            reason,
+        } => {
+            let decision = match (choice, wording, unspecified) {
+                (Some(choice), None, None) => {
+                    DecisionInput::Chosen(ReasonedInput { choice, reason })
+                }
+                (None, Some(wording), None) => DecisionInput::Worded { wording, reason },
+                (None, None, Some(keep)) => DecisionInput::Unspecified { keep },
+                _ => {
+                    return Err(AppError::Input(
+                        "give exactly one of `choice`, `wording` and `unspecified`".to_string(),
+                    ));
+                }
+            };
+            app.decide_crux(&title, &decision)?;
+            json!({ "op": "crux_decide" })
+        }
+        Op::CruxResolve { title } => {
+            app.resolve_crux(&title)?;
+            json!({ "op": "crux_resolve" })
         }
         Op::Status => {
             let s = app.status()?;
@@ -277,12 +412,17 @@ where
                 .iter()
                 .map(|c| json!({ "case": c.case, "target": c.target, "cited": c.cited, "now": c.now }))
                 .collect();
+            let cruxes: Vec<Value> = s
+                .cruxes
+                .iter()
+                .map(|c| json!({ "title": c.title, "kind": c.kind, "state": c.state, "decision": c.decision }))
+                .collect();
             let open: Vec<Value> = s
                 .unapplied
                 .iter()
-                .map(|u| json!({ "crux": u.crux, "answer": u.answer, "unchanged": u.unchanged, "gone": u.gone }))
+                .map(|u| json!({ "crux": u.crux, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
                 .collect();
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "unapplied": open })
+            json!({ "op": "status", "pins": pins, "stale_cites": stale, "cruxes": cruxes, "unapplied": open })
         }
     })
 }

@@ -10,10 +10,11 @@
 {"op":"pin","context":"pricing","interface":"price","code":"pub fn total(lines: &[u64]) -> u64 { lines.iter().sum() }"}
 {"op":"pin","context":"receipt","interface":"print","code":"pub fn print(lines: &[u64]) -> String { total(lines).to_string() }"}
 {"op":"status"}
-{"op":"crux_raise","title":"How is a half cent rounded?","choices":["half up","half to even"],"default":"half up","clauses":[{"context":"pricing","contract":"rounding","label":"C1"}]}
-{"op":"crux_answer","title":"How is a half cent rounded?","choice":"half to even"}
+{"op":"crux_raise","kind":"ambiguity","title":"How is a half cent rounded?","situation":"The request asks for fair totals; C1 rounds half up, which favours the shop.","source":{"request":"totals must be fair to the customer"},"options":[{"choice":"half up"},{"choice":"half to even","change":"C1: a total is rounded half to even to whole cents","consequence":"the rounding cases and the receipt change"}],"default":{"choice":"half up","reason":"what C1 says now"},"recommended":{"choice":"half to even","reason":"no bias over many totals"},"clauses":[{"context":"pricing","contract":"rounding","label":"C1"}]}
+{"op":"crux_decide","title":"How is a half cent rounded?","choice":"half to even","reason":"fair to the customer over many totals"}
 {"op":"status"}
 {"op":"contract_put","context":"pricing","name":"rounding","title":"Rounding of a total","clauses":[{"label":"C1","text":"a total is rounded half to even to whole cents"},{"label":"C2","text":"a total of no lines is zero"}]}
+{"op":"crux_resolve","title":"How is a half cent rounded?"}
 {"op":"interface_put","context":"pricing","name":"price","source":"pub fn total(lines: &[u64], rounding: Rounding) -> u64;\n","items":[{"signature":"fn total(lines: &[u64], rounding: Rounding) -> u64","lines":[1,1],"replaces":"fn total(lines: &[u64]) -> u64"}]}
 {"op":"status"}
 {"op":"harness_put","context":"pricing","name":"price_tests","source":"#[test] fn total_rounds_to_even() {}\n#[test] fn empty_total_is_zero() {}\n","cases":[{"name":"total_rounds","lines":[1,1],"items":[{"interface":"price","signature":"fn total(lines: &[u64], rounding: Rounding) -> u64"}],"clauses":[{"contract":"rounding","label":"C1"}]},{"name":"empty_total_is_zero","lines":[2,2],"items":[{"interface":"price","signature":"fn total(lines: &[u64], rounding: Rounding) -> u64"}],"clauses":[{"contract":"rounding","label":"C2"}]}]}

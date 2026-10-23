@@ -1,11 +1,11 @@
-//! Answering a Crux against the Project, and finding answers the definitions have not caught up with.
+//! Deciding and resolving a Crux against the Project, and finding decisions the definitions have not followed.
 
 use std::collections::BTreeMap;
 
 use super::cite::revision_of;
-use crate::domain::entity::crux::{Crux, CruxError};
+use crate::domain::entity::crux::{Crux, CruxError, CruxState};
 use crate::domain::entity::project::Project;
-use crate::domain::vo::choice::Choice;
+use crate::domain::vo::crux::Decision;
 use crate::domain::vo::id::CruxId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -21,53 +21,70 @@ pub fn revisions_now(
         .collect()
 }
 
-/// Gives `crux` the person's answer, with each line at the revision its definition has in `project` now.
-pub fn answer(crux: &mut Crux, choice: Choice, project: &Project) -> Result<(), CruxError> {
+/// Gives `crux` the person's decision, with each line at the revision its definition has in `project` now.
+pub fn decide(crux: &mut Crux, decision: Decision, project: &Project) -> Result<(), CruxError> {
     let now = revisions_now(project, crux.lines().keys().copied());
-    crux.take_answer(choice, &now)
+    crux.decide(decision, &now)
 }
 
-/// A Crux answered other than its default whose definitions written on the default have not changed since.
+/// The lines of `crux` its decision has not reached in `project`: those that asked a change and are still at the
+/// revision they had when it was decided, and those whose definition is gone. Empty when the decision asks no
+/// change.
+fn behind(crux: &Crux, project: &Project) -> (Vec<Target>, Vec<Target>) {
+    let mut unchanged = Vec::new();
+    let mut gone = Vec::new();
+    if crux.asks_change() {
+        for (target, at_decision) in crux.lines() {
+            match revision_of(project, *target) {
+                None => gone.push(*target),
+                Some(now) if now == *at_decision => unchanged.push(*target),
+                Some(_) => {}
+            }
+        }
+    }
+    (unchanged, gone)
+}
+
+/// Closes the record of `crux` once its decision is applied: every line it asked to change has a later revision
+/// than when it was decided, and none is gone.
+pub fn resolve(crux: &mut Crux, project: &Project) -> Result<(), CruxError> {
+    let (unchanged, gone) = behind(crux, project);
+    if !unchanged.is_empty() || !gone.is_empty() {
+        return Err(CruxError::NotApplied(
+            unchanged.into_iter().chain(gone).collect(),
+        ));
+    }
+    crux.resolve()
+}
+
+/// A decided Crux whose definitions have not followed its decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unapplied {
     /// The Crux.
     pub crux: CruxId,
-    /// The definitions still at the revision they had when the answer was given, in order.
+    /// The definitions still at the revision they had when the decision was taken, in order.
     pub unchanged: Vec<Target>,
     /// The definitions no asset of the Project has any more, in order.
     pub gone: Vec<Target>,
 }
 
-/// Every Crux in `cruxes` answered other than its default that still has a line its answer has not reached: a
-/// definition at the revision it had when the answer was given (it was written on the default and has not been
-/// changed since), or one that is gone. An answer equal to the default, or no answer, asks for no change.
+/// Every unresolved Crux in `cruxes` whose decision asks a change that has not reached all its lines.
 pub fn unapplied<'a>(
     cruxes: impl IntoIterator<Item = &'a Crux>,
     project: &Project,
 ) -> Vec<Unapplied> {
-    let mut out = Vec::new();
-    for crux in cruxes {
-        if !crux.differs_from_default() {
-            continue;
-        }
-        let mut unchanged = Vec::new();
-        let mut gone = Vec::new();
-        for (target, at_answer) in crux.lines() {
-            match revision_of(project, *target) {
-                None => gone.push(*target),
-                Some(now) if now == *at_answer => unchanged.push(*target),
-                Some(_) => {}
-            }
-        }
-        if !unchanged.is_empty() || !gone.is_empty() {
-            out.push(Unapplied {
+    cruxes
+        .into_iter()
+        .filter(|c| c.state() == CruxState::Decided)
+        .filter_map(|crux| {
+            let (unchanged, gone) = behind(crux, project);
+            (!unchanged.is_empty() || !gone.is_empty()).then(|| Unapplied {
                 crux: crux.id(),
                 unchanged,
                 gone,
-            });
-        }
-    }
-    out
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -76,9 +93,13 @@ mod tests {
 
     use super::*;
     use crate::domain::entity::context::Context;
+    use crate::domain::entity::crux::CruxDraft;
+    use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+    use crate::domain::vo::crux::{CruxKind, CruxOption, Reasoned};
     use crate::domain::vo::id::{ClauseId, ContextId, ContractId, ProjectId, test_uuid};
     use crate::domain::vo::name::ContextName;
+    use crate::domain::vo::prose::Prose;
     use crate::domain::vo::title::Title;
 
     fn clause() -> Target {
@@ -123,28 +144,47 @@ mod tests {
     fn crux(p: &Project) -> Crux {
         Crux::new(
             CruxId::from_uuid(test_uuid(1)),
-            Title::try_from("How is a half rounded?").unwrap(),
-            vec![choice("up"), choice("to even")],
-            choice("up"),
-            revisions_now(p, [clause()]),
+            CruxDraft {
+                kind: CruxKind::Ambiguity,
+                title: Title::try_from("How is a half rounded?").unwrap(),
+                situation: None,
+                source: None,
+                options: vec![
+                    CruxOption::new(choice("up"), None, None),
+                    CruxOption::new(
+                        choice("to even"),
+                        Some(Prose::try_from("C1 rounds half to even").unwrap()),
+                        None,
+                    ),
+                ],
+                default: Some(Reasoned::new(choice("up"), None)),
+                recommended: None,
+                lines: revisions_now(p, [clause()]),
+            },
         )
         .unwrap()
     }
 
-    #[test]
-    fn an_answer_equal_to_the_default_or_none_asks_for_nothing() {
-        let p = project();
-        let mut c = crux(&p);
-        assert!(unapplied([&c], &p).is_empty());
-        answer(&mut c, choice("up"), &p).unwrap();
-        assert!(unapplied([&c], &p).is_empty());
+    fn chosen(c: &str) -> Decision {
+        Decision::Chosen(Reasoned::new(choice(c), None))
     }
 
     #[test]
-    fn another_answer_is_unapplied_until_the_definitions_change() {
+    fn the_default_or_no_decision_asks_nothing_and_resolves_at_once() {
+        let p = project();
+        let mut c = crux(&p);
+        assert!(unapplied([&c], &p).is_empty());
+        decide(&mut c, chosen("up"), &p).unwrap();
+        assert!(unapplied([&c], &p).is_empty());
+        resolve(&mut c, &p).unwrap();
+        assert_eq!(c.state(), CruxState::Resolved);
+    }
+
+    #[test]
+    fn a_decision_asking_a_change_resolves_only_once_the_definitions_follow() {
         let mut p = project();
         let mut c = crux(&p);
-        answer(&mut c, choice("to even"), &p).unwrap();
+        decide(&mut c, chosen("to even"), &p).unwrap();
         assert_eq!(
             unapplied([&c], &p),
             [Unapplied {
@@ -153,7 +193,13 @@ mod tests {
                 gone: Vec::new()
             }]
         );
+        assert_eq!(
+            resolve(&mut c, &p),
+            Err(CruxError::NotApplied(vec![clause()]))
+        );
         put_contract(&mut p, "a half rounds to even");
+        assert!(unapplied([&c], &p).is_empty());
+        resolve(&mut c, &p).unwrap();
         assert!(unapplied([&c], &p).is_empty());
     }
 
@@ -161,7 +207,7 @@ mod tests {
     fn a_definition_that_is_gone_is_reported() {
         let p = project();
         let mut c = crux(&p);
-        answer(&mut c, choice("to even"), &p).unwrap();
+        decide(&mut c, chosen("to even"), &p).unwrap();
         let empty = Project::new(ProjectId::from_uuid(test_uuid(1001)));
         assert_eq!(
             unapplied([&c], &empty),

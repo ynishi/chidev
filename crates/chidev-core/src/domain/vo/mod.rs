@@ -3,11 +3,14 @@
 pub mod case;
 pub mod choice;
 pub mod clause;
+pub mod crux;
 pub mod digest;
+pub mod finding;
 pub mod id;
 pub mod line_range;
 pub mod name;
 pub mod pin_basis;
+pub mod prose;
 pub mod revision;
 pub mod signature;
 pub mod source;
