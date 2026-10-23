@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::context::{Context, ContextError};
 use super::harness::CaseFound;
@@ -38,7 +39,11 @@ pub enum ProjectError {
     /// Contexts would use each other in a ring; the ids are those on it, in the order of use.
     #[error("the contexts would use each other in a cycle: {0:?}")]
     Cycle(Vec<ContextId>),
-    /// A Case cites an Item that is neither in its Context's Interface nor in that of a Context it uses.
+    /// An asset or a definition would have an id that another one in the Project has. A citation names its
+    /// target by id alone, so an id is one thing in the whole Project.
+    #[error("the id {0} is given to two things in the project")]
+    IdTaken(Uuid),
+    /// A Case cites an Item that is neither in its Context's Interfaces nor in those of a Context it uses.
     #[error(
         "the case {case} of the context {context} cites the item {item}, which it cannot reach"
     )]
@@ -50,7 +55,7 @@ pub enum ProjectError {
         /// The Item cited.
         item: ItemId,
     },
-    /// A Case cites a Clause that is neither in its Context's Contract nor in that of a Context it uses.
+    /// A Case cites a Clause that is neither in its Context's Contracts nor in those of a Context it uses.
     #[error(
         "the case {case} of the context {context} cites the clause {clause}, which it cannot reach"
     )]
@@ -68,9 +73,10 @@ pub enum ProjectError {
 }
 
 /// The Contexts of one repository. Every change is made on a copy and kept only when the Project still holds:
-/// names are unique, every Context it uses is in the Project, `uses` forms no ring, and every Case cites only
-/// Items and Clauses its Context owns or uses. A change to one Context can break a citation in another (an Item
-/// removed from an Interface that another Context's Case cites), so the whole Project is checked each time.
+/// names are unique, every Context it uses is in the Project, `uses` forms no ring, every id of an asset or a
+/// definition is given once in the whole Project, and every Case cites only Items and Clauses its Context owns or
+/// uses. A change to one Context can break a citation in another (an Item removed from an Interface that another
+/// Context's Case cites), so the whole Project is checked each time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     id: ProjectId,
@@ -125,12 +131,12 @@ impl Project {
         self.change(context, |c| c.set_uses(uses))
     }
 
-    /// Bases a Context on its Contract, which it must have. There is no way back.
+    /// Bases a Context on its Contracts, of which it must have one. There is no way back.
     pub fn base_on_contract(&mut self, context: ContextId) -> Result<(), ProjectError> {
         self.change(context, Context::base_on_contract)
     }
 
-    /// Makes or revises the Contract of a Context.
+    /// Makes or revises a Contract of a Context.
     pub fn put_contract(
         &mut self,
         context: ContextId,
@@ -141,7 +147,7 @@ impl Project {
         self.change(context, |c| c.put_contract(id, title, clauses))
     }
 
-    /// Makes or revises the Interface of a Context.
+    /// Makes or revises an Interface of a Context.
     pub fn put_interface(
         &mut self,
         context: ContextId,
@@ -152,7 +158,7 @@ impl Project {
         self.change(context, |c| c.put_interface(id, source, items))
     }
 
-    /// Makes or revises the Harness of a Context.
+    /// Makes or revises a Harness of a Context.
     pub fn put_harness(
         &mut self,
         context: ContextId,
@@ -202,8 +208,42 @@ fn check(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
     if let Some(ring) = find_cycle(contexts) {
         return Err(ProjectError::Cycle(ring));
     }
+    check_ids(contexts)?;
     for c in contexts.values() {
         check_cites(c, contexts)?;
+    }
+    Ok(())
+}
+
+/// Every id of an asset or of a definition in an asset is given once in the whole Project.
+fn check_ids(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
+    let mut seen = BTreeSet::new();
+    let mut once = |id: Uuid| {
+        if seen.insert(id) {
+            Ok(())
+        } else {
+            Err(ProjectError::IdTaken(id))
+        }
+    };
+    for c in contexts.values() {
+        for k in c.contracts() {
+            once(k.id().as_uuid())?;
+            for clause in k.clauses() {
+                once(clause.id().as_uuid())?;
+            }
+        }
+        for i in c.interfaces() {
+            once(i.id().as_uuid())?;
+            for item in i.items() {
+                once(item.id().as_uuid())?;
+            }
+        }
+        for h in c.harnesses() {
+            once(h.id().as_uuid())?;
+            for case in h.cases() {
+                once(case.id().as_uuid())?;
+            }
+        }
     }
     Ok(())
 }
@@ -213,23 +253,12 @@ fn check_cites(
     context: &Context,
     contexts: &BTreeMap<ContextId, Context>,
 ) -> Result<(), ProjectError> {
-    let Some(harness) = context.harness() else {
-        return Ok(());
-    };
     let reach: Vec<&Context> = std::iter::once(context)
         .chain(context.uses().iter().filter_map(|u| contexts.get(u)))
         .collect();
-    let has_item = |item: &ItemId| {
-        reach
-            .iter()
-            .any(|c| c.interface().is_some_and(|i| i.item(*item).is_some()))
-    };
-    let has_clause = |clause: &ClauseId| {
-        reach
-            .iter()
-            .any(|c| c.contract().is_some_and(|k| k.clause(*clause).is_some()))
-    };
-    for case in harness.cases() {
+    let has_item = |item: &ItemId| reach.iter().any(|c| c.interface_of(*item).is_some());
+    let has_clause = |clause: &ClauseId| reach.iter().any(|c| c.contract_of(*clause).is_some());
+    for case in context.harnesses().flat_map(|h| h.cases()) {
         if let Some(item) = case.cites().items().keys().find(|i| !has_item(i)) {
             return Err(ProjectError::ItemNotReached {
                 context: context.id(),
@@ -426,7 +455,46 @@ mod tests {
     fn a_case_may_cite_its_own_and_its_used_contexts_items_and_clauses() {
         let mut p = project();
         put_harness(&mut p, &[10, 20], &[11, 30]).unwrap();
-        assert!(p.context(ctx_id(1)).unwrap().harness().is_some());
+        assert_eq!(p.context(ctx_id(1)).unwrap().harnesses().count(), 1);
+    }
+
+    #[test]
+    fn an_id_given_twice_in_the_project_is_refused_and_changes_nothing() {
+        let mut p = project();
+        let before = p.clone();
+        // Interface 201 is `base`'s; `core` cannot have an Interface with that id
+        assert_eq!(
+            p.put_interface(
+                ctx_id(1),
+                InterfaceId::from_uuid(test_uuid(201)),
+                Source::new("fn g()\n".to_string()),
+                Vec::new()
+            ),
+            Err(ProjectError::IdTaken(test_uuid(201)))
+        );
+        // Item 20 is in `base`'s Interface; another Interface of `core` cannot declare it
+        assert_eq!(
+            p.put_interface(
+                ctx_id(1),
+                InterfaceId::from_uuid(test_uuid(105)),
+                Source::new("fn g()\n".to_string()),
+                vec![(
+                    item(20),
+                    Signature::try_from("fn g()").unwrap(),
+                    LineRange::new(1, 1).unwrap()
+                )]
+            ),
+            Err(ProjectError::IdTaken(test_uuid(20)))
+        );
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_context_holds_several_interfaces_and_a_case_cites_any_of_them() {
+        let mut p = project();
+        put_interface(&mut p, 1, 106, 12);
+        assert_eq!(p.context(ctx_id(1)).unwrap().interfaces().count(), 2);
+        put_harness(&mut p, &[10, 12], &[]).unwrap();
     }
 
     #[test]
