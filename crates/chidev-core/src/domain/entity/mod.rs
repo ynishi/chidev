@@ -2,3 +2,4 @@
 //! changes. Each counts its changes in a `Revision`.
 
 pub mod contract;
+pub mod interface;

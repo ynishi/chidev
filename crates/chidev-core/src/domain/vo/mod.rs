@@ -6,5 +6,6 @@ pub mod id;
 pub mod line_range;
 pub mod name;
 pub mod revision;
+pub mod signature;
 pub mod source;
 pub mod title;
