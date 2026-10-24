@@ -34,12 +34,14 @@ use self::ports::{AssetKind, AssetName, Changes, IdSource, Invocation, Store, St
 pub use crate::domain::check::ParamValue;
 use crate::domain::check::{CheckView, Finding, Hook, Mention};
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux, Route,
+    ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux,
 };
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
-use crate::domain::service::change_request::{decide, resolve, revisions_now, unapplied};
+use crate::domain::service::change_request::{
+    awaiting_decision, decide, resolve, revisions_now, unapplied,
+};
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::vo::case::{CaseCites, CaseName};
@@ -123,6 +125,14 @@ pub enum AppError {
     /// The change request cannot be opened, decided or resolved.
     #[error(transparent)]
     ChangeRequest(#[from] ChangeRequestError),
+    /// The definitions have not followed the change request yet; they are named as `status` names them.
+    #[error("the change is not applied yet: {}", not_applied_words(.unchanged, .gone))]
+    NotApplied {
+        /// The definitions still as they were, described.
+        unchanged: Vec<String>,
+        /// The definitions gone, described.
+        gone: Vec<String>,
+    },
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -308,6 +318,10 @@ pub struct OptionInput {
     pub choice: String,
     /// The change it makes to the definitions the Crux is about (the exact new wording); none: it changes none.
     pub change: Option<String>,
+    /// The Items that must change when it is chosen, apart from the lines of the change request.
+    pub items: Vec<ItemRef>,
+    /// The Clauses that must change when it is chosen, apart from the lines of the change request.
+    pub clauses: Vec<ClauseRef>,
     /// What else it affects.
     pub consequence: Option<String>,
 }
@@ -348,11 +362,11 @@ pub struct ChangeRequestInput {
     pub parent: Option<String>,
     /// Who raises it.
     pub issuer: Option<String>,
-    /// The Items it is about.
+    /// The Items it asks to change.
     pub items: Vec<ItemRef>,
-    /// The Clauses it is about.
+    /// The Clauses it asks to change.
     pub clauses: Vec<ClauseRef>,
-    /// The question for a person; none: the machine resolves it.
+    /// The question for a person, besides the lines; none: nothing to ask.
     pub crux: Option<CruxInput>,
     /// The findings it deals with.
     pub addresses: Vec<FindingInput>,
@@ -404,12 +418,58 @@ pub struct ChangeRequestStatus {
     pub parent: Option<String>,
     /// Who raised it.
     pub issuer: Option<String>,
-    /// The kind of its Crux; none: the machine resolves it.
+    /// The kind of its Crux; none: it has no question.
     pub crux: Option<&'static str>,
     /// `open`, `decided` or `resolved`.
     pub state: &'static str,
     /// The decision on its Crux, in words.
     pub decision: Option<String>,
+}
+
+/// A definition a change request was opened with as a line, in the names a person wrote it with, and the revision
+/// recorded for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenedLine {
+    /// An Item of an Interface.
+    Item {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The signature of the Item.
+        signature: String,
+        /// The revision it had when the change request was opened.
+        revision: Revision,
+    },
+    /// A Clause of a Contract.
+    Clause {
+        /// The Context.
+        context: String,
+        /// The Contract.
+        contract: String,
+        /// The label of the Clause.
+        label: String,
+        /// The revision it had when the change request was opened.
+        revision: Revision,
+    },
+}
+
+/// A change request as it was opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    /// Its id.
+    pub id: ChangeRequestId,
+    /// The lines it recorded, in order.
+    pub lines: Vec<OpenedLine>,
+}
+
+/// A change request whose Crux has no decision yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingStatus {
+    /// The change request's title.
+    pub cr: String,
+    /// The kind of its Crux.
+    pub crux: &'static str,
 }
 
 /// An unresolved change request the definitions have not followed.
@@ -437,6 +497,8 @@ pub struct Status {
     pub change_requests: Vec<ChangeRequestStatus>,
     /// The change requests not yet applied.
     pub unapplied: Vec<UnappliedStatus>,
+    /// The change requests whose Crux has no decision yet.
+    pub awaiting: Vec<AwaitingStatus>,
     /// What every check finds in the state as it is, each with whether a change request deals with it.
     pub findings: Vec<Found>,
     /// The judged rules never reported or gone stale: what an agent is to judge (`check_rules`).
@@ -813,11 +875,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
     /// it is a part of, who raises it, the definitions it is about (each citation names its Context), and the
-    /// question for a person when the machine cannot resolve it.
+    /// question for a person, whose options may name the definitions they ask to change. Gives back the id and the
+    /// lines as recorded.
     pub async fn open_change_request(
         &mut self,
         c: &ChangeRequestInput,
-    ) -> Result<ChangeRequestId, AppError> {
+    ) -> Result<Opened, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
@@ -842,18 +905,26 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for r in &c.clauses {
             targets.push(Target::Clause(self.clause(&p, None, r).await?.0));
         }
-        let route = match &c.crux {
-            None => Route::Machine,
+        let crux = match &c.crux {
+            None => None,
             Some(q) => {
                 let mut options = Vec::with_capacity(q.options.len());
                 for o in &q.options {
+                    let mut changes = BTreeSet::new();
+                    for r in &o.items {
+                        changes.insert(Target::Item(self.item(&p, None, r).await?.0));
+                    }
+                    for r in &o.clauses {
+                        changes.insert(Target::Clause(self.clause(&p, None, r).await?.0));
+                    }
                     options.push(CruxOption::new(
                         Choice::try_from(o.choice.as_str()).map_err(input)?,
                         prose(&o.change)?,
+                        changes,
                         prose(&o.consequence)?,
                     ));
                 }
-                Route::Person(Crux::new(
+                Some(Crux::new(
                     q.kind,
                     options,
                     q.default.as_ref().map(reasoned).transpose()?,
@@ -880,13 +951,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 parent,
                 issuer,
                 lines: revisions_now(&p, targets),
-                route,
+                crux,
                 addresses,
             },
         );
+        let mut lines = Vec::with_capacity(cr.lines().len());
+        for (target, revision) in cr.lines() {
+            lines.push(self.opened_line(&p, *target, *revision).await?);
+        }
         self.commit_change_request(at, cr, Vec::new(), Vec::new())
             .await?;
-        Ok(id)
+        Ok(Opened { id, lines })
     }
 
     /// Takes the person's decision on the Crux of the change request titled `title`.
@@ -922,7 +997,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let mut cr = self.change_request_titled(title).await?;
-        resolve(&mut cr, &p)?;
+        if let Err(e) = resolve(&mut cr, &p) {
+            return Err(match e {
+                ChangeRequestError::NotApplied { unchanged, gone } => AppError::NotApplied {
+                    unchanged: self.describe_all(&p, &unchanged).await?,
+                    gone: self.describe_all(&p, &gone).await?,
+                },
+                other => other.into(),
+            });
+        }
         let pins = self.store.pins().await?;
         let mut crs = self.store.change_requests().await?;
         crs.retain(|k| k.id() != cr.id());
@@ -1059,11 +1142,19 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 gone: self.describe_all(&p, &u.gone).await?,
             });
         }
+        let awaiting = awaiting_decision(crs.iter())
+            .into_iter()
+            .map(|c| AwaitingStatus {
+                cr: c.title().to_string(),
+                crux: c.crux().map_or("question", |q| q.kind().word()),
+            })
+            .collect();
         Ok(Status {
             pins,
             stale_cites: stale,
             change_requests: records,
             unapplied: open,
+            awaiting,
             findings,
             judged,
             external: self.external_standing(&p, &crs, at).await?.1,
@@ -1387,6 +1478,53 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
+    /// A line of a change request, in the names a person wrote it with.
+    async fn opened_line(
+        &self,
+        p: &Project,
+        target: Target,
+        revision: Revision,
+    ) -> Result<OpenedLine, AppError> {
+        let found = p.contexts().find_map(|c| match target {
+            Target::Item(id) => c.interface_of(id).and_then(|i| {
+                i.item(id).map(|it| {
+                    (
+                        c.name().to_string(),
+                        i.id().as_uuid(),
+                        it.signature().to_string(),
+                    )
+                })
+            }),
+            Target::Clause(id) => c.contract_of(id).and_then(|k| {
+                k.clause(id).map(|cl| {
+                    (
+                        c.name().to_string(),
+                        k.id().as_uuid(),
+                        cl.content().label().to_string(),
+                    )
+                })
+            }),
+        });
+        let Some((context, asset, what)) = found else {
+            return Err(AppError::Input(format!("{target:?} is not in the Project")));
+        };
+        let name = self.name_of(asset).await?;
+        Ok(match target {
+            Target::Item(_) => OpenedLine::Item {
+                context,
+                interface: name,
+                signature: what,
+                revision,
+            },
+            Target::Clause(_) => OpenedLine::Clause {
+                context,
+                contract: name,
+                label: what,
+                revision,
+            },
+        })
+    }
+
     /// Several targets, in words, in order.
     async fn describe_all(&self, p: &Project, targets: &[Target]) -> Result<Vec<String>, AppError> {
         let mut said = Vec::with_capacity(targets.len());
@@ -1426,6 +1564,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             },
         })
     }
+}
+
+/// What a change request still lacks, in words: the definitions as they were, then the ones gone.
+fn not_applied_words(unchanged: &[String], gone: &[String]) -> String {
+    let mut parts = Vec::with_capacity(2);
+    if !unchanged.is_empty() {
+        parts.push(format!("not changed: {}", unchanged.join(", ")));
+    }
+    if !gone.is_empty() {
+        parts.push(format!("gone: {}", gone.join(", ")));
+    }
+    parts.join("; ")
 }
 
 /// The id of the Context named `name`.

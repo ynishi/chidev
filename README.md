@@ -68,6 +68,39 @@ saved result does not re-hash the executable or check the filesystem. The check
 input consists of the selected model sections, not a snapshot of the working
 tree. Re-run a check after changing inputs outside that model.
 
+## Change requests
+
+A change request lists the definitions it asks to change (`items`, `clauses`: its
+lines) and may carry a `crux`, a question for a person. The two are independent:
+
+- Every line has to change before the request resolves, whatever the Crux
+  decides. A line does not wait for the answer.
+- Each option of the Crux may name `items` / `clauses` (the same references,
+  context required) that must change if that option is chosen. The default
+  option normally names none. `cr_decide` records the revision each of them has
+  at that moment; a later decision replaces it. Deciding with the person's own
+  wording asks the lines only, and leaving it unspecified asks nothing more.
+- `cr_resolve` needs the Crux decided, every line past the revision recorded, and
+  every definition of the chosen option past the revision recorded. When some
+  have not changed it says which, by name (`rounding C1`), and which are gone.
+
+```json
+{"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
+ "clauses":[{"context":"pricing","contract":"discount","label":"C1"}],
+ "crux":{"kind":"ambiguity","default":{"choice":"reuse InvalidDiscount"},
+  "options":[{"choice":"reuse InvalidDiscount"},
+             {"choice":"new error","clauses":[{"context":"pricing","contract":"discount","label":"C2"}]}]}}
+```
+
+`cr_open` answers with the lines it recorded, so a wrong reference is seen at
+once: `{"kind":"clause","context":"pricing","contract":"discount","label":"C1","revision":1}`
+(an item has `interface` and `signature` instead of `contract` and `label`).
+`status` lists a request whose Crux has no decision under `awaiting` (title and
+kind of the Crux) as well as under `unapplied` when its lines have not changed,
+and the check `cr.awaiting-decision` (a note) reports it. A database written
+before options named their changes does not load; chidev is unreleased and there
+is no migration.
+
 ## Change-request addresses
 
 Each entry in `cr_open.addresses` names a rule and the subject of its finding.

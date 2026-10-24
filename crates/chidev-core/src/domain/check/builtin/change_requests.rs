@@ -8,7 +8,7 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::change_request::ChangeRequestState;
-use crate::domain::service::change_request::unapplied;
+use crate::domain::service::change_request::{awaiting_decision, unapplied};
 use crate::domain::service::cite::revision_of;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::intent::Intent;
@@ -21,8 +21,8 @@ static UNAPPLIED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.unapplied"),
     summary: Cow::Borrowed("an unresolved change request whose definitions have not changed"),
     help: Cow::Borrowed(
-        "The change was asked for and decided, but a definition it names is still as it was, or is gone. Make the \
-           change, then resolve the change request.",
+        "The change was asked for, but a definition it names (a line, or a change the decision asked) is still as it \
+           was, or is gone. Make the change, then resolve the change request.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
@@ -48,6 +48,44 @@ impl Check for Unapplied {
                         u.unchanged.len(),
                         u.gone.len()
                     ),
+                )
+            })
+            .collect()
+    }
+}
+
+/// A change request whose question has no decision yet.
+#[derive(Debug, Clone, Copy)]
+pub struct AwaitingDecision;
+
+static AWAITING_DECISION: Descriptor = Descriptor {
+    id: RuleId::from_static("cr.awaiting-decision"),
+    summary: Cow::Borrowed("an unresolved change request whose question no person has decided"),
+    help: Cow::Borrowed(
+        "The change request asks a question and waits for the person. Work goes on with the default, if there is \
+           one, but the option chosen may ask more definitions to change. Decide it (`cr_decide`).",
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
+    default_level: Level::Note,
+    mandatory: false,
+    params: std::borrow::Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for AwaitingDecision {
+    fn descriptor(&self) -> &'static Descriptor {
+        &AWAITING_DECISION
+    }
+
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        awaiting_decision(view.change_requests.iter())
+            .into_iter()
+            .map(|c| {
+                let kind = c.crux().map_or("question", |q| q.kind().word());
+                Finding::new(
+                    &AWAITING_DECISION,
+                    Some(Subject::ChangeRequest(c.id())),
+                    format!("a {kind} question is not decided yet"),
                 )
             })
             .collect()

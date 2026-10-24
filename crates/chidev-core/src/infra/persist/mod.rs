@@ -71,11 +71,11 @@ pub(crate) fn decode_change_request(stored: u32, text: &str) -> Result<ChangeReq
 pub(crate) mod fixture {
     //! One Project, Pin and change requests that use every part of the stored format.
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use uuid::Uuid;
 
-    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux, Route};
+    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
     use crate::domain::entity::context::Context;
     use crate::domain::entity::pin::Pin;
     use crate::domain::entity::project::Project;
@@ -203,7 +203,7 @@ pub(crate) mod fixture {
         Reasoned::new(Choice::try_from(c).unwrap(), Some(prose("because")))
     }
 
-    /// A change request resolved by the machine, and one with a Crux, a parent and a decision.
+    /// A change request without a Crux, and one with a Crux, a parent and a decision that asks a change.
     pub(crate) fn change_requests(p: &Project) -> Vec<ChangeRequest> {
         let targets = [
             Target::Item(ItemId::from_uuid(id(31))),
@@ -218,7 +218,7 @@ pub(crate) mod fixture {
                 parent: None,
                 issuer: None,
                 lines: revisions_now(p, targets),
-                route: Route::Machine,
+                crux: None,
                 addresses: Vec::new(),
             },
         );
@@ -229,9 +229,15 @@ pub(crate) mod fixture {
                 CruxOption::new(
                     Choice::try_from("fail").unwrap(),
                     Some(prose("C2 says fail")),
+                    BTreeSet::new(),
                     Some(prose("callers check")),
                 ),
-                CruxOption::new(Choice::try_from("zero").unwrap(), None, None),
+                CruxOption::new(
+                    Choice::try_from("zero").unwrap(),
+                    None,
+                    BTreeSet::from([targets[1]]),
+                    None,
+                ),
             ],
             Some(reasoned("fail")),
             Some(reasoned("zero")),
@@ -246,7 +252,7 @@ pub(crate) mod fixture {
                 parent: Some(ChangeRequestId::from_uuid(id(60))),
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
                 lines: revisions_now(p, targets),
-                route: Route::Person(crux),
+                crux: Some(crux),
                 addresses: vec![
                     FindingRef::new(
                         RuleId::from_static("cite.uncited-clause"),
@@ -272,10 +278,15 @@ pub(crate) mod fixture {
                     parent: None,
                     issuer: None,
                     lines: revisions_now(p, [Target::Item(ItemId::from_uuid(id(31)))]),
-                    route: Route::Person(
+                    crux: Some(
                         Crux::new(
                             kind,
-                            vec![CruxOption::new(Choice::try_from("a").unwrap(), None, None)],
+                            vec![CruxOption::new(
+                                Choice::try_from("a").unwrap(),
+                                None,
+                                BTreeSet::new(),
+                                None,
+                            )],
                             None,
                             None,
                         )
@@ -348,6 +359,33 @@ mod tests {
             assert!(read.addresses().is_empty());
             assert_eq!(read.title(), cr.title());
         }
+    }
+
+    #[test]
+    fn a_change_request_that_asks_a_change_keeps_what_it_asked_and_an_old_document_is_refused() {
+        let p = project();
+        let second = &change_requests(&p)[1];
+        assert_eq!(second.decided_changes().len(), 1);
+        // A document of the layout before decided changes names no `decided_changes`: it does not load.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(second).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("decided_changes");
+        let refused = decode_change_request(CURRENT, &doc.to_string());
+        assert!(
+            matches!(&refused, Err(StoreError::Corrupt(why)) if why.contains("decided_changes"))
+        );
+    }
+
+    #[test]
+    fn a_decided_change_the_decision_does_not_ask_is_corrupt() {
+        let p = project();
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
+        doc["decision"] = serde_json::json!({ "chosen": { "choice": "fail", "reason": null } });
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
     }
 
     #[test]

@@ -11,7 +11,9 @@ mod pins;
 use super::Check;
 use super::level::Hook;
 
-pub use self::change_requests::{KeepBehaviorChanged, ParentResolvedEarly, Unapplied};
+pub use self::change_requests::{
+    AwaitingDecision, KeepBehaviorChanged, ParentResolvedEarly, Unapplied,
+};
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
 pub use self::pins::{StalePin, Unpinned};
@@ -27,6 +29,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &NoInterface,
         &NoHarness,
         &Unapplied,
+        &AwaitingDecision,
         &KeepBehaviorChanged,
         &ParentResolvedEarly,
     ]
@@ -43,7 +46,7 @@ mod fixture {
 
     use crate::domain::check::policy::Params;
     use crate::domain::check::{Check, CheckView, Finding};
-    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Route};
+    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft};
     use crate::domain::entity::context::Context;
     use crate::domain::entity::pin::Pin;
     use crate::domain::entity::project::Project;
@@ -168,7 +171,7 @@ mod fixture {
         .unwrap()
     }
 
-    /// A change request resolved by the machine, about `targets` at their revisions now.
+    /// A change request without a Crux, about `targets` at their revisions now.
     pub(super) fn cr(
         p: &Project,
         n: u128,
@@ -185,7 +188,7 @@ mod fixture {
                 parent: parent.map(|k| ChangeRequestId::from_uuid(test_uuid(k))),
                 issuer: None,
                 lines: revisions_now(p, targets.iter().copied()),
-                route: Route::Machine,
+                crux: None,
                 addresses: Vec::new(),
             },
         )
@@ -232,7 +235,10 @@ mod tests {
             assert!(!d.summary.is_empty() && !d.help.is_empty());
             let note = matches!(
                 d.id.as_str(),
-                "pin.unpinned" | "context.no-interface" | "context.no-harness"
+                "pin.unpinned"
+                    | "context.no-interface"
+                    | "context.no-harness"
+                    | "cr.awaiting-decision"
             );
             assert_eq!(
                 d.default_level,
@@ -322,6 +328,50 @@ mod tests {
         assert_eq!(run(&Unapplied, &p, &[], &crs).len(), 1);
         put_contract(&mut p, "a half rounds to even");
         assert!(run(&Unapplied, &p, &[], &crs).is_empty());
+    }
+
+    #[test]
+    fn a_change_request_whose_question_is_not_decided_is_found_until_it_is_decided() {
+        use std::collections::BTreeMap;
+
+        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+        use crate::domain::vo::choice::Choice;
+        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+        use crate::domain::vo::title::Title;
+        let option =
+            |c: &str| CruxOption::new(Choice::try_from(c).unwrap(), None, BTreeSet::new(), None);
+        let crux = Crux::new(
+            CruxKind::Conflict,
+            vec![option("a"), option("b")],
+            None,
+            None,
+        )
+        .unwrap();
+        let p = project();
+        let plain = cr(&p, 1, Intent::ChangeBehavior, None, &[]);
+        let mut asking = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(2)),
+            ChangeRequestDraft {
+                title: Title::try_from("asks").unwrap(),
+                situation: None,
+                intent: Intent::ChangeBehavior,
+                parent: None,
+                issuer: None,
+                lines: BTreeMap::new(),
+                crux: Some(crux),
+                addresses: Vec::new(),
+            },
+        );
+        let found = run(&AwaitingDecision, &p, &[], &[plain.clone(), asking.clone()]);
+        assert_eq!(
+            subjects(&found),
+            [Some(Subject::ChangeRequest(asking.id()))]
+        );
+        assert_eq!(found[0].level(), crate::domain::check::Level::Note);
+        let choice = Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None));
+        asking.decide(choice, &BTreeMap::new()).unwrap();
+        assert!(run(&AwaitingDecision, &p, &[], &[plain, asking]).is_empty());
     }
 
     #[test]

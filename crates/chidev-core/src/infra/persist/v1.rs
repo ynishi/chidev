@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, ChangeRequestState, Crux, Route,
+    ChangeRequest, ChangeRequestDraft, ChangeRequestState, Crux,
 };
 use crate::domain::entity::context::{Basis, Context};
 use crate::domain::entity::contract::Contract;
@@ -457,6 +457,8 @@ pub(crate) struct ChangeRequestDoc {
     lines: Vec<LineDoc>,
     crux: Option<CruxDoc>,
     decision: Option<DecisionDoc>,
+    /// The definitions the option decided asks to change, with the revision each had at the decision.
+    decided_changes: Vec<LineDoc>,
     /// Absent in the documents written before a change request could address findings.
     #[serde(default)]
     addresses: Vec<AddressDoc>,
@@ -550,11 +552,54 @@ enum TargetDoc {
     Clause,
 }
 
+/// A definition and the revision recorded for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LineDoc {
     target: TargetDoc,
     id: String,
     revision: u64,
+}
+
+/// A definition a Crux option asks to change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChangeDoc {
+    target: TargetDoc,
+    id: String,
+}
+
+fn target_doc(t: &Target) -> (TargetDoc, String) {
+    match t {
+        Target::Item(i) => (TargetDoc::Item, i.as_uuid().to_string()),
+        Target::Clause(i) => (TargetDoc::Clause, i.as_uuid().to_string()),
+    }
+}
+
+fn target_of(kind: &TargetDoc, id: &str) -> Result<Target, Bad> {
+    let id = uuid(id)?;
+    Ok(match kind {
+        TargetDoc::Item => Target::Item(ItemId::from_uuid(id)),
+        TargetDoc::Clause => Target::Clause(ClauseId::from_uuid(id)),
+    })
+}
+
+fn line_docs(lines: &BTreeMap<Target, Revision>) -> Vec<LineDoc> {
+    lines
+        .iter()
+        .map(|(t, r)| {
+            let (target, id) = target_doc(t);
+            LineDoc {
+                target,
+                id,
+                revision: r.number(),
+            }
+        })
+        .collect()
+}
+
+fn lines_of(docs: &[LineDoc]) -> Result<BTreeMap<Target, Revision>, Bad> {
+    docs.iter()
+        .map(|l| Ok((target_of(&l.target, &l.id)?, revision(l.revision)?)))
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,6 +623,7 @@ struct CruxDoc {
 struct OptionDoc {
     choice: String,
     change: Option<String>,
+    changes: Vec<ChangeDoc>,
     consequence: Option<String>,
 }
 
@@ -633,22 +679,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             },
             parent: c.parent().map(|p| p.as_uuid().to_string()),
             issuer: c.issuer().map(|i| i.to_string()),
-            lines: c
-                .lines()
-                .iter()
-                .map(|(t, r)| match t {
-                    Target::Item(i) => LineDoc {
-                        target: TargetDoc::Item,
-                        id: i.as_uuid().to_string(),
-                        revision: r.number(),
-                    },
-                    Target::Clause(i) => LineDoc {
-                        target: TargetDoc::Clause,
-                        id: i.as_uuid().to_string(),
-                        revision: r.number(),
-                    },
-                })
-                .collect(),
+            lines: line_docs(c.lines()),
             crux: c.crux().map(|q| CruxDoc {
                 kind: match q.kind() {
                     CruxKind::Ambiguity => CruxKindDoc::Ambiguity,
@@ -662,6 +693,14 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                     .map(|o| OptionDoc {
                         choice: o.choice().to_string(),
                         change: o.change().map(|p| p.to_string()),
+                        changes: o
+                            .changes()
+                            .iter()
+                            .map(|t| {
+                                let (target, id) = target_doc(t);
+                                ChangeDoc { target, id }
+                            })
+                            .collect(),
                         consequence: o.consequence().map(|p| p.to_string()),
                     })
                     .collect(),
@@ -678,6 +717,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                     keep: keep.iter().map(|p| p.to_string()).collect(),
                 },
             }),
+            decided_changes: line_docs(c.decided_changes()),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             resolved: c.state() == ChangeRequestState::Resolved,
         }
@@ -688,23 +728,22 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
     type Error = Bad;
 
     fn try_from(d: ChangeRequestDoc) -> Result<ChangeRequest, Bad> {
-        let mut lines = BTreeMap::new();
-        for l in &d.lines {
-            let id = uuid(&l.id)?;
-            let target = match l.target {
-                TargetDoc::Item => Target::Item(ItemId::from_uuid(id)),
-                TargetDoc::Clause => Target::Clause(ClauseId::from_uuid(id)),
-            };
-            lines.insert(target, revision(l.revision)?);
-        }
-        let route = match &d.crux {
-            None => Route::Machine,
+        let lines = lines_of(&d.lines)?;
+        let decided_changes = lines_of(&d.decided_changes)?;
+        let crux = match &d.crux {
+            None => None,
             Some(q) => {
                 let mut options = Vec::with_capacity(q.options.len());
                 for o in &q.options {
+                    let changes = o
+                        .changes
+                        .iter()
+                        .map(|c| target_of(&c.target, &c.id))
+                        .collect::<Result<_, _>>()?;
                     options.push(CruxOption::new(
                         Choice::try_from(o.choice.as_str()).map_err(bad)?,
                         prose(&o.change)?,
+                        changes,
                         prose(&o.consequence)?,
                     ));
                 }
@@ -714,7 +753,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                     CruxKindDoc::Model => CruxKind::Model,
                     CruxKindDoc::Disagreement => CruxKind::Disagreement,
                 };
-                Route::Person(
+                Some(
                     Crux::new(
                         kind,
                         options,
@@ -757,7 +796,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .map(|i| Issuer::try_from(i).map_err(bad))
                 .transpose()?,
             lines,
-            route,
+            crux,
             addresses: d
                 .addresses
                 .iter()
@@ -768,6 +807,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
             ChangeRequestId::from_uuid(uuid(&d.id)?),
             draft,
             decision,
+            decided_changes,
             d.resolved,
         )
         .map_err(bad)

@@ -385,6 +385,8 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
         options: vec![OptionInput {
             choice: "keep".into(),
             change: None,
+            items: vec![],
+            clauses: vec![],
             consequence: None,
         }],
         default: None,

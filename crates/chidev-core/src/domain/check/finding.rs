@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use crate::domain::check::descriptor::Executor;
     use crate::domain::check::level::Hook;
-    use crate::domain::entity::change_request::{ChangeRequestDraft, Route};
+    use crate::domain::entity::change_request::ChangeRequestDraft;
     use crate::domain::vo::id::{ChangeRequestId, ClauseId, test_uuid};
     use crate::domain::vo::intent::Intent;
     use crate::domain::vo::title::Title;
@@ -165,7 +165,7 @@ mod tests {
                 parent: None,
                 issuer: None,
                 lines: BTreeMap::new(),
-                route: Route::Machine,
+                crux: None,
                 addresses,
             },
         );

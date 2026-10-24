@@ -673,7 +673,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     let call = executor.calls.lock().unwrap()[0].clone();
     assert_eq!(call.hook, "resolve");
     let candidate = &call.model.change_requests.as_ref().unwrap()[0];
-    assert_eq!(candidate["id"], cr.to_string());
+    assert_eq!(candidate["id"], cr.id.to_string());
     assert_eq!(candidate["state"], "resolved");
 
     app.resolve_change_request("accept current behavior")

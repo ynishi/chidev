@@ -177,6 +177,136 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(code, Some(1));
 }
 
+/// The contract of the change-request scenario: C1 is the settled change's clause, C2 the detail.
+fn discount_put(c1: &str, c2: &str) -> String {
+    format!(
+        concat!(
+            "{{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"discount\",\"title\":\"Discount\",",
+            "\"clauses\":[{{\"label\":\"C1\",\"text\":\"{}\"}},{{\"label\":\"C2\",\"text\":\"{}\"}}]}}\n"
+        ),
+        c1, c2
+    )
+}
+
+#[test]
+fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied() {
+    let dir = fresh_dir("obligation");
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "any discount is accepted",
+            "a refused discount is an InvalidDiscount",
+        ),
+        // 4: the settled change (C1, a line) and the question about a detail (which error; C2 for a new one)
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Refuse big discounts\",\"intent\":\"change_behavior\",",
+            "\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}],",
+            "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
+            "{\"choice\":\"reuse InvalidDiscount\"},",
+            "{\"choice\":\"new error\",\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}]}",
+            "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
+        )
+        .to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+        "{\"op\":\"check\"}\n".to_string(),
+        "{\"op\":\"cr_decide\",\"title\":\"Refuse big discounts\",\"choice\":\"reuse InvalidDiscount\"}\n"
+            .to_string(),
+        // 8: decided with the default, yet C1 never changed: it does not resolve, and says which definition
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
+        // 12: a question whose non-default option asks C2 to change
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
+            "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
+            "{\"choice\":\"reuse InvalidDiscount\"},",
+            "{\"choice\":\"new error\",\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}]}",
+            "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
+        "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"new error\"}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is a DiscountTooLarge",
+        ),
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [8, 13, 15], "{results:#?}");
+
+    // cr_open echoes what it recorded, by name
+    let opened = at(&results, 4);
+    assert_eq!(
+        opened["lines"],
+        serde_json::json!([{
+            "kind": "clause", "context": "pricing", "contract": "discount", "label": "C1", "revision": 1
+        }])
+    );
+
+    // the undecided question is visible: in status, and in check as a note; the line is behind as well
+    let waiting = at(&results, 5);
+    assert_eq!(
+        waiting["awaiting"],
+        serde_json::json!([{ "cr": "Refuse big discounts", "crux": "ambiguity" }])
+    );
+    assert_eq!(waiting["unapplied"][0]["unchanged"][0], "discount C1");
+    let finding = |r: &Value, rule: &str| -> Option<Value> {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .find(|f| f["rule"] == rule)
+            .cloned()
+    };
+    let note = finding(at(&results, 6), "cr.awaiting-decision").expect("awaiting is found");
+    assert_eq!(note["level"], "note");
+    assert!(finding(at(&results, 6), "cr.unapplied").is_some());
+
+    // decided with the default and not resolved: the error names the definition, not its id
+    let refused = at(&results, 8)["error"].as_str().expect("error");
+    assert!(refused.contains("discount C1"), "{refused}");
+    assert!(
+        !refused.contains("ClauseId") && !refused.contains("Clause("),
+        "{refused}"
+    );
+    let decided = at(&results, 9);
+    assert_eq!(decided["awaiting"], serde_json::json!([]));
+    assert_eq!(decided["unapplied"][0]["decision"], "reuse InvalidDiscount");
+    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+
+    // the second question: awaited, refused undecided, and after the non-default choice C2 is required
+    assert_eq!(at(&results, 13)["ok"], false);
+    assert!(
+        at(&results, 13)["error"]
+            .as_str()
+            .expect("error")
+            .contains("no decision")
+    );
+    let asked = at(&results, 15)["error"].as_str().expect("error");
+    assert!(asked.contains("discount C2"), "{asked}");
+    assert_eq!(at(&results, 17)["ok"], true, "{results:#?}");
+    let last = at(&results, 18);
+    assert_eq!(last["awaiting"], serde_json::json!([]));
+    assert_eq!(last["unapplied"], serde_json::json!([]));
+    assert_eq!(last["change_requests"][0]["state"], "resolved");
+    assert_eq!(last["change_requests"][1]["state"], "resolved");
+}
+
 #[test]
 fn a_second_run_continues_the_project_the_first_kept() {
     let dir = fresh_dir("persist");
@@ -369,7 +499,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 10);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 11);
     assert_eq!(entry("context.no-harness")["level"], "off");
     assert_eq!(entry("context.no-harness")["default_level"], "note");
     // the person's layer comes after the project's

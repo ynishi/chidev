@@ -1,5 +1,6 @@
-//! The change request: a request that the definitions change (or a confirmation that they need not), resolved by
-//! the machine or, through a Crux, by a person.
+//! The change request: a request that the definitions change (or a confirmation that they need not). Its lines are
+//! always to follow; a Crux, when it has one, is a question a person settles, and the option chosen may ask more
+//! definitions to change.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +34,7 @@ pub enum ChangeRequestError {
     /// A model question is about words; it cannot be left unspecified.
     #[error("a {0} question cannot be left unspecified")]
     UnspecifiedNotAllowed(&'static str),
-    /// The change request is resolved by the machine; there is no question for a person to decide.
+    /// The change request has no Crux; there is no question for a person to decide.
     #[error("the change request has no crux to decide")]
     NoCrux,
     /// The change request is resolved; it takes no more decisions.
@@ -42,13 +43,21 @@ pub enum ChangeRequestError {
     /// The Crux has no decision yet.
     #[error("the crux has no decision yet")]
     Undecided,
-    /// The definitions have not followed yet: these are still as they were, or gone.
-    #[error("the change is not applied yet: {0:?}")]
-    NotApplied(Vec<Target>),
+    /// The definitions have not followed yet: `unchanged` are still as they were, `gone` are no more.
+    #[error("the change is not applied yet: {} unchanged, {} gone", .unchanged.len(), .gone.len())]
+    NotApplied {
+        /// The definitions still at the revision they were recorded at, in order.
+        unchanged: Vec<Target>,
+        /// The definitions no asset of the Project has any more, in order.
+        gone: Vec<Target>,
+    },
+    /// A stored change was not asked by the decision stored with it.
+    #[error("{0:?} is not a change the decision asks")]
+    UnaskedChange(Target),
 }
 
-/// The question a person settles for a change request the machine cannot resolve: its kind, the options with what
-/// each changes, the default work goes on with, the recommendation, and the decision once taken.
+/// The question a person settles for a change request: its kind, the options with what each changes, the default
+/// work goes on with, the recommendation, and the decision once taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Crux {
     kind: CruxKind,
@@ -126,20 +135,15 @@ impl Crux {
         self.decision.as_ref()
     }
 
-    /// Whether the decision asks the definitions to change: an option other than the default that changes them, or
-    /// the person's own wording. The default, an option that changes nothing, leaving it unspecified, or no
-    /// decision yet asks for no change.
-    pub fn asks_change(&self) -> bool {
-        match &self.decision {
-            None | Some(Decision::Unspecified { .. }) => false,
-            Some(Decision::Worded { .. }) => true,
-            Some(Decision::Chosen(c)) => {
-                self.default.as_ref().map(Reasoned::choice) != Some(c.choice())
-                    && self
-                        .option(c.choice())
-                        .is_some_and(|o| o.change().is_some())
-            }
-        }
+    /// The definitions the decision asks to change besides the lines of the change request: those of the option
+    /// chosen. The person's own wording asks the lines to change (already listed) and no more, leaving it
+    /// unspecified asks nothing, and no decision yet asks nothing.
+    pub fn decided_changes(&self) -> Vec<Target> {
+        let chosen = match &self.decision {
+            Some(Decision::Chosen(c)) => self.option(c.choice()),
+            _ => None,
+        };
+        chosen.map_or_else(Vec::new, |o| o.changes().iter().copied().collect())
     }
 
     /// Checks `decision` against the options and the kind, and takes it.
@@ -158,19 +162,11 @@ impl Crux {
     }
 }
 
-/// Who resolves a change request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Route {
-    /// The machine: the change follows from the definitions, nobody has to choose.
-    Machine,
-    /// A person, by settling this question.
-    Person(Crux),
-}
-
 /// Where a change request stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeRequestState {
-    /// Not resolved, and its Crux (if any) not decided: work goes on with the Crux's default, if it has one.
+    /// Not resolved, and its Crux (if any) not decided: the person is awaited, and work goes on with the Crux's
+    /// default, if it has one. The lines are to follow all the same.
     Open,
     /// Its Crux is decided; the definitions may still have to follow.
     Decided,
@@ -202,10 +198,10 @@ pub struct ChangeRequestDraft {
     pub parent: Option<ChangeRequestId>,
     /// Who raised it.
     pub issuer: Option<Issuer>,
-    /// The definitions it is about, with the revision each has now.
+    /// The definitions it asks to change, with the revision each has now.
     pub lines: BTreeMap<Target, Revision>,
-    /// Who resolves it. A Crux given here is undecided.
-    pub route: Route,
+    /// The question for a person, when there is one. A Crux given here is undecided.
+    pub crux: Option<Crux>,
     /// The findings of the checks it deals with: while it is unresolved they are addressed, once resolved decided.
     pub addresses: Vec<FindingRef>,
 }
@@ -223,9 +219,10 @@ fn distinct(addresses: Vec<FindingRef>) -> Vec<FindingRef> {
 
 /// A request that the definitions change, or a confirmation that they need not: whatever is there now does not
 /// satisfy. It means either to change the behaviour the specification promises or to keep it; it may be part of a
-/// broader one; it is resolved by the machine or, through its Crux, by a person. The definitions it is about are
-/// kept with a revision each, so that whether they have followed is seen by comparing revisions; once they have,
-/// it is resolved and its record stands.
+/// broader one. Its lines, the definitions it asks to change, are always to follow. It may carry a Crux, a question
+/// a person settles; the option chosen may ask more definitions to change, which are to follow too. The revision of
+/// each definition is kept, so that whether it has followed is seen by comparing revisions; once all have, and the
+/// Crux is decided, it is resolved and its record stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRequest {
     id: ChangeRequestId,
@@ -235,7 +232,9 @@ pub struct ChangeRequest {
     parent: Option<ChangeRequestId>,
     issuer: Option<Issuer>,
     lines: BTreeMap<Target, Revision>,
-    route: Route,
+    crux: Option<Crux>,
+    /// The definitions the chosen option asks to change, with the revision each had when it was decided.
+    decided_changes: BTreeMap<Target, Revision>,
     addresses: Vec<FindingRef>,
     resolved: bool,
 }
@@ -243,13 +242,10 @@ pub struct ChangeRequest {
 impl ChangeRequest {
     /// An open change request. It cannot be its own parent.
     pub fn open(id: ChangeRequestId, draft: ChangeRequestDraft) -> ChangeRequest {
-        let route = match draft.route {
-            Route::Person(mut crux) => {
-                crux.decision = None;
-                Route::Person(crux)
-            }
-            Route::Machine => Route::Machine,
-        };
+        let crux = draft.crux.map(|mut crux| {
+            crux.decision = None;
+            crux
+        });
         ChangeRequest {
             id,
             title: draft.title,
@@ -258,24 +254,27 @@ impl ChangeRequest {
             parent: draft.parent.filter(|p| *p != id),
             issuer: draft.issuer,
             lines: draft.lines,
-            route,
+            crux,
+            decided_changes: BTreeMap::new(),
             addresses: distinct(draft.addresses),
             resolved: false,
         }
     }
 
-    /// A change request as a store kept it: its Crux with the decision taken, and whether it is resolved. A
-    /// resolved one with a Crux has a decision.
+    /// A change request as a store kept it: its Crux with the decision taken, the changes that decision asked with
+    /// the revisions recorded, and whether it is resolved. A resolved one with a Crux has a decision, and every
+    /// change recorded is one the decision asks.
     pub(crate) fn restore(
         id: ChangeRequestId,
         draft: ChangeRequestDraft,
         decision: Option<Decision>,
+        decided_changes: BTreeMap<Target, Revision>,
         resolved: bool,
     ) -> Result<ChangeRequest, ChangeRequestError> {
-        let route = match draft.route {
-            Route::Machine if decision.is_some() => return Err(ChangeRequestError::NoCrux),
-            Route::Machine => Route::Machine,
-            Route::Person(mut crux) => {
+        let crux = match draft.crux {
+            None if decision.is_some() => return Err(ChangeRequestError::NoCrux),
+            None => None,
+            Some(mut crux) => {
                 crux.decision = None;
                 if let Some(d) = decision {
                     crux.decide(d)?;
@@ -283,9 +282,13 @@ impl ChangeRequest {
                 if resolved && crux.decision.is_none() {
                     return Err(ChangeRequestError::Undecided);
                 }
-                Route::Person(crux)
+                Some(crux)
             }
         };
+        let asked: Vec<Target> = crux.iter().flat_map(|c| c.decided_changes()).collect();
+        if let Some(t) = decided_changes.keys().find(|t| !asked.contains(t)) {
+            return Err(ChangeRequestError::UnaskedChange(*t));
+        }
         Ok(ChangeRequest {
             id,
             title: draft.title,
@@ -294,7 +297,8 @@ impl ChangeRequest {
             parent: draft.parent.filter(|p| *p != id),
             issuer: draft.issuer,
             lines: draft.lines,
-            route,
+            crux,
+            decided_changes,
             addresses: distinct(draft.addresses),
             resolved,
         })
@@ -330,9 +334,16 @@ impl ChangeRequest {
         self.issuer.as_ref()
     }
 
-    /// The definitions it is about, with the revision each had when it was opened or its Crux last decided.
+    /// The definitions it asks to change, with the revision each had when it was opened. They are to follow
+    /// whatever its Crux decides.
     pub fn lines(&self) -> &BTreeMap<Target, Revision> {
         &self.lines
+    }
+
+    /// The definitions the chosen option of its Crux asks to change, with the revision each had when the Crux was
+    /// last decided. Empty until decided, and when the decision asks nothing more than the lines.
+    pub fn decided_changes(&self) -> &BTreeMap<Target, Revision> {
+        &self.decided_changes
     }
 
     /// The findings it deals with: a finding listed here is addressed while the change request is unresolved and
@@ -341,17 +352,14 @@ impl ChangeRequest {
         &self.addresses
     }
 
-    /// Who resolves it.
-    pub fn route(&self) -> &Route {
-        &self.route
+    /// Its Crux, when it has a question for a person.
+    pub fn crux(&self) -> Option<&Crux> {
+        self.crux.as_ref()
     }
 
-    /// Its Crux, when a person resolves it.
-    pub fn crux(&self) -> Option<&Crux> {
-        match &self.route {
-            Route::Machine => None,
-            Route::Person(c) => Some(c),
-        }
+    /// Whether it is unresolved and its Crux is not decided yet: a person is awaited.
+    pub fn awaits_decision(&self) -> bool {
+        !self.resolved && self.crux.as_ref().is_some_and(|c| c.decision.is_none())
     }
 
     /// Where it stands.
@@ -365,18 +373,10 @@ impl ChangeRequest {
         }
     }
 
-    /// Whether it asks its definitions to change now: one the machine resolves does; one a person resolves does
-    /// once its Crux is decided for a change (see [`Crux::asks_change`]).
-    pub fn asks_change(&self) -> bool {
-        match &self.route {
-            Route::Machine => true,
-            Route::Person(c) => c.asks_change(),
-        }
-    }
-
-    /// Takes the person's decision on its Crux; a later one replaces an earlier one until it is resolved. Each line
-    /// takes the revision in `now`, the one its definition has as the decision is taken (a line missing from `now`
-    /// keeps its revision: that its definition is gone is for the caller to report).
+    /// Takes the person's decision on its Crux; a later one replaces an earlier one, and the changes the earlier
+    /// one asked, until it is resolved. Each definition the option chosen asks to change takes the revision in
+    /// `now`, the one it has as the decision is taken (one missing from `now` is gone: it is not recorded, and the
+    /// caller reports it). The lines keep the revisions they were opened with.
     pub fn decide(
         &mut self,
         decision: Decision,
@@ -385,15 +385,15 @@ impl ChangeRequest {
         if self.resolved {
             return Err(ChangeRequestError::AlreadyResolved);
         }
-        let Route::Person(crux) = &mut self.route else {
+        let Some(crux) = &mut self.crux else {
             return Err(ChangeRequestError::NoCrux);
         };
         crux.decide(decision)?;
-        for (target, revision) in &mut self.lines {
-            if let Some(r) = now.get(target) {
-                *revision = *r;
-            }
-        }
+        self.decided_changes = crux
+            .decided_changes()
+            .into_iter()
+            .filter_map(|t| now.get(&t).map(|r| (t, *r)))
+            .collect();
         Ok(())
     }
 
@@ -403,7 +403,7 @@ impl ChangeRequest {
         if self.resolved {
             return Err(ChangeRequestError::AlreadyResolved);
         }
-        if self.crux().is_some_and(|c| c.decision.is_none()) {
+        if self.awaits_decision() {
             return Err(ChangeRequestError::Undecided);
         }
         self.resolved = true;
@@ -413,6 +413,8 @@ impl ChangeRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::domain::vo::id::{ClauseId, test_uuid};
 
@@ -428,17 +430,22 @@ mod tests {
         Target::Clause(ClauseId::from_uuid(test_uuid(30)))
     }
 
+    fn detail() -> Target {
+        Target::Clause(ClauseId::from_uuid(test_uuid(31)))
+    }
+
     fn crux(kind: CruxKind, default: Option<&str>) -> Result<Crux, ChangeRequestError> {
         Crux::new(
             kind,
             vec![
-                CruxOption::new(choice("up"), None, None),
+                CruxOption::new(choice("up"), None, BTreeSet::new(), None),
                 CruxOption::new(
                     choice("to even"),
                     Some(prose("C1: a total is rounded half to even")),
+                    BTreeSet::from([detail()]),
                     Some(prose("the rounding tests change")),
                 ),
-                CruxOption::new(choice("keep"), None, None),
+                CruxOption::new(choice("keep"), None, BTreeSet::new(), None),
             ],
             default.map(|d| Reasoned::new(choice(d), Some(prose("the literal reading")))),
             Some(Reasoned::new(choice("to even"), None)),
@@ -449,7 +456,7 @@ mod tests {
         ChangeRequestId::from_uuid(test_uuid(n))
     }
 
-    fn cr(route: Route) -> ChangeRequest {
+    fn cr(crux: Option<Crux>) -> ChangeRequest {
         ChangeRequest::open(
             id(1),
             ChangeRequestDraft {
@@ -459,16 +466,14 @@ mod tests {
                 parent: Some(id(9)),
                 issuer: Some(Issuer::try_from("designer").unwrap()),
                 lines: BTreeMap::from([(line(), Revision::first())]),
-                route,
+                crux,
                 addresses: Vec::new(),
             },
         )
     }
 
     fn person() -> ChangeRequest {
-        cr(Route::Person(
-            crux(CruxKind::Ambiguity, Some("up")).unwrap(),
-        ))
+        cr(Some(crux(CruxKind::Ambiguity, Some("up")).unwrap()))
     }
 
     fn chosen(c: &str) -> Decision {
@@ -479,14 +484,15 @@ mod tests {
     fn a_new_change_request_is_open_and_keeps_what_it_was_opened_with() {
         let c = person();
         assert_eq!(c.state(), ChangeRequestState::Open);
-        assert!(!c.asks_change());
+        assert!(c.awaits_decision());
+        assert!(c.decided_changes().is_empty());
         assert_eq!(c.intent(), Intent::ChangeBehavior);
         assert_eq!(c.parent(), Some(id(9)));
         assert_eq!(c.issuer().unwrap().as_str(), "designer");
-        let machine = cr(Route::Machine);
-        assert_eq!(machine.state(), ChangeRequestState::Open);
-        assert!(machine.asks_change());
-        assert!(machine.crux().is_none());
+        let plain = cr(None);
+        assert_eq!(plain.state(), ChangeRequestState::Open);
+        assert!(!plain.awaits_decision());
+        assert!(plain.crux().is_none());
     }
 
     #[test]
@@ -504,7 +510,7 @@ mod tests {
             parent: None,
             issuer: None,
             lines: BTreeMap::new(),
-            route: Route::Machine,
+            crux: None,
             addresses: vec![a.clone(), b.clone(), a.clone()],
         };
         assert_eq!(ChangeRequest::open(id(1), d).addresses(), [a, b]);
@@ -519,7 +525,7 @@ mod tests {
             parent: Some(id(1)),
             issuer: None,
             lines: BTreeMap::new(),
-            route: Route::Machine,
+            crux: None,
             addresses: Vec::new(),
         };
         assert_eq!(ChangeRequest::open(id(1), d.clone()).parent(), None);
@@ -536,8 +542,8 @@ mod tests {
         let twice = Crux::new(
             CruxKind::Ambiguity,
             vec![
-                CruxOption::new(choice("a"), None, None),
-                CruxOption::new(choice("a"), None, None),
+                CruxOption::new(choice("a"), None, BTreeSet::new(), None),
+                CruxOption::new(choice("a"), None, BTreeSet::new(), None),
             ],
             None,
             None,
@@ -559,38 +565,117 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_takes_the_revisions_now_and_says_whether_it_asks_a_change() {
+    fn a_decision_records_the_revisions_of_the_changes_the_option_asks_and_leaves_the_lines() {
         let mut c = person();
-        let now = BTreeMap::from([(line(), Revision::first().next())]);
+        let now = BTreeMap::from([
+            (line(), Revision::first().next()),
+            (detail(), Revision::first().next()),
+        ]);
         assert_eq!(
             c.decide(chosen("down"), &now),
             Err(ChangeRequestError::NotAnOption(choice("down")))
         );
-        assert_eq!(c.lines()[&line()], Revision::first());
+        assert!(c.decided_changes().is_empty());
         c.decide(chosen("to even"), &now).unwrap();
         assert_eq!(c.state(), ChangeRequestState::Decided);
-        assert!(c.asks_change());
-        assert_eq!(c.lines()[&line()], Revision::first().next());
+        assert!(!c.awaits_decision());
+        assert_eq!(
+            c.decided_changes(),
+            &BTreeMap::from([(detail(), Revision::first().next())])
+        );
+        // The lines keep the revision they were opened with: they are to follow whatever is decided.
+        assert_eq!(c.lines()[&line()], Revision::first());
+    }
+
+    #[test]
+    fn a_later_decision_replaces_the_changes_of_the_earlier_one() {
+        let mut c = person();
+        let now = BTreeMap::from([(detail(), Revision::first().next())]);
+        c.decide(chosen("to even"), &now).unwrap();
+        assert_eq!(c.decided_changes().len(), 1);
         c.decide(chosen("up"), &now).unwrap();
-        assert!(!c.asks_change());
-        c.decide(chosen("keep"), &now).unwrap();
-        assert!(!c.asks_change());
+        assert!(c.decided_changes().is_empty());
+        c.decide(chosen("to even"), &now).unwrap();
         let worded = Decision::Worded {
             wording: prose("round half away from zero"),
             reason: None,
         };
         c.decide(worded, &now).unwrap();
-        assert!(c.asks_change());
+        assert!(c.decided_changes().is_empty());
+        c.decide(chosen("to even"), &now).unwrap();
         let free = Decision::Unspecified {
             keep: vec![prose("a total is whole cents")],
         };
         c.decide(free, &now).unwrap();
-        assert!(!c.asks_change());
+        assert!(c.decided_changes().is_empty());
+        assert_eq!(c.state(), ChangeRequestState::Decided);
+    }
+
+    #[test]
+    fn a_change_gone_when_decided_is_not_recorded() {
+        let mut c = person();
+        c.decide(chosen("to even"), &BTreeMap::new()).unwrap();
+        assert!(c.decided_changes().is_empty());
+    }
+
+    #[test]
+    fn a_stored_change_must_be_one_the_decision_asks() {
+        let draft = |crux| ChangeRequestDraft {
+            title: Title::try_from("T").unwrap(),
+            situation: None,
+            intent: Intent::ChangeBehavior,
+            parent: None,
+            issuer: None,
+            lines: BTreeMap::new(),
+            crux,
+            addresses: Vec::new(),
+        };
+        let recorded = BTreeMap::from([(detail(), Revision::first())]);
+        let crux = || Some(crux(CruxKind::Ambiguity, Some("up")).unwrap());
+        // No decision, or a decision whose option asks nothing: the change is unasked.
+        assert_eq!(
+            ChangeRequest::restore(id(1), draft(crux()), None, recorded.clone(), false),
+            Err(ChangeRequestError::UnaskedChange(detail()))
+        );
+        assert_eq!(
+            ChangeRequest::restore(
+                id(1),
+                draft(crux()),
+                Some(chosen("up")),
+                recorded.clone(),
+                false
+            ),
+            Err(ChangeRequestError::UnaskedChange(detail()))
+        );
+        assert!(
+            ChangeRequest::restore(
+                id(1),
+                draft(crux()),
+                Some(chosen("to even")),
+                recorded,
+                true
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            ChangeRequest::restore(id(1), draft(crux()), None, BTreeMap::new(), true),
+            Err(ChangeRequestError::Undecided)
+        );
+        assert_eq!(
+            ChangeRequest::restore(
+                id(1),
+                draft(None),
+                Some(chosen("up")),
+                BTreeMap::new(),
+                false
+            ),
+            Err(ChangeRequestError::NoCrux)
+        );
     }
 
     #[test]
     fn a_model_question_cannot_be_left_unspecified() {
-        let mut c = cr(Route::Person(crux(CruxKind::Model, None).unwrap()));
+        let mut c = cr(Some(crux(CruxKind::Model, None).unwrap()));
         assert_eq!(
             c.decide(Decision::Unspecified { keep: Vec::new() }, &BTreeMap::new()),
             Err(ChangeRequestError::UnspecifiedNotAllowed("model"))
@@ -598,8 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn a_change_request_the_machine_resolves_has_nothing_to_decide() {
-        let mut c = cr(Route::Machine);
+    fn a_change_request_without_a_crux_has_nothing_to_decide() {
+        let mut c = cr(None);
         assert_eq!(
             c.decide(chosen("up"), &BTreeMap::new()),
             Err(ChangeRequestError::NoCrux)

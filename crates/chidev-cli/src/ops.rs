@@ -7,9 +7,9 @@ use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, ModelView, OptionInput,
-    ParamValue, PinState, ReasonedInput, ReportInput, ReportedFinding, RuleStanding, RuleToJudge,
-    SubjectInput,
+    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, ModelView, OpenedLine,
+    OptionInput, ParamValue, PinState, ReasonedInput, ReportInput, ReportedFinding, RuleStanding,
+    RuleToJudge, SubjectInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use serde::{Deserialize, Serialize};
@@ -210,7 +210,7 @@ struct OpenDto {
     items: Vec<ItemRefDto>,
     #[serde(default)]
     clauses: Vec<ClauseRefDto>,
-    /// The question for a person; none: the machine resolves it.
+    /// The question for a person, besides the lines; none: nothing to ask.
     #[serde(default)]
     crux: Option<CruxDto>,
     /// The findings it deals with.
@@ -327,6 +327,128 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
             }),
         })
         .collect()
+}
+
+/// A line a change request recorded, in the result of `cr_open`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum OpenedLineOut {
+    Item {
+        context: String,
+        interface: String,
+        signature: String,
+        revision: u64,
+    },
+    Clause {
+        context: String,
+        contract: String,
+        label: String,
+        revision: u64,
+    },
+}
+
+impl From<OpenedLine> for OpenedLineOut {
+    fn from(l: OpenedLine) -> OpenedLineOut {
+        match l {
+            OpenedLine::Item {
+                context,
+                interface,
+                signature,
+                revision,
+            } => OpenedLineOut::Item {
+                context,
+                interface,
+                signature,
+                revision: revision.number(),
+            },
+            OpenedLine::Clause {
+                context,
+                contract,
+                label,
+                revision,
+            } => OpenedLineOut::Clause {
+                context,
+                contract,
+                label,
+                revision: revision.number(),
+            },
+        }
+    }
+}
+
+/// The result of `cr_open`.
+#[derive(Debug, Serialize)]
+struct CrOpenOut {
+    op: &'static str,
+    cr: String,
+    lines: Vec<OpenedLineOut>,
+}
+
+/// A Pin in the result of `status`.
+#[derive(Debug, Serialize)]
+struct PinOut<'a> {
+    context: &'a str,
+    interface: &'a str,
+    state: &'static str,
+    why: &'a [String],
+}
+
+/// A stale citation in the result of `status`.
+#[derive(Debug, Serialize)]
+struct StaleCiteOut<'a> {
+    case: &'a str,
+    target: &'a str,
+    cited: u64,
+    now: u64,
+}
+
+/// A change request in the result of `status`.
+#[derive(Debug, Serialize)]
+struct CrOut<'a> {
+    title: &'a str,
+    intent: &'static str,
+    parent: Option<&'a str>,
+    issuer: Option<&'a str>,
+    crux: Option<&'static str>,
+    state: &'static str,
+    decision: Option<&'a str>,
+}
+
+/// A change request the definitions have not followed, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct UnappliedOut<'a> {
+    cr: &'a str,
+    decision: Option<&'a str>,
+    unchanged: &'a [String],
+    gone: &'a [String],
+}
+
+/// A change request whose Crux has no decision yet, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct AwaitingOut<'a> {
+    cr: &'a str,
+    crux: &'static str,
+}
+
+/// The freshness of a saved external execution, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct ExternalOut<'a> {
+    rule: &'a str,
+    state: &'static str,
+}
+
+/// The result of `status`.
+#[derive(Debug, Serialize)]
+struct StatusOut<'a> {
+    op: &'static str,
+    pins: Vec<PinOut<'a>>,
+    stale_cites: Vec<StaleCiteOut<'a>>,
+    change_requests: Vec<CrOut<'a>>,
+    unapplied: Vec<UnappliedOut<'a>>,
+    awaiting: Vec<AwaitingOut<'a>>,
+    findings: Vec<FindingOut<'a>>,
+    judged: Vec<StandingOut<'a>>,
+    external: Vec<ExternalOut<'a>>,
 }
 
 /// The result of `check`.
@@ -515,6 +637,12 @@ struct OptionDto {
     choice: String,
     #[serde(default)]
     change: Option<String>,
+    /// The Items that must change when it is chosen, besides the lines.
+    #[serde(default)]
+    items: Vec<ItemRefDto>,
+    /// The Clauses that must change when it is chosen, besides the lines.
+    #[serde(default)]
+    clauses: Vec<ClauseRefDto>,
     #[serde(default)]
     consequence: Option<String>,
 }
@@ -752,6 +880,8 @@ where
                     .map(|o| OptionInput {
                         choice: o.choice,
                         change: o.change,
+                        items: o.items.into_iter().map(ItemRef::from).collect(),
+                        clauses: o.clauses.into_iter().map(ClauseRef::from).collect(),
                         consequence: o.consequence,
                     })
                     .collect(),
@@ -769,8 +899,12 @@ where
                 crux,
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
-            let id = app.open_change_request(&input).await?;
-            json!({ "op": "cr_open", "cr": id.to_string() })
+            let opened = app.open_change_request(&input).await?;
+            to_value(&CrOpenOut {
+                op: "cr_open",
+                cr: opened.id.to_string(),
+                lines: opened.lines.into_iter().map(OpenedLineOut::from).collect(),
+            })?
         }
         Op::CrDecide {
             title,
@@ -800,46 +934,78 @@ where
         }
         Op::Status => {
             let s = app.status().await?;
-            let pins: Vec<Value> = s
-                .pins
-                .iter()
-                .map(|p| {
-                    let (state, why) = match &p.state {
-                        PinState::Unpinned => ("unpinned", Vec::new()),
-                        PinState::Fresh => ("fresh", Vec::new()),
-                        PinState::Gone => ("gone", Vec::new()),
-                        PinState::Stale(why) => ("stale", why.clone()),
-                    };
-                    json!({ "context": p.context, "interface": p.interface, "state": state, "why": why })
-                })
-                .collect();
-            let stale: Vec<Value> = s
-                .stale_cites
-                .iter()
-                .map(|c| json!({ "case": c.case, "target": c.target, "cited": c.cited, "now": c.now }))
-                .collect();
-            let crs: Vec<Value> = s
-                .change_requests
-                .iter()
-                .map(|c| {
-                    json!({
-                        "title": c.title, "intent": c.intent, "parent": c.parent, "issuer": c.issuer,
-                        "crux": c.crux, "state": c.state, "decision": c.decision,
+            to_value(&StatusOut {
+                op: "status",
+                pins: s
+                    .pins
+                    .iter()
+                    .map(|p| {
+                        let (state, why): (_, &[String]) = match &p.state {
+                            PinState::Unpinned => ("unpinned", &[]),
+                            PinState::Fresh => ("fresh", &[]),
+                            PinState::Gone => ("gone", &[]),
+                            PinState::Stale(why) => ("stale", why),
+                        };
+                        PinOut {
+                            context: &p.context,
+                            interface: &p.interface,
+                            state,
+                            why,
+                        }
                     })
-                })
-                .collect();
-            let open: Vec<Value> = s
-                .unapplied
-                .iter()
-                .map(|u| json!({ "cr": u.cr, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
-                .collect();
-            let judged = to_value(&standing_out(&s.judged))?;
-            let external: Vec<Value> = s
-                .external
-                .iter()
-                .map(|r| json!({"rule":r.rule.as_str(),"state":r.state.word()}))
-                .collect();
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings), "judged": judged, "external": external })
+                    .collect(),
+                stale_cites: s
+                    .stale_cites
+                    .iter()
+                    .map(|c| StaleCiteOut {
+                        case: &c.case,
+                        target: &c.target,
+                        cited: c.cited,
+                        now: c.now,
+                    })
+                    .collect(),
+                change_requests: s
+                    .change_requests
+                    .iter()
+                    .map(|c| CrOut {
+                        title: &c.title,
+                        intent: c.intent,
+                        parent: c.parent.as_deref(),
+                        issuer: c.issuer.as_deref(),
+                        crux: c.crux,
+                        state: c.state,
+                        decision: c.decision.as_deref(),
+                    })
+                    .collect(),
+                unapplied: s
+                    .unapplied
+                    .iter()
+                    .map(|u| UnappliedOut {
+                        cr: &u.cr,
+                        decision: u.decision.as_deref(),
+                        unchanged: &u.unchanged,
+                        gone: &u.gone,
+                    })
+                    .collect(),
+                awaiting: s
+                    .awaiting
+                    .iter()
+                    .map(|a| AwaitingOut {
+                        cr: &a.cr,
+                        crux: a.crux,
+                    })
+                    .collect(),
+                findings: findings_out(&s.findings),
+                judged: standing_out(&s.judged),
+                external: s
+                    .external
+                    .iter()
+                    .map(|r| ExternalOut {
+                        rule: r.rule.as_str(),
+                        state: r.state.word(),
+                    })
+                    .collect(),
+            })?
         }
         Op::Check => {
             let found = app.check().await?;
