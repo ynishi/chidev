@@ -11,6 +11,8 @@
 //! label, signature or case name keeps its id, and a new one gets a fresh id.
 
 mod check;
+mod judged;
+mod model_view;
 pub mod ports;
 
 use std::collections::BTreeSet;
@@ -18,12 +20,17 @@ use std::fmt::Display;
 
 use thiserror::Error;
 
-pub use self::check::{CheckInfo, Checked, Found, Registry, Run};
+pub use self::check::{CheckInfo, Checked, Found, Judgment, Registry, RegistryError, Run};
+pub use self::judged::{
+    JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
+    SubjectInput,
+};
+pub use self::model_view::{ModelView, VIEW_VERSION};
 use self::ports::{AssetKind, AssetName, Changes, IdSource, Invocation, Store, StoreRevision};
 pub use crate::domain::check::ParamValue;
-use crate::domain::check::{CheckView, Hook};
+use crate::domain::check::{CheckView, Finding, Hook, Mention};
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, ChangeRequestError, ChangeRequestState, Crux, Route,
+    ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux, Route,
 };
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
@@ -115,6 +122,20 @@ pub enum AppError {
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// No check has this id.
+    #[error("no check is named `{0}`")]
+    UnknownRule(String),
+    /// The check is not a judged rule, so an agent has nothing to report for it.
+    #[error("the rule `{rule}` is {executor}, not judged: only a judged rule takes a report")]
+    NotJudged {
+        /// The rule.
+        rule: String,
+        /// Who runs it.
+        executor: &'static str,
+    },
+    /// The policy turned the rule off.
+    #[error("the rule `{0}` is off by the policy")]
+    RuleOff(String),
     /// A mandatory check found something at `error`; nothing was kept.
     #[error("refused by the mandatory check(s) {}", rules_of(.0))]
     Refused(Vec<Found>),
@@ -389,6 +410,8 @@ pub struct Status {
     pub unapplied: Vec<UnappliedStatus>,
     /// What every check finds in the state as it is, each with whether a change request deals with it.
     pub findings: Vec<Found>,
+    /// The judged rules never reported or gone stale: what an agent is to judge (`check_rules`).
+    pub judged: Vec<RuleStanding>,
 }
 
 /// A decision, in words.
@@ -867,9 +890,14 @@ where
         })
     }
 
-    /// Runs every check on the state as it is: what the person would see if each check ran now. Nothing is kept,
-    /// and the runs are not recorded.
+    /// Runs every check on the state as it is: what the person would see if each check ran now, with what agents
+    /// reported for the judged rules. Nothing is kept, and the runs are not recorded.
     pub async fn check(&self) -> Result<Vec<Found>, AppError> {
+        Ok(self.checked().await?.0)
+    }
+
+    /// The findings of [`App::check`], and the judged rules not up to date.
+    async fn checked(&self) -> Result<(Vec<Found>, Vec<RuleStanding>), AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let pins = self.store.pins().await?;
@@ -884,7 +912,10 @@ where
                 change_requests: &crs,
             },
         );
-        self.found(&run.findings, &p, &crs, &[]).await
+        let mut found = self.found(&run.findings, &p, &crs, &[]).await?;
+        let (judged, standing) = self.judged_standing(&p, &crs, at).await?;
+        found.extend(judged);
+        Ok((found, standing))
     }
 
     /// The change request titled `title`.
@@ -945,7 +976,7 @@ where
             });
         }
         let crs = self.store.change_requests().await?;
-        let findings = self.check().await?;
+        let (findings, judged) = self.checked().await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
                 .find(|c| c.id() == id)
@@ -962,11 +993,7 @@ where
                 parent: c.parent().map(title_of),
                 issuer: c.issuer().map(|i| i.to_string()),
                 crux: c.crux().map(|q| q.kind().word()),
-                state: match c.state() {
-                    ChangeRequestState::Open => "open",
-                    ChangeRequestState::Decided => "decided",
-                    ChangeRequestState::Resolved => "resolved",
-                },
+                state: c.state().word(),
                 decision: decision_of(c),
             })
             .collect();
@@ -988,6 +1015,7 @@ where
             change_requests: records,
             unapplied: open,
             findings,
+            judged,
         })
     }
 
@@ -1080,7 +1108,7 @@ where
     /// The findings as a caller sees them: their state among `crs`, and what they are about in words.
     async fn found(
         &self,
-        findings: &[crate::domain::check::Finding],
+        findings: &[Finding],
         p: &Project,
         crs: &[ChangeRequest],
         pending: &[AssetName],
@@ -1095,12 +1123,35 @@ where
                 rule: f.rule().clone(),
                 level: f.level(),
                 state: f.state_in(crs),
-                message: f.message().to_string(),
+                message: self.worded(f, pending).await?,
                 about,
                 subject: f.subject(),
+                stale: false,
+                judgment: None,
             });
         }
         Ok(out)
+    }
+
+    /// The message of a finding, with the names of the things it mentions written after it
+    /// (`the code was pinned against what has moved: contract `rounding` changed`).
+    async fn worded(&self, f: &Finding, pending: &[AssetName]) -> Result<String, AppError> {
+        if f.mentions().is_empty() {
+            return Ok(f.message().to_string());
+        }
+        let mut said = Vec::with_capacity(f.mentions().len());
+        for m in f.mentions() {
+            let (kind, id) = match m {
+                Mention::Interface(id) => ("interface", id.as_uuid()),
+                Mention::Harness(id) => ("harness", id.as_uuid()),
+                Mention::Contract(id) => ("contract", id.as_uuid()),
+            };
+            said.push(format!(
+                "{kind} `{}` changed",
+                self.name_in(id, pending).await?
+            ));
+        }
+        Ok(format!("{}: {}", f.message(), said.join(", ")))
     }
 
     /// What a finding is about, in words.

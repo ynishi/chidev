@@ -4,6 +4,7 @@ use super::descriptor::Descriptor;
 use super::level::Level;
 use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestState};
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
 
 /// Whether a finding is being dealt with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +28,19 @@ impl FindingState {
     }
 }
 
+/// A thing a finding's message is about besides its subject, by id. The message of a finding has no names (the
+/// store keeps them, not the domain), so a finding that has to say which of several things moved gives the things
+/// and the caller who has the names writes them into the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mention {
+    /// An Interface.
+    Interface(InterfaceId),
+    /// A Harness.
+    Harness(HarnessId),
+    /// A Contract.
+    Contract(ContractId),
+}
+
 /// One thing a check found: the rule and what it is about (the [`FindingRef`], which is also how a change request
 /// points at it), how serious it is, and what is wrong in words. The words carry no names the store keeps (those
 /// are not the domain's); the reader of the finding has the subject to look them up by.
@@ -35,6 +49,7 @@ pub struct Finding {
     at: FindingRef,
     level: Level,
     message: String,
+    mentions: Vec<Mention>,
 }
 
 impl Finding {
@@ -45,7 +60,19 @@ impl Finding {
             at: FindingRef::new(d.id.clone(), subject),
             level: d.default_level,
             message: message.into(),
+            mentions: Vec::new(),
         }
+    }
+
+    /// The same finding, whose message goes on to name `mentions`.
+    pub fn mentioning(mut self, mentions: Vec<Mention>) -> Finding {
+        self.mentions = mentions;
+        self
+    }
+
+    /// What the message goes on to name, in order; empty for most findings.
+    pub fn mentions(&self) -> &[Mention] {
+        &self.mentions
     }
 
     /// The same finding at `level`.
@@ -98,6 +125,8 @@ impl Finding {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::domain::check::descriptor::Executor;
     use crate::domain::check::level::Hook;
@@ -109,9 +138,9 @@ mod tests {
 
     static RULE: Descriptor = Descriptor {
         id: RuleId::from_static("t.rule"),
-        summary: "s",
-        help: "h",
-        hooks: &[Hook::Check],
+        summary: Cow::Borrowed("s"),
+        help: Cow::Borrowed("h"),
+        hooks: Cow::Borrowed(&[Hook::Check]),
         default_level: Level::Note,
         mandatory: false,
         params: &[],

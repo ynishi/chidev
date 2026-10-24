@@ -3,12 +3,15 @@
 //! `.await`, so [`Store::commit`] writes everything of one use case in a single `call_write` closure, after
 //! checking that nothing was committed since the use case began to read.
 //!
-//! The file holds six tables: `meta` (the store's revision, which every commit bumps), `project`, `pins` and
+//! The file holds nine tables: `meta` (the store's revision, which every commit bumps), `project`, `pins` and
 //! `change_requests` (one JSON document each, in the schema the record names; see `persist`), `asset_names`, and
-//! `check_invocations` (the checks each use case ran, appended and never changed). `PRAGMA user_version` is the
-//! layout of the tables; a file with a higher one is refused. `check_invocations` was added without a new layout
-//! number: it is created `IF NOT EXISTS` each time a file of layout 1 is opened, so a database made before it gets
-//! the table and nothing else in it changes.
+//! `check_invocations` (the checks each use case ran, appended and never changed), `judged_reports` and
+//! `judged_findings` (what agents reported for the judged rules: one report per rule, replaced as a whole, and its
+//! findings), and `model_revision` (the store revision at which the model last changed). `PRAGMA user_version` is
+//! the layout of the tables; a file with a higher one is refused. The last four, and the `executor` and `judge`
+//! columns of `check_invocations`, were added without a new layout number: they are created `IF NOT EXISTS` (or
+//! added when missing) each time a file of layout 1 is opened, so a database made before them gets them and
+//! nothing else in it changes.
 
 use std::path::Path;
 use std::time::Duration;
@@ -19,16 +22,18 @@ use uuid::Uuid;
 
 use super::persist::{self, CURRENT};
 use crate::app::ports::{
-    AssetKind, AssetNames, Changes, Invocation, Outcome, Store, StoreRevision,
+    AssetKind, AssetNames, Changes, Invocation, JudgedFinding, JudgedReport, JudgedRepository,
+    Outcome, Store, StoreRevision,
 };
-use crate::domain::check::Hook;
+use crate::domain::check::{Executor, Hook, Level};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
-use crate::domain::vo::finding::RuleId;
+use crate::domain::vo::digest::Digest;
+use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
 use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId};
 
 /// The layout of the tables this code creates and reads.
@@ -82,9 +87,61 @@ CREATE TABLE IF NOT EXISTS check_invocations (
     notes INTEGER NOT NULL,
     warnings INTEGER NOT NULL,
     errors INTEGER NOT NULL,
-    outcome TEXT NOT NULL
+    outcome TEXT NOT NULL,
+    executor TEXT NOT NULL DEFAULT 'builtin',
+    judge TEXT
 );
 ";
+
+/// What agents reported for the judged rules. A report is replaced as a whole with the commit that makes it: its
+/// rows in both tables are deleted and written again, so a rule has the findings of its latest report and no
+/// others. The judge, `read_at` and the revision reported are of the report, so they are on its row; each finding
+/// is joined to it by rule.
+const CREATE_JUDGED: &str = "
+CREATE TABLE IF NOT EXISTS judged_reports (
+    rule TEXT PRIMARY KEY,
+    judge TEXT NOT NULL,
+    read_at INTEGER NOT NULL,
+    reported_at INTEGER NOT NULL,
+    on_older_revision INTEGER NOT NULL,
+    scope TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS judged_findings (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT,
+    message TEXT NOT NULL,
+    level TEXT,
+    stamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS judged_findings_by_rule ON judged_findings (rule);
+CREATE TABLE IF NOT EXISTS model_revision (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO model_revision (id, revision) SELECT 1, revision FROM meta WHERE id = 1;
+";
+
+/// Adds `column` to `table` when the table (made before the column existed) lacks it.
+fn add_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+    }
+    Ok(())
+}
 
 fn failed(e: IsleError) -> StoreError {
     StoreError::Failed(e.to_string())
@@ -98,9 +155,35 @@ fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     }
     if layout <= LAYOUT {
         conn.execute_batch(CREATE_INVOCATIONS)?;
+        add_column(
+            conn,
+            "check_invocations",
+            "executor",
+            "TEXT NOT NULL DEFAULT 'builtin'",
+        )?;
+        add_column(conn, "check_invocations", "judge", "TEXT")?;
+        conn.execute_batch(CREATE_JUDGED)?;
     }
     Ok(())
 }
+
+/// The revision a stored number is; none for a negative one.
+fn revision_of(n: i64) -> Option<StoreRevision> {
+    u64::try_from(n).ok().map(StoreRevision)
+}
+
+/// An invocation as stored: revision, check, hook, the three counts, outcome, executor, judge.
+type InvocationRow = (
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    Option<String>,
+);
 
 /// A stored document and the schema its record names.
 type Row = (u32, String);
@@ -152,11 +235,11 @@ impl SqliteStore {
     /// The checks the use cases have run, in the order they were kept. Not part of the [`Store`] port: nothing in a
     /// use case reads them back; they are for the person (or a test) who asks what ran.
     pub async fn invocations(&self) -> Result<Vec<Invocation>, StoreError> {
-        let rows: Vec<(i64, String, String, i64, i64, i64, String)> = self
+        let rows: Vec<InvocationRow> = self
             .isle
             .call(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome
+                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge
                      FROM check_invocations ORDER BY seq",
                 )?;
                 stmt.query_map([], |r| {
@@ -168,6 +251,8 @@ impl SqliteStore {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
                     ))
                 })?
                 .collect()
@@ -176,17 +261,25 @@ impl SqliteStore {
             .map_err(failed)?;
         let corrupt = |what: &str| StoreError::Corrupt(format!("an invocation: {what}"));
         rows.into_iter()
-            .map(|(at, check, hook, notes, warnings, errors, outcome)| {
-                Ok(Invocation {
-                    check: RuleId::try_from(check.as_str()).map_err(|e| corrupt(&e.to_string()))?,
-                    hook: Hook::from_word(&hook).ok_or_else(|| corrupt(&hook))?,
-                    read_at: StoreRevision(u64::try_from(at).map_err(|_| corrupt("a revision"))?),
-                    notes: u32::try_from(notes).map_err(|_| corrupt("a count"))?,
-                    warnings: u32::try_from(warnings).map_err(|_| corrupt("a count"))?,
-                    errors: u32::try_from(errors).map_err(|_| corrupt("a count"))?,
-                    outcome: Outcome::from_word(&outcome).ok_or_else(|| corrupt(&outcome))?,
-                })
-            })
+            .map(
+                |(at, check, hook, notes, warnings, errors, outcome, executor, judge)| {
+                    Ok(Invocation {
+                        check: RuleId::try_from(check.as_str())
+                            .map_err(|e| corrupt(&e.to_string()))?,
+                        hook: Hook::from_word(&hook).ok_or_else(|| corrupt(&hook))?,
+                        read_at: StoreRevision(
+                            u64::try_from(at).map_err(|_| corrupt("a revision"))?,
+                        ),
+                        notes: u32::try_from(notes).map_err(|_| corrupt("a count"))?,
+                        warnings: u32::try_from(warnings).map_err(|_| corrupt("a count"))?,
+                        errors: u32::try_from(errors).map_err(|_| corrupt("a count"))?,
+                        outcome: Outcome::from_word(&outcome).ok_or_else(|| corrupt(&outcome))?,
+                        executor: Executor::from_word(&executor)
+                            .ok_or_else(|| corrupt(&executor))?,
+                        judge,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -310,6 +403,85 @@ impl AssetNames for SqliteStore {
     }
 }
 
+impl JudgedRepository for SqliteStore {
+    async fn judged_reports(&self) -> Result<Vec<JudgedReport>, StoreError> {
+        /// A report's row, with one of its findings (none for a report that found nothing).
+        type Row = (
+            (String, String, i64, i64, i64, String),
+            Option<(String, Option<String>, String, Option<String>, String)>,
+        );
+        // One statement, so the reports and their findings are read from the same state of the file.
+        let rows: Vec<Row> = self
+            .isle
+            .call(|c| {
+                c.prepare(
+                    "SELECT r.rule, r.judge, r.read_at, r.reported_at, r.on_older_revision, r.scope,
+                            f.subject_kind, f.subject_id, f.message, f.level, f.stamp
+                     FROM judged_reports r LEFT JOIN judged_findings f ON f.rule = r.rule
+                     ORDER BY r.rule, f.seq",
+                )?
+                .query_map([], |r| {
+                    let finding = match r.get::<_, Option<String>>(6)? {
+                        Some(kind) => Some((kind, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
+                        None => None,
+                    };
+                    Ok((
+                        (
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ),
+                        finding,
+                    ))
+                })?
+                .collect()
+            })
+            .await
+            .map_err(failed)?;
+        let corrupt = |what: &str| StoreError::Corrupt(format!("a judged report: {what}"));
+        let revision = |n: i64| revision_of(n).ok_or_else(|| corrupt("a revision"));
+        let mut out: Vec<JudgedReport> = Vec::new();
+        for ((rule, judge, read_at, reported_at, older, scope), finding) in rows {
+            let rule = RuleId::try_from(rule.as_str()).map_err(|e| corrupt(&e.to_string()))?;
+            if out.last().is_none_or(|r| r.rule != rule) {
+                out.push(JudgedReport {
+                    rule,
+                    judge,
+                    read_at: revision(read_at)?,
+                    reported_at: revision(reported_at)?,
+                    on_older_revision: older != 0,
+                    scope: Digest::restore(&scope).ok_or_else(|| corrupt("a scope"))?,
+                    findings: Vec::new(),
+                });
+            }
+            let (Some((kind, id, message, level, stamp)), Some(report)) = (finding, out.last_mut())
+            else {
+                continue;
+            };
+            let kind = SubjectKind::from_word(&kind).ok_or_else(|| corrupt(&kind))?;
+            let subject = match id {
+                None => None,
+                Some(id) => Subject::from_parts(
+                    kind,
+                    Uuid::parse_str(&id).map_err(|_| corrupt("a subject id"))?,
+                ),
+            };
+            report.findings.push(JudgedFinding {
+                subject,
+                message,
+                level: level
+                    .map(|w| Level::from_word(&w).ok_or_else(|| corrupt(&w)))
+                    .transpose()?,
+                stamp: Digest::restore(&stamp).ok_or_else(|| corrupt("a stamp"))?,
+            });
+        }
+        Ok(out)
+    }
+}
+
 impl Store for SqliteStore {
     async fn revision(&self) -> Result<StoreRevision, StoreError> {
         let number: i64 = self
@@ -320,6 +492,22 @@ impl Store for SqliteStore {
         u64::try_from(number)
             .map(StoreRevision)
             .map_err(|_| StoreError::Corrupt(format!("the store's revision is {number}")))
+    }
+
+    async fn model_revision(&self) -> Result<StoreRevision, StoreError> {
+        let number: i64 = self
+            .isle
+            .call(|c| {
+                c.query_row(
+                    "SELECT revision FROM model_revision WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .map_err(failed)?;
+        revision_of(number)
+            .ok_or_else(|| StoreError::Corrupt(format!("the model's revision is {number}")))
     }
 
     async fn commit(&self, read_at: StoreRevision, changes: Changes) -> Result<(), StoreError> {
@@ -363,9 +551,45 @@ impl Store for SqliteStore {
                     i64::from(i.warnings),
                     i64::from(i.errors),
                     i.outcome.word(),
+                    i.executor.word(),
+                    i.judge.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let judged = changes
+            .judged
+            .iter()
+            .map(|r| {
+                let number = |n: StoreRevision| {
+                    i64::try_from(n.0)
+                        .map_err(|_| StoreError::Failed("a revision too large to keep".to_string()))
+                };
+                let findings = r
+                    .findings
+                    .iter()
+                    .map(|f| {
+                        (
+                            SubjectKind::of(f.subject).word(),
+                            f.subject.map(|s| s.as_uuid().to_string()),
+                            f.message.clone(),
+                            f.level.map(|l| l.word()),
+                            f.stamp.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Ok((
+                    r.rule.to_string(),
+                    r.judge.clone(),
+                    number(r.read_at)?,
+                    number(r.reported_at)?,
+                    i64::from(r.on_older_revision),
+                    r.scope.to_string(),
+                    findings,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        // What an agent is shown is the Project, the change requests and the names; a Pin is not in the view.
+        let model_changed = project.is_some() || !crs.is_empty() || !names.is_empty();
         let current = CURRENT;
         let kept = self
             .isle
@@ -409,15 +633,45 @@ impl Store for SqliteStore {
                         ],
                     )?;
                 }
-                for (at, check, hook, notes, warnings, errors, outcome) in &invocations {
+                for (at, check, hook, notes, warnings, errors, outcome, executor, judge) in
+                    &invocations
+                {
                     tx.execute(
                         "INSERT INTO check_invocations
-                         (store_revision, check_id, hook, notes, warnings, errors, outcome)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![at, check, hook, notes, warnings, errors, outcome],
+                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge],
                     )?;
                 }
+                for (rule, judge, read_at, reported_at, older, scope, findings) in &judged {
+                    // A report replaces the rule's: its findings and its row go, and the new ones are written.
+                    tx.execute("DELETE FROM judged_findings WHERE rule = ?1", params![rule])?;
+                    tx.execute(
+                        "INSERT INTO judged_reports
+                         (rule, judge, read_at, reported_at, on_older_revision, scope)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT (rule) DO UPDATE SET judge = excluded.judge,
+                           read_at = excluded.read_at, reported_at = excluded.reported_at,
+                           on_older_revision = excluded.on_older_revision, scope = excluded.scope",
+                        params![rule, judge, read_at, reported_at, older, scope],
+                    )?;
+                    for (kind, id, message, level, stamp) in findings {
+                        tx.execute(
+                            "INSERT INTO judged_findings
+                             (rule, subject_kind, subject_id, message, level, stamp)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![rule, kind, id, message, level, stamp],
+                        )?;
+                    }
+                }
                 tx.execute("UPDATE meta SET revision = revision + 1 WHERE id = 1", [])?;
+                if model_changed {
+                    tx.execute(
+                        "UPDATE model_revision SET revision = (SELECT revision FROM meta WHERE id = 1)
+                         WHERE id = 1",
+                        [],
+                    )?;
+                }
                 Ok(true)
             })
             .await
@@ -433,6 +687,7 @@ impl Store for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::vo::id::ClauseId;
     use crate::infra::persist::fixture;
 
     fn temp_db(name: &str) -> std::path::PathBuf {
@@ -461,7 +716,10 @@ mod tests {
                 warnings: 2,
                 errors: 0,
                 outcome: Outcome::Found,
+                executor: Executor::Builtin,
+                judge: None,
             }],
+            judged: Vec::new(),
         }
     }
 
@@ -526,6 +784,102 @@ mod tests {
         let at = store.revision().await.unwrap();
         store.commit(at, changes()).await.unwrap();
         assert_eq!(store.invocations().await.unwrap().len(), 1);
+        store.close().await.unwrap();
+    }
+
+    fn report(rule: &str, findings: usize) -> JudgedReport {
+        JudgedReport {
+            rule: RuleId::try_from(rule).unwrap(),
+            judge: "agent".to_string(),
+            read_at: StoreRevision(0),
+            reported_at: StoreRevision(1),
+            on_older_revision: false,
+            scope: Digest::of(b"scope"),
+            findings: (0..findings)
+                .map(|n| JudgedFinding {
+                    subject: (n % 2 == 0)
+                        .then(|| Subject::Clause(ClauseId::from_uuid(fixture::id(50 + n as u128)))),
+                    message: format!("finding {n}"),
+                    level: (n == 1).then_some(Level::Note),
+                    stamp: Digest::of(&[n as u8]),
+                })
+                .collect(),
+        }
+    }
+
+    async fn commit_judged(store: &SqliteStore, reports: Vec<JudgedReport>) {
+        let at = store.revision().await.unwrap();
+        let changes = Changes {
+            judged: reports,
+            ..Changes::default()
+        };
+        store.commit(at, changes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_judged_report_replaces_the_rules_earlier_one_and_survives_reopening() {
+        let path = temp_db("judged");
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(store.judged_reports().await.unwrap().is_empty());
+        let (a, b) = (report("judged.a", 3), report("judged.b", 0));
+        commit_judged(&store, vec![a.clone(), b.clone()]).await;
+        assert_eq!(store.judged_reports().await.unwrap(), vec![a, b.clone()]);
+        // judged again: only the new findings are there; a report with none is kept
+        let a2 = report("judged.a", 1);
+        commit_judged(&store, vec![a2.clone()]).await;
+        store.close().await.unwrap();
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.judged_reports().await.unwrap(), vec![a2, b]);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_models_revision_moves_with_the_model_and_not_with_a_run_or_a_report() {
+        let path = temp_db("model-revision");
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
+        commit_judged(&store, vec![report("judged.a", 1)]).await;
+        assert_eq!(store.revision().await.unwrap(), StoreRevision(1));
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
+        let at = store.revision().await.unwrap();
+        let pin_only = Changes {
+            pins: changes().pins,
+            ..Changes::default()
+        };
+        store.commit(at, pin_only).await.unwrap();
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
+        let at = store.revision().await.unwrap();
+        store.commit(at, changes()).await.unwrap();
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(3));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_database_made_before_the_judged_tables_gets_them_and_keeps_its_invocations() {
+        let path = temp_db("before-judged");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let at = store.revision().await.unwrap();
+        store.commit(at, changes()).await.unwrap();
+        store.close().await.unwrap();
+        // the tables as the previous version made them
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE judged_reports; DROP TABLE judged_findings; DROP TABLE model_revision;
+             ALTER TABLE check_invocations DROP COLUMN executor;
+             ALTER TABLE check_invocations DROP COLUMN judge;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(store.judged_reports().await.unwrap().is_empty());
+        // the model is taken to have last changed at the store's revision, the safe side
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(1));
+        let ran = store.invocations().await.unwrap();
+        assert_eq!(ran.len(), 1);
+        assert_eq!(
+            (ran[0].executor, ran[0].judge.clone()),
+            (Executor::Builtin, None)
+        );
         store.close().await.unwrap();
     }
 

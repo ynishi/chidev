@@ -1,5 +1,7 @@
 //! Checks on what a Context has.
 
+use std::borrow::Cow;
+
 use crate::domain::check::descriptor::{Descriptor, Executor};
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
@@ -13,10 +15,12 @@ pub struct NoInterface;
 
 static NO_INTERFACE: Descriptor = Descriptor {
     id: RuleId::from_static("context.no-interface"),
-    summary: "a context with no interface",
-    help: "A context starts as a name; its code is described by its interfaces. Put one once there is code, or \
+    summary: Cow::Borrowed("a context with no interface"),
+    help: Cow::Borrowed(
+        "A context starts as a name; its code is described by its interfaces. Put one once there is code, or \
            leave the note while the context is being drawn.",
-    hooks: &[Hook::Put, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: &[],
@@ -49,10 +53,12 @@ pub struct NoHarness;
 
 static NO_HARNESS: Descriptor = Descriptor {
     id: RuleId::from_static("context.no-harness"),
-    summary: "a context with no harness",
-    help: "Without a harness nothing checks the context's code, and nothing can be pinned. Put one once there are \
+    summary: Cow::Borrowed("a context with no harness"),
+    help: Cow::Borrowed(
+        "Without a harness nothing checks the context's code, and nothing can be pinned. Put one once there are \
            cases to cite, or leave the note while the context is being drawn.",
-    hooks: &[Hook::Put, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: &[],

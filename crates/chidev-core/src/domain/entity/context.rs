@@ -23,6 +23,16 @@ pub enum Basis {
     Contract,
 }
 
+impl Basis {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Basis::Interface => "interface",
+            Basis::Contract => "contract",
+        }
+    }
+}
+
 /// Which rule of a Context a change would break. The change is not made.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ContextError {

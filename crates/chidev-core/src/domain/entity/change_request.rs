@@ -178,6 +178,17 @@ pub enum ChangeRequestState {
     Resolved,
 }
 
+impl ChangeRequestState {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            ChangeRequestState::Open => "open",
+            ChangeRequestState::Decided => "decided",
+            ChangeRequestState::Resolved => "resolved",
+        }
+    }
+}
+
 /// What a change request is opened with, before its rules are checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRequestDraft {

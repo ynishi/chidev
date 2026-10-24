@@ -384,9 +384,9 @@ mod tests {
     ) -> Descriptor {
         Descriptor {
             id,
-            summary: "",
-            help: "",
-            hooks: &[Hook::Check],
+            summary: "".into(),
+            help: "".into(),
+            hooks: [Hook::Check][..].into(),
             default_level: level,
             mandatory,
             params,

@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 use chidev_core::app::{App, Registry};
 use chidev_core::infra::ids::UuidV7;
+use chidev_core::infra::judged;
 use chidev_core::infra::policy;
 use chidev_core::infra::sqlite::SqliteStore;
 use clap::{Parser, Subcommand};
@@ -58,18 +59,23 @@ async fn main() -> ExitCode {
                 },
                 None => Box::new(BufReader::new(io::stdin())),
             };
-            // The project's root is the directory the command runs in; its policy files are read from there.
-            let registry = match std::env::current_dir()
-                .map_err(|e| e.to_string())
-                .and_then(|root| policy::load(&root).map_err(|e| e.to_string()))
-                .and_then(|layers| Registry::builtin(&layers).map_err(|e| e.to_string()))
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("chidev: policy: {e}");
-                    return ExitCode::from(2);
-                }
-            };
+            // The project's root is the directory the command runs in; its policy files and the judged rules are read
+            // from there. Either being unreadable stops the run before any operation.
+            let registry =
+                match std::env::current_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|root| {
+                        let layers = policy::load(&root).map_err(|e| format!("policy: {e}"))?;
+                        let rules = judged::load(&root).map_err(|e| format!("rules: {e}"))?;
+                        Registry::builtin_with_judged(rules, &layers)
+                            .map_err(|e| format!("policy: {e}"))
+                    }) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("chidev: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
             let sqlite = match SqliteStore::open(&store).await {
                 Ok(s) => s,
                 Err(e) => {

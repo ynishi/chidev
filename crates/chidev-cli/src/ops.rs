@@ -6,9 +6,11 @@ use std::io::{self, BufRead, Write};
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, OptionInput, ParamValue,
-    PinState, ReasonedInput,
+    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, ModelView, OptionInput,
+    ParamValue, PinState, ReasonedInput, ReportInput, ReportedFinding, RuleStanding, RuleToJudge,
+    SubjectInput,
 };
+use chidev_core::domain::check::{Hook, Level};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -77,6 +79,114 @@ enum Op {
     Check,
     /// Lists every check with the level it runs at.
     CheckList,
+    /// The judged rules to judge (those of `hook`, or the one `rule`; all when neither is given), with a view of
+    /// the model to judge them on. The agent that drives chidev judges; chidev keeps the results.
+    CheckRules {
+        #[serde(default)]
+        hook: Option<String>,
+        #[serde(default)]
+        rule: Option<String>,
+    },
+    /// What an agent judged of one rule: replaces every finding the rule had.
+    FindingReport(Box<ReportDto>),
+}
+
+/// The fields of `finding_report`.
+#[derive(Debug, Deserialize)]
+struct ReportDto {
+    rule: String,
+    /// The agent that judged.
+    judge: String,
+    /// The store revision of the view it judged from (`store_revision` of `check_rules`).
+    read_at: u64,
+    /// Every finding of the rule; empty: it found nothing.
+    findings: Vec<ReportedFindingDto>,
+}
+
+/// A finding in a report.
+#[derive(Debug, Deserialize)]
+struct ReportedFindingDto {
+    /// What it is about; none: the Project as a whole.
+    #[serde(default)]
+    subject: Option<SubjectDto>,
+    message: String,
+    /// `note`, `warning` or `error`, not above the rule's level; none: the rule's.
+    #[serde(default)]
+    level: Option<String>,
+}
+
+/// What a finding is about, tagged by its kind: `{ "clause": { ... } }`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubjectDto {
+    Context(String),
+    Interface {
+        context: String,
+        interface: String,
+    },
+    Item(ItemRefDto),
+    Clause(ClauseRefDto),
+    Case {
+        context: String,
+        harness: String,
+        name: String,
+    },
+    ChangeRequest(String),
+}
+
+impl From<SubjectDto> for SubjectInput {
+    fn from(s: SubjectDto) -> SubjectInput {
+        match s {
+            SubjectDto::Context(name) => SubjectInput::Context(name),
+            SubjectDto::Interface { context, interface } => {
+                SubjectInput::Interface { context, interface }
+            }
+            SubjectDto::Item(r) => SubjectInput::Item(ItemRef::from(r)),
+            SubjectDto::Clause(r) => SubjectInput::Clause(ClauseRef::from(r)),
+            SubjectDto::Case {
+                context,
+                harness,
+                name,
+            } => SubjectInput::Case {
+                context,
+                harness,
+                name,
+            },
+            SubjectDto::ChangeRequest(title) => SubjectInput::ChangeRequest(title),
+        }
+    }
+}
+
+/// A level a person wrote.
+fn level_of(word: &str) -> Result<Level, AppError> {
+    Level::from_word(word).ok_or_else(|| {
+        AppError::Input(format!(
+            "the level `{word}` is not one; it is off, note, warning or error"
+        ))
+    })
+}
+
+impl TryFrom<ReportDto> for ReportInput {
+    type Error = AppError;
+
+    fn try_from(r: ReportDto) -> Result<ReportInput, AppError> {
+        Ok(ReportInput {
+            rule: r.rule,
+            judge: r.judge,
+            read_at: r.read_at,
+            findings: r
+                .findings
+                .into_iter()
+                .map(|f| {
+                    Ok(ReportedFinding {
+                        subject: f.subject.map(SubjectInput::from),
+                        message: f.message,
+                        level: f.level.as_deref().map(level_of).transpose()?,
+                    })
+                })
+                .collect::<Result<_, AppError>>()?,
+        })
+    }
 }
 
 /// The fields of `cr_open`, boxed: they are far larger than any other operation's.
@@ -132,6 +242,20 @@ struct FindingOut<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     about: Option<&'a str>,
+    /// Judged on a model that has since changed: it may no longer hold. Only a judged finding can be.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stale: bool,
+    /// Who judged it and on what; only a judged finding has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    judged: Option<JudgmentOut<'a>>,
+}
+
+/// Who judged a finding and on what.
+#[derive(Debug, Serialize)]
+struct JudgmentOut<'a> {
+    judge: &'a str,
+    read_at: u64,
+    on_older_revision: bool,
 }
 
 fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
@@ -143,6 +267,12 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
             state: f.state.word(),
             message: &f.message,
             about: f.about.as_deref(),
+            stale: f.stale,
+            judged: f.judgment.as_ref().map(|j| JudgmentOut {
+                judge: &j.judge,
+                read_at: j.read_at.0,
+                on_older_revision: j.on_older_revision,
+            }),
         })
         .collect()
 }
@@ -167,7 +297,7 @@ enum ParamOut {
 #[derive(Debug, Serialize)]
 struct CheckEntryOut {
     id: String,
-    summary: &'static str,
+    summary: String,
     level: &'static str,
     default_level: &'static str,
     mandatory: bool,
@@ -182,6 +312,98 @@ struct CheckListOut {
     op: &'static str,
     policy: String,
     checks: Vec<CheckEntryOut>,
+}
+
+/// A judged rule in the result of `check_rules`: everything an agent needs to judge it.
+#[derive(Debug, Serialize)]
+struct RuleOut<'a> {
+    id: &'a str,
+    summary: &'a str,
+    /// The kind of thing it judges: a finding names a subject of this kind (`project`: none).
+    subject: &'static str,
+    hooks: Vec<&'static str>,
+    /// The level the policy holds it to; a finding is at it or below.
+    level: &'static str,
+    default_level: &'static str,
+    question: &'a str,
+    #[serde(rename = "true")]
+    true_when: &'a str,
+    #[serde(rename = "false")]
+    false_when: &'a str,
+    fix: &'a str,
+    when: &'a [String],
+    /// `never` (not judged yet), `current` or `stale` (the model it judged has changed).
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    judged: Option<JudgmentOut<'a>>,
+}
+
+impl<'a> RuleOut<'a> {
+    fn of(r: &'a RuleToJudge) -> RuleOut<'a> {
+        let d = r.rule.descriptor();
+        RuleOut {
+            id: d.id.as_str(),
+            summary: &d.summary,
+            subject: r.rule.subject().word(),
+            hooks: d.hooks.iter().map(|h| h.word()).collect(),
+            level: r.level.word(),
+            default_level: d.default_level.word(),
+            question: r.rule.question(),
+            true_when: r.rule.true_when(),
+            false_when: r.rule.false_when(),
+            fix: r.rule.fix(),
+            when: r.rule.when(),
+            state: r.state.word(),
+            judged: r.judgment.as_ref().map(|j| JudgmentOut {
+                judge: &j.judge,
+                read_at: j.read_at.0,
+                on_older_revision: j.on_older_revision,
+            }),
+        }
+    }
+}
+
+/// The result of `check_rules`: the rules, and the model they are judged on (read at `store_revision`).
+#[derive(Debug, Serialize)]
+struct CheckRulesOut<'a> {
+    op: &'static str,
+    store_revision: u64,
+    rules: Vec<RuleOut<'a>>,
+    model: &'a ModelView,
+}
+
+/// The result of `finding_report`.
+#[derive(Debug, Serialize)]
+struct ReportOut<'a> {
+    op: &'static str,
+    rule: &'a str,
+    findings: usize,
+    /// How many findings the report replaced.
+    replaced: usize,
+    on_older_revision: bool,
+    store_revision: u64,
+}
+
+/// A judged rule that is never reported or stale, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct StandingOut<'a> {
+    rule: &'a str,
+    summary: &'a str,
+    subject: &'static str,
+    /// `never` or `stale`.
+    state: &'static str,
+}
+
+fn standing_out(standing: &[RuleStanding]) -> Vec<StandingOut<'_>> {
+    standing
+        .iter()
+        .map(|s| StandingOut {
+            rule: s.rule.as_str(),
+            summary: &s.summary,
+            subject: s.subject.word(),
+            state: s.state.word(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -541,13 +763,44 @@ where
                 .iter()
                 .map(|u| json!({ "cr": u.cr, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
                 .collect();
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings) })
+            let judged = to_value(&standing_out(&s.judged))?;
+            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings), "judged": judged })
         }
         Op::Check => {
             let found = app.check().await?;
             to_value(&CheckOut {
                 op: "check",
                 findings: findings_out(&found),
+            })?
+        }
+        Op::CheckRules { hook, rule } => {
+            let hook = hook
+                .as_deref()
+                .map(|w| {
+                    Hook::from_word(w).ok_or_else(|| {
+                        AppError::Input(format!(
+                            "the hook `{w}` is not one; it is put, pin, resolve or check"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let view = app.check_rules(hook, rule.as_deref()).await?;
+            to_value(&CheckRulesOut {
+                op: "check_rules",
+                store_revision: view.store_revision.0,
+                rules: view.rules.iter().map(RuleOut::of).collect(),
+                model: &view.model,
+            })?
+        }
+        Op::FindingReport(report) => {
+            let done = app.finding_report(&ReportInput::try_from(*report)?).await?;
+            to_value(&ReportOut {
+                op: "finding_report",
+                rule: done.rule.as_str(),
+                findings: done.findings,
+                replaced: done.replaced,
+                on_older_revision: done.on_older_revision,
+                store_revision: done.store_revision.0,
             })?
         }
         Op::CheckList => {
@@ -557,7 +810,7 @@ where
                 .into_iter()
                 .map(|c| CheckEntryOut {
                     id: c.descriptor.id.to_string(),
-                    summary: c.descriptor.summary,
+                    summary: c.descriptor.summary.to_string(),
                     level: c.level.word(),
                     default_level: c.descriptor.default_level.word(),
                     mandatory: c.descriptor.mandatory,

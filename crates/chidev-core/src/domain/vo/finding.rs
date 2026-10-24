@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::id::{CaseId, ChangeRequestId, ClauseId, ContextId, InterfaceId, ItemId};
 use super::target::Target;
@@ -110,6 +111,101 @@ pub enum Subject {
     ChangeRequest(ChangeRequestId),
 }
 
+/// The kind of thing a finding is about; a rule that is judged says which kind it judges. `Project` is a finding
+/// about the Project as a whole, which has no [`Subject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SubjectKind {
+    /// A Context.
+    Context,
+    /// An Interface.
+    Interface,
+    /// An Item of an Interface.
+    Item,
+    /// A Clause of a Contract.
+    Clause,
+    /// A Case of a Harness.
+    Case,
+    /// A change request.
+    ChangeRequest,
+    /// The Project as a whole: no subject.
+    Project,
+}
+
+impl SubjectKind {
+    /// Every kind.
+    pub const ALL: [SubjectKind; 7] = [
+        SubjectKind::Context,
+        SubjectKind::Interface,
+        SubjectKind::Item,
+        SubjectKind::Clause,
+        SubjectKind::Case,
+        SubjectKind::ChangeRequest,
+        SubjectKind::Project,
+    ];
+
+    /// The word for it, as a rule file and the output write it.
+    pub fn word(self) -> &'static str {
+        match self {
+            SubjectKind::Context => "context",
+            SubjectKind::Interface => "interface",
+            SubjectKind::Item => "item",
+            SubjectKind::Clause => "clause",
+            SubjectKind::Case => "case",
+            SubjectKind::ChangeRequest => "change_request",
+            SubjectKind::Project => "project",
+        }
+    }
+
+    /// The kind a word names; `None` for any other.
+    pub fn from_word(word: &str) -> Option<SubjectKind> {
+        SubjectKind::ALL.into_iter().find(|k| k.word() == word)
+    }
+
+    /// The kind of what a finding is about: `Project` when it is about nothing that has an id.
+    pub fn of(subject: Option<Subject>) -> SubjectKind {
+        subject.map_or(SubjectKind::Project, Subject::kind)
+    }
+}
+
+impl Subject {
+    /// The kind of thing it is.
+    pub fn kind(self) -> SubjectKind {
+        match self {
+            Subject::Context(_) => SubjectKind::Context,
+            Subject::Interface(_) => SubjectKind::Interface,
+            Subject::Item(_) => SubjectKind::Item,
+            Subject::Clause(_) => SubjectKind::Clause,
+            Subject::Case(_) => SubjectKind::Case,
+            Subject::ChangeRequest(_) => SubjectKind::ChangeRequest,
+        }
+    }
+
+    /// The uuid inside the id, for the layer that stores it.
+    pub fn as_uuid(self) -> Uuid {
+        match self {
+            Subject::Context(i) => i.as_uuid(),
+            Subject::Interface(i) => i.as_uuid(),
+            Subject::Item(i) => i.as_uuid(),
+            Subject::Clause(i) => i.as_uuid(),
+            Subject::Case(i) => i.as_uuid(),
+            Subject::ChangeRequest(i) => i.as_uuid(),
+        }
+    }
+
+    /// The subject of `kind` with this uuid, as a store kept it; `None` for `Project`, which has none.
+    pub fn from_parts(kind: SubjectKind, id: Uuid) -> Option<Subject> {
+        Some(match kind {
+            SubjectKind::Context => Subject::Context(ContextId::from_uuid(id)),
+            SubjectKind::Interface => Subject::Interface(InterfaceId::from_uuid(id)),
+            SubjectKind::Item => Subject::Item(ItemId::from_uuid(id)),
+            SubjectKind::Clause => Subject::Clause(ClauseId::from_uuid(id)),
+            SubjectKind::Case => Subject::Case(CaseId::from_uuid(id)),
+            SubjectKind::ChangeRequest => Subject::ChangeRequest(ChangeRequestId::from_uuid(id)),
+            SubjectKind::Project => return None,
+        })
+    }
+}
+
 impl From<Target> for Subject {
     fn from(t: Target) -> Subject {
         match t {
@@ -168,6 +264,20 @@ mod tests {
         assert_eq!(ID, RuleId::try_from("cite.stale").unwrap());
         assert!(ID.in_family("cite."));
         assert!(!ID.in_family("pin."));
+    }
+
+    #[test]
+    fn a_subject_has_a_kind_and_is_made_again_from_its_parts() {
+        let c = Subject::Clause(ClauseId::from_uuid(super::super::id::test_uuid(1)));
+        assert_eq!(c.kind(), SubjectKind::Clause);
+        assert_eq!(Subject::from_parts(c.kind(), c.as_uuid()), Some(c));
+        assert_eq!(SubjectKind::of(None), SubjectKind::Project);
+        assert_eq!(SubjectKind::of(Some(c)), SubjectKind::Clause);
+        assert_eq!(Subject::from_parts(SubjectKind::Project, c.as_uuid()), None);
+        for k in SubjectKind::ALL {
+            assert_eq!(SubjectKind::from_word(k.word()), Some(k));
+        }
+        assert_eq!(SubjectKind::from_word("contract"), None);
     }
 
     #[test]

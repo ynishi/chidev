@@ -71,6 +71,8 @@ async fn an_asset_and_its_name_are_kept_together() {
 }
 
 mod checks {
+    use std::borrow::Cow;
+
     use chidev_core::app::ports::{Invocation, Outcome};
     use chidev_core::app::{
         App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, FindingInput, Intent, Registry,
@@ -88,9 +90,9 @@ mod checks {
 
     static FORBIDDEN: Descriptor = Descriptor {
         id: RuleId::from_static("test.forbidden"),
-        summary: "a context exists",
-        help: "only for the test",
-        hooks: &[Hook::Put],
+        summary: Cow::Borrowed("a context exists"),
+        help: Cow::Borrowed("only for the test"),
+        hooks: Cow::Borrowed(&[Hook::Put]),
         default_level: Level::Error,
         mandatory: true,
         params: &[],
@@ -267,5 +269,505 @@ mod checks {
             None
         );
         assert!(invocations(&app).await.is_empty());
+    }
+}
+
+mod judged {
+    use chidev_core::app::ports::{Outcome, Store};
+    use chidev_core::app::{
+        App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, FindingInput, Intent,
+        JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
+    };
+    use chidev_core::domain::check::{Executor, FindingState, Hook, Level};
+    use chidev_core::infra::judged::parse;
+    use chidev_core::infra::sqlite::SqliteStore;
+
+    use super::Counter;
+
+    fn rule(id: &str, subject: &str, level: &str) -> String {
+        format!(
+            "id = \"{id}\"\nsummary = \"s\"\nsubject = \"{subject}\"\nhooks = [\"put\"]\nlevel = \"{level}\"\n\
+             question = \"q\"\ntrue = \"t\"\nfalse = \"f\"\nfix = \"x\"\n"
+        )
+    }
+
+    /// An App with the judged rules `texts`, a Context `core` and a Contract `stack` with clauses C1 and C2.
+    async fn app_with(name: &str, texts: &[String]) -> App<SqliteStore, Counter> {
+        let dir = std::env::temp_dir().join(format!("chidev-judged-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SqliteStore::open(dir.join("chidev.db")).await.unwrap();
+        let rules = texts.iter().map(|t| parse(t).unwrap()).collect();
+        let registry = Registry::builtin_with_judged(rules, &[]).unwrap();
+        let mut app = App::with_registry(store, Counter::default(), registry);
+        app.init().await.unwrap();
+        app.add_context("core", &[]).await.unwrap();
+        put_stack(&mut app, "push then pop", "empty pops nothing").await;
+        app
+    }
+
+    async fn app(name: &str) -> App<SqliteStore, Counter> {
+        app_with(name, &[rule("judged.vague", "clause", "warning")]).await
+    }
+
+    async fn put_stack(app: &mut App<SqliteStore, Counter>, c1: &str, c2: &str) {
+        let clause = |label: &str, text: &str| ClauseInput {
+            label: label.to_string(),
+            text: text.to_string(),
+        };
+        app.put_contract(
+            "core",
+            "stack",
+            "Stack",
+            &[clause("C1", c1), clause("C2", c2)],
+        )
+        .await
+        .unwrap();
+    }
+
+    fn clause(label: &str) -> Option<SubjectInput> {
+        Some(SubjectInput::Clause(ClauseRef {
+            context: Some("core".to_string()),
+            contract: "stack".to_string(),
+            label: label.to_string(),
+        }))
+    }
+
+    fn finding(subject: Option<SubjectInput>, message: &str) -> ReportedFinding {
+        ReportedFinding {
+            subject,
+            message: message.to_string(),
+            level: None,
+        }
+    }
+
+    fn report(rule: &str, read_at: u64, findings: Vec<ReportedFinding>) -> ReportInput {
+        ReportInput {
+            rule: rule.to_string(),
+            judge: "agent-1".to_string(),
+            read_at,
+            findings,
+        }
+    }
+
+    async fn now(app: &App<SqliteStore, Counter>) -> u64 {
+        app.store().revision().await.unwrap().0
+    }
+
+    fn judged_findings(found: &[chidev_core::app::Found]) -> Vec<&chidev_core::app::Found> {
+        found
+            .iter()
+            .filter(|f| f.rule.as_str().starts_with("judged."))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_rules_and_a_view_of_the_model_are_given_to_the_agent() {
+        let app = app_with(
+            "rules",
+            &[
+                rule("judged.vague", "clause", "warning"),
+                rule("judged.quiet", "context", "off"),
+                rule("judged.later", "clause", "note").replace("put", "check"),
+            ],
+        )
+        .await;
+        let view = app.check_rules(None, None).await.unwrap();
+        let ids: Vec<&str> = view.rules.iter().map(|r| r.rule.id().as_str()).collect();
+        // the rule the policy default turned off is left out
+        assert_eq!(ids, ["judged.vague", "judged.later"]);
+        assert!(view.rules.iter().all(|r| r.state == JudgedState::Never));
+        assert_eq!(view.store_revision.0, now(&app).await);
+        assert_eq!(view.model.store_revision(), view.store_revision.0);
+        let json = serde_json::to_value(&view.model).unwrap();
+        assert_eq!(json["version"], 1);
+        let clauses = &json["contexts"][0]["contracts"][0]["clauses"];
+        assert_eq!(json["contexts"][0]["contracts"][0]["name"], "stack");
+        assert_eq!(clauses[0]["label"], "C1");
+        assert_eq!(clauses[0]["text"], "push then pop");
+        assert_eq!(clauses[0]["revision"], 1);
+
+        let at_put = app.check_rules(Some(Hook::Put), None).await.unwrap();
+        assert_eq!(at_put.rules.len(), 1);
+        let one = app.check_rules(None, Some("judged.later")).await.unwrap();
+        assert_eq!(one.rules[0].level, Level::Note);
+        assert_eq!(
+            app.check_rules(None, Some("judged.quiet"))
+                .await
+                .map(|_| ()),
+            Err(AppError::RuleOff("judged.quiet".to_string()))
+        );
+        assert!(matches!(
+            app.check_rules(None, Some("judged.none")).await,
+            Err(AppError::UnknownRule(_))
+        ));
+        assert!(matches!(
+            app.check_rules(None, Some("pin.stale")).await,
+            Err(AppError::NotJudged { .. })
+        ));
+        // asking changes nothing
+        let revision = now(&app).await;
+        app.check_rules(None, None).await.unwrap();
+        assert_eq!(now(&app).await, revision);
+    }
+
+    #[tokio::test]
+    async fn a_report_that_cannot_be_kept_is_refused_and_keeps_nothing() {
+        async fn refuse(app: &mut App<SqliteStore, Counter>, r: ReportInput) -> AppError {
+            let before = app.store().revision().await.unwrap();
+            let e = app.finding_report(&r).await.unwrap_err();
+            assert_eq!(app.store().revision().await.unwrap(), before);
+            e
+        }
+
+        let mut app = app("refused").await;
+        let at = now(&app).await;
+        let ok = || vec![finding(clause("C1"), "vague")];
+        assert!(matches!(
+            refuse(&mut app, report("judged.none", at, ok())).await,
+            AppError::UnknownRule(_)
+        ));
+        assert!(matches!(
+            refuse(&mut app, report("cite.stale", at, ok())).await,
+            AppError::NotJudged {
+                executor: "builtin",
+                ..
+            }
+        ));
+        // a context where a clause is judged, a project finding, a missing clause, a clause given twice
+        let wrong = vec![finding(
+            Some(SubjectInput::Context("core".to_string())),
+            "m",
+        )];
+        assert!(matches!(
+            refuse(&mut app, report("judged.vague", at, wrong)).await,
+            AppError::Input(m) if m.contains("judges clause findings")
+        ));
+        assert!(matches!(
+            refuse(
+                &mut app,
+                report("judged.vague", at, vec![finding(None, "m")])
+            )
+            .await,
+            AppError::Input(_)
+        ));
+        assert!(matches!(
+            refuse(
+                &mut app,
+                report("judged.vague", at, vec![finding(clause("C9"), "m")])
+            )
+            .await,
+            AppError::UnknownClause { .. }
+        ));
+        let twice = vec![finding(clause("C1"), "a"), finding(clause("C1"), "b")];
+        assert!(matches!(
+            refuse(&mut app, report("judged.vague", at, twice)).await,
+            AppError::Input(m) if m.contains("two findings")
+        ));
+        // levels: above the rule's, and off
+        for (level, expect) in [
+            (Level::Error, "above the warning"),
+            (Level::Off, "leave it out"),
+        ] {
+            let mut f = finding(clause("C1"), "m");
+            f.level = Some(level);
+            assert!(matches!(
+                refuse(&mut app, report("judged.vague", at, vec![f])).await,
+                AppError::Input(m) if m.contains(expect)
+            ));
+        }
+        // a store revision that does not exist yet, no judge, no message
+        assert!(matches!(
+            refuse(&mut app, report("judged.vague", at + 5, ok())).await,
+            AppError::Input(m) if m.contains("read_at")
+        ));
+        let mut nameless = report("judged.vague", at, ok());
+        nameless.judge = " ".to_string();
+        assert!(matches!(
+            refuse(&mut app, nameless).await,
+            AppError::Input(_)
+        ));
+        assert!(matches!(
+            refuse(
+                &mut app,
+                report("judged.vague", at, vec![finding(clause("C1"), " ")])
+            )
+            .await,
+            AppError::Input(_)
+        ));
+        assert!(
+            app.check()
+                .await
+                .unwrap()
+                .iter()
+                .all(|f| !f.rule.as_str().starts_with("judged."))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_replaces_every_earlier_finding_of_its_rule_and_is_recorded() {
+        let mut app = app_with(
+            "replace",
+            &[
+                rule("judged.vague", "clause", "warning"),
+                rule("judged.other", "clause", "note"),
+            ],
+        )
+        .await;
+        let at = now(&app).await;
+        let done = app
+            .finding_report(&report(
+                "judged.vague",
+                at,
+                vec![
+                    finding(clause("C1"), "vague"),
+                    finding(clause("C2"), "vague too"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            (done.findings, done.replaced, done.on_older_revision),
+            (2, 0, false)
+        );
+        app.finding_report(&report(
+            "judged.other",
+            now(&app).await,
+            vec![finding(clause("C1"), "o")],
+        ))
+        .await
+        .unwrap();
+        let found = app.check().await.unwrap();
+        let mine = judged_findings(&found);
+        assert_eq!(mine.len(), 3);
+        let vague: Vec<_> = mine
+            .iter()
+            .filter(|f| f.rule.as_str() == "judged.vague")
+            .collect();
+        assert_eq!(vague[0].level, Level::Warning);
+        assert_eq!(vague[0].state, FindingState::Open);
+        assert_eq!(vague[0].about.as_deref(), Some("stack C1"));
+        assert!(!vague[0].stale);
+        assert_eq!(vague[0].judgment.as_ref().unwrap().judge, "agent-1");
+
+        // judged again: one finding, at a lower level; the other rule's finding stays
+        let mut lower = finding(clause("C2"), "only this");
+        lower.level = Some(Level::Note);
+        let done = app
+            .finding_report(&report("judged.vague", now(&app).await, vec![lower]))
+            .await
+            .unwrap();
+        assert_eq!((done.findings, done.replaced), (1, 2));
+        let found = app.check().await.unwrap();
+        let vague: Vec<_> = judged_findings(&found)
+            .into_iter()
+            .filter(|f| f.rule.as_str() == "judged.vague")
+            .collect();
+        assert_eq!(vague.len(), 1);
+        assert_eq!(
+            (vague[0].message.as_str(), vague[0].level),
+            ("only this", Level::Note)
+        );
+        assert_eq!(judged_findings(&found).len(), 2);
+
+        // judged again, and nothing found: the rule has no finding left, and is current, not never judged
+        app.finding_report(&report("judged.vague", now(&app).await, Vec::new()))
+            .await
+            .unwrap();
+        let found = app.check().await.unwrap();
+        assert_eq!(judged_findings(&found).len(), 1);
+        let view = app.check_rules(None, Some("judged.vague")).await.unwrap();
+        assert_eq!(view.rules[0].state, JudgedState::Current);
+
+        // each report was recorded as a run of a judged rule, by the judge
+        let ran = app.store().invocations().await.unwrap();
+        let reports: Vec<_> = ran
+            .iter()
+            .filter(|i| i.executor == Executor::Judged)
+            .collect();
+        assert_eq!(reports.len(), 4);
+        assert_eq!(reports[0].check.as_str(), "judged.vague");
+        assert_eq!(
+            (reports[0].warnings, reports[0].outcome),
+            (2, Outcome::Found)
+        );
+        assert_eq!(
+            (reports[2].notes, reports[2].judge.as_deref()),
+            (1, Some("agent-1"))
+        );
+        assert_eq!(reports[3].outcome, Outcome::Ok);
+    }
+
+    #[tokio::test]
+    async fn a_finding_is_stale_once_its_subject_changed_and_a_rule_once_what_it_judges_did() {
+        let mut app = app("stale").await;
+        let at = now(&app).await;
+        app.finding_report(&report(
+            "judged.vague",
+            at,
+            vec![finding(clause("C1"), "vague")],
+        ))
+        .await
+        .unwrap();
+        let stale_of =
+            |found: &[chidev_core::app::Found]| judged_findings(found).first().map(|f| f.stale);
+        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        assert!(app.status().await.unwrap().judged.is_empty());
+
+        // another clause changes: the rule's part of the model moved, so it is to be judged again, but the
+        // finding about C1 stands
+        put_stack(&mut app, "push then pop", "an empty stack pops nothing").await;
+        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        let pending = app.status().await.unwrap().judged;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            (pending[0].rule.as_str(), pending[0].state),
+            ("judged.vague", JudgedState::Stale)
+        );
+
+        // its own clause changes: the finding is stale, and still shown
+        put_stack(
+            &mut app,
+            "push then pop, in order",
+            "an empty stack pops nothing",
+        )
+        .await;
+        let found = app.check().await.unwrap();
+        assert_eq!(stale_of(&found), Some(true));
+        assert_eq!(app.status().await.unwrap().findings, found);
+
+        // judged again on the view as it is: current
+        let read = now(&app).await;
+        app.finding_report(&report(
+            "judged.vague",
+            read,
+            vec![finding(clause("C1"), "still vague")],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        assert!(app.status().await.unwrap().judged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_report_on_a_view_older_than_the_model_is_kept_and_marked_stale_but_a_report_is_not_a_change()
+     {
+        let mut app = app_with(
+            "older",
+            &[
+                rule("judged.vague", "clause", "warning"),
+                rule("judged.other", "clause", "warning"),
+            ],
+        )
+        .await;
+        let read = now(&app).await;
+        // two reports on the same view: the first is a commit, but it does not change the model
+        for id in ["judged.vague", "judged.other"] {
+            let done = app
+                .finding_report(&report(id, read, vec![finding(clause("C1"), "m")]))
+                .await
+                .unwrap();
+            assert!(!done.on_older_revision, "{id}");
+        }
+        // the model moves after the agent read the view
+        put_stack(&mut app, "push then pop, in order", "x").await;
+        let done = app
+            .finding_report(&report(
+                "judged.vague",
+                read,
+                vec![finding(clause("C1"), "m")],
+            ))
+            .await
+            .unwrap();
+        assert!(done.on_older_revision);
+        let found = app.check().await.unwrap();
+        let vague = judged_findings(&found)
+            .into_iter()
+            .find(|f| f.rule.as_str() == "judged.vague")
+            .unwrap();
+        assert!(vague.stale && vague.judgment.as_ref().unwrap().on_older_revision);
+        let rules = app.check_rules(None, Some("judged.vague")).await.unwrap();
+        assert_eq!(rules.rules[0].state, JudgedState::Stale);
+    }
+
+    #[tokio::test]
+    async fn a_change_request_can_address_a_judged_finding() {
+        let mut app = app("addressed").await;
+        let at = now(&app).await;
+        app.finding_report(&report(
+            "judged.vague",
+            at,
+            vec![finding(clause("C1"), "vague")],
+        ))
+        .await
+        .unwrap();
+        let state = |found: &[chidev_core::app::Found]| judged_findings(found)[0].state;
+        assert_eq!(state(&app.check().await.unwrap()), FindingState::Open);
+        app.open_change_request(&ChangeRequestInput {
+            title: "reword C1".to_string(),
+            situation: None,
+            intent: Intent::ChangeBehavior,
+            parent: None,
+            issuer: None,
+            items: Vec::new(),
+            clauses: Vec::new(),
+            crux: None,
+            addresses: vec![FindingInput {
+                rule: "judged.vague".to_string(),
+                item: None,
+                clause: Some(ClauseRef {
+                    context: Some("core".to_string()),
+                    contract: "stack".to_string(),
+                    label: "C1".to_string(),
+                }),
+            }],
+        })
+        .await
+        .unwrap();
+        assert_eq!(state(&app.check().await.unwrap()), FindingState::Addressed);
+    }
+
+    #[tokio::test]
+    async fn a_stale_pin_names_what_moved() {
+        let mut app = app("pin-names").await;
+        app.put_interface(
+            "core",
+            "stack-api",
+            "fn push(v: u8)\n",
+            &[chidev_core::app::ItemInput {
+                signature: "fn push(v: u8)".to_string(),
+                lines: (1, 1),
+                replaces: None,
+            }],
+        )
+        .await
+        .unwrap();
+        let cites = chidev_core::app::CaseInput {
+            name: "pushes".to_string(),
+            lines: (1, 1),
+            items: vec![chidev_core::app::ItemRef {
+                context: Some("core".to_string()),
+                interface: "stack-api".to_string(),
+                signature: "fn push(v: u8)".to_string(),
+            }],
+            clauses: vec![ClauseRef {
+                context: Some("core".to_string()),
+                contract: "stack".to_string(),
+                label: "C1".to_string(),
+            }],
+        };
+        app.put_harness("core", "stack-test", "fn t() {}\n", &[cites])
+            .await
+            .unwrap();
+        app.pin("core", "stack-api", "code").await.unwrap();
+        put_stack(&mut app, "push then pop, in order", "x").await;
+        let found = app.check().await.unwrap();
+        let pin = found
+            .iter()
+            .find(|f| f.rule.as_str() == "pin.stale")
+            .unwrap();
+        assert_eq!(
+            pin.message,
+            "the code was pinned against what has moved: contract `stack` changed"
+        );
     }
 }

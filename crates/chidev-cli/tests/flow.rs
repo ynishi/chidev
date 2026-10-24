@@ -310,3 +310,176 @@ fn a_policy_that_names_no_check_stops_the_run_before_any_operation() {
         "{stderr}"
     );
 }
+
+const VAGUE_RULE: &str = r#"id = "judged.vague-clause"
+summary = "a clause too vague for a case to check"
+subject = "clause"
+hooks = ["put", "check"]
+level = "warning"
+question = "Can a case be written from this clause alone?"
+true = "the clause has no condition or value a case could check"
+false = "the clause is a definition"
+fix = "reword it with a condition and an observable result"
+when = ["should"]
+"#;
+
+/// The findings of the judged rule in a `check` result.
+fn judged(check: &Value) -> Vec<&Value> {
+    check["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|f| f["rule"] == "judged.vague-clause")
+        .collect()
+}
+
+#[test]
+fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_and_go() {
+    let dir = fresh_dir("judged");
+    std::fs::create_dir_all(dir.join("checks/judged")).expect("a directory");
+    std::fs::write(dir.join("checks/judged/vague-clause.toml"), VAGUE_RULE).expect("a file");
+    let clause = r#"{"clause":{"context":"pricing","contract":"rounding","label":"C1"}}"#;
+    // The store's revision is 1 after `init`, 2 after the Context, 3 after the Contract; reading and checking
+    // change nothing, a report is one commit and so is a put: the revisions the agent read are written below.
+    let ops = format!(
+        concat!(
+            "{{\"op\":\"init\"}}\n",
+            "{{\"op\":\"context_add\",\"name\":\"pricing\"}}\n",
+            "{{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
+            "\"clauses\":[{{\"label\":\"C1\",\"text\":\"a total should be rounded\"}}]}}\n",
+            "{{\"op\":\"check_rules\"}}\n",
+            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"judge\":\"agent-1\",\"read_at\":3,",
+            "\"findings\":[{{\"subject\":{clause},\"message\":\"`should` states no condition\"}}]}}\n",
+            "{{\"op\":\"check\"}}\n",
+            "{{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
+            "\"clauses\":[{{\"label\":\"C1\",\"text\":\"a total is rounded to whole cents\"}}]}}\n",
+            "{{\"op\":\"check\"}}\n",
+            "{{\"op\":\"status\"}}\n",
+            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"judge\":\"agent-1\",\"read_at\":5,\"findings\":[]}}\n",
+            "{{\"op\":\"check\"}}\n",
+            "{{\"op\":\"status\"}}\n",
+            "{{\"op\":\"finding_report\",\"rule\":\"cite.stale\",\"judge\":\"agent-1\",\"read_at\":6,\"findings\":[]}}\n",
+            "{{\"op\":\"check_rules\",\"hook\":\"pin\"}}\n",
+        ),
+        clause = clause
+    );
+    let (results, code, stderr) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{results:#?}\n{stderr}");
+
+    // the rule and a view of the model, read at revision 3
+    let rules = at(&results, 4);
+    assert_eq!(rules["ok"], true, "{rules:#?}");
+    assert_eq!(rules["store_revision"], 3);
+    let rule = &rules["rules"][0];
+    assert_eq!(rule["id"], "judged.vague-clause");
+    assert_eq!(rule["subject"], "clause");
+    assert_eq!(rule["level"], "warning");
+    assert_eq!(rule["state"], "never");
+    assert_eq!(
+        rule["question"],
+        "Can a case be written from this clause alone?"
+    );
+    assert_eq!(rule["when"], serde_json::json!(["should"]));
+    assert_eq!(rule["hooks"], serde_json::json!(["put", "check"]));
+    let model = &rules["model"];
+    assert_eq!(model["version"], 1);
+    assert_eq!(model["store_revision"], 3);
+    let contract = &model["contexts"][0]["contracts"][0];
+    assert_eq!(contract["name"], "rounding");
+    assert_eq!(contract["clauses"][0]["label"], "C1");
+    assert_eq!(contract["clauses"][0]["text"], "a total should be rounded");
+    assert_eq!(contract["clauses"][0]["revision"], 1);
+
+    // reported: a finding like the builtin ones, with who judged it
+    assert_eq!(at(&results, 5)["ok"], true, "{:#?}", at(&results, 5));
+    assert_eq!(at(&results, 5)["findings"], 1);
+    let first = judged(at(&results, 6));
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["level"], "warning");
+    assert_eq!(first[0]["state"], "open");
+    assert_eq!(first[0]["about"], "rounding C1");
+    assert_eq!(first[0]["judged"]["judge"], "agent-1");
+    assert_eq!(first[0]["judged"]["read_at"], 3);
+    assert_eq!(first[0].get("stale"), None);
+
+    // the clause is reworded: the finding is still there, stale, and status says what to judge again
+    let stale = judged(at(&results, 8));
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0]["stale"], true);
+    assert_eq!(
+        at(&results, 9)["judged"],
+        serde_json::json!([{
+            "rule": "judged.vague-clause",
+            "summary": "a clause too vague for a case to check",
+            "subject": "clause",
+            "state": "stale"
+        }])
+    );
+
+    // judged again with nothing found: the finding is gone, and nothing is left to judge
+    assert_eq!(at(&results, 10)["replaced"], 1);
+    assert!(judged(at(&results, 11)).is_empty());
+    assert_eq!(at(&results, 12)["judged"], serde_json::json!([]));
+
+    // a builtin check takes no report; a rule filtered by hook: this one belongs to put and check
+    assert_eq!(at(&results, 13)["ok"], false);
+    assert!(
+        at(&results, 13)["error"]
+            .as_str()
+            .expect("error")
+            .contains("not judged")
+    );
+    assert_eq!(at(&results, 14)["rules"], serde_json::json!([]));
+}
+
+#[test]
+fn a_judged_rule_that_asks_to_be_mandatory_or_is_malformed_stops_the_run() {
+    for (name, text, expect) in [
+        (
+            "mandatory",
+            format!("{VAGUE_RULE}mandatory = true\n"),
+            "cannot be mandatory",
+        ),
+        (
+            "prefix",
+            VAGUE_RULE.replace("judged.vague", "cite.vague"),
+            "starts with `judged.`",
+        ),
+        ("toml", "id = ".to_string(), "vague.toml"),
+    ] {
+        let dir = fresh_dir(&format!("judged-bad-{name}"));
+        std::fs::create_dir_all(dir.join("checks/judged")).expect("a directory");
+        std::fs::write(dir.join("checks/judged/vague.toml"), text).expect("a file");
+        let (results, code, stderr) = exec_in(&dir, "{\"op\":\"init\"}\n");
+        assert_eq!(code, Some(2), "{name}");
+        assert!(results.is_empty(), "{name}");
+        assert!(stderr.contains(expect), "{name}: {stderr}");
+    }
+}
+
+#[test]
+fn a_policy_holds_a_judged_rule_like_any_check() {
+    let dir = fresh_dir("judged-policy");
+    std::fs::create_dir_all(dir.join("checks/judged")).expect("a directory");
+    std::fs::write(dir.join("checks/judged/vague-clause.toml"), VAGUE_RULE).expect("a file");
+    std::fs::write(
+        dir.join("checks.toml"),
+        "[checks.\"judged.\"]\nlevel = \"off\"\n",
+    )
+    .expect("a file");
+    let ops = "{\"op\":\"init\"}\n{\"op\":\"check_rules\"}\n{\"op\":\"check_list\"}\n";
+    let (results, code, _) = exec_in(&dir, ops);
+    assert_eq!(code, Some(0), "{results:#?}");
+    assert_eq!(at(&results, 2)["rules"], serde_json::json!([]));
+    let listed = at(&results, 3)["checks"].as_array().expect("checks");
+    let entry = listed
+        .iter()
+        .find(|c| c["id"] == "judged.vague-clause")
+        .expect("listed");
+    assert_eq!(
+        (entry["executor"].as_str(), entry["level"].as_str()),
+        (Some("judged"), Some("off"))
+    );
+    assert_eq!(entry["default_level"], "warning");
+    assert_eq!(entry["mandatory"], false);
+}

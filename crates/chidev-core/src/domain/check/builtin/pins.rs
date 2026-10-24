@@ -1,7 +1,10 @@
 //! Checks on the Pins.
 
+use std::borrow::Cow;
+
 use super::ALL_HOOKS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
+use crate::domain::check::finding::Mention;
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
@@ -15,10 +18,12 @@ pub struct StalePin;
 
 static STALE_PIN: Descriptor = Descriptor {
     id: RuleId::from_static("pin.stale"),
-    summary: "a pin whose code no longer stands on what it was pinned against",
-    help: "The interface, a harness that checks it or a contract it cites changed after the code was pinned. Run \
+    summary: Cow::Borrowed("a pin whose code no longer stands on what it was pinned against"),
+    help: Cow::Borrowed(
+        "The interface, a harness that checks it or a contract it cites changed after the code was pinned. Run \
            the harness against the code and pin it again.",
-    hooks: &[Hook::Put, Hook::Pin, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Pin, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],
@@ -34,25 +39,32 @@ impl Check for StalePin {
         view.pins
             .iter()
             .filter_map(|pin| {
-                let message = match staleness(pin, view.after) {
+                let (message, mentions) = match staleness(pin, view.after) {
                     Staleness::Fresh => return None,
-                    Staleness::InterfaceGone => "the pinned interface is gone".to_string(),
-                    Staleness::Stale(why) => {
-                        let count = |f: fn(&StaleReason) -> bool| why.iter().filter(|r| f(r)).count();
-                        format!(
-                            "the code was pinned against what has moved: {} interface change, {} harness, {} contract, {} used interface",
-                            count(|r| matches!(r, StaleReason::Interface)),
-                            count(|r| matches!(r, StaleReason::Harness(_))),
-                            count(|r| matches!(r, StaleReason::Contract(_))),
-                            count(|r| matches!(r, StaleReason::UsedInterface(_))),
-                        )
+                    Staleness::InterfaceGone => {
+                        ("the pinned interface is gone".to_string(), Vec::new())
                     }
+                    // What moved is named by whoever has the names (the use case), after the message.
+                    Staleness::Stale(why) => (
+                        "the code was pinned against what has moved".to_string(),
+                        why.iter()
+                            .map(|r| match r {
+                                StaleReason::Interface => Mention::Interface(pin.interface()),
+                                StaleReason::Harness(id) => Mention::Harness(*id),
+                                StaleReason::Contract(id) => Mention::Contract(*id),
+                                StaleReason::UsedInterface(id) => Mention::Interface(*id),
+                            })
+                            .collect(),
+                    ),
                 };
-                Some(Finding::new(
-                    &STALE_PIN,
-                    Some(Subject::Interface(pin.interface())),
-                    message,
-                ))
+                Some(
+                    Finding::new(
+                        &STALE_PIN,
+                        Some(Subject::Interface(pin.interface())),
+                        message,
+                    )
+                    .mentioning(mentions),
+                )
             })
             .collect()
     }
@@ -64,9 +76,11 @@ pub struct Unpinned;
 
 static UNPINNED: Descriptor = Descriptor {
     id: RuleId::from_static("pin.unpinned"),
-    summary: "an interface whose code was never pinned",
-    help: "Nothing records which code the harness checked. Pin the code once a case checks the interface.",
-    hooks: ALL_HOOKS,
+    summary: Cow::Borrowed("an interface whose code was never pinned"),
+    help: Cow::Borrowed(
+        "Nothing records which code the harness checked. Pin the code once a case checks the interface.",
+    ),
+    hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Note,
     mandatory: false,
     params: &[],

@@ -1,5 +1,7 @@
 //! Checks on the citations of the Cases: behind their targets, or missing.
 
+use std::borrow::Cow;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::ALL_HOOKS;
@@ -19,10 +21,14 @@ pub struct StaleCite;
 
 static STALE_CITE: Descriptor = Descriptor {
     id: RuleId::from_static("cite.stale"),
-    summary: "a case cites an item or clause that changed after the case was written",
-    help: "The case was written against an older definition and may no longer check what it says. \
+    summary: Cow::Borrowed(
+        "a case cites an item or clause that changed after the case was written",
+    ),
+    help: Cow::Borrowed(
+        "The case was written against an older definition and may no longer check what it says. \
            Bring the case up to date (put the harness again) or, if it still holds, put it to record the new revision.",
-    hooks: &[Hook::Put, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],
@@ -66,10 +72,12 @@ pub struct UncitedClause;
 
 static UNCITED_CLAUSE: Descriptor = Descriptor {
     id: RuleId::from_static("cite.uncited-clause"),
-    summary: "a clause of a contract that no case cites",
-    help: "Nothing checks the promise this clause makes. Add a case that cites it, or open a change request that \
+    summary: Cow::Borrowed("a clause of a contract that no case cites"),
+    help: Cow::Borrowed(
+        "Nothing checks the promise this clause makes. Add a case that cites it, or open a change request that \
            addresses the finding if the clause is meant to go unchecked for now.",
-    hooks: ALL_HOOKS,
+    ),
+    hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],
@@ -111,10 +119,12 @@ pub struct UncitedItem;
 
 static UNCITED_ITEM: Descriptor = Descriptor {
     id: RuleId::from_static("cite.uncited-item"),
-    summary: "an item of an interface that no case cites",
-    help: "Nothing checks this declaration. Add a case that cites it, or open a change request that addresses the \
+    summary: Cow::Borrowed("an item of an interface that no case cites"),
+    help: Cow::Borrowed(
+        "Nothing checks this declaration. Add a case that cites it, or open a change request that addresses the \
            finding if it is meant to go unchecked for now.",
-    hooks: ALL_HOOKS,
+    ),
+    hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],

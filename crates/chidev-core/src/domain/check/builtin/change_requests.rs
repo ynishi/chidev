@@ -1,5 +1,7 @@
 //! Checks on the change requests.
 
+use std::borrow::Cow;
+
 use crate::domain::check::descriptor::{Descriptor, Executor};
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
@@ -17,10 +19,12 @@ pub struct Unapplied;
 
 static UNAPPLIED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.unapplied"),
-    summary: "an unresolved change request whose definitions have not changed",
-    help: "The change was asked for and decided, but a definition it names is still as it was, or is gone. Make the \
+    summary: Cow::Borrowed("an unresolved change request whose definitions have not changed"),
+    help: Cow::Borrowed(
+        "The change was asked for and decided, but a definition it names is still as it was, or is gone. Make the \
            change, then resolve the change request.",
-    hooks: &[Hook::Put, Hook::Resolve, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],
@@ -56,10 +60,14 @@ pub struct KeepBehaviorChanged;
 
 static KEEP_BEHAVIOR_CHANGED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.keep-behavior-changed"),
-    summary: "a keep-behavior change request one of whose definitions moved past the revision it recorded",
-    help: "The change request says the behaviour stays; a definition it is about changed anyway. Either the change \
+    summary: Cow::Borrowed(
+        "a keep-behavior change request one of whose definitions moved past the revision it recorded",
+    ),
+    help: Cow::Borrowed(
+        "The change request says the behaviour stays; a definition it is about changed anyway. Either the change \
            was meant (open a change-behavior request) or the definition should be put back.",
-    hooks: &[Hook::Put, Hook::Resolve, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],
@@ -104,10 +112,12 @@ pub struct ParentResolvedEarly;
 
 static PARENT_RESOLVED_EARLY: Descriptor = Descriptor {
     id: RuleId::from_static("cr.parent-resolved-early"),
-    summary: "a resolved change request with a part that is not resolved",
-    help: "The broader request was closed before its parts. Resolve the parts first, so that the record shows the \
+    summary: Cow::Borrowed("a resolved change request with a part that is not resolved"),
+    help: Cow::Borrowed(
+        "The broader request was closed before its parts. Resolve the parts first, so that the record shows the \
            whole change was applied.",
-    hooks: &[Hook::Resolve, Hook::Check],
+    ),
+    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: &[],

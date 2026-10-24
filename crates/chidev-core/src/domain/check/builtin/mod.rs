@@ -290,7 +290,11 @@ mod tests {
         put_interface(&mut p, "fn a(x: u8)");
         let found = run(&StalePin, &p, &pins, &[]);
         assert_eq!(subjects(&found), [Some(Subject::Interface(iface()))]);
-        assert!(found[0].message().contains("1 interface change"));
+        // the message does not count what moved; it gives the things for the use case to name
+        assert_eq!(
+            found[0].mentions(),
+            [crate::domain::check::finding::Mention::Interface(iface())]
+        );
     }
 
     #[test]

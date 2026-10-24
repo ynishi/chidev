@@ -4,16 +4,32 @@
 
 use super::ports::{Invocation, Outcome, StoreRevision};
 use crate::domain::check::builtin;
+use thiserror::Error;
+
 use crate::domain::check::{
-    Check, CheckView, Descriptor, Finding, FindingState, Hook, Layer, Level, Params, Policy,
-    PolicyError,
+    Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, JudgedRule, Layer, Level,
+    Params, Policy, PolicyError,
 };
 use crate::domain::vo::finding::{RuleId, Subject};
 
+/// Why the checks and the policy make no registry.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RegistryError {
+    /// The policy cannot be resolved over the checks.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
+    /// Two checks have this id; a finding and a change request are filed under it, so it names one.
+    #[error("two checks have the id `{0}`")]
+    DuplicateRule(RuleId),
+}
+
 /// The checks that can run and the policy they run under. Built once for a run of the program: the policy is
-/// resolved when it is built, so a bad policy file is an error before any use case runs.
+/// resolved when it is built, so a bad policy file is an error before any use case runs. The builtin checks are
+/// code and run in the hooks; the judged rules are data read from the project's files, held by the same policy
+/// and run by no one here: an agent judges them and reports.
 pub struct Registry {
     checks: Vec<&'static dyn Check>,
+    judged: Vec<JudgedRule>,
     policy: Policy,
 }
 
@@ -26,6 +42,7 @@ impl std::fmt::Debug for Registry {
                     .checks
                     .iter()
                     .map(|c| c.descriptor().id.as_str())
+                    .chain(self.judged.iter().map(|r| r.id().as_str()))
                     .collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
@@ -36,7 +53,7 @@ impl std::fmt::Debug for Registry {
 #[derive(Debug, Clone, Copy)]
 pub struct CheckInfo<'a> {
     /// What the check says about itself.
-    pub descriptor: &'static Descriptor,
+    pub descriptor: &'a Descriptor,
     /// The level it runs at.
     pub level: Level,
     /// The parameters it runs with.
@@ -60,7 +77,35 @@ impl Registry {
         let descriptors: Vec<&Descriptor> = checks.iter().map(|c| c.descriptor()).collect();
         Ok(Registry {
             checks: checks.to_vec(),
+            judged: Vec::new(),
             policy: Policy::resolve(&descriptors, layers)?,
+        })
+    }
+
+    /// `checks` and the `judged` rules under the policy the `layers` make. A judged rule is held by the policy as
+    /// a builtin is (a family `judged.` or the rule's own id), so a person can turn it off or change its level.
+    pub fn with_judged(
+        checks: &[&'static dyn Check],
+        judged: Vec<JudgedRule>,
+        layers: &[Layer],
+    ) -> Result<Registry, RegistryError> {
+        let mut seen: Vec<&RuleId> = checks.iter().map(|c| &c.descriptor().id).collect();
+        for r in &judged {
+            if seen.contains(&r.id()) {
+                return Err(RegistryError::DuplicateRule(r.id().clone()));
+            }
+            seen.push(r.id());
+        }
+        let descriptors: Vec<&Descriptor> = checks
+            .iter()
+            .map(|c| c.descriptor())
+            .chain(judged.iter().map(JudgedRule::descriptor))
+            .collect();
+        let policy = Policy::resolve(&descriptors, layers)?;
+        Ok(Registry {
+            checks: checks.to_vec(),
+            judged,
+            policy,
         })
     }
 
@@ -69,11 +114,20 @@ impl Registry {
         Registry::new(builtin::all(), layers)
     }
 
+    /// The builtin checks and the `judged` rules under `layers`.
+    pub fn builtin_with_judged(
+        judged: Vec<JudgedRule>,
+        layers: &[Layer],
+    ) -> Result<Registry, RegistryError> {
+        Registry::with_judged(builtin::all(), judged, layers)
+    }
+
     /// The builtin checks at their default levels.
     pub fn defaults() -> Registry {
         let checks = builtin::all();
         Registry {
             checks: checks.to_vec(),
+            judged: Vec::new(),
             policy: Policy::defaults(checks.iter().map(|c| c.descriptor())),
         }
     }
@@ -83,12 +137,14 @@ impl Registry {
         &self.policy
     }
 
-    /// Every check with the level and parameters it runs with, in order.
+    /// Every check with the level and parameters it runs with, in order: the builtin checks, then the judged
+    /// rules.
     pub fn list(&self) -> Vec<CheckInfo<'_>> {
         self.checks
             .iter()
-            .filter_map(|c| {
-                let d = c.descriptor();
+            .map(|c| c.descriptor())
+            .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .filter_map(|d| {
                 let r = self.policy.of(&d.id)?;
                 Some(CheckInfo {
                     descriptor: d,
@@ -97,6 +153,31 @@ impl Registry {
                 })
             })
             .collect()
+    }
+
+    /// The judged rules, in the order they were given.
+    pub fn judged(&self) -> &[JudgedRule] {
+        &self.judged
+    }
+
+    /// The judged rule `id`.
+    pub fn judged_rule(&self, id: &RuleId) -> Option<&JudgedRule> {
+        self.judged.iter().find(|r| r.id() == id)
+    }
+
+    /// Who runs the check `id`; none when there is no such check.
+    pub fn executor_of(&self, id: &RuleId) -> Option<Executor> {
+        self.checks
+            .iter()
+            .map(|c| c.descriptor())
+            .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .find(|d| d.id == *id)
+            .map(|d| d.executor)
+    }
+
+    /// The level the policy gives the check `id`.
+    pub fn level_of(&self, id: &RuleId) -> Option<Level> {
+        self.policy.of(id).map(|r| r.level)
     }
 
     /// Runs the checks that run at `hook` and are not off over `view`, which the store stood at `read_at` for.
@@ -127,6 +208,8 @@ impl Registry {
                 } else {
                     Outcome::Found
                 },
+                executor: Executor::Builtin,
+                judge: None,
             };
             for f in &found {
                 match f.level() {
@@ -162,6 +245,24 @@ pub struct Found {
     pub about: Option<String>,
     /// What it is about, by id.
     pub subject: Option<Subject>,
+    /// Whether it was judged on a model that has since changed (its subject changed or is gone, or the agent judged
+    /// an older model than the one it was kept against): a judged finding may no longer hold. Separate from
+    /// `state`, which is about the change requests that deal with it: a decided finding can be stale too. A
+    /// builtin finding is run on the model as it is, so it is never stale.
+    pub stale: bool,
+    /// Who judged it and on what, for a finding of a judged rule; none for a builtin.
+    pub judgment: Option<Judgment>,
+}
+
+/// Who judged a finding and on which revision of the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judgment {
+    /// The agent.
+    pub judge: String,
+    /// The revision of the store the view it judged from was read at.
+    pub read_at: StoreRevision,
+    /// Whether the model had changed since it read the view when it reported.
+    pub on_older_revision: bool,
 }
 
 /// What a use case did and what the checks found while it did it.
