@@ -340,7 +340,7 @@ impl Harness {
     /// read as it is, and only a Harness put again is held to them (see `Project::apply`).
     ///
     /// [`Context::sim_problems`]: crate::domain::entity::context::Context::sim_problems
-    pub(crate) fn sim_problems(&self) -> Vec<SimShapeProblem> {
+    pub fn sim_problems(&self) -> Vec<SimShapeProblem> {
         if self.kind != HarnessKind::Sim {
             return Vec::new();
         }

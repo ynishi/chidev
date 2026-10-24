@@ -239,7 +239,7 @@ impl Context {
     ///
     /// `harness` is one of this Context's. A problem about the Context as a whole comes with each of its sim
     /// Harnesses, so a caller that asks for several keeps each problem once.
-    pub(crate) fn sim_problems(&self, harness: &Harness) -> Vec<SimShapeProblem> {
+    pub fn sim_problems(&self, harness: &Harness) -> Vec<SimShapeProblem> {
         if harness.kind() != HarnessKind::Sim {
             return Vec::new();
         }

@@ -632,14 +632,27 @@ pub(crate) fn refused(problems: Vec<ProjectError>) -> ProjectError {
 ///
 /// Every entry a change makes is in `next`, so a Harness put and another retired in the same change is judged on
 /// the state it ends in, as the other rules are.
+///
+/// A Clause the Context does not reach at all is not foreign here: it is [`ProjectError::ClauseNotReached`], and
+/// one citation is refused for one rule.
 pub(crate) fn sim_shape_problems(
     next: &BTreeMap<ContextId, Context>,
     put: &BTreeSet<HarnessId>,
 ) -> Vec<ProjectError> {
     let mut found: Vec<SimShapeProblem> = Vec::new();
     for context in next.values() {
+        let reached = |clause: ClauseId| {
+            std::iter::once(context)
+                .chain(context.uses().iter().filter_map(|u| next.get(u)))
+                .any(|c| c.contract_of(clause).is_some())
+        };
         for harness in context.harnesses().filter(|h| put.contains(&h.id())) {
             for problem in context.sim_problems(harness) {
+                if let SimShapeProblem::ClauseForeign { clause, .. } = problem
+                    && !reached(clause)
+                {
+                    continue;
+                }
                 if !found.contains(&problem) {
                     found.push(problem);
                 }

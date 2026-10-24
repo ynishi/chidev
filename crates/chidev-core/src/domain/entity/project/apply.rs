@@ -1078,6 +1078,46 @@ mod tests {
     }
 
     #[test]
+    fn a_sim_case_that_cites_a_clause_its_context_does_not_reach_is_refused_once_as_not_reached() {
+        let mut p = project();
+        let other = ContextId::from_uuid(test_uuid(3));
+        p.apply(ChangeSet::new(
+            vec![
+                AssetPut::Context(
+                    Context::new(
+                        other,
+                        ContextName::try_from("other").unwrap(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap(),
+                ),
+                AssetPut::Contract {
+                    context: other,
+                    id: ContractId::from_uuid(test_uuid(111)),
+                    title: Title::try_from("O").unwrap(),
+                    clauses: clauses(&[(91, "C1")]),
+                },
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let err = p
+            .apply(ChangeSet::new(
+                vec![sim_put(
+                    106,
+                    &[interface_id()],
+                    vec![named(70, "sweep", &[20, 91])],
+                )],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProjectError::ClauseNotReached { clause: cited, .. } if cited == clause(91)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn a_sim_harness_and_the_contract_it_cites_are_put_in_one_set_and_are_judged_on_the_end_state()
     {
         let mut p = Project::new(ProjectId::from_uuid(test_uuid(1000)));
