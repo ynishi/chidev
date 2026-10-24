@@ -201,10 +201,10 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         // 4: the settled change (C1, a line) and the question about a detail (which error; C2 for a new one)
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Refuse big discounts\",\"intent\":\"change_behavior\",",
-            "\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}],",
+            "\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}],",
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
-            "{\"choice\":\"new error\",\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}]}",
+            "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
             "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
         )
         .to_string(),
@@ -225,7 +225,7 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
-            "{\"choice\":\"new error\",\"clauses\":[{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}]}",
+            "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
             "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
         )
         .to_string(),
@@ -252,9 +252,11 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     // cr_open echoes what it recorded, by name
     let opened = at(&results, 4);
     assert_eq!(
-        opened["lines"],
+        opened["expects"],
         serde_json::json!([{
-            "kind": "clause", "context": "pricing", "contract": "discount", "label": "C1", "revision": 1
+            "kind": "change",
+            "target": { "clause": { "context": "pricing", "contract": "discount", "label": "C1" } },
+            "recorded": 1
         }])
     );
 
@@ -305,6 +307,219 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(last["unapplied"], serde_json::json!([]));
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
+}
+
+/// The `error` of the operation on line `n`.
+fn error_at(results: &[Value], n: u64) -> &str {
+    at(results, n)["error"].as_str().expect("an error")
+}
+
+#[test]
+fn a_context_is_added_and_a_clause_removed_through_change_requests() {
+    let dir = fresh_dir("add-and-remove");
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        // 4: adding a Context is a change of the Project
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Add billing\",\"intent\":\"change_behavior\",",
+            "\"change\":[{\"project\":true}]}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Add billing\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"billing\"}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Add billing\"}\n".to_string(),
+        // 8: removing a Clause, while the other stays as it is
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Drop C2\",\"intent\":\"change_behavior\",",
+            "\"remove\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}],",
+            "\"keep\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
+        "{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"discount\",\"title\":\"Discount\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a discount above 50% is refused\"}]}\n"
+            .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [5, 9], "{results:#?}");
+
+    assert_eq!(
+        at(&results, 4)["expects"],
+        serde_json::json!([{ "kind": "change", "target": { "project": true }, "recorded": 2 }])
+    );
+    // no Context was added yet: the Project did not change
+    assert!(error_at(&results, 5).contains("not changed: project"));
+
+    // the Clause is still there: it says which one, by name
+    assert!(error_at(&results, 9).contains("not removed: discount C2"));
+    // (two Clauses are in the order of their ids, which are not known here)
+    let recorded = at(&results, 8)["expects"].as_array().expect("expects");
+    assert_eq!(recorded.len(), 2);
+    for (kind, label) in [("remove", "C2"), ("keep", "C1")] {
+        assert!(
+            recorded.contains(&serde_json::json!({
+                "kind": kind,
+                "target": { "clause": { "context": "pricing", "contract": "discount", "label": label } },
+                "recorded": 1
+            })),
+            "{recorded:?}"
+        );
+    }
+
+    let last = at(&results, 12);
+    assert_eq!(last["change_requests"][0]["state"], "resolved");
+    assert_eq!(last["change_requests"][1]["state"], "resolved");
+    assert_eq!(last["unapplied"], serde_json::json!([]));
+    assert_eq!(last["keep_moved"], serde_json::json!([]));
+}
+
+#[test]
+fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
+    let dir = fresh_dir("parts-and-keeps");
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        "{\"op\":\"cr_open\",\"title\":\"Umbrella\",\"intent\":\"keep_behavior\"}\n".to_string(),
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Part\",\"intent\":\"keep_behavior\",\"parent\":\"Umbrella\",",
+            "\"keep\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
+        )
+        .to_string(),
+        // 6: the parent waits for its part
+        "{\"op\":\"cr_resolve\",\"title\":\"Umbrella\"}\n".to_string(),
+        discount_put(
+            "a discount above 40% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        "{\"op\":\"status\"}\n".to_string(),
+        "{\"op\":\"check\"}\n".to_string(),
+        // 10: the clause it expected to keep moved: it cannot be resolved
+        "{\"op\":\"cr_resolve\",\"title\":\"Part\"}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [6, 10], "{results:#?}");
+
+    let parent = error_at(&results, 6);
+    assert!(
+        parent.contains("not resolved") && parent.contains("Part"),
+        "{parent}"
+    );
+
+    assert_eq!(
+        at(&results, 8)["keep_moved"],
+        serde_json::json!([{ "cr": "Part", "moved": ["discount C1"] }])
+    );
+    // the check says so too, as a warning
+    let found = at(&results, 9)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|f| f["rule"] == "cr.keep-moved")
+        .cloned()
+        .expect("cr.keep-moved is found");
+    assert_eq!(found["level"], "warning");
+
+    let kept = error_at(&results, 10);
+    assert!(
+        kept.contains("stay as they are") && kept.contains("discount C1"),
+        "{kept}"
+    );
+}
+
+#[test]
+fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
+    let dir = fresh_dir("every-kind");
+    let ops = [
+        "{\"op\":\"init\"}\n",
+        "{\"op\":\"context_add\",\"name\":\"core\"}\n",
+        "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a value is returned\"}]}\n",
+        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"signature\":\"fn value()\",\"lines\":[1,1]}]}\n",
+        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
+        // 6: one of each kind, in the three lists (the Context is kept; a Case is changed)
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Everything\",\"intent\":\"change_behavior\",",
+            "\"change\":[{\"project\":true},{\"contract\":{\"context\":\"core\",\"contract\":\"rules\"}},",
+            "{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}},{\"case\":{\"context\":\"core\",\"harness\":\"tests\",\"name\":\"checks_value\"}}],",
+            "\"remove\":[{\"item\":{\"context\":\"core\",\"interface\":\"api\",\"signature\":\"fn value()\"}}],",
+            "\"keep\":[{\"context\":\"core\"},{\"harness\":{\"context\":\"core\",\"harness\":\"tests\"}},",
+            "{\"clause\":{\"context\":\"core\",\"contract\":\"rules\",\"label\":\"C1\"}}]}\n"
+        ),
+        // 7: a reference of no kind, one that is not in the Project, and `false` for the Project
+        "{\"op\":\"cr_open\",\"title\":\"Nothing\",\"intent\":\"change_behavior\",\"change\":[{\"nothing\":true}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Missing\",\"intent\":\"change_behavior\",\"remove\":[{\"harness\":{\"context\":\"core\",\"harness\":\"gone\"}}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Twice\",\"intent\":\"change_behavior\",\"change\":[{\"context\":\"core\"}],\"keep\":[{\"context\":\"core\"}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"No project\",\"intent\":\"change_behavior\",\"change\":[{\"project\":false}]}\n",
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [7, 8, 9, 10], "{results:#?}");
+
+    let core = |extra: Value| {
+        let mut base = serde_json::json!({ "context": "core" });
+        for (k, v) in extra.as_object().expect("an object") {
+            base[k] = v.clone();
+        }
+        base
+    };
+    // in the order of the targets: the Project, the Context, assets, then what they hold
+    assert_eq!(
+        at(&results, 6)["expects"],
+        serde_json::json!([
+            { "kind": "change", "target": { "project": true }, "recorded": 2 },
+            { "kind": "keep", "target": { "context": "core" }, "recorded": 4 },
+            { "kind": "change", "target": { "contract": core(serde_json::json!({ "contract": "rules" })) }, "recorded": 1 },
+            { "kind": "change", "target": { "interface": core(serde_json::json!({ "interface": "api" })) }, "recorded": 1 },
+            { "kind": "keep", "target": { "harness": core(serde_json::json!({ "harness": "tests" })) }, "recorded": 1 },
+            { "kind": "keep", "target": { "clause": core(serde_json::json!({ "contract": "rules", "label": "C1" })) }, "recorded": 1 },
+            { "kind": "remove", "target": { "item": core(serde_json::json!({ "interface": "api", "signature": "fn value()" })) }, "recorded": 1 },
+            { "kind": "change", "target": { "case": core(serde_json::json!({ "harness": "tests", "name": "checks_value" })) }, "recorded": 1 }
+        ])
+    );
+    assert!(
+        error_at(&results, 8).contains("gone"),
+        "{}",
+        error_at(&results, 8)
+    );
+    assert!(
+        error_at(&results, 9).contains("given twice"),
+        "{}",
+        error_at(&results, 9)
+    );
+    assert!(
+        error_at(&results, 10).contains("project"),
+        "{}",
+        error_at(&results, 10)
+    );
 }
 
 #[test]
@@ -612,7 +827,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     assert_eq!(rule["when"], serde_json::json!(["should"]));
     assert_eq!(rule["hooks"], serde_json::json!(["put", "check"]));
     let model = &rules["model"];
-    assert_eq!(model["version"], 1);
+    assert_eq!(model["version"], 2);
     assert_eq!(model["store_revision"], 3);
     let contract = &model["contexts"][0]["contracts"][0];
     assert_eq!(contract["name"], "rounding");

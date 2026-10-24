@@ -164,7 +164,7 @@ mod tests {
                 intent: Intent::ChangeBehavior,
                 parent: None,
                 issuer: None,
-                lines: BTreeMap::new(),
+                expects: BTreeMap::new(),
                 crux: None,
                 addresses,
             },

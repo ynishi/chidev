@@ -194,8 +194,7 @@ mod checks {
             intent: Intent::KeepBehavior,
             parent: None,
             issuer: None,
-            items: Vec::new(),
-            clauses: Vec::new(),
+            expects: Vec::new(),
             crux: None,
             addresses: vec![FindingInput {
                 rule: "cite.uncited-clause".to_string(),
@@ -389,7 +388,7 @@ mod judged {
         assert_eq!(view.store_revision.0, now(&app).await);
         assert_eq!(view.model.store_revision(), view.store_revision.0);
         let json = serde_json::to_value(&view.model).unwrap();
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["version"], 2);
         let clauses = &json["contexts"][0]["contracts"][0]["clauses"];
         assert_eq!(json["contexts"][0]["contracts"][0]["name"], "stack");
         assert_eq!(clauses[0]["label"], "C1");
@@ -723,8 +722,7 @@ mod judged {
             intent: Intent::ChangeBehavior,
             parent: None,
             issuer: None,
-            items: Vec::new(),
-            clauses: Vec::new(),
+            expects: Vec::new(),
             crux: None,
             addresses: vec![FindingInput {
                 rule: "judged.vague".to_string(),

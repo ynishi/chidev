@@ -70,36 +70,76 @@ tree. Re-run a check after changing inputs outside that model.
 
 ## Change requests
 
-A change request lists the definitions it asks to change (`items`, `clauses`: its
-lines) and may carry a `crux`, a question for a person. The two are independent:
+A change request says what it expects of the targets it points at, in three
+lists, and may carry a `crux`, a question for a person. The targets are the
+assets, as a tree, and each has a revision:
 
-- Every line has to change before the request resolves, whatever the Crux
-  decides. A line does not wait for the answer.
-- Each option of the Crux may name `items` / `clauses` (the same references,
-  context required) that must change if that option is chosen. The default
-  option normally names none. `cr_decide` records the revision each of them has
-  at that moment; a later decision replaces it. Deciding with the person's own
-  wording asks the lines only, and leaving it unspecified asks nothing more.
-- `cr_resolve` needs the Crux decided, every line past the revision recorded, and
-  every definition of the chosen option past the revision recorded. When some
-  have not changed it says which, by name (`rounding C1`), and which are gone.
+```text
+Project
+ └ Context
+    ├ Contract  ─ Clause
+    ├ Interface ─ Item
+    └ Harness   ─ Case
+```
+
+A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
+`{"contract":{"context":"pricing","contract":"discount"}}`,
+`{"interface":{"context":..,"interface":..}}`, `{"harness":{"context":..,"harness":..}}`,
+`{"item":{"context":..,"interface":..,"signature":..}}`,
+`{"clause":{"context":..,"contract":..,"label":..}}` and
+`{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
+the request opens, and a target has one expectation.
+
+- `change`: the revision of the target goes past the one recorded at `cr_open`.
+  Adding something is a change of what holds it: a Clause, `change` its Contract;
+  a Contract, Interface or Harness, `change` its Context; a Context, `change`
+  the Project. A Context's revision moves when one of its assets is added or
+  removed, or its `uses` or basis change, not when an asset's content does; the
+  Project's moves when a Context is added or removed.
+- `remove`: the target is no longer there (a Context takes its assets with it).
+- `keep`: the revision of the target is still the one recorded. A request cannot
+  be resolved once a target it keeps has moved.
+- Each option of the Crux takes the same `change` / `remove` / `keep` lists
+  (and `wording`, the exact new text of the definitions, which was `change`
+  before the lists took that name). `cr_decide` records the revision each of
+  them has at that moment; a later decision replaces it. Deciding with the
+  person's own wording, or leaving it unspecified, expects nothing more.
+- `intent` (`change_behavior` or `keep_behavior`) is a record. No rule of
+  resolving reads it; the note `cr.intent-mismatch` points out a keep-behavior
+  request that changes or removes a Clause, and a change-behavior request that
+  changes or removes nothing.
+- `cr_resolve` needs the Crux decided, every `change` and `remove` met (the
+  request's own and the chosen option's), no `keep` moved, and every request
+  whose `parent` it is resolved. When it refuses it names what is missing, by
+  name (`rounding C1`): what has not changed, what is gone, what is not removed
+  yet, what moved, or which parts are open.
 
 ```json
 {"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
- "clauses":[{"context":"pricing","contract":"discount","label":"C1"}],
+ "change":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}],
  "crux":{"kind":"ambiguity","default":{"choice":"reuse InvalidDiscount"},
   "options":[{"choice":"reuse InvalidDiscount"},
-             {"choice":"new error","clauses":[{"context":"pricing","contract":"discount","label":"C2"}]}]}}
+             {"choice":"new error","change":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}]}]}}
 ```
 
-`cr_open` answers with the lines it recorded, so a wrong reference is seen at
-once: `{"kind":"clause","context":"pricing","contract":"discount","label":"C1","revision":1}`
-(an item has `interface` and `signature` instead of `contract` and `label`).
+```json
+{"op":"cr_open","title":"Add billing and drop C2","intent":"change_behavior",
+ "change":[{"project":true}],
+ "remove":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}],
+ "keep":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}]}
+```
+
+`cr_open` answers with the expectations it recorded, so a wrong reference is
+seen at once: `{"kind":"keep","target":{"clause":{"context":"pricing","contract":"discount","label":"C1"}},"recorded":1}`.
 `status` lists a request whose Crux has no decision under `awaiting` (title and
-kind of the Crux) as well as under `unapplied` when its lines have not changed,
-and the check `cr.awaiting-decision` (a note) reports it. A database written
-before options named their changes does not load; chidev is unreleased and there
-is no migration.
+kind of the Crux), the requests whose `change` / `remove` have not been met
+under `unapplied` (`unchanged`, `gone`, `not_removed`), and those whose `keep`
+moved under `keep_moved`. The checks `cr.awaiting-decision` (a note),
+`cr.unapplied` and `cr.keep-moved` (warnings) report them. A "change" is judged
+by the revision alone, so another request's change satisfies it too, and a change
+to a container is met by any change inside it that moves it; tying a change to
+the request that made it is left for later. A database written before
+expectations does not load; chidev is unreleased and there is no migration.
 
 ## Change-request addresses
 

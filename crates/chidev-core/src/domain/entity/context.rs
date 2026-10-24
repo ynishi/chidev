@@ -8,8 +8,11 @@ use super::contract::{Contract, ContractError};
 use super::harness::{CaseFound, Harness, HarnessError};
 use super::interface::{Interface, InterfaceError, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
-use crate::domain::vo::id::{ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId};
+use crate::domain::vo::id::{
+    CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
+};
 use crate::domain::vo::name::ContextName;
+use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::title::Title;
 
@@ -31,6 +34,21 @@ impl Basis {
             Basis::Contract => "contract",
         }
     }
+}
+
+/// What a store keeps of a Context besides its assets.
+#[derive(Debug, Clone)]
+pub(crate) struct ContextHead {
+    /// Its id.
+    pub(crate) id: ContextId,
+    /// Its revision.
+    pub(crate) revision: Revision,
+    /// Its name.
+    pub(crate) name: ContextName,
+    /// What it is checked against.
+    pub(crate) basis: Basis,
+    /// The Contexts it uses.
+    pub(crate) uses: BTreeSet<ContextId>,
 }
 
 /// Which rule of a Context a change would break. The change is not made.
@@ -60,9 +78,14 @@ pub enum ContextError {
 /// changed on its own; the assets are tied to each other only by what the Cases of a Harness cite. Its changes go
 /// through the Project, which checks the rules between Contexts (what a Case may cite, what a Context may use)
 /// before it keeps one.
+///
+/// Its revision is 1 when it is made and goes one up each time an asset is added to it or removed from it, and
+/// each time its uses or its basis change. It does not move when the content of an asset changes: the asset has a
+/// revision of its own. So a change request that adds a Contract expects the Context to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
     id: ContextId,
+    revision: Revision,
     name: ContextName,
     basis: Basis,
     uses: BTreeSet<ContextId>,
@@ -83,6 +106,7 @@ impl Context {
         }
         Ok(Context {
             id,
+            revision: Revision::first(),
             name,
             basis: Basis::Interface,
             uses,
@@ -92,17 +116,21 @@ impl Context {
         })
     }
 
-    /// A Context as a store kept it, with its basis and assets. It does not use itself, and a Context based on its
-    /// Contracts has one at least.
+    /// A Context as a store kept it, with its revision, basis and assets. It does not use itself, and a Context
+    /// based on its Contracts has one at least.
     pub(crate) fn restore(
-        id: ContextId,
-        name: ContextName,
-        basis: Basis,
-        uses: BTreeSet<ContextId>,
+        head: ContextHead,
         contracts: Vec<Contract>,
         interfaces: Vec<Interface>,
         harnesses: Vec<Harness>,
     ) -> Result<Context, ContextError> {
+        let ContextHead {
+            id,
+            revision,
+            name,
+            basis,
+            uses,
+        } = head;
         if uses.contains(&id) {
             return Err(ContextError::UsesItself);
         }
@@ -111,6 +139,7 @@ impl Context {
         }
         Ok(Context {
             id,
+            revision,
             name,
             basis,
             uses,
@@ -123,6 +152,11 @@ impl Context {
     /// Its id.
     pub fn id(&self) -> ContextId {
         self.id
+    }
+
+    /// How many times its set of assets, its uses or its basis has changed, from 1.
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     /// Its name.
@@ -180,10 +214,18 @@ impl Context {
         self.interfaces().find(|i| i.item(item).is_some())
     }
 
-    /// Sets the Contexts it uses.
+    /// The Harness that has the Case with this id.
+    pub fn harness_of(&self, case: CaseId) -> Option<&Harness> {
+        self.harnesses().find(|h| h.case(case).is_some())
+    }
+
+    /// Sets the Contexts it uses. Its revision goes up when they differ.
     pub(super) fn set_uses(&mut self, uses: BTreeSet<ContextId>) -> Result<(), ContextError> {
         if uses.contains(&self.id) {
             return Err(ContextError::UsesItself);
+        }
+        if uses != self.uses {
+            self.revision = self.revision.next();
         }
         self.uses = uses;
         Ok(())
@@ -198,6 +240,7 @@ impl Context {
             return Err(ContextError::NoContract);
         }
         self.basis = Basis::Contract;
+        self.revision = self.revision.next();
         Ok(())
     }
 
@@ -213,6 +256,7 @@ impl Context {
             None => {
                 self.contracts
                     .insert(id, Contract::new(id, title, clauses)?);
+                self.revision = self.revision.next();
             }
         }
         Ok(())
@@ -230,6 +274,7 @@ impl Context {
             None => {
                 self.interfaces
                     .insert(id, Interface::new(id, source, items)?);
+                self.revision = self.revision.next();
             }
         }
         Ok(())
@@ -246,6 +291,7 @@ impl Context {
             Some(h) => h.revise(source, cases)?,
             None => {
                 self.harnesses.insert(id, Harness::new(id, source, cases)?);
+                self.revision = self.revision.next();
             }
         }
         Ok(())

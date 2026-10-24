@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestState, Crux,
 };
-use crate::domain::entity::context::{Basis, Context};
+use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::interface::Interface;
@@ -34,7 +34,7 @@ use crate::domain::vo::prose::Prose;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
-use crate::domain::vo::target::Target;
+use crate::domain::vo::target::{ExpectKind, Expectation, Target};
 use crate::domain::vo::title::Title;
 
 /// The schema number these documents carry.
@@ -94,6 +94,8 @@ fn unrevs<I: Ord>(list: &[Rev], make: impl Fn(Uuid) -> I) -> Result<BTreeMap<I, 
 pub(crate) struct ProjectDoc {
     pub schema: u32,
     id: String,
+    /// The revision of the Project; a document without it is from before the Project had one and does not load.
+    revision: u64,
     contexts: Vec<ContextDoc>,
 }
 
@@ -107,6 +109,8 @@ enum BasisDoc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ContextDoc {
     id: String,
+    /// The revision of the Context; a document without it does not load.
+    revision: u64,
     name: String,
     basis: BasisDoc,
     uses: Vec<String>,
@@ -172,6 +176,7 @@ impl From<&Project> for ProjectDoc {
         ProjectDoc {
             schema: SCHEMA,
             id: p.id().as_uuid().to_string(),
+            revision: p.revision().number(),
             contexts: p.contexts().map(ContextDoc::from).collect(),
         }
     }
@@ -181,6 +186,7 @@ impl From<&Context> for ContextDoc {
     fn from(c: &Context) -> ContextDoc {
         ContextDoc {
             id: c.id().as_uuid().to_string(),
+            revision: c.revision().number(),
             name: c.name().to_string(),
             basis: match c.basis() {
                 Basis::Interface => BasisDoc::Interface,
@@ -267,7 +273,12 @@ impl TryFrom<ProjectDoc> for Project {
             .into_iter()
             .map(Context::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Project::restore(ProjectId::from_uuid(uuid(&d.id)?), contexts).map_err(bad)
+        Project::restore(
+            ProjectId::from_uuid(uuid(&d.id)?),
+            revision(d.revision)?,
+            contexts,
+        )
+        .map_err(bad)
     }
 }
 
@@ -285,10 +296,13 @@ impl TryFrom<ContextDoc> for Context {
             BasisDoc::Contract => Basis::Contract,
         };
         Context::restore(
-            ContextId::from_uuid(uuid(&d.id)?),
-            ContextName::try_from(d.name.as_str()).map_err(bad)?,
-            basis,
-            uses,
+            ContextHead {
+                id: ContextId::from_uuid(uuid(&d.id)?),
+                revision: revision(d.revision)?,
+                name: ContextName::try_from(d.name.as_str()).map_err(bad)?,
+                basis,
+                uses,
+            },
             d.contracts
                 .into_iter()
                 .map(Contract::try_from)
@@ -454,11 +468,11 @@ pub(crate) struct ChangeRequestDoc {
     intent: IntentDoc,
     parent: Option<String>,
     issuer: Option<String>,
-    lines: Vec<LineDoc>,
+    expects: Vec<ExpectDoc>,
     crux: Option<CruxDoc>,
     decision: Option<DecisionDoc>,
-    /// The definitions the option decided asks to change, with the revision each had at the decision.
-    decided_changes: Vec<LineDoc>,
+    /// What the option decided expects, with the revision each target had at the decision.
+    decided_expects: Vec<ExpectDoc>,
     /// Absent in the documents written before a change request could address findings.
     #[serde(default)]
     addresses: Vec<AddressDoc>,
@@ -545,61 +559,140 @@ enum IntentDoc {
     KeepBehavior,
 }
 
+/// The kind of a target. Every kind has an id but the Project, whose `id` is null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TargetDoc {
-    Item,
+    Project,
+    Context,
+    Contract,
+    Interface,
+    Harness,
     Clause,
+    Item,
+    Case,
 }
 
-/// A definition and the revision recorded for it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LineDoc {
-    target: TargetDoc,
-    id: String,
-    revision: u64,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExpectKindDoc {
+    Change,
+    Remove,
+    Keep,
 }
 
-/// A definition a Crux option asks to change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChangeDoc {
-    target: TargetDoc,
-    id: String,
-}
-
-fn target_doc(t: &Target) -> (TargetDoc, String) {
-    match t {
-        Target::Item(i) => (TargetDoc::Item, i.as_uuid().to_string()),
-        Target::Clause(i) => (TargetDoc::Clause, i.as_uuid().to_string()),
+impl From<ExpectKind> for ExpectKindDoc {
+    fn from(k: ExpectKind) -> ExpectKindDoc {
+        match k {
+            ExpectKind::Change => ExpectKindDoc::Change,
+            ExpectKind::Remove => ExpectKindDoc::Remove,
+            ExpectKind::Keep => ExpectKindDoc::Keep,
+        }
     }
 }
 
-fn target_of(kind: &TargetDoc, id: &str) -> Result<Target, Bad> {
-    let id = uuid(id)?;
+impl From<ExpectKindDoc> for ExpectKind {
+    fn from(k: ExpectKindDoc) -> ExpectKind {
+        match k {
+            ExpectKindDoc::Change => ExpectKind::Change,
+            ExpectKindDoc::Remove => ExpectKind::Remove,
+            ExpectKindDoc::Keep => ExpectKind::Keep,
+        }
+    }
+}
+
+/// What a change request expects of a target, and the revision the target had when it was recorded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExpectDoc {
+    target: TargetDoc,
+    id: Option<String>,
+    kind: ExpectKindDoc,
+    recorded: u64,
+}
+
+/// What a Crux option expects of a target when it is chosen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OptionExpectDoc {
+    target: TargetDoc,
+    id: Option<String>,
+    kind: ExpectKindDoc,
+}
+
+fn target_doc(t: &Target) -> (TargetDoc, Option<String>) {
+    let id = |u: Uuid| Some(u.to_string());
+    match t {
+        Target::Project => (TargetDoc::Project, None),
+        Target::Context(i) => (TargetDoc::Context, id(i.as_uuid())),
+        Target::Contract(i) => (TargetDoc::Contract, id(i.as_uuid())),
+        Target::Interface(i) => (TargetDoc::Interface, id(i.as_uuid())),
+        Target::Harness(i) => (TargetDoc::Harness, id(i.as_uuid())),
+        Target::Clause(i) => (TargetDoc::Clause, id(i.as_uuid())),
+        Target::Item(i) => (TargetDoc::Item, id(i.as_uuid())),
+        Target::Case(i) => (TargetDoc::Case, id(i.as_uuid())),
+    }
+}
+
+fn target_of(kind: &TargetDoc, id: &Option<String>) -> Result<Target, Bad> {
+    if let TargetDoc::Project = kind {
+        return match id {
+            None => Ok(Target::Project),
+            Some(_) => Err("the project target has no id".to_string()),
+        };
+    }
+    let id = uuid(id.as_deref().ok_or("a target has no id")?)?;
     Ok(match kind {
-        TargetDoc::Item => Target::Item(ItemId::from_uuid(id)),
+        TargetDoc::Project => Target::Project,
+        TargetDoc::Context => Target::Context(ContextId::from_uuid(id)),
+        TargetDoc::Contract => Target::Contract(ContractId::from_uuid(id)),
+        TargetDoc::Interface => Target::Interface(InterfaceId::from_uuid(id)),
+        TargetDoc::Harness => Target::Harness(HarnessId::from_uuid(id)),
         TargetDoc::Clause => Target::Clause(ClauseId::from_uuid(id)),
+        TargetDoc::Item => Target::Item(ItemId::from_uuid(id)),
+        TargetDoc::Case => Target::Case(CaseId::from_uuid(id)),
     })
 }
 
-fn line_docs(lines: &BTreeMap<Target, Revision>) -> Vec<LineDoc> {
-    lines
+fn expect_docs(expects: &BTreeMap<Target, Expectation>) -> Vec<ExpectDoc> {
+    expects
         .iter()
-        .map(|(t, r)| {
+        .map(|(t, e)| {
             let (target, id) = target_doc(t);
-            LineDoc {
+            ExpectDoc {
                 target,
                 id,
-                revision: r.number(),
+                kind: e.kind.into(),
+                recorded: e.recorded.number(),
             }
         })
         .collect()
 }
 
-fn lines_of(docs: &[LineDoc]) -> Result<BTreeMap<Target, Revision>, Bad> {
-    docs.iter()
-        .map(|l| Ok((target_of(&l.target, &l.id)?, revision(l.revision)?)))
-        .collect()
+/// The expectations in `docs`; a target twice is refused: a target has one expectation.
+fn expects_of(docs: &[ExpectDoc]) -> Result<BTreeMap<Target, Expectation>, Bad> {
+    let mut out = BTreeMap::new();
+    for d in docs {
+        let target = target_of(&d.target, &d.id)?;
+        let expectation = Expectation {
+            kind: d.kind.into(),
+            recorded: revision(d.recorded)?,
+        };
+        if out.insert(target, expectation).is_some() {
+            return Err(format!("{target:?} is expected twice"));
+        }
+    }
+    Ok(out)
+}
+
+/// The expectations of a Crux option; a target twice is refused.
+fn option_expects_of(docs: &[OptionExpectDoc]) -> Result<BTreeMap<Target, ExpectKind>, Bad> {
+    let mut out = BTreeMap::new();
+    for d in docs {
+        let target = target_of(&d.target, &d.id)?;
+        if out.insert(target, d.kind.into()).is_some() {
+            return Err(format!("{target:?} is expected twice by one option"));
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -623,7 +716,7 @@ struct CruxDoc {
 struct OptionDoc {
     choice: String,
     change: Option<String>,
-    changes: Vec<ChangeDoc>,
+    expects: Vec<OptionExpectDoc>,
     consequence: Option<String>,
 }
 
@@ -679,7 +772,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             },
             parent: c.parent().map(|p| p.as_uuid().to_string()),
             issuer: c.issuer().map(|i| i.to_string()),
-            lines: line_docs(c.lines()),
+            expects: expect_docs(c.expects()),
             crux: c.crux().map(|q| CruxDoc {
                 kind: match q.kind() {
                     CruxKind::Ambiguity => CruxKindDoc::Ambiguity,
@@ -693,12 +786,16 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                     .map(|o| OptionDoc {
                         choice: o.choice().to_string(),
                         change: o.change().map(|p| p.to_string()),
-                        changes: o
-                            .changes()
+                        expects: o
+                            .expects()
                             .iter()
-                            .map(|t| {
+                            .map(|(t, k)| {
                                 let (target, id) = target_doc(t);
-                                ChangeDoc { target, id }
+                                OptionExpectDoc {
+                                    target,
+                                    id,
+                                    kind: (*k).into(),
+                                }
                             })
                             .collect(),
                         consequence: o.consequence().map(|p| p.to_string()),
@@ -717,7 +814,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                     keep: keep.iter().map(|p| p.to_string()).collect(),
                 },
             }),
-            decided_changes: line_docs(c.decided_changes()),
+            decided_expects: expect_docs(c.decided_expects()),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             resolved: c.state() == ChangeRequestState::Resolved,
         }
@@ -728,22 +825,17 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
     type Error = Bad;
 
     fn try_from(d: ChangeRequestDoc) -> Result<ChangeRequest, Bad> {
-        let lines = lines_of(&d.lines)?;
-        let decided_changes = lines_of(&d.decided_changes)?;
+        let expects = expects_of(&d.expects)?;
+        let decided_expects = expects_of(&d.decided_expects)?;
         let crux = match &d.crux {
             None => None,
             Some(q) => {
                 let mut options = Vec::with_capacity(q.options.len());
                 for o in &q.options {
-                    let changes = o
-                        .changes
-                        .iter()
-                        .map(|c| target_of(&c.target, &c.id))
-                        .collect::<Result<_, _>>()?;
                     options.push(CruxOption::new(
                         Choice::try_from(o.choice.as_str()).map_err(bad)?,
                         prose(&o.change)?,
-                        changes,
+                        option_expects_of(&o.expects)?,
                         prose(&o.consequence)?,
                     ));
                 }
@@ -795,7 +887,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .as_deref()
                 .map(|i| Issuer::try_from(i).map_err(bad))
                 .transpose()?,
-            lines,
+            expects,
             crux,
             addresses: d
                 .addresses
@@ -807,7 +899,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
             ChangeRequestId::from_uuid(uuid(&d.id)?),
             draft,
             decision,
-            decided_changes,
+            decided_expects,
             d.resolved,
         )
         .map_err(bad)

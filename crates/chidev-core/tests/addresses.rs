@@ -47,8 +47,7 @@ fn request(title: &str, addresses: Vec<FindingInput>) -> ChangeRequestInput {
         intent: Intent::KeepBehavior,
         parent: None,
         issuer: None,
-        items: vec![],
-        clauses: vec![],
+        expects: vec![],
         crux: None,
         addresses,
     }
@@ -385,8 +384,7 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
         options: vec![OptionInput {
             choice: "keep".into(),
             change: None,
-            items: vec![],
-            clauses: vec![],
+            expects: vec![],
             consequence: None,
         }],
         default: None,

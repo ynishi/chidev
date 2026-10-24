@@ -7,9 +7,9 @@ use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, ModelView, OpenedLine,
-    OptionInput, ParamValue, PinState, ReasonedInput, ReportInput, ReportedFinding, RuleStanding,
-    RuleToJudge, SubjectInput,
+    DecisionInput, ExpectInput, ExpectKind, FindingInput, Found, Intent, ItemInput, ItemRef,
+    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, ReasonedInput, ReportInput,
+    ReportedFinding, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use serde::{Deserialize, Serialize};
@@ -206,11 +206,16 @@ struct OpenDto {
     parent: Option<String>,
     #[serde(default)]
     issuer: Option<String>,
+    /// The targets it expects to change.
     #[serde(default)]
-    items: Vec<ItemRefDto>,
+    change: Vec<RefDto>,
+    /// The targets it expects to go.
     #[serde(default)]
-    clauses: Vec<ClauseRefDto>,
-    /// The question for a person, besides the lines; none: nothing to ask.
+    remove: Vec<RefDto>,
+    /// The targets it expects to stay as they are.
+    #[serde(default)]
+    keep: Vec<RefDto>,
+    /// The question for a person, besides the expectations; none: nothing to ask.
     #[serde(default)]
     crux: Option<CruxDto>,
     /// The findings it deals with.
@@ -329,49 +334,93 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
         .collect()
 }
 
-/// A line a change request recorded, in the result of `cr_open`.
+/// A target by name, in the shape a reference to it is written in: `{"project": true}`, `{"context": "core"}`,
+/// `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on.
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OpenedLineOut {
-    Item {
-        context: String,
-        interface: String,
-        signature: String,
-        revision: u64,
-    },
-    Clause {
+#[serde(rename_all = "snake_case")]
+enum TargetOut {
+    Project(bool),
+    Context(String),
+    Contract {
         context: String,
         contract: String,
+    },
+    Interface {
+        context: String,
+        interface: String,
+    },
+    Harness {
+        context: String,
+        harness: String,
+    },
+    Item {
+        context: Option<String>,
+        interface: String,
+        signature: String,
+    },
+    Clause {
+        context: Option<String>,
+        contract: String,
         label: String,
-        revision: u64,
+    },
+    Case {
+        context: String,
+        harness: String,
+        name: String,
     },
 }
 
-impl From<OpenedLine> for OpenedLineOut {
-    fn from(l: OpenedLine) -> OpenedLineOut {
-        match l {
-            OpenedLine::Item {
-                context,
-                interface,
-                signature,
-                revision,
-            } => OpenedLineOut::Item {
-                context,
-                interface,
-                signature,
-                revision: revision.number(),
+impl From<TargetInput> for TargetOut {
+    fn from(t: TargetInput) -> TargetOut {
+        match t {
+            TargetInput::Project => TargetOut::Project(true),
+            TargetInput::Context(name) => TargetOut::Context(name),
+            TargetInput::Contract { context, contract } => {
+                TargetOut::Contract { context, contract }
+            }
+            TargetInput::Interface { context, interface } => {
+                TargetOut::Interface { context, interface }
+            }
+            TargetInput::Harness { context, harness } => TargetOut::Harness { context, harness },
+            TargetInput::Item(r) => TargetOut::Item {
+                context: r.context,
+                interface: r.interface,
+                signature: r.signature,
             },
-            OpenedLine::Clause {
-                context,
-                contract,
-                label,
-                revision,
-            } => OpenedLineOut::Clause {
-                context,
-                contract,
-                label,
-                revision: revision.number(),
+            TargetInput::Clause(r) => TargetOut::Clause {
+                context: r.context,
+                contract: r.contract,
+                label: r.label,
             },
+            TargetInput::Case {
+                context,
+                harness,
+                name,
+            } => TargetOut::Case {
+                context,
+                harness,
+                name,
+            },
+        }
+    }
+}
+
+/// An expectation a change request recorded, in the result of `cr_open`.
+#[derive(Debug, Serialize)]
+struct OpenedExpectOut {
+    /// `change`, `remove` or `keep`.
+    kind: &'static str,
+    target: TargetOut,
+    /// The revision the target had when the change request was opened.
+    recorded: u64,
+}
+
+impl From<OpenedExpect> for OpenedExpectOut {
+    fn from(e: OpenedExpect) -> OpenedExpectOut {
+        OpenedExpectOut {
+            kind: e.kind.word(),
+            target: e.target.into(),
+            recorded: e.recorded.number(),
         }
     }
 }
@@ -381,7 +430,7 @@ impl From<OpenedLine> for OpenedLineOut {
 struct CrOpenOut {
     op: &'static str,
     cr: String,
-    lines: Vec<OpenedLineOut>,
+    expects: Vec<OpenedExpectOut>,
 }
 
 /// A Pin in the result of `status`.
@@ -421,6 +470,14 @@ struct UnappliedOut<'a> {
     decision: Option<&'a str>,
     unchanged: &'a [String],
     gone: &'a [String],
+    not_removed: &'a [String],
+}
+
+/// A change request that expected targets to stay as they are, and they moved, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct KeepMovedOut<'a> {
+    cr: &'a str,
+    moved: &'a [String],
 }
 
 /// A change request whose Crux has no decision yet, in the result of `status`.
@@ -445,6 +502,7 @@ struct StatusOut<'a> {
     stale_cites: Vec<StaleCiteOut<'a>>,
     change_requests: Vec<CrOut<'a>>,
     unapplied: Vec<UnappliedOut<'a>>,
+    keep_moved: Vec<KeepMovedOut<'a>>,
     awaiting: Vec<AwaitingOut<'a>>,
     findings: Vec<FindingOut<'a>>,
     judged: Vec<StandingOut<'a>>,
@@ -635,16 +693,121 @@ impl From<KindDto> for CruxKind {
 #[derive(Debug, Deserialize)]
 struct OptionDto {
     choice: String,
+    /// The exact new wording the option makes of the definitions; none: it words none. (Called `change` before the
+    /// lists of references took that name.)
     #[serde(default)]
-    change: Option<String>,
-    /// The Items that must change when it is chosen, besides the lines.
+    wording: Option<String>,
+    /// The targets that must change when it is chosen, besides what the change request expects.
     #[serde(default)]
-    items: Vec<ItemRefDto>,
-    /// The Clauses that must change when it is chosen, besides the lines.
+    change: Vec<RefDto>,
+    /// The targets that must go when it is chosen.
     #[serde(default)]
-    clauses: Vec<ClauseRefDto>,
+    remove: Vec<RefDto>,
+    /// The targets that must stay as they are when it is chosen.
+    #[serde(default)]
+    keep: Vec<RefDto>,
     #[serde(default)]
     consequence: Option<String>,
+}
+
+/// A reference to a target of any kind. The Project is `{"project": true}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RefDto {
+    Project(bool),
+    Context(String),
+    Contract(ContractRefDto),
+    Interface(InterfaceRefDto),
+    Harness(HarnessRefDto),
+    Item(ItemRefDto),
+    Clause(ClauseRefDto),
+    Case(CaseRefDto),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractRefDto {
+    context: String,
+    contract: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InterfaceRefDto {
+    context: String,
+    interface: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessRefDto {
+    context: String,
+    harness: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaseRefDto {
+    context: String,
+    harness: String,
+    name: String,
+}
+
+impl TryFrom<RefDto> for TargetInput {
+    type Error = AppError;
+
+    fn try_from(r: RefDto) -> Result<TargetInput, AppError> {
+        Ok(match r {
+            RefDto::Project(true) => TargetInput::Project,
+            RefDto::Project(false) => {
+                return Err(AppError::Input(
+                    "`{\"project\": false}` names nothing; write `{\"project\": true}`".to_string(),
+                ));
+            }
+            RefDto::Context(name) => TargetInput::Context(name),
+            RefDto::Contract(c) => TargetInput::Contract {
+                context: c.context,
+                contract: c.contract,
+            },
+            RefDto::Interface(i) => TargetInput::Interface {
+                context: i.context,
+                interface: i.interface,
+            },
+            RefDto::Harness(h) => TargetInput::Harness {
+                context: h.context,
+                harness: h.harness,
+            },
+            RefDto::Item(i) => TargetInput::Item(ItemRef::from(i)),
+            RefDto::Clause(c) => TargetInput::Clause(ClauseRef::from(c)),
+            RefDto::Case(c) => TargetInput::Case {
+                context: c.context,
+                harness: c.harness,
+                name: c.name,
+            },
+        })
+    }
+}
+
+/// The expectations the lists of references `change`, `remove` and `keep` write, in that order.
+fn expects_of(
+    change: Vec<RefDto>,
+    remove: Vec<RefDto>,
+    keep: Vec<RefDto>,
+) -> Result<Vec<ExpectInput>, AppError> {
+    let mut out = Vec::with_capacity(change.len() + remove.len() + keep.len());
+    for (kind, refs) in [
+        (ExpectKind::Change, change),
+        (ExpectKind::Remove, remove),
+        (ExpectKind::Keep, keep),
+    ] {
+        for r in refs {
+            out.push(ExpectInput {
+                kind,
+                target: TargetInput::try_from(r)?,
+            });
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -867,35 +1030,40 @@ where
                 intent,
                 parent,
                 issuer,
-                items,
-                clauses,
+                change,
+                remove,
+                keep,
                 crux,
                 addresses,
             } = *open;
-            let crux = crux.map(|q| CruxInput {
-                kind: q.kind.into(),
-                options: q
-                    .options
-                    .into_iter()
-                    .map(|o| OptionInput {
-                        choice: o.choice,
-                        change: o.change,
-                        items: o.items.into_iter().map(ItemRef::from).collect(),
-                        clauses: o.clauses.into_iter().map(ClauseRef::from).collect(),
-                        consequence: o.consequence,
+            let crux = crux
+                .map(|q| {
+                    Ok::<_, AppError>(CruxInput {
+                        kind: q.kind.into(),
+                        options: q
+                            .options
+                            .into_iter()
+                            .map(|o| {
+                                Ok(OptionInput {
+                                    choice: o.choice,
+                                    change: o.wording,
+                                    expects: expects_of(o.change, o.remove, o.keep)?,
+                                    consequence: o.consequence,
+                                })
+                            })
+                            .collect::<Result<_, AppError>>()?,
+                        default: q.default.map(ReasonedInput::from),
+                        recommended: q.recommended.map(ReasonedInput::from),
                     })
-                    .collect(),
-                default: q.default.map(ReasonedInput::from),
-                recommended: q.recommended.map(ReasonedInput::from),
-            });
+                })
+                .transpose()?;
             let input = ChangeRequestInput {
                 title,
                 situation,
                 intent: intent.into(),
                 parent,
                 issuer,
-                items: items.into_iter().map(ItemRef::from).collect(),
-                clauses: clauses.into_iter().map(ClauseRef::from).collect(),
+                expects: expects_of(change, remove, keep)?,
                 crux,
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
@@ -903,7 +1071,11 @@ where
             to_value(&CrOpenOut {
                 op: "cr_open",
                 cr: opened.id.to_string(),
-                lines: opened.lines.into_iter().map(OpenedLineOut::from).collect(),
+                expects: opened
+                    .expects
+                    .into_iter()
+                    .map(OpenedExpectOut::from)
+                    .collect(),
             })?
         }
         Op::CrDecide {
@@ -985,6 +1157,15 @@ where
                         decision: u.decision.as_deref(),
                         unchanged: &u.unchanged,
                         gone: &u.gone,
+                        not_removed: &u.not_removed,
+                    })
+                    .collect(),
+                keep_moved: s
+                    .keep_moved
+                    .iter()
+                    .map(|k| KeepMovedOut {
+                        cr: &k.cr,
+                        moved: &k.moved,
                     })
                     .collect(),
                 awaiting: s

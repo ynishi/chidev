@@ -1,23 +1,45 @@
-//! Citations a Case has not been brought up to: the cited Item or Clause changed after the Case was written.
+//! The revision of anything a Case or a change request can point at, and the citations a Case has not been
+//! brought up to: the cited Item or Clause changed after the Case was written.
 
 use crate::domain::entity::project::Project;
 use crate::domain::vo::id::CaseId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
 
-/// The revision `target` has in `project` now; `None` when no asset of the Project has it. Ids are given once in
-/// the whole Project, so the first one found is the one.
+/// The revision `target` has in `project` now; `None` when the Project does not have it. The Project always has
+/// itself. Ids are given once in the whole Project, so the first one found is the one.
 pub fn revision_of(project: &Project, target: Target) -> Option<Revision> {
-    project.contexts().find_map(|c| match target {
-        Target::Item(id) => c
-            .interface_of(id)
-            .and_then(|i| i.item(id))
-            .map(|i| i.revision()),
-        Target::Clause(id) => c
-            .contract_of(id)
-            .and_then(|k| k.clause(id))
+    match target {
+        Target::Project => Some(project.revision()),
+        Target::Context(id) => project.context(id).map(|c| c.revision()),
+        Target::Contract(id) => project
+            .contexts()
+            .find_map(|c| c.contract(id))
             .map(|k| k.revision()),
-    })
+        Target::Interface(id) => project
+            .contexts()
+            .find_map(|c| c.interface(id))
+            .map(|i| i.revision()),
+        Target::Harness(id) => project
+            .contexts()
+            .find_map(|c| c.harness(id))
+            .map(|h| h.revision()),
+        Target::Clause(id) => project.contexts().find_map(|c| {
+            c.contract_of(id)
+                .and_then(|k| k.clause(id))
+                .map(|k| k.revision())
+        }),
+        Target::Item(id) => project.contexts().find_map(|c| {
+            c.interface_of(id)
+                .and_then(|i| i.item(id))
+                .map(|i| i.revision())
+        }),
+        Target::Case(id) => project.contexts().find_map(|c| {
+            c.harness_of(id)
+                .and_then(|h| h.case(id))
+                .map(|k| k.revision())
+        }),
+    }
 }
 
 /// A citation whose target moved past the revision the Case recorded. It is not refused (the Project holds

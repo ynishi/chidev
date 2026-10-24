@@ -13,6 +13,7 @@ use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
 };
 use crate::domain::vo::name::ContextName;
+use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::title::Title;
 
@@ -77,23 +78,34 @@ pub enum ProjectError {
 /// definition is given once in the whole Project, and every Case cites only Items and Clauses its Context owns or
 /// uses. A change to one Context can break a citation in another (an Item removed from an Interface that another
 /// Context's Case cites), so the whole Project is checked each time.
+///
+/// Its revision is 1 when it is made and goes one up each time a Context is added to it or removed from it. It
+/// does not move when a Context changes: the Context has a revision of its own. So a change request that adds a
+/// Context expects the Project to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     id: ProjectId,
+    revision: Revision,
     contexts: BTreeMap<ContextId, Context>,
 }
 
 impl Project {
-    /// A Project with no Contexts.
+    /// A Project with no Contexts, at its first revision.
     pub fn new(id: ProjectId) -> Project {
         Project {
             id,
+            revision: Revision::first(),
             contexts: BTreeMap::new(),
         }
     }
 
-    /// A Project as a store kept it. Every rule of the Project is checked on it, as on a change.
-    pub(crate) fn restore(id: ProjectId, contexts: Vec<Context>) -> Result<Project, ProjectError> {
+    /// A Project as a store kept it, with its revision. Every rule of the Project is checked on it, as on a
+    /// change.
+    pub(crate) fn restore(
+        id: ProjectId,
+        revision: Revision,
+        contexts: Vec<Context>,
+    ) -> Result<Project, ProjectError> {
         let mut map = BTreeMap::new();
         for c in contexts {
             if map.contains_key(&c.id()) {
@@ -102,12 +114,21 @@ impl Project {
             map.insert(c.id(), c);
         }
         check(&map)?;
-        Ok(Project { id, contexts: map })
+        Ok(Project {
+            id,
+            revision,
+            contexts: map,
+        })
     }
 
     /// Its id.
     pub fn id(&self) -> ProjectId {
         self.id
+    }
+
+    /// How many times its set of Contexts has changed, from 1.
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     /// The Context with this id.
@@ -125,14 +146,16 @@ impl Project {
         self.contexts.values()
     }
 
-    /// Adds a Context.
+    /// Adds a Context. The Project goes to its next revision.
     pub fn add_context(&mut self, context: Context) -> Result<(), ProjectError> {
         if self.contexts.contains_key(&context.id()) {
             return Err(ProjectError::DuplicateId(context.id()));
         }
         let mut next = self.contexts.clone();
         next.insert(context.id(), context);
-        self.keep(next)
+        self.keep(next)?;
+        self.revision = self.revision.next();
+        Ok(())
     }
 
     /// Sets the Contexts a Context uses.
@@ -429,6 +452,54 @@ mod tests {
         let base = ContextName::try_from("base").unwrap();
         assert_eq!(p.context_by_name(&base).unwrap().id(), ctx_id(2));
         assert_eq!(p.contexts().count(), 2);
+    }
+
+    #[test]
+    fn the_project_goes_to_its_next_revision_when_a_context_is_added_and_not_when_one_changes() {
+        let mut p = project();
+        // Made at the first revision, and one more for each of the two Contexts added.
+        assert_eq!(p.revision().number(), 3);
+        p.add_context(context(3, "extra", &[])).unwrap();
+        assert_eq!(p.revision().number(), 4);
+        // A refused addition leaves it.
+        assert!(p.add_context(context(3, "again", &[])).is_err());
+        assert_eq!(p.revision().number(), 4);
+        // A change inside a Context moves the Context, not the Project.
+        let core = p.context(ctx_id(1)).unwrap().revision();
+        p.set_uses(ctx_id(1), BTreeSet::new()).unwrap();
+        assert_eq!(p.revision().number(), 4);
+        assert!(p.context(ctx_id(1)).unwrap().revision() > core);
+    }
+
+    #[test]
+    fn a_context_goes_to_its_next_revision_for_a_new_asset_and_a_new_use_not_for_a_changed_asset() {
+        let mut p = project();
+        let rev = |p: &Project| p.context(ctx_id(1)).unwrap().revision().number();
+        // `project()` put an Interface and a Contract on `core`, and set its uses when it was made.
+        let start = rev(&p);
+        // The same Interface again, changed: the asset moves, the Context does not.
+        p.put_interface(
+            ctx_id(1),
+            InterfaceId::from_uuid(test_uuid(101)),
+            Source::new("fn g()\n".to_string()),
+            vec![(
+                item(10),
+                Signature::try_from("fn g()").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(rev(&p), start);
+        // A new Harness is a new asset.
+        put_harness(&mut p, &[10], &[]).unwrap();
+        assert_eq!(rev(&p), start + 1);
+        // New uses move it, the same uses again do not, and being based on the Contracts does.
+        p.set_uses(ctx_id(1), BTreeSet::new()).unwrap();
+        assert_eq!(rev(&p), start + 2);
+        p.set_uses(ctx_id(1), BTreeSet::new()).unwrap();
+        assert_eq!(rev(&p), start + 2);
+        p.base_on_contract(ctx_id(1)).unwrap();
+        assert_eq!(rev(&p), start + 3);
     }
 
     #[test]

@@ -7,7 +7,6 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::id::{CaseId, ChangeRequestId, ClauseId, ContextId, InterfaceId, ItemId};
-use super::target::Target;
 
 /// Why a text is not a rule id.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -92,9 +91,9 @@ impl fmt::Display for RuleId {
     }
 }
 
-/// What a finding is about, by id. A citation or a change request line points at an Item or a Clause ([`Target`]);
-/// a finding can also be about a thing that is neither (an Interface with no Pin, a Context with no Harness), so
-/// the subject has more kinds than a [`Target`], which stays what a line may point at.
+/// What a finding is about, by id. It has the kinds a finding needs (an Interface with no Pin, a Context with no
+/// Harness, a Case behind its citations, a change request); it is not a `Target`, which is what a citation or a
+/// change request points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Subject {
     /// A Context.
@@ -203,15 +202,6 @@ impl Subject {
             SubjectKind::ChangeRequest => Subject::ChangeRequest(ChangeRequestId::from_uuid(id)),
             SubjectKind::Project => return None,
         })
-    }
-}
-
-impl From<Target> for Subject {
-    fn from(t: Target) -> Subject {
-        match t {
-            Target::Item(i) => Subject::Item(i),
-            Target::Clause(c) => Subject::Clause(c),
-        }
     }
 }
 

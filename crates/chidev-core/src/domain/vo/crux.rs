@@ -1,11 +1,11 @@
 //! The values of a Crux, the question a person settles for a change request: its kind, its options, and the
 //! decision taken.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use super::choice::Choice;
 use super::prose::Prose;
-use super::target::Target;
+use super::target::{ExpectKind, Target};
 
 /// What kind of question a Crux is. The kind says whether work may go on with a default until the person answers,
 /// and whether the question may be left unspecified.
@@ -44,29 +44,30 @@ impl CruxKind {
     }
 }
 
-/// One answer a Crux offers: the choice, the change it makes to the definitions (in words, and as the definitions
-/// that must change; none when it leaves them as they are), and what else it affects.
+/// One answer a Crux offers: the choice, the change it makes to the definitions (in words, and as what it expects
+/// of the targets: change, remove or keep; none when it expects nothing more), and what else it affects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CruxOption {
     choice: Choice,
     change: Option<Prose>,
-    changes: BTreeSet<Target>,
+    expects: BTreeMap<Target, ExpectKind>,
     consequence: Option<Prose>,
 }
 
 impl CruxOption {
-    /// An option. `changes` are the definitions that must change when it is chosen, apart from the lines of the
-    /// change request, which change whatever is chosen. The default option normally has none.
+    /// An option. `expects` is what the option expects of targets once it is chosen, besides the expectations of
+    /// the change request, which hold whatever is chosen (one kind for each target). The default option normally
+    /// expects nothing.
     pub fn new(
         choice: Choice,
         change: Option<Prose>,
-        changes: BTreeSet<Target>,
+        expects: BTreeMap<Target, ExpectKind>,
         consequence: Option<Prose>,
     ) -> CruxOption {
         CruxOption {
             choice,
             change,
-            changes,
+            expects,
             consequence,
         }
     }
@@ -81,9 +82,9 @@ impl CruxOption {
         self.change.as_ref()
     }
 
-    /// The definitions that must change when it is chosen, in order; empty: it asks no more than the lines.
-    pub fn changes(&self) -> &BTreeSet<Target> {
-        &self.changes
+    /// What it expects of targets when it is chosen; empty: it expects no more than the change request does.
+    pub fn expects(&self) -> &BTreeMap<Target, ExpectKind> {
+        &self.expects
     }
 
     /// What else it affects.

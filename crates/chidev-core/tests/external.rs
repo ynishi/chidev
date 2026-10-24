@@ -650,8 +650,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
             intent: Intent::KeepBehavior,
             parent: None,
             issuer: None,
-            items: vec![],
-            clauses: vec![],
+            expects: vec![],
             crux: None,
             addresses: vec![],
         })

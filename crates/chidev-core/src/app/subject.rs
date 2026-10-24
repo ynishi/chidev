@@ -5,7 +5,7 @@ use super::ports::{AssetKind, IdSource, Store};
 use super::{App, AppError, ClauseRef, ItemRef, context_id};
 use crate::domain::entity::project::Project;
 use crate::domain::vo::finding::Subject;
-use crate::domain::vo::id::{HarnessId, InterfaceId};
+use crate::domain::vo::id::{CaseId, HarnessId, InterfaceId};
 
 /// What a finding is about, addressed by the names the model view shows.
 /// Shared by change-request addresses and judged reports; `None` at their call sites means the whole Project.
@@ -67,40 +67,46 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 context,
                 harness,
                 name,
-            } => {
-                let ctx = context_id(p, context)?;
-                let id = HarnessId::from_uuid(
-                    self.asset(ctx, context, AssetKind::Harness, harness)
-                        .await?,
-                );
-                let cases: Vec<_> = p
-                    .context(ctx)
-                    .and_then(|c| c.harness(id))
-                    .map(|h| {
-                        h.cases()
-                            .iter()
-                            .filter(|k| k.name().as_str() == name)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                match cases.as_slice() {
-                    [one] => Subject::Case(one.id()),
-                    [] => {
-                        return Err(AppError::Input(format!(
-                            "the harness `{harness}` has no case named `{name}`"
-                        )));
-                    }
-                    _ => {
-                        return Err(AppError::Input(format!(
-                            "the harness `{harness}` has several cases named `{name}`; \
-                             a finding cannot say which"
-                        )));
-                    }
-                }
-            }
+            } => Subject::Case(self.case_named(p, context, harness, name).await?),
             SubjectInput::ChangeRequest(title) => {
                 Subject::ChangeRequest(self.change_request_titled(title).await?.id())
             }
         })
+    }
+
+    /// The Case named `name` in the Harness `harness` of the Context `context`. A name that two Cases of the
+    /// Harness share does not say which.
+    pub(super) async fn case_named(
+        &self,
+        p: &Project,
+        context: &str,
+        harness: &str,
+        name: &str,
+    ) -> Result<CaseId, AppError> {
+        let ctx = context_id(p, context)?;
+        let id = HarnessId::from_uuid(
+            self.asset(ctx, context, AssetKind::Harness, harness)
+                .await?,
+        );
+        let cases: Vec<_> = p
+            .context(ctx)
+            .and_then(|c| c.harness(id))
+            .map(|h| {
+                h.cases()
+                    .iter()
+                    .filter(|k| k.name().as_str() == name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        match cases.as_slice() {
+            [one] => Ok(one.id()),
+            [] => Err(AppError::Input(format!(
+                "the harness `{harness}` has no case named `{name}`"
+            ))),
+            _ => Err(AppError::Input(format!(
+                "the harness `{harness}` has several cases named `{name}`; \
+                 a reference cannot say which"
+            ))),
+        }
     }
 }

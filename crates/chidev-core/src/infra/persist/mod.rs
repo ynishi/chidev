@@ -71,7 +71,7 @@ pub(crate) fn decode_change_request(stored: u32, text: &str) -> Result<ChangeReq
 pub(crate) mod fixture {
     //! One Project, Pin and change requests that use every part of the stored format.
 
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     use uuid::Uuid;
 
@@ -79,7 +79,7 @@ pub(crate) mod fixture {
     use crate::domain::entity::context::Context;
     use crate::domain::entity::pin::Pin;
     use crate::domain::entity::project::Project;
-    use crate::domain::service::change_request::{decide, revisions_now};
+    use crate::domain::service::change_request::{decide, expectations_now};
     use crate::domain::service::pin::record;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
@@ -98,7 +98,7 @@ pub(crate) mod fixture {
     use crate::domain::vo::revision::Revision;
     use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
-    use crate::domain::vo::target::Target;
+    use crate::domain::vo::target::{ExpectKind, Target};
     use crate::domain::vo::title::Title;
 
     pub(crate) fn id(n: u128) -> Uuid {
@@ -203,11 +203,37 @@ pub(crate) mod fixture {
         Reasoned::new(Choice::try_from(c).unwrap(), Some(prose("because")))
     }
 
-    /// A change request without a Crux, and one with a Crux, a parent and a decision that asks a change.
+    /// A change request without a Crux that expects something of a target of every kind, and one with a Crux, a
+    /// parent and a decision that asks a change.
     pub(crate) fn change_requests(p: &Project) -> Vec<ChangeRequest> {
         let targets = [
             Target::Item(ItemId::from_uuid(id(31))),
             Target::Clause(ClauseId::from_uuid(id(21))),
+        ];
+        let of_every_kind = [
+            (Target::Project, ExpectKind::Change),
+            (
+                Target::Context(ContextId::from_uuid(id(11))),
+                ExpectKind::Change,
+            ),
+            (
+                Target::Contract(ContractId::from_uuid(id(20))),
+                ExpectKind::Keep,
+            ),
+            (
+                Target::Interface(InterfaceId::from_uuid(id(IFACE))),
+                ExpectKind::Change,
+            ),
+            (
+                Target::Harness(HarnessId::from_uuid(id(40))),
+                ExpectKind::Keep,
+            ),
+            (
+                Target::Clause(ClauseId::from_uuid(id(22))),
+                ExpectKind::Remove,
+            ),
+            (Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Change),
+            (Target::Case(CaseId::from_uuid(id(41))), ExpectKind::Change),
         ];
         let mut first = ChangeRequest::open(
             ChangeRequestId::from_uuid(id(60)),
@@ -217,7 +243,7 @@ pub(crate) mod fixture {
                 intent: Intent::KeepBehavior,
                 parent: None,
                 issuer: None,
-                lines: revisions_now(p, targets),
+                expects: expectations_now(p, of_every_kind),
                 crux: None,
                 addresses: Vec::new(),
             },
@@ -229,13 +255,16 @@ pub(crate) mod fixture {
                 CruxOption::new(
                     Choice::try_from("fail").unwrap(),
                     Some(prose("C2 says fail")),
-                    BTreeSet::new(),
+                    BTreeMap::new(),
                     Some(prose("callers check")),
                 ),
                 CruxOption::new(
                     Choice::try_from("zero").unwrap(),
                     None,
-                    BTreeSet::from([targets[1]]),
+                    BTreeMap::from([
+                        (targets[1], ExpectKind::Change),
+                        (Target::Item(ItemId::from_uuid(id(32))), ExpectKind::Remove),
+                    ]),
                     None,
                 ),
             ],
@@ -251,7 +280,7 @@ pub(crate) mod fixture {
                 intent: Intent::ChangeBehavior,
                 parent: Some(ChangeRequestId::from_uuid(id(60))),
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
-                lines: revisions_now(p, targets),
+                expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Change))),
                 crux: Some(crux),
                 addresses: vec![
                     FindingRef::new(
@@ -277,14 +306,17 @@ pub(crate) mod fixture {
                     intent: Intent::ChangeBehavior,
                     parent: None,
                     issuer: None,
-                    lines: revisions_now(p, [Target::Item(ItemId::from_uuid(id(31)))]),
+                    expects: expectations_now(
+                        p,
+                        [(Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Change)],
+                    ),
                     crux: Some(
                         Crux::new(
                             kind,
                             vec![CruxOption::new(
                                 Choice::try_from("a").unwrap(),
                                 None,
-                                BTreeSet::new(),
+                                BTreeMap::new(),
                                 None,
                             )],
                             None,
@@ -362,22 +394,47 @@ mod tests {
     }
 
     #[test]
-    fn a_change_request_that_asks_a_change_keeps_what_it_asked_and_an_old_document_is_refused() {
+    fn a_change_request_that_asks_for_more_keeps_what_it_asked_and_an_old_document_is_refused() {
         let p = project();
         let second = &change_requests(&p)[1];
-        assert_eq!(second.decided_changes().len(), 1);
-        // A document of the layout before decided changes names no `decided_changes`: it does not load.
-        let mut doc: serde_json::Value =
-            serde_json::from_str(&encode_change_request(second).unwrap()).unwrap();
-        doc.as_object_mut().unwrap().remove("decided_changes");
-        let refused = decode_change_request(CURRENT, &doc.to_string());
-        assert!(
-            matches!(&refused, Err(StoreError::Corrupt(why)) if why.contains("decided_changes"))
-        );
+        assert_eq!(second.decided_expects().len(), 2);
+        // A document of the layout before expectations names no `decided_expects`: it does not load, and says why.
+        for old in ["decided_expects", "expects"] {
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&encode_change_request(second).unwrap()).unwrap();
+            doc.as_object_mut().unwrap().remove(old);
+            let refused = decode_change_request(CURRENT, &doc.to_string());
+            assert!(
+                matches!(&refused, Err(StoreError::Corrupt(why)) if why.contains(old)),
+                "{old}: {refused:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_decided_change_the_decision_does_not_ask_is_corrupt() {
+    fn a_change_request_keeps_an_expectation_of_every_kind_of_target() {
+        let p = project();
+        let first = &change_requests(&p)[0];
+        assert_eq!(first.expects().len(), 8);
+        let text = encode_change_request(first).unwrap();
+        assert_eq!(&decode_change_request(CURRENT, &text).unwrap(), first);
+    }
+
+    #[test]
+    fn a_target_expected_twice_is_corrupt() {
+        let p = project();
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[0]).unwrap()).unwrap();
+        let again = doc["expects"][0].clone();
+        doc["expects"].as_array_mut().unwrap().push(again);
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("twice")
+        ));
+    }
+
+    #[test]
+    fn a_decided_expectation_the_decision_does_not_ask_is_corrupt() {
         let p = project();
         let mut doc: serde_json::Value =
             serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
@@ -385,6 +442,27 @@ mod tests {
         assert!(matches!(
             decode_change_request(CURRENT, &doc.to_string()),
             Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_project_stored_without_the_revisions_of_the_project_and_its_contexts_is_refused() {
+        let text = encode_project(&project()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["revision"], 3);
+        doc.as_object_mut().unwrap().remove("revision");
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("revision")
+        ));
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["contexts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("revision");
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("revision")
         ));
     }
 

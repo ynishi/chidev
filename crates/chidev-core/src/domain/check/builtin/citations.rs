@@ -13,7 +13,6 @@ use crate::domain::check::{Check, Finding};
 use crate::domain::service::cite::stale_cites;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::{ClauseId, ItemId};
-use crate::domain::vo::target::Target;
 
 /// A Case cites a definition that moved past the revision the Case recorded.
 #[derive(Debug, Clone, Copy)]
@@ -44,10 +43,7 @@ impl Check for StaleCite {
         // One finding per Case, so that the same Case is the same finding however many of its citations moved.
         let mut by_case = BTreeMap::new();
         for s in stale_cites(view.after) {
-            let what = match s.target {
-                Target::Item(_) => "item",
-                Target::Clause(_) => "clause",
-            };
+            let what = s.target.word();
             by_case
                 .entry(s.case)
                 .or_insert_with(Vec::new)

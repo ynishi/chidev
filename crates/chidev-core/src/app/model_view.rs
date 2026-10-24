@@ -16,11 +16,11 @@ use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{Subject, SubjectKind};
-use crate::domain::vo::target::Target;
 
 /// The version of the view. It is its own: the stored documents have a schema of their own, and the two change
-/// apart. A change that removes or renames a field is a new version; a field added is not.
-pub const VIEW_VERSION: u32 = 1;
+/// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
+/// request's `lines` became `expects`, each with a kind.)
+pub const VIEW_VERSION: u32 = 2;
 
 /// The model as an agent is shown it, read when the store stood at `store_revision`.
 #[derive(Debug, Clone, Serialize)]
@@ -127,19 +127,24 @@ pub struct ChangeRequestView {
     intent: &'static str,
     /// `open`, `decided` or `resolved`.
     state: &'static str,
-    /// The definitions it is about, each with the revision it had when the request was opened.
-    lines: Vec<LineView>,
+    /// What it expects of targets, each with the revision the target had when the request was opened.
+    expects: Vec<ExpectView>,
     /// The findings it deals with.
     addresses: Vec<AddressView>,
 }
 
-/// A definition a change request is about.
+/// What a change request expects of a target.
 #[derive(Debug, Clone, Serialize)]
-pub struct LineView {
-    /// `item` or `clause`.
+pub struct ExpectView {
+    /// The kind of the target: `project`, `context`, `contract`, `interface`, `harness`, `clause`, `item` or
+    /// `case`.
+    target: &'static str,
+    /// Its id; none for the Project.
+    id: Option<String>,
+    /// `change`, `remove` or `keep`.
     kind: &'static str,
-    id: String,
-    revision: u64,
+    /// The revision the target had when the expectation was recorded.
+    recorded: u64,
 }
 
 /// A finding a change request addresses.
@@ -281,20 +286,14 @@ impl ModelView {
                 title: c.title().to_string(),
                 intent: c.intent().word(),
                 state: c.state().word(),
-                lines: c
-                    .lines()
+                expects: c
+                    .expects()
                     .iter()
-                    .map(|(t, r)| match t {
-                        Target::Item(id) => LineView {
-                            kind: "item",
-                            id: id.to_string(),
-                            revision: r.number(),
-                        },
-                        Target::Clause(id) => LineView {
-                            kind: "clause",
-                            id: id.to_string(),
-                            revision: r.number(),
-                        },
+                    .map(|(t, e)| ExpectView {
+                        target: t.word(),
+                        id: t.as_uuid().map(|u| u.to_string()),
+                        kind: e.kind.word(),
+                        recorded: e.recorded.number(),
                     })
                     .collect(),
                 addresses: c
