@@ -8,8 +8,25 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- A change request keeps its lines and its Crux apart. Every line has to change
+  before it resolves, whatever the Crux decides (`Route` is gone: a request has
+  `lines` and an optional `crux`), so a settled change no longer disappears when
+  a question about a detail is decided with its default. Each Crux option may
+  name the `items` / `clauses` that must change when it is chosen; `cr_decide`
+  records their revisions, a later decision replaces them, and `cr_resolve`
+  needs them changed too. `cr_resolve` names what has not changed by name, as
+  `status.unapplied` does, instead of raw ids. `cr_open` answers with the lines
+  it recorded. The stored change-request document gains `decided_changes` and
+  per-option `changes`; an older database does not load (unreleased, no
+  migration).
+
 ### Added
 
+- `status.awaiting` lists the change requests whose Crux has no decision, and the
+  builtin check `cr.awaiting-decision` (note; put, resolve, check) reports them.
+  `cr.unapplied` now also covers the changes a decision asked.
 - External check execution through an application port and a Unix process adapter,
   with project registration, bounded JSON communication, timeout and cancellation
   cleanup, advisory results and mandatory change gates.
