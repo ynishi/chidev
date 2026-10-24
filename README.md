@@ -101,6 +101,32 @@ its former `item` / `clause` fields. Wrap those references in
 public re-export. See `app::subject` and `domain::check::FindingState` in the
 RustDoc for subject resolution and how a finding's state follows its requests.
 
+## Judged rule versions
+
+When an agent reads `check_rules`, each rule includes a `rule_digest`. The agent
+must return that exact value in its `finding_report`, including a report with no
+findings. A missing, null or malformed digest is refused as an input error, and
+one that differs from the current definition as a rule version mismatch; either
+way the report replaces nothing and records no run. The result carries the saved
+`rule_digest` and the freshness `state`.
+
+The digest covers only the fields that decide the answer: `id`, `subject`,
+`question`, `true` and `false` (see `JudgedRule::digest` in RustDoc). The
+summary, fix, `when` hints, hooks and default level describe, guide, schedule or
+weight the rule without changing what is a finding, so editing them, TOML
+comments or formatting, or a Policy level override leaves saved judgments
+current. Changing a deciding field makes the saved report and every finding
+stale. An App keeps its Registry for its lifetime; the CLI reloads
+configuration on each invocation.
+
+Database rows written before digests existed hold a null `rule_digest`: they
+stay readable and show as stale (`rule_digest: null`), since the definition they
+were judged on cannot be established after the fact. A matching digest still
+cannot make a report on an older model current.
+
+Rust callers supply `ReportInput.rule_digest` (a `String`) from
+`RuleToJudge.rule_digest`.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

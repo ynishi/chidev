@@ -129,6 +129,18 @@ pub enum AppError {
     /// No check has this id.
     #[error("no check is named `{0}`")]
     UnknownRule(String),
+    /// The caller judged a different definition; no result was replaced.
+    #[error(
+        "the rule `{rule}` changed: expected digest {expected}, reported {reported}; read check_rules again"
+    )]
+    RuleVersionMismatch {
+        /// Rule whose definition differs.
+        rule: String,
+        /// Current Registry definition digest.
+        expected: Digest,
+        /// Digest supplied by the caller.
+        reported: Digest,
+    },
     /// The check is not a judged rule, so an agent has nothing to report for it.
     #[error("the rule `{rule}` is {executor}, not judged: only a judged rule takes a report")]
     NotJudged {

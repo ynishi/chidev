@@ -20,6 +20,7 @@ use super::{App, AppError, SubjectInput, input};
 use crate::domain::check::{Executor, Finding, Hook, JudgedRule, Level};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
+use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, SubjectKind};
 
 /// Whether what an agent reported for a judged rule can still be relied on.
@@ -27,10 +28,9 @@ use crate::domain::vo::finding::{RuleId, SubjectKind};
 pub enum JudgedState {
     /// No agent has reported it: it was never judged.
     Never,
-    /// Reported, and the part of the model it judges is as it was.
+    /// Reported on this rule definition, and the part of the model it judges is as it was.
     Current,
-    /// Reported, but that part of the model has changed since (or the agent judged a model older than the one it
-    /// was kept against): to be judged again.
+    /// Reported on an unknown or different rule definition, a changed model scope, or an older model: judge again.
     Stale,
 }
 
@@ -50,6 +50,8 @@ impl JudgedState {
 pub struct RuleToJudge {
     /// The rule: the question and what answers it.
     pub rule: JudgedRule,
+    /// Definition version to echo in the report.
+    pub rule_digest: Digest,
     /// The level the policy gives it; a finding is reported at it or below.
     pub level: Level,
     /// Whether it was judged, and whether that still holds.
@@ -98,6 +100,8 @@ pub struct ReportedFinding {
 pub struct ReportInput {
     /// The rule (`judged.vague-clause`).
     pub rule: String,
+    /// The `rule_digest` check_rules gave for the rule, echoed back: it names the definition judged. Required.
+    pub rule_digest: String,
     /// The agent that judged.
     pub judge: String,
     /// The store revision of the view it judged from.
@@ -111,6 +115,10 @@ pub struct ReportInput {
 pub struct Reported {
     /// The rule.
     pub rule: RuleId,
+    /// The definition version the saved report was judged on.
+    pub rule_digest: Digest,
+    /// Whether the saved report is current or needs judgment again.
+    pub state: JudgedState,
     /// How many findings it now has.
     pub findings: usize,
     /// How many findings it had before, which the report replaced.
@@ -125,7 +133,11 @@ pub struct Reported {
 fn state_of(rule: &JudgedRule, report: Option<&JudgedReport>, view: &ModelView) -> JudgedState {
     match report {
         None => JudgedState::Never,
-        Some(r) if r.on_older_revision || view.scope_stamp(rule.subject()) != r.scope => {
+        Some(r)
+            if r.rule_digest != Some(rule.digest())
+                || r.on_older_revision
+                || view.scope_stamp(rule.subject()) != r.scope =>
+        {
             JudgedState::Stale
         }
         Some(_) => JudgedState::Current,
@@ -171,12 +183,14 @@ where
             let report = reports.iter().find(|x| x.rule == *r.id());
             rules.push(RuleToJudge {
                 rule: r.clone(),
+                rule_digest: r.digest(),
                 level,
                 state: state_of(r, report, &model),
                 judgment: report.map(|x| Judgment {
                     judge: x.judge.clone(),
                     read_at: x.read_at,
                     on_older_revision: x.on_older_revision,
+                    rule_digest: x.rule_digest,
                 }),
             });
         }
@@ -194,7 +208,10 @@ where
     /// level above the rule's (the policy decides how much a rule may matter, the agent only that a finding
     /// matters less) or `off`. A `read_at` older than the last change of the model is accepted, and the report is
     /// marked as made on an older revision, so that its findings show as stale: the agent judged a model that is no
-    /// longer there.
+    /// longer there. The rule_digest is required and must identify this Registry's definition; a missing,
+    /// malformed or mismatching digest refuses the report without replacing the previous judgment or
+    /// recording a run.
+    /// Registry definitions are fixed for this App; changing files does not reload them.
     pub async fn finding_report(&mut self, report: &ReportInput) -> Result<Reported, AppError> {
         let at = self.store.revision().await?;
         let model_at = self.store.model_revision().await?;
@@ -203,6 +220,18 @@ where
         let policy_level = self.registry.level_of(&id).unwrap_or(Level::Off);
         if policy_level == Level::Off {
             return Err(AppError::RuleOff(id.to_string()));
+        }
+        let rule_digest = Digest::restore(&report.rule_digest).ok_or_else(|| {
+            AppError::Input("rule_digest is required: 64 lower-case hexadecimal digits".into())
+        })?;
+        let expected = rule.digest();
+        if rule_digest != expected {
+            let reported = rule_digest;
+            return Err(AppError::RuleVersionMismatch {
+                rule: id.to_string(),
+                expected,
+                reported,
+            });
         }
         let judge = report.judge.trim();
         if judge.is_empty() {
@@ -291,10 +320,12 @@ where
             executor: Executor::Judged,
             judge: Some(judge.to_string()),
             external: None,
+            rule_digest: Some(rule_digest),
         };
         let stored = StoreRevision(at.0 + 1);
         let stored_report = JudgedReport {
             rule: id.clone(),
+            rule_digest: Some(rule_digest),
             judge: judge.to_string(),
             read_at,
             reported_at: stored,
@@ -303,6 +334,7 @@ where
             findings: kept,
         };
         let findings = stored_report.findings.len();
+        let state = state_of(&rule, Some(&stored_report), &view);
         let changes = Changes {
             judged: vec![stored_report],
             invocations: vec![invocation],
@@ -311,6 +343,8 @@ where
         self.store.commit(at, changes).await?;
         Ok(Reported {
             rule: id,
+            rule_digest,
+            state,
             findings,
             replaced: before,
             on_older_revision,
@@ -356,13 +390,16 @@ where
                 findings.push(
                     Finding::new(rule.descriptor(), f.subject, f.message.clone()).at_level(held),
                 );
-                let stale = r.on_older_revision || view.stamp_of(f.subject) != Some(f.stamp);
+                let stale = r.rule_digest != Some(rule.digest())
+                    || r.on_older_revision
+                    || view.stamp_of(f.subject) != Some(f.stamp);
                 meta.push((
                     stale,
                     Judgment {
                         judge: r.judge.clone(),
                         read_at: r.read_at,
                         on_older_revision: r.on_older_revision,
+                        rule_digest: r.rule_digest,
                     },
                 ));
             }

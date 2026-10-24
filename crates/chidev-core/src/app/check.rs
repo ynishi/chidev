@@ -238,6 +238,7 @@ impl Registry {
                 executor: Executor::Builtin,
                 judge: None,
                 external: None,
+                rule_digest: None,
             };
             for f in &found {
                 match f.level() {
@@ -273,8 +274,9 @@ pub struct Found {
     pub about: Option<String>,
     /// What it is about, by id.
     pub subject: Option<Subject>,
-    /// Whether it was judged on a model that has since changed (its subject changed or is gone, or the agent judged
-    /// an older model than the one it was kept against): a judged finding may no longer hold. Separate from
+    /// Whether its rule version is unknown or changed, or its model input has changed: the finding may no
+    /// longer hold. A judged finding also becomes stale when its subject is gone or it was reported on an
+    /// older model. External findings use the restricted input and configuration of their saved run. Separate from
     /// `state`, which is about the change requests that deal with it: a decided finding can be stale too. A
     /// builtin finding is run on the model as it is, so it is never stale.
     pub stale: bool,
@@ -291,6 +293,9 @@ pub struct Judgment {
     pub read_at: StoreRevision,
     /// Whether the model had changed since it read the view when it reported.
     pub on_older_revision: bool,
+    /// Definition version echoed by the judge. Only an old database row can lack it (a version cannot be
+    /// established after the fact), and it then reads as stale.
+    pub rule_digest: Option<crate::domain::vo::digest::Digest>,
 }
 
 /// What a use case did and what the checks found while it did it.

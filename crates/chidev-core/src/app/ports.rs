@@ -134,6 +134,8 @@ pub struct Invocation {
     pub judge: Option<String>,
     /// Evidence of an external process; absent for builtin and judged checks.
     pub external: Option<external::ExecutionEvidence>,
+    /// Definition digest echoed by the judge; none for other executors and for old database rows.
+    pub rule_digest: Option<Digest>,
 }
 
 /// One finding an agent reported for a judged rule.
@@ -156,6 +158,8 @@ pub struct JudgedFinding {
 pub struct JudgedReport {
     /// The rule.
     pub rule: RuleId,
+    /// The definition judged. Always set by a report; none only for an old database row, which reads as stale.
+    pub rule_digest: Option<Digest>,
     /// The agent that judged it.
     pub judge: String,
     /// The revision of the store the view the agent judged from was read at.

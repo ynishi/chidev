@@ -340,9 +340,19 @@ mod judged {
         }
     }
 
-    fn report(rule: &str, read_at: u64, findings: Vec<ReportedFinding>) -> ReportInput {
-        ReportInput {
+    /// Own the versions before mutating the App, as an agent does after reading check_rules.
+    fn reporter(
+        app: &App<SqliteStore, Counter>,
+    ) -> impl Fn(&str, u64, Vec<ReportedFinding>) -> ReportInput + use<> {
+        let versions: std::collections::BTreeMap<String, String> = app
+            .registry()
+            .judged()
+            .iter()
+            .map(|r| (r.id().to_string(), r.digest().to_string()))
+            .collect();
+        move |rule, read_at, findings| ReportInput {
             rule: rule.to_string(),
+            rule_digest: versions.get(rule).cloned().unwrap_or_default(),
             judge: "agent-1".to_string(),
             read_at,
             findings,
@@ -420,6 +430,7 @@ mod judged {
         }
 
         let mut app = app("refused").await;
+        let report = reporter(&app);
         let at = now(&app).await;
         let ok = || vec![finding(clause("C1"), "vague")];
         assert!(matches!(
@@ -513,6 +524,7 @@ mod judged {
             ],
         )
         .await;
+        let report = reporter(&app);
         let at = now(&app).await;
         let done = app
             .finding_report(&report(
@@ -600,6 +612,7 @@ mod judged {
     #[tokio::test]
     async fn a_finding_is_stale_once_its_subject_changed_and_a_rule_once_what_it_judges_did() {
         let mut app = app("stale").await;
+        let report = reporter(&app);
         let at = now(&app).await;
         app.finding_report(&report(
             "judged.vague",
@@ -659,6 +672,7 @@ mod judged {
             ],
         )
         .await;
+        let report = reporter(&app);
         let read = now(&app).await;
         // two reports on the same view: the first is a commit, but it does not change the model
         for id in ["judged.vague", "judged.other"] {
@@ -692,6 +706,7 @@ mod judged {
     #[tokio::test]
     async fn a_change_request_can_address_a_judged_finding() {
         let mut app = app("addressed").await;
+        let report = reporter(&app);
         let at = now(&app).await;
         app.finding_report(&report(
             "judged.vague",

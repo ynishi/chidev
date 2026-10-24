@@ -98,6 +98,8 @@ enum Op {
 #[derive(Debug, Deserialize)]
 struct ReportDto {
     rule: String,
+    /// The rule digest returned by check_rules, echoed back. Required: a missing or null one is refused.
+    rule_digest: String,
     /// The agent that judged.
     judge: String,
     /// The store revision of the view it judged from (`store_revision` of `check_rules`).
@@ -175,6 +177,7 @@ impl TryFrom<ReportDto> for ReportInput {
     fn try_from(r: ReportDto) -> Result<ReportInput, AppError> {
         Ok(ReportInput {
             rule: r.rule,
+            rule_digest: r.rule_digest,
             judge: r.judge,
             read_at: r.read_at,
             findings: r
@@ -288,7 +291,7 @@ struct FindingOut<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     about: Option<&'a str>,
-    /// Judged on a model that has since changed: it may no longer hold. Only a judged finding can be.
+    /// A saved finding whose input or judged rule changed, or whose judged rule version is unknown.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stale: bool,
     /// Who judged it and on what; only a judged finding has it.
@@ -300,6 +303,8 @@ struct FindingOut<'a> {
 #[derive(Debug, Serialize)]
 struct JudgmentOut<'a> {
     judge: &'a str,
+    /// The rule version judged; null only for an old database row (shown stale).
+    rule_digest: Option<String>,
     read_at: u64,
     on_older_revision: bool,
 }
@@ -316,6 +321,7 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
             stale: f.stale,
             judged: f.judgment.as_ref().map(|j| JudgmentOut {
                 judge: &j.judge,
+                rule_digest: j.rule_digest.map(|digest| digest.to_string()),
                 read_at: j.read_at.0,
                 on_older_revision: j.on_older_revision,
             }),
@@ -364,6 +370,8 @@ struct CheckListOut {
 #[derive(Debug, Serialize)]
 struct RuleOut<'a> {
     id: &'a str,
+    /// The current parsed rule definition, echoed back by finding_report.
+    rule_digest: String,
     summary: &'a str,
     /// The kind of thing it judges: a finding names a subject of this kind (`project`: none).
     subject: &'static str,
@@ -378,7 +386,7 @@ struct RuleOut<'a> {
     false_when: &'a str,
     fix: &'a str,
     when: &'a [String],
-    /// `never` (not judged yet), `current` or `stale` (the model it judged has changed).
+    /// `never`, `current`, or `stale` (the rule/model changed, or the reported rule version is unknown).
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     judged: Option<JudgmentOut<'a>>,
@@ -389,6 +397,7 @@ impl<'a> RuleOut<'a> {
         let d = r.rule.descriptor();
         RuleOut {
             id: d.id.as_str(),
+            rule_digest: r.rule_digest.to_string(),
             summary: &d.summary,
             subject: r.rule.subject().word(),
             hooks: d.hooks.iter().map(|h| h.word()).collect(),
@@ -402,6 +411,7 @@ impl<'a> RuleOut<'a> {
             state: r.state.word(),
             judged: r.judgment.as_ref().map(|j| JudgmentOut {
                 judge: &j.judge,
+                rule_digest: j.rule_digest.map(|digest| digest.to_string()),
                 read_at: j.read_at.0,
                 on_older_revision: j.on_older_revision,
             }),
@@ -423,6 +433,8 @@ struct CheckRulesOut<'a> {
 struct ReportOut<'a> {
     op: &'static str,
     rule: &'a str,
+    rule_digest: String,
+    state: &'static str,
     findings: usize,
     /// How many findings the report replaced.
     replaced: usize,
@@ -860,6 +872,8 @@ where
             to_value(&ReportOut {
                 op: "finding_report",
                 rule: done.rule.as_str(),
+                rule_digest: done.rule_digest.to_string(),
+                state: done.state.word(),
                 findings: done.findings,
                 replaced: done.replaced,
                 on_older_revision: done.on_older_revision,

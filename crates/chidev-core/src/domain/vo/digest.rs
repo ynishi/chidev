@@ -1,11 +1,13 @@
-//! The fingerprint of the code a Pin accepts. The code is a cache kept outside the domain, so a Pin can only
-//! record what its bytes were; the assets, whose content the domain holds, count their changes in a `Revision`.
+//! A SHA-256 fingerprint of bytes, used in two places. A Pin records the digest of the code it accepts: the code
+//! is a cache kept outside the domain, so a Pin can only record what its bytes were (the assets, whose content
+//! the domain holds, count their changes in a `Revision`). A judged rule's digest identifies the fields of its
+//! definition that decide a judgment, so a saved judgment can tell whether it was made on this definition.
 
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
 
-/// The SHA-256 of some bytes. The bytes are not normalised (no trimming, no line-ending change): a digest that
+/// The SHA-256 of some bytes (pinned code, or the deciding fields of a judged rule). The bytes are not normalised (no trimming, no line-ending change): a digest that
 /// forgave white space would say "unchanged" about a text that a person did change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Digest([u8; 32]);

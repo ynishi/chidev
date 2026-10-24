@@ -158,8 +158,13 @@ async fn fixture(registry: Registry) -> (App<SqliteStore, Counter>, PathBuf) {
 async fn report_every_subject(app: &mut App<SqliteStore, Counter>) {
     for (kind, subject) in subjects() {
         let at = app.store().revision().await.unwrap().0;
+        let rule = format!("judged.{kind}");
+        let rule_digest = app.check_rules(None, Some(&rule)).await.unwrap().rules[0]
+            .rule_digest
+            .to_string();
         app.finding_report(&ReportInput {
-            rule: format!("judged.{kind}"),
+            rule,
+            rule_digest,
             judge: "reviewer".into(),
             read_at: at,
             findings: vec![ReportedFinding {

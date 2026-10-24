@@ -434,22 +434,36 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
             "{{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
             "\"clauses\":[{{\"label\":\"C1\",\"text\":\"a total should be rounded\"}}]}}\n",
             "{{\"op\":\"check_rules\"}}\n",
-            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"judge\":\"agent-1\",\"read_at\":3,",
+            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"rule_digest\":\"RULE_DIGEST\",\"judge\":\"agent-1\",\"read_at\":3,",
             "\"findings\":[{{\"subject\":{clause},\"message\":\"`should` states no condition\"}}]}}\n",
             "{{\"op\":\"check\"}}\n",
             "{{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
             "\"clauses\":[{{\"label\":\"C1\",\"text\":\"a total is rounded to whole cents\"}}]}}\n",
             "{{\"op\":\"check\"}}\n",
             "{{\"op\":\"status\"}}\n",
-            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"judge\":\"agent-1\",\"read_at\":5,\"findings\":[]}}\n",
+            "{{\"op\":\"finding_report\",\"rule\":\"judged.vague-clause\",\"rule_digest\":\"RULE_DIGEST\",\"judge\":\"agent-1\",\"read_at\":5,\"findings\":[]}}\n",
             "{{\"op\":\"check\"}}\n",
             "{{\"op\":\"status\"}}\n",
-            "{{\"op\":\"finding_report\",\"rule\":\"cite.stale\",\"judge\":\"agent-1\",\"read_at\":6,\"findings\":[]}}\n",
+            "{{\"op\":\"finding_report\",\"rule\":\"cite.stale\",\"rule_digest\":\"RULE_DIGEST\",\"judge\":\"agent-1\",\"read_at\":6,\"findings\":[]}}\n",
             "{{\"op\":\"check_rules\",\"hook\":\"pin\"}}\n",
         ),
         clause = clause
     );
-    let (results, code, stderr) = exec_in(&dir, &ops);
+    // Feed the exact digest the command returned, so the test exercises the round trip.
+    let lines: Vec<_> = ops.lines().collect();
+    let (mut results, setup_code, setup_stderr) = exec_in(&dir, &lines[..4].join("\n"));
+    assert_eq!(setup_code, Some(0), "{setup_stderr}\n{results:#?}");
+    let digest = at(&results, 4)["rules"][0]["rule_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(digest.len(), 64);
+    let rest = lines[4..].join("\n").replace("RULE_DIGEST", &digest);
+    let (mut later, code, stderr) = exec_in(&dir, &rest);
+    for result in &mut later {
+        result["line"] = serde_json::json!(result["line"].as_u64().unwrap() + 4);
+    }
+    results.extend(later);
     assert_eq!(code, Some(1), "{results:#?}\n{stderr}");
 
     // the rule and a view of the model, read at revision 3
@@ -479,6 +493,8 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     // reported: a finding like the builtin ones, with who judged it
     assert_eq!(at(&results, 5)["ok"], true, "{:#?}", at(&results, 5));
     assert_eq!(at(&results, 5)["findings"], 1);
+    assert_eq!(at(&results, 5)["rule_digest"], digest);
+    assert_eq!(at(&results, 5)["state"], "current");
     let first = judged(at(&results, 6));
     assert_eq!(first.len(), 1);
     assert_eq!(first[0]["level"], "warning");
@@ -486,6 +502,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     assert_eq!(first[0]["about"], "rounding C1");
     assert_eq!(first[0]["judged"]["judge"], "agent-1");
     assert_eq!(first[0]["judged"]["read_at"], 3);
+    assert_eq!(first[0]["judged"]["rule_digest"], digest);
     assert_eq!(first[0].get("stale"), None);
 
     // the clause is reworded: the finding is still there, stale, and status says what to judge again
@@ -742,4 +759,210 @@ fn missing_address_targets_are_rejected_before_the_request_is_saved() {
         last["model"]["change_requests"].as_array().unwrap().len(),
         1
     );
+}
+
+fn versioned_rule_project(name: &str) -> (PathBuf, String, u64) {
+    let dir = fresh_dir(name);
+    std::fs::create_dir_all(dir.join("checks/judged")).unwrap();
+    std::fs::write(dir.join("checks/judged/rule.toml"), VAGUE_RULE).unwrap();
+    let (results, code, stderr) =
+        exec_in(&dir, &format!("{CHECK_OPS}{{\"op\":\"check_rules\"}}\n"));
+    assert_eq!(code, Some(0), "{stderr}\n{results:#?}");
+    let view = results.last().unwrap();
+    let digest = view["rules"][0]["rule_digest"].as_str().unwrap().to_owned();
+    (dir, digest, view["store_revision"].as_u64().unwrap())
+}
+
+fn judged_report(digest: Option<Value>, read_at: u64, findings: Vec<Value>) -> Value {
+    let mut report = serde_json::json!({
+        "op":"finding_report", "rule":"judged.vague-clause", "judge":"reviewer", "read_at":read_at,
+        "findings":findings
+    });
+    if let Some(digest) = digest {
+        report["rule_digest"] = digest;
+    }
+    report
+}
+
+fn clause_finding() -> Value {
+    serde_json::json!({
+        "subject":{"clause":{"context":"pricing","contract":"rounding","label":"C1"}},
+        "message":"requires a precise condition"
+    })
+}
+
+fn run_values(dir: &Path, ops: &[Value]) -> (Vec<Value>, Option<i32>, String) {
+    let lines = ops
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    exec_in(dir, &lines)
+}
+
+#[test]
+fn a_changed_rule_stales_findings_and_empty_reports_and_refuses_wrong_versions_atomically() {
+    use serde_json::json;
+    let (dir, digest, read_at) = versioned_rule_project("rule-version-change");
+    let (first, code, stderr) = run_values(
+        &dir,
+        &[
+            judged_report(Some(json!(digest)), read_at, vec![clause_finding()]),
+            json!({"op":"check_rules"}),
+            json!({"op":"check"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{first:#?}");
+    assert_eq!(first[0]["rule_digest"], digest);
+    assert_eq!(first[0]["state"], "current");
+    assert_eq!(first[1]["rules"][0]["state"], "current");
+    assert_eq!(judged(&first[2])[0].get("stale"), None);
+    let saved_at = first[1]["store_revision"].as_u64().unwrap();
+    let changed = VAGUE_RULE.replace("Can a case be written", "Must a case be written");
+    std::fs::write(dir.join("checks/judged/rule.toml"), &changed).unwrap();
+    let (changed_view, code, stderr) = run_values(
+        &dir,
+        &[
+            json!({"op":"check_rules"}),
+            json!({"op":"check"}),
+            json!({"op":"status"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{changed_view:#?}");
+    assert_eq!(changed_view[0]["store_revision"], saved_at);
+    let changed_digest = changed_view[0]["rules"][0]["rule_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(changed_digest, digest);
+    assert_eq!(changed_view[0]["rules"][0]["state"], "stale");
+    assert_eq!(changed_view[0]["rules"][0]["judged"]["rule_digest"], digest);
+    assert_eq!(judged(&changed_view[1])[0]["stale"], true);
+    assert_eq!(judged(&changed_view[1])[0]["judged"]["rule_digest"], digest);
+    assert_eq!(changed_view[2]["judged"][0]["state"], "stale");
+
+    for wrong in [
+        digest.clone(),
+        String::new(),
+        "invalid".into(),
+        changed_digest.to_uppercase(),
+        "0".repeat(63),
+    ] {
+        let (results, code, stderr) = run_values(
+            &dir,
+            &[
+                judged_report(Some(json!(wrong)), saved_at, vec![]),
+                json!({"op":"check_rules"}),
+                json!({"op":"check"}),
+            ],
+        );
+        assert_eq!(code, Some(1), "{stderr}\n{results:#?}");
+        assert_eq!(results[0]["ok"], false);
+        assert_eq!(results[1]["store_revision"], saved_at);
+        assert_eq!(results[1]["rules"][0]["judged"]["rule_digest"], digest);
+        assert_eq!(judged(&results[2]).len(), 1);
+    }
+
+    let (empty, code, stderr) = run_values(
+        &dir,
+        &[
+            judged_report(Some(json!(changed_digest)), saved_at, vec![]),
+            json!({"op":"check_rules"}),
+            json!({"op":"check"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{empty:#?}");
+    assert_eq!(empty[0]["state"], "current");
+    assert_eq!(empty[0]["replaced"], 1);
+    assert_eq!(empty[1]["rules"][0]["state"], "current");
+    assert!(judged(&empty[2]).is_empty());
+    std::fs::write(
+        dir.join("checks/judged/rule.toml"),
+        changed.replace("Must a case be written", "Could a case be written"),
+    )
+    .unwrap();
+    let (results, code, stderr) =
+        run_values(&dir, &[json!({"op":"check_rules"}), json!({"op":"check"})]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(results[0]["rules"][0]["state"], "stale");
+    assert!(judged(&results[1]).is_empty());
+}
+
+#[test]
+fn formatting_descriptive_fields_and_policy_levels_do_not_invalidate_a_judgment() {
+    use serde_json::json;
+    let (dir, digest, read_at) = versioned_rule_project("rule-version-formatting");
+    let (results, code, stderr) = run_values(
+        &dir,
+        &[judged_report(
+            Some(json!(digest)),
+            read_at,
+            vec![clause_finding()],
+        )],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{results:#?}");
+    let formatted = format!(
+        "# A comment does not change the parsed rule.\n{}\n",
+        VAGUE_RULE
+            .replace("hooks = [\"put\", \"check\"]", "hooks = [ \"check\" ]")
+            .replace(
+                "a clause too vague",
+                "a reworded summary of a clause too vague"
+            )
+            .replace("reword it with", "a reworded fix with")
+            .replace("[\"should\"]", "[\"must\"]")
+            .replace("level = \"warning\"", "level = \"error\"")
+    );
+    std::fs::write(dir.join("checks/judged/rule.toml"), formatted).unwrap();
+    std::fs::write(
+        dir.join("checks.toml"),
+        "[checks.\"judged.vague-clause\"]\nlevel='note'\n",
+    )
+    .unwrap();
+    let (results, code, stderr) = run_values(
+        &dir,
+        &[
+            json!({"op":"check_rules"}),
+            json!({"op":"check"}),
+            json!({"op":"status"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{results:#?}");
+    assert_eq!(results[0]["rules"][0]["rule_digest"], digest);
+    assert_eq!(results[0]["rules"][0]["state"], "current");
+    assert_eq!(results[0]["rules"][0]["level"], "note");
+    assert_eq!(judged(&results[1])[0]["level"], "note");
+    assert_eq!(judged(&results[1])[0].get("stale"), None);
+    assert_eq!(results[2]["judged"], json!([]));
+}
+
+#[test]
+fn a_missing_null_or_empty_rule_version_is_refused_and_replaces_nothing() {
+    use serde_json::json;
+    let (dir, digest, read_at) = versioned_rule_project("rule-version-required");
+    let (saved, code, stderr) = run_values(
+        &dir,
+        &[
+            judged_report(Some(json!(digest)), read_at, vec![clause_finding()]),
+            json!({"op":"check_rules"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{stderr}\n{saved:#?}");
+    let at = saved[1]["store_revision"].as_u64().unwrap();
+    for supplied in [None, Some(Value::Null), Some(json!(""))] {
+        let (results, code, stderr) = run_values(
+            &dir,
+            &[
+                judged_report(supplied, at, vec![]),
+                json!({"op":"check_rules"}),
+                json!({"op":"check"}),
+            ],
+        );
+        assert_eq!(code, Some(1), "{stderr}\n{results:#?}");
+        assert_eq!(results[0]["ok"], false);
+        assert_eq!(results[1]["store_revision"], at);
+        assert_eq!(results[1]["rules"][0]["state"], "current");
+        assert_eq!(results[1]["rules"][0]["judged"]["rule_digest"], digest);
+        assert_eq!(judged(&results[2]).len(), 1);
+    }
 }

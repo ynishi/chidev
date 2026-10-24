@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use super::descriptor::{Descriptor, Executor};
 use super::level::{Hook, Level};
+use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
 
 /// The prefix of a judged rule's id; no builtin check has it, so the two never share an id.
@@ -138,6 +139,35 @@ impl JudgedRule {
         })
     }
 
+    /// Identifies what decides the judgment's answer, independently of its source file or effective policy.
+    ///
+    /// Version 2 hashes length-prefixed UTF-8 fields in this order: `chidev.judged-rule/v2`, id, subject,
+    /// question, true, false. A field is its decimal byte length, `:`, then its bytes; text is exact.
+    /// The summary, fix, `when` hints, hooks and default level are left out: they describe, guide, schedule or
+    /// weight the rule but do not change what is a finding, so editing them must not make saved judgments stale
+    /// (policy level overrides are excluded for the same reason). Comments and TOML formatting do not matter.
+    /// Changing this encoding requires a new format marker so existing records cannot silently acquire another
+    /// meaning.
+    pub fn digest(&self) -> Digest {
+        fn append(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend_from_slice(value.len().to_string().as_bytes());
+            bytes.push(b':');
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        let mut bytes = Vec::new();
+        for value in [
+            "chidev.judged-rule/v2",
+            self.id().as_str(),
+            self.subject().word(),
+            self.question(),
+            self.true_when(),
+            self.false_when(),
+        ] {
+            append(&mut bytes, value);
+        }
+        Digest::of(&bytes)
+    }
+
     /// What it says about itself, as every check does.
     pub fn descriptor(&self) -> &Descriptor {
         &self.descriptor
@@ -262,5 +292,63 @@ mod tests {
         d.subject = SubjectKind::Project;
         let project = JudgedRule::new(d).unwrap();
         assert!(project.admits(None) && !project.admits(Some(clause)));
+    }
+    #[test]
+    fn every_deciding_field_participates_and_the_others_do_not() {
+        let baseline = JudgedRule::new(draft()).unwrap().digest();
+        let deciding: [fn(&mut JudgedDraft); 5] = [
+            |d| d.id = RuleId::try_from("judged.other").unwrap(),
+            |d| d.subject = SubjectKind::Project,
+            |d| d.question.push('!'),
+            |d| d.true_when.push('!'),
+            |d| d.false_when.push('!'),
+        ];
+        for change in deciding {
+            let mut d = draft();
+            change(&mut d);
+            assert_ne!(JudgedRule::new(d).unwrap().digest(), baseline);
+        }
+        let others: [fn(&mut JudgedDraft); 6] = [
+            |d| d.summary.push('!'),
+            |d| d.fix.push('!'),
+            |d| d.when[0].push('!'),
+            |d| d.when.push("must".into()),
+            |d| d.hooks.push(Hook::Resolve),
+            |d| d.level = Level::Error,
+        ];
+        for change in others {
+            let mut d = draft();
+            change(&mut d);
+            assert_eq!(JudgedRule::new(d).unwrap().digest(), baseline);
+        }
+    }
+
+    #[test]
+    fn field_boundaries_are_unambiguous_and_text_is_exact() {
+        let mut a = draft();
+        let mut b = a.clone();
+        a.question = "ab".into();
+        a.true_when = "c".into();
+        b.question = "a".into();
+        b.true_when = "bc".into();
+        assert_ne!(
+            JudgedRule::new(a).unwrap().digest(),
+            JudgedRule::new(b).unwrap().digest()
+        );
+        let a = draft();
+        let mut b = a.clone();
+        b.question.push(' ');
+        assert_ne!(
+            JudgedRule::new(a).unwrap().digest(),
+            JudgedRule::new(b).unwrap().digest()
+        );
+    }
+
+    #[test]
+    fn definition_digest_format_v2_is_stable() {
+        assert_eq!(
+            JudgedRule::new(draft()).unwrap().digest().to_string(),
+            "351f833b6ac8496d6f6c5d81605a1550e774c6037a8f436f080d206c565533bd"
+        );
     }
 }
