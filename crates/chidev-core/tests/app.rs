@@ -35,6 +35,16 @@ async fn app(name: &str) -> App<SqliteStore, Counter> {
     )
 }
 
+/// What a refusal says: the messages of its diagnostics, one per line.
+async fn said(app: &App<SqliteStore, Counter>, err: &AppError) -> String {
+    app.diagnose(err)
+        .await
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[tokio::test]
 async fn a_project_is_made_once() {
     let mut app = app("init").await;
@@ -220,7 +230,7 @@ async fn the_same_removal_as_a_single_put_is_refused_naming_the_case_and_the_cla
         .put_contract("core", "stock", "Stock", &clauses(&["C1"]))
         .await
         .unwrap_err();
-    let text = err.to_string();
+    let text = said(&app, &err).await;
     assert!(
         text.contains("stock-tests release_frees") && text.contains("stock C7"),
         "{text}"
@@ -245,10 +255,10 @@ async fn a_refused_change_set_names_every_problem_and_keeps_nothing() {
         panic!("two problems expected: {err}");
     };
     assert_eq!(all.len(), 2);
-    let text = err.to_string();
+    let text = said(&app, &err).await;
     assert!(text.contains("case stock-tests release_frees"), "{text}");
-    assert!(text.contains("the item stock fn release()"), "{text}");
-    assert!(text.contains("the clause stock C7"), "{text}");
+    assert!(text.contains("the item `stock fn release()`"), "{text}");
+    assert!(text.contains("the clause `stock C7`"), "{text}");
     assert_eq!(app.store().revision().await.unwrap(), before);
 }
 
@@ -352,9 +362,11 @@ async fn a_pin_with_nothing_that_checks_it_names_the_interface_not_its_id() {
     .unwrap();
     let err = app.pin("core", "stock", "code").await.unwrap_err();
     assert_eq!(
-        err.to_string(),
-        "no case cites an item of the interface `stock` (context `core`), so nothing checked the code to pin"
+        said(&app, &err).await,
+        "no case cites an item of `interface stock`, so nothing checked the code to pin"
     );
+    let diagnostics = app.diagnose(&err).await;
+    assert_eq!(diagnostics[0].code, "pin.unchecked");
 }
 
 mod checks {
@@ -1091,5 +1103,230 @@ mod judged {
             pin.message,
             "the code was pinned against what has moved: contract `stack` changed"
         );
+    }
+}
+
+mod diagnostics {
+    //! A refusal as diagnostics: the names the store has, the names that are close to one that does not exist, and
+    //! the operations that would mend it.
+
+    use chidev_core::app::{
+        App, ChangeRequestInput, ChangeSetInput, ClauseRef, DecisionMakerInput, Diagnostic, Intent,
+        PutInput, ResolutionInput, TargetInput,
+    };
+    use chidev_core::infra::sqlite::SqliteStore;
+    use serde_json::json;
+
+    use super::{Counter, app, clauses};
+
+    fn open(title: &str, parent: Option<&str>) -> ChangeRequestInput {
+        ChangeRequestInput {
+            title: title.to_string(),
+            situation: None,
+            intent: Intent::ChangeBehavior,
+            parent: parent.map(ToString::to_string),
+            issuer: None,
+            targets: Vec::new(),
+            keep: Vec::new(),
+            crux: None,
+            assumptions: Vec::new(),
+            addresses: Vec::new(),
+        }
+    }
+
+    fn alice() -> DecisionMakerInput {
+        DecisionMakerInput::Person("alice".to_string())
+    }
+
+    /// A project with the Context `core` and the Contract `stock`, in a database of its own.
+    async fn project() -> App<SqliteStore, Counter> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut app = app(&format!("diagnostics-{n}")).await;
+        app.init().await.unwrap();
+        app.add_context("core", &[]).await.unwrap();
+        app.put_contract("core", "stock", "Stock", &clauses(&["C1"]))
+            .await
+            .unwrap();
+        app
+    }
+
+    async fn only(app: &App<SqliteStore, Counter>, err: chidev_core::app::AppError) -> Diagnostic {
+        let mut all = app.diagnose(&err).await;
+        assert_eq!(all.len(), 1, "{all:#?}");
+        all.remove(0)
+    }
+
+    #[tokio::test]
+    async fn a_change_request_title_one_letter_off_has_the_right_one_suggested() {
+        let mut app = project().await;
+        app.open_change_request(&open("Round halves up", None))
+            .await
+            .unwrap();
+        let err = app
+            .resolve_change_request("Round halfs up", &ResolutionInput::Done, "r", &alice())
+            .await
+            .unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "input.unknown-name");
+        assert_eq!(d.did_you_mean, ["Round halves up"]);
+        assert_eq!(d.values["kind"], "change request");
+        assert_eq!(d.values["name"], "Round halfs up");
+        assert_eq!(d.message, "no change request is named `Round halfs up`");
+    }
+
+    #[tokio::test]
+    async fn a_change_set_for_an_unopened_change_request_suggests_opening_it() {
+        let mut app = project().await;
+        app.open_change_request(&open("Something else entirely", None))
+            .await
+            .unwrap();
+        let set = ChangeSetInput {
+            change_request: Some("Not opened".to_string()),
+            puts: vec![PutInput::Context {
+                name: "extra".to_string(),
+                uses: Vec::new(),
+            }],
+            retires: Vec::new(),
+        };
+        let err = app.apply_change_set(&set).await.unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "input.unknown-name");
+        assert!(d.did_you_mean.is_empty());
+        assert_eq!(d.suggestions.len(), 1);
+        assert_eq!(
+            d.suggestions[0].op,
+            json!({"op": "cr_open", "title": "Not opened", "intent": "change_behavior"})
+        );
+        assert_eq!(d.suggestions[0].applicability, "review");
+    }
+
+    #[tokio::test]
+    async fn a_name_that_is_not_a_context_clause_or_asset_has_the_names_that_exist() {
+        let mut app = project().await;
+        let err = app
+            .put_contract("cor", "stock", "Stock", &clauses(&["C1"]))
+            .await
+            .unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "input.unknown-name");
+        assert_eq!(d.did_you_mean, ["core"]);
+        assert_eq!(
+            d.suggestions[0].op,
+            json!({"op": "context_add", "name": "cor"})
+        );
+
+        let err = app.status().await.and_then(|_| {
+            Err::<(), _>(chidev_core::app::AppError::UnknownAsset {
+                context: "core".to_string(),
+                kind: "contract",
+                name: "stok".to_string(),
+            })
+        });
+        let d = only(&app, err.unwrap_err()).await;
+        assert_eq!(d.did_you_mean, ["stock"]);
+        assert_eq!(d.subjects[0].name, "core");
+
+        let target = TargetInput::Clause(ClauseRef {
+            context: Some("core".to_string()),
+            contract: "stock".to_string(),
+            label: "C2".to_string(),
+        });
+        let mut wants = open("Needs a clause", None);
+        wants.targets.push(target);
+        let err = app.open_change_request(&wants).await.unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.values["kind"], "clause");
+        assert_eq!(d.did_you_mean, ["C1"]);
+    }
+
+    #[tokio::test]
+    async fn a_parent_with_open_parts_is_refused_naming_the_parts_and_how_to_resolve_them() {
+        let mut app = project().await;
+        app.open_change_request(&open("Parent", None))
+            .await
+            .unwrap();
+        app.open_change_request(&open("Part one", Some("Parent")))
+            .await
+            .unwrap();
+        let err = app
+            .resolve_change_request("Parent", &ResolutionInput::Done, "r", &alice())
+            .await
+            .unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "cr.parent-open");
+        assert_eq!(
+            d.message,
+            "the change request `Parent` has 1 part(s) that are not resolved: `Part one`"
+        );
+        assert_eq!(d.values["count"], 1);
+        assert_eq!(d.suggestions[0].op["op"], "cr_resolve");
+        assert_eq!(d.suggestions[0].op["title"], "Part one");
+        assert_eq!(d.suggestions[0].applicability, "placeholder");
+    }
+
+    #[tokio::test]
+    async fn a_resolved_change_request_is_refused_and_reopening_is_suggested() {
+        let mut app = project().await;
+        app.open_change_request(&open("Done already", None))
+            .await
+            .unwrap();
+        app.resolve_change_request("Done already", &ResolutionInput::Done, "r", &alice())
+            .await
+            .unwrap();
+        let err = app
+            .resolve_change_request("Done already", &ResolutionInput::Done, "r", &alice())
+            .await
+            .unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "cr.already-resolved");
+        assert_eq!(d.subjects[0].name, "Done already");
+        assert_eq!(d.suggestions[0].op["op"], "cr_reopen");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_without_a_rule_yet_is_still_a_diagnostic_and_says_what_it_was() {
+        let mut app = project().await;
+        let err = app
+            .put_contract("core", "dup", "Dup", &clauses(&["C1", "C1"]))
+            .await
+            .unwrap_err();
+        let d = only(&app, err).await;
+        assert_eq!(d.code, "domain.unmapped");
+        assert!(d.message.contains("twice"), "{}", d.message);
+        assert!(
+            d.values["error"]
+                .as_str()
+                .unwrap()
+                .contains("DuplicateLabel")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rules_are_listed_and_each_is_explained() {
+        let app = project().await;
+        let all = app.rules();
+        assert!(
+            all.iter()
+                .any(|r| r.id == "cr.parent-open" && r.kind == "invariant")
+        );
+        assert!(
+            all.iter()
+                .any(|r| r.id == "input.unknown-name" && r.kind == "input")
+        );
+        assert!(
+            all.iter()
+                .any(|r| r.id == "cite.stale" && r.kind == "check")
+        );
+        let one = app.explain("cr.parent-open").unwrap();
+        assert_eq!(one.values, ["count"]);
+        assert!(one.example.is_some());
+        assert!(one.help.contains("Resolve each part"));
+        let check = app.explain("cite.stale").unwrap();
+        assert_eq!(check.kind, "check");
+        assert_eq!(check.executor, Some("builtin"));
+        let err = app.explain("cr.parent-opn").unwrap_err();
+        let d = app.diagnose(&err).await;
+        assert_eq!(d[0].did_you_mean, ["cr.parent-open"]);
     }
 }

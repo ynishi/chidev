@@ -202,6 +202,17 @@ impl Registry {
             .map(|d| d.executor)
     }
 
+    /// The help of the check `id`; none when there is no such check.
+    pub fn help_of(&self, id: &RuleId) -> Option<&str> {
+        self.checks
+            .iter()
+            .map(|c| c.descriptor())
+            .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .chain(self.external.iter().map(ExternalRule::descriptor))
+            .find(|d| d.id == *id)
+            .map(|d| d.help.as_ref())
+    }
+
     /// The level the policy gives the check `id`.
     pub fn level_of(&self, id: &RuleId) -> Option<Level> {
         self.policy.of(id).map(|r| r.level)
@@ -270,6 +281,8 @@ pub struct Found {
     pub state: FindingState,
     /// What is wrong.
     pub message: String,
+    /// Why the rule holds and what to do about a finding of it: the help of the rule's descriptor.
+    pub help: String,
     /// What it is about, in words; none for the Project as a whole.
     pub about: Option<String>,
     /// What it is about, by id.

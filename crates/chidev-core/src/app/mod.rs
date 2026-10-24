@@ -17,6 +17,11 @@ pub use self::change_set::{
     RetireInput,
 };
 mod check;
+mod diagnostic;
+pub use self::diagnostic::{
+    DiagSubject, Diagnostic, Names, RuleCard, RuleExplanation, Suggestion, did_you_mean,
+    locate_field,
+};
 mod external;
 pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
 use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
@@ -61,6 +66,7 @@ use crate::domain::service::change_request::{
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
+use crate::domain::violation::Violation;
 use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::choice::Choice;
@@ -123,32 +129,11 @@ pub enum AppError {
         /// The name.
         name: String,
     },
-    /// Cases that stay cite what the retirement would take away.
-    #[error(
-        "cannot retire: {} cite(s) {}; retire the cases' harness first, or put it again without the citation",
-        .cases.join(", "),
-        .cited.join(", ")
-    )]
-    RetireCited {
-        /// What would go and is cited, described.
-        cited: Vec<String>,
-        /// The Cases that stay and cite it, described.
-        cases: Vec<String>,
-    },
-    /// Contexts that stay use the Context to retire.
-    #[error(
-        "cannot retire the context `{context}`: the context(s) {} use it; change their uses or retire them first",
-        .by.join(", ")
-    )]
-    RetireUsed {
-        /// The Context to retire.
-        context: String,
-        /// The Contexts that use it.
-        by: Vec<String>,
-    },
     /// The Interface declares no Item with this signature.
     #[error("the interface `{interface}` declares no `{signature}`")]
     UnknownItem {
+        /// The Context.
+        context: String,
         /// The Interface.
         interface: String,
         /// The signature looked for.
@@ -157,10 +142,22 @@ pub enum AppError {
     /// The Contract has no Clause with this label.
     #[error("the contract `{contract}` has no clause {label}")]
     UnknownClause {
+        /// The Context.
+        context: String,
         /// The Contract.
         contract: String,
         /// The label looked for.
         label: String,
+    },
+    /// The Harness has no Case with this name.
+    #[error("the harness `{harness}` has no case named `{name}`")]
+    UnknownCase {
+        /// The Context.
+        context: String,
+        /// The Harness.
+        harness: String,
+        /// The name looked for.
+        name: String,
     },
     /// No change request has this title.
     #[error("no change request is titled `{0}`")]
@@ -174,68 +171,38 @@ pub enum AppError {
     /// A value given is not well formed (a name, a label, a line range, ...).
     #[error("{0}")]
     Input(String),
-    /// A Case cites an Item or a Clause it cannot reach: it is not in the Case's Context, nor in a Context that
-    /// one uses (it was removed, or the Context does not use the one that owns it).
-    #[error(
-        "the {case} (context `{context}`) cites the {kind} {target}, which it cannot reach; put its harness again without the citation, or keep the {kind}"
-    )]
-    NotReached {
-        /// The Case, described (`case stock-tests reserve refuses`).
-        case: String,
-        /// The Context that owns the Case.
-        context: String,
-        /// `item` or `clause`.
-        kind: &'static str,
-        /// What is cited, described (`stock C7`, `stock fn release()`).
-        target: String,
-    },
-    /// A sim Harness builds an Interface that is gone or that its Context cannot reach.
-    #[error(
-        "the {harness} (context `{context}`) builds the interface {interface}, which it cannot reach; put the harness again without it, or keep the interface"
-    )]
-    BuildNotReached {
-        /// The sim Harness, described (`harness sim`).
-        harness: String,
-        /// The Context that owns the Harness.
-        context: String,
-        /// The Interface it builds, described.
-        interface: String,
-    },
-    /// A change set names one thing twice.
-    #[error("the change set names the {what} `{name}` twice")]
-    NamedTwice {
-        /// The kind of thing.
-        what: &'static str,
-        /// Its name.
-        name: String,
+    /// The domain refused the change, and the names of what it is about are known (a change set names the things it
+    /// makes, which the store does not have yet). Each violation is a rule broken; see
+    /// [`App::diagnose`](App::diagnose) for the diagnostics they come to.
+    #[error("refused: {}", rules_in(violations))]
+    Violated {
+        /// The rules broken, in the order found.
+        violations: Vec<Violation>,
+        /// The names of what they are about.
+        names: Names,
     },
     /// A change set has several problems; it was not applied, and each is here.
     #[error("the change set is refused, {} problems: {}", .0.len(), problems_of(.0))]
     Many(Vec<AppError>),
-    /// No Case cites an Item of the Interface, so nothing checked the code to pin.
-    #[error(
-        "no case cites an item of the interface `{interface}` (context `{context}`), so nothing checked the code to pin"
-    )]
-    NothingChecksIt {
-        /// The Context.
-        context: String,
-        /// The Interface.
-        interface: String,
-    },
     /// The change breaks a rule of the Project.
     #[error(transparent)]
     Project(#[from] ProjectError),
     /// The code cannot be pinned.
     #[error(transparent)]
     Pin(#[from] PinError),
-    /// The change request cannot be opened, decided, resolved or reopened.
+    /// A change request that is not one an operation was on is refused. Use [`AppError::on`] where the request is
+    /// known: a violation names the request it is about.
     #[error(transparent)]
     ChangeRequest(#[from] ChangeRequestError),
-    /// Change requests that are a part of this one are not resolved yet.
-    #[error("these parts of the change request are not resolved: {}", .children.join(", "))]
-    ChildrenNotResolved {
-        /// The titles of the parts that are not resolved.
-        children: Vec<String>,
+    /// The operation on the change request `title` was refused by a rule of change requests.
+    #[error("the change request `{title}`: {error}")]
+    ChangeRequestOf {
+        /// The change request.
+        id: ChangeRequestId,
+        /// Its title.
+        title: String,
+        /// Why.
+        error: ChangeRequestError,
     },
     /// The Interface has no Pin, so there is no code to measure.
     #[error(
@@ -299,6 +266,26 @@ pub enum AppError {
         /// All external attempts made while checking the candidate.
         external: Vec<ExternalReport>,
     },
+}
+
+impl AppError {
+    /// The refusal `error` of an operation on the change request `cr`: the violation names it.
+    pub fn on(cr: &ChangeRequest, error: ChangeRequestError) -> AppError {
+        AppError::ChangeRequestOf {
+            id: cr.id(),
+            title: cr.title().to_string(),
+            error,
+        }
+    }
+}
+
+/// The rule ids of `violations`, for a message.
+fn rules_in(violations: &[Violation]) -> String {
+    violations
+        .iter()
+        .map(|v| v.rule().as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The rules of `found`, once each, for a message.
@@ -1358,14 +1345,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             InterfaceId::from_uuid(iface),
             id,
             Digest::of(code.as_bytes()),
-        )
-        .map_err(|e| match e {
-            PinError::Unchecked(_) => AppError::NothingChecksIt {
-                context: context.to_string(),
-                interface: interface.to_string(),
-            },
-            other => other.into(),
-        })?;
+        )?;
         let mut pins = self.store.pins().await?;
         pins.retain(|k| k.interface() != pin.interface());
         pins.push(pin.clone());
@@ -1406,6 +1386,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         if existing.iter().any(|cr| *cr.title() == title) {
             return Err(AppError::TitleTaken(title.to_string()));
         }
+        // The id is made before the Crux, so that a refusal of the Crux names the request it was opened for.
+        let id = ChangeRequestId::from_uuid(self.ids.next_uuid());
+        let refused = |error: ChangeRequestError| AppError::ChangeRequestOf {
+            id,
+            title: title.to_string(),
+            error,
+        };
         let parent = match &c.parent {
             None => None,
             Some(t) => Some(
@@ -1484,17 +1471,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             .find(|cr| cr.title().as_str() == t.trim())
                             .map(|cr| cr.id())
                             .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))?;
-                        check_supersedes(replaced, &existing)?;
+                        check_supersedes(replaced, &existing).map_err(refused)?;
                         Some(replaced)
                     }
                 };
-                Some(Crux::new(
-                    q.kind,
-                    options,
-                    recommended,
-                    q.importance,
-                    supersedes,
-                )?)
+                Some(
+                    Crux::new(q.kind, options, recommended, q.importance, supersedes)
+                        .map_err(refused)?,
+                )
             }
         };
         let assumptions = c
@@ -1511,7 +1495,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for a in &c.addresses {
             addresses.push(self.finding_ref(&p, a).await?);
         }
-        let id = ChangeRequestId::from_uuid(self.ids.next_uuid());
         let cr = ChangeRequest::open(
             id,
             ChangeRequestDraft {
@@ -1565,7 +1548,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let line = PolicyLineId::try_from(line.as_str()).map_err(input)?;
                 p.policy()
                     .basis_on(line)
-                    .map_err(|_| ChangeRequestError::UnknownPolicyLine(line))?
+                    .map_err(|_| AppError::on(&cr, ChangeRequestError::UnknownPolicyLine(line)))?
             }
             BasisInput::Arbitrary(reason) => Basis::Arbitrary {
                 reason: Prose::try_from(reason.as_str()).map_err(input)?,
@@ -1585,7 +1568,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .collect::<Result<_, _>>()?,
             },
         };
-        decide(&mut cr, Answer::new(decision, basis, by, now), &p)?;
+        decide(&mut cr, Answer::new(decision, basis, by, now), &p)
+            .map_err(|e| AppError::on(&cr, e))?;
         self.commit_change_request(at, cr, Vec::new(), Vec::new())
             .await?;
         Ok(())
@@ -1600,7 +1584,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<(), AppError> {
         let at = self.store.revision().await?;
         let mut cr = self.change_request_titled(title).await?;
-        cr.assume(assumption_of(assumption)?)?;
+        cr.assume(assumption_of(assumption)?)
+            .map_err(|e| AppError::on(&cr, e))?;
         self.commit_change_request(at, cr, Vec::new(), Vec::new())
             .await?;
         Ok(())
@@ -1676,23 +1661,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             maker_of(by)?,
             now,
         );
-        if let Err(e) = resolve(&mut cr, resolution, &crs) {
-            return Err(match e {
-                ChangeRequestError::ChildrenNotResolved { children } => {
-                    AppError::ChildrenNotResolved {
-                        children: children
-                            .iter()
-                            .map(|id| {
-                                crs.iter()
-                                    .find(|c| c.id() == *id)
-                                    .map_or_else(|| id.to_string(), |c| c.title().to_string())
-                            })
-                            .collect(),
-                    }
-                }
-                other => other.into(),
-            });
-        }
+        resolve(&mut cr, resolution, &crs).map_err(|e| AppError::on(&cr, e))?;
         let pins = self.store.pins().await?;
         crs.retain(|k| k.id() != cr.id());
         crs.push(cr.clone());
@@ -1723,7 +1692,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Prose::try_from(reason).map_err(input)?,
             maker_of(by)?,
             now,
-        ))?;
+        ))
+        .map_err(|e| AppError::on(&cr, e))?;
         self.commit_change_request(at, cr, Vec::new(), Vec::new())
             .await?;
         Ok(())
@@ -2084,6 +2054,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 level: f.level(),
                 state: f.state_in(crs),
                 message: self.worded(f, pending).await?,
+                help: self
+                    .registry
+                    .help_of(f.rule())
+                    .unwrap_or_default()
+                    .to_string(),
                 about,
                 subject: f.subject(),
                 stale: false,
@@ -2218,6 +2193,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             })
             .map(|it| (it.id(), it.revision()))
             .ok_or_else(|| AppError::UnknownItem {
+                context: ctx_name.clone(),
                 interface: r.interface.clone(),
                 signature: r.signature.clone(),
             })
@@ -2241,6 +2217,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .and_then(|k| k.clause_by_label(label))
             .map(|k| (k.id(), k.revision()))
             .ok_or_else(|| AppError::UnknownClause {
+                context: ctx_name.clone(),
                 contract: r.contract.clone(),
                 label: r.label.clone(),
             })

@@ -18,8 +18,8 @@ that does not fit the project is deleted, together with its `arch-lint.toml` sco
 
 `chidev exec <file> --store <db>` reads one JSON object per line, runs each as an
 operation, and prints one result line per operation (`"ok"`, the `line` it came
-from, and its fields). A line that fails gets `"ok":false` and an `error`, and the
-run goes on; the exit status is 1 if any line failed. Things are named, never
+from, and its fields). A line that fails gets `"ok":false` and `diagnostics` (see
+"Diagnostics"), and the run goes on; the exit status is 1 if any line failed. Things are named, never
 given by id: a Context by its name, an asset by its name within its Context, a
 Clause by its label (`C1`), an Item by its signature, a Case by its name. These are
 the operations that build the model (the others are described below, where they
@@ -872,6 +872,59 @@ its former `item` / `clause` fields. Wrap those references in
 `SubjectInput::Item` / `SubjectInput::Clause`; `app::SubjectInput` remains the
 public re-export. See `app::subject` and `domain::check::FindingState` in the
 RustDoc for subject resolution and how a finding's state follows its requests.
+
+## Diagnostics
+
+A refused operation is a violation of a *rule*, and it is printed as structure, not
+as a sentence to be parsed:
+
+```json
+{"ok":false,"line":9,"diagnostics":[{
+  "code":"cr.parent-open","level":"error",
+  "message":"the change request `Parent` has 2 part(s) that are not resolved: `Part one`, `Part two`",
+  "subjects":[{"kind":"change_request","name":"Parent"},
+              {"kind":"change_request","name":"Part one"},{"kind":"change_request","name":"Part two"}],
+  "values":{"count":2},
+  "help":"A part is a change request whose `parent` is this one. Resolve each part first ...",
+  "suggestions":[{"op":{"op":"cr_resolve","title":"Part one","resolution":"done","reason":"<why>","by":{"person":"<who>"}},
+                  "applicability":"placeholder"}],
+  "did_you_mean":[]}]}
+```
+
+- `code` is the id of the rule and is stable: a published id keeps its meaning and
+  is never reused, and the keys of a rule's `values` are added to, never removed.
+  Read the `code` and the `values`; the `message` is for a person.
+- `subjects` are what it is about, named as `status` shows them. `field` (when the
+  refusal is about the input) says where: `for`, `puts[0].context`,
+  `cases[0].items[0].interface`.
+- `help` says why the rule holds and how to mend a violation. `suggestions` are the
+  operations that mend it: `op` is an operation to send (with `"<..>"` where a value
+  is yours to fill in), or a sentence when no single operation does it. Their
+  `applicability` says how far to trust one, as rustc's does: `machine` (it mends the
+  violation and changes nothing else: apply it as it stands), `review` (likely what
+  is meant, but it changes the model: look first) and `placeholder` (it has a hole:
+  fill it in). `did_you_mean` lists the names that exist and are close to one that
+  does not (`input.unknown-name`): a title or a label one letter off, or the same in
+  another case.
+- A line that cannot be read as an operation is a diagnostic as well, under an
+  `input.*` rule: `input.unknown-op`, `input.unknown-field`, `input.missing-field`,
+  `input.wrong-type`, `input.unknown-name`, `input.invalid`.
+- A change refused by checks keeps its `findings` beside the diagnostics, and a
+  finding in any result has the same fields (`code` is its rule, `help` its rule's).
+  A refusal that has no rule of its own yet is `domain.unmapped` (or `app.unmapped`),
+  which says what was refused; it is a bug to report.
+
+`{"op":"rules"}` lists every rule (the invariants an operation is refused for, the
+input rules, and the checks with the level the policy gives them), and
+`{"op":"explain","rule":"cr.parent-open"}` explains one: its help, the keys of the
+values a diagnostic of it carries, and an operation that violates it. **An agent
+that is refused should read `suggestions` and `help` before it tries again,** and run
+`explain` for a rule it does not know.
+
+In Rust, `ChangeRequestError`, `ProjectError`, `ContextError` and `PinError` give the
+domain's `Violation` (`violation`, `violations`; see `domain::violation` and
+`domain::rule`), and `App::diagnose` turns an `AppError` into `Vec<Diagnostic>`,
+which any front end (the CLI, a server) lists as it is.
 
 ## Judged rule versions
 

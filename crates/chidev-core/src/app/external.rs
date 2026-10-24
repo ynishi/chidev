@@ -375,6 +375,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     level: finding.level(),
                     state: finding.state_in(crs),
                     message: finding.message().into(),
+                    help: rule.descriptor().help.to_string(),
                     about,
                     subject,
                     stale,

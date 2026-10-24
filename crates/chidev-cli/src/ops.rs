@@ -9,9 +9,9 @@ use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
     ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
-    DecisionInput, DecisionMakerInput, EvidenceInput, EvidenceStatus, FindingInput, Found,
-    HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef, ModelView,
-    OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
+    DecisionInput, DecisionMakerInput, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput,
+    Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef,
+    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
     ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, ResolutionInput,
     ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
     SubjectInput, TargetInput, TransitionStatus,
@@ -166,6 +166,12 @@ enum Op {
         #[serde(default)]
         harness: Option<String>,
     },
+    /// Lists every rule: the invariants an operation is refused for, the rules an input must meet, and the checks
+    /// (with the level the policy gives them). Each has the id a diagnostic carries as its `code`.
+    Rules,
+    /// Explains one rule by its id (`rule`): what it protects, why and how to mend a violation, the keys of the
+    /// values a diagnostic of it carries, and an operation that violates it.
+    Explain { rule: String },
     /// Where the project stands.
     Status,
     /// Runs every check on the project as it is; nothing is kept.
@@ -889,14 +895,15 @@ impl From<AddressDto> for FindingInput {
     }
 }
 
-/// A finding in a result.
+/// A finding in a result: the diagnostic it is (`code`, `level`, `message`, `subjects`, `values`, `help`, ...), and
+/// the fields a finding has besides (`rule` is its `code`, kept; `state` says whether a change request deals with it).
 #[derive(Debug, Serialize)]
 struct FindingOut<'a> {
+    #[serde(flatten)]
+    diagnostic: Diagnostic,
     rule: &'a str,
-    level: &'static str,
     /// `open`, `addressed` or `decided`.
     state: &'static str,
-    message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     about: Option<&'a str>,
     /// A saved finding whose input or judged rule changed, or whose judged rule version is unknown.
@@ -921,10 +928,9 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
     found
         .iter()
         .map(|f| FindingOut {
+            diagnostic: Diagnostic::of_found(f),
             rule: f.rule.as_str(),
-            level: f.level.word(),
             state: f.state.word(),
-            message: &f.message,
             about: f.about.as_deref(),
             stale: f.stale,
             judged: f.judgment.as_ref().map(|j| JudgmentOut {
@@ -1777,9 +1783,15 @@ where
         if line.trim().is_empty() {
             continue;
         }
+        // The line is read as an operation directly (a duplicated field is refused, which reading it as a JSON value
+        // first would hide); the value is read besides only to say where in the input a refusal is about.
+        let raw = serde_json::from_str::<Value>(&line).ok();
         let result = match serde_json::from_str::<Op>(&line) {
-            Ok(op) => apply(app, root, op).await,
-            Err(e) => Err(AppError::Input(format!("not an operation: {e}"))),
+            Ok(op) => apply(app, root, op).await.map_err(Refusal::Refused),
+            Err(e) => Err(Refusal::Unreadable(Diagnostic::of_unreadable(
+                &e.to_string(),
+                raw.as_ref(),
+            ))),
         };
         let mut result = match result {
             Ok(Value::Object(mut fields)) => {
@@ -1787,23 +1799,57 @@ where
                 Value::Object(fields)
             }
             Ok(other) => json!({ "ok": true, "result": other }),
-            Err(AppError::ExternalRefused { findings, external }) => {
+            Err(refusal) => {
                 all_ok = false;
-                json!({ "ok": false, "error": "refused by external gate(s)", "findings": findings_out(&findings), "external": external })
-            }
-            Err(AppError::Refused(found)) => {
-                all_ok = false;
-                json!({ "ok": false, "error": AppError::Refused(found.clone()).to_string(), "findings": findings_out(&found) })
-            }
-            Err(error) => {
-                all_ok = false;
-                json!({ "ok": false, "error": error.to_string() })
+                refused_out(app, refusal, raw.as_ref()).await
             }
         };
         result["line"] = json!(k + 1);
         writeln!(out, "{result}")?;
     }
     Ok(all_ok)
+}
+
+/// Why a line gave no result: it could not be read as an operation, or the use case refused it.
+enum Refusal {
+    /// The line is not an operation chidev reads (not JSON, an unknown `op`, a field it does not take, a missing
+    /// field, a value of another type).
+    Unreadable(Diagnostic),
+    /// The operation was read and refused.
+    Refused(AppError),
+}
+
+/// The result of a refused line: `ok: false` and the `diagnostics`, which are the app's structure as it is. A
+/// change refused by checks also keeps the `findings` (and the `external` attempts of a gate), as before.
+async fn refused_out<S, G, E>(app: &App<S, G, E>, refusal: Refusal, input: Option<&Value>) -> Value
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (error, mut diagnostics) = match refusal {
+        Refusal::Unreadable(d) => (None, vec![d]),
+        Refusal::Refused(error) => {
+            let diagnostics = app.diagnose(&error).await;
+            (Some(error), diagnostics)
+        }
+    };
+    if let Some(input) = input {
+        diagnostics = diagnostics
+            .into_iter()
+            .map(|d| d.located_in(input))
+            .collect();
+    }
+    let mut out = json!({ "ok": false, "diagnostics": diagnostics });
+    match error {
+        Some(AppError::Refused(found)) => out["findings"] = json!(findings_out(&found)),
+        Some(AppError::ExternalRefused { findings, external }) => {
+            out["findings"] = json!(findings_out(&findings));
+            out["external"] = json!(external);
+        }
+        _ => {}
+    }
+    out
 }
 
 /// A typed result as the JSON object the run prints.
@@ -1827,6 +1873,12 @@ where
     E: ExternalExecutor,
 {
     Ok(match op {
+        Op::Rules => json!({ "op": "rules", "rules": app.rules() }),
+        Op::Explain { rule } => {
+            let mut explained = to_value(&app.explain(&rule)?)?;
+            explained["op"] = json!("explain");
+            explained
+        }
         Op::CheckRun => {
             let result = app.check_run().await?;
             json!({ "op": "check_run", "findings": findings_out(&result.findings), "external": result.external })

@@ -11,8 +11,8 @@ use uuid::Uuid;
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, AssetName, Changes, IdSource, Store};
 use super::{
-    App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Put, RetiredStatus, Retirement,
-    context_id, context_ids, input, refuse_retired, view,
+    App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RetiredStatus,
+    Retirement, context_id, context_ids, input, refuse_retired, view,
 };
 use crate::domain::check::Hook;
 use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
@@ -20,6 +20,7 @@ use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::service::footprint::moves_between;
+use crate::domain::violation::Violation;
 use crate::domain::vo::case::CaseName;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
@@ -221,7 +222,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Some(title) => {
                 let cr = self.change_request_titled(title).await?;
                 if cr.state() == ChangeRequestState::Resolved {
-                    return Err(AppError::ChangeRequest(ChangeRequestError::AlreadyResolved));
+                    return Err(AppError::on(&cr, ChangeRequestError::AlreadyResolved));
                 }
                 Some(cr)
             }
@@ -522,6 +523,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let lines = LineRange::new(it.lines.0, it.lines.1).map_err(input)?;
             let item = match &it.replaces {
                 Some(was) => find(was).ok_or_else(|| AppError::UnknownItem {
+                    context: i.context.clone(),
                     interface: i.name.clone(),
                     signature: was.clone(),
                 })?,
@@ -709,6 +711,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .map(|it| it.id()),
         };
         found.ok_or_else(|| AppError::UnknownItem {
+            context: ctx_name.clone(),
             interface: r.interface.clone(),
             signature: r.signature.clone(),
         })
@@ -744,6 +747,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .map(|k| k.id()),
         };
         found.ok_or_else(|| AppError::UnknownClause {
+            context: ctx_name.clone(),
             contract: r.contract.clone(),
             label: r.label.clone(),
         })
@@ -824,86 +828,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         plan: &Plan,
         e: ProjectError,
     ) -> Result<AppError, AppError> {
-        let context_name = |id: ContextId| {
-            before
-                .context(id)
-                .map_or_else(|| id.to_string(), |c| c.name().to_string())
-        };
-        Ok(match e {
-            ProjectError::ItemNotReached {
-                context,
-                case,
-                item,
-            } => AppError::NotReached {
-                case: self.said(before, plan, Target::Case(case)).await?,
-                context: context_name(context),
-                kind: "item",
-                target: self.said(before, plan, Target::Item(item)).await?,
-            },
-            ProjectError::ClauseNotReached {
-                context,
-                case,
-                clause,
-            } => AppError::NotReached {
-                case: self.said(before, plan, Target::Case(case)).await?,
-                context: context_name(context),
-                kind: "clause",
-                target: self.said(before, plan, Target::Clause(clause)).await?,
-            },
-            ProjectError::BuildNotReached {
-                context,
-                harness,
-                interface,
-            } => AppError::BuildNotReached {
-                harness: self.said(before, plan, Target::Harness(harness)).await?,
-                context: context_name(context),
-                interface: self
-                    .said(before, plan, Target::Interface(interface))
-                    .await?,
-            },
-            ProjectError::RetireCited { cited, cases } => {
-                let mut said_cited = Vec::with_capacity(cited.len());
-                for t in cited {
-                    said_cited.push(self.said(before, plan, t).await?);
-                }
-                let mut said_cases = Vec::with_capacity(cases.len());
-                for c in cases {
-                    said_cases.push(self.said(before, plan, Target::Case(c)).await?);
-                }
-                AppError::RetireCited {
-                    cited: said_cited,
-                    cases: said_cases,
-                }
-            }
-            ProjectError::RetireUsed { context, by } => AppError::RetireUsed {
-                context: context_name(context),
-                by: by.into_iter().map(context_name).collect(),
-            },
-            ProjectError::Repeated { what, id } => {
-                let name = match plan.names.iter().find(|n| n.id == id) {
-                    Some(n) => n.name.clone(),
-                    None => match before.contexts().find(|c| c.id().as_uuid() == id) {
-                        Some(c) => c.name().to_string(),
-                        None => self.name_of(id).await?,
-                    },
-                };
-                AppError::NamedTwice { what, name }
-            }
-            other => other.into(),
-        })
-    }
-
-    /// A target in words: what the change set makes as it names it, anything else as the Project describes it.
-    async fn said(
-        &self,
-        before: &Project,
-        plan: &Plan,
-        target: Target,
-    ) -> Result<String, AppError> {
-        match plan.words.get(&target) {
-            Some(words) => Ok(words.clone()),
-            None => self.describe_in(before, target, &plan.names).await,
+        let violations = e.violations();
+        let mut names = Names::default();
+        for party in violations.iter().flat_map(Violation::parties) {
+            let words = self
+                .words_of(before, &plan.words, &plan.names, party)
+                .await?;
+            names.insert(party, words);
         }
+        Ok(AppError::Violated { violations, names })
     }
 }
 

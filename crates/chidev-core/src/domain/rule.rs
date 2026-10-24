@@ -1,0 +1,448 @@
+//! The rules of the Project that are not checks: the invariants a change must keep (an operation that would break
+//! one is refused) and the rules an input must meet before the domain sees it. They are registered like the checks
+//! (an id, a line on what they protect, a help on why and how to fix), so that a refusal and a finding are the same
+//! thing to a reader: a violation of a rule, found by its id.
+//!
+//! A check is a [`Descriptor`](crate::domain::check::Descriptor) and lives with the checks; an invariant or an input
+//! rule is a [`Rule`] and lives here. The application lists both (`rules`) and explains either (`explain`).
+//!
+//! An id, once published, keeps its meaning and is never reused. The keys of the values a rule carries
+//! ([`Rule::values`]) may be added to and are never removed, so a program that reads a violation by key goes on
+//! working (the contract AIP-193 gives `ErrorInfo.metadata`).
+
+use crate::domain::check::Level;
+use crate::domain::vo::finding::RuleId;
+
+/// What a rule is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuleKind {
+    /// What a change must never break: an operation that would break it is refused. Its level is always `error`,
+    /// and no policy lowers it.
+    Invariant,
+    /// What may be kept but should not be left: found by a check, at the level a policy gives.
+    Check,
+    /// What an input must be before an operation is tried: its shape and the names it uses. Refused with `error`.
+    Input,
+}
+
+impl RuleKind {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            RuleKind::Invariant => "invariant",
+            RuleKind::Check => "check",
+            RuleKind::Input => "input",
+        }
+    }
+}
+
+/// A rule that is not a check, described.
+///
+/// The `message` is the template of the sentence a refusal says: `{s0}`, `{s1}` ... are the names of the
+/// violation's subjects in order, `{subjects}` all of them, `{others}` all but the first, and `{key}` the value of
+/// that key (a list of things is joined with commas). The application fills it in with the names it has; the
+/// domain only keeps the words.
+#[derive(Debug)]
+pub struct Rule {
+    /// The id; `<family>.<name>`.
+    pub id: RuleId,
+    /// What kind of rule it is.
+    pub kind: RuleKind,
+    /// What it protects, in a line.
+    pub summary: &'static str,
+    /// Why it holds and how to fix a violation.
+    pub help: &'static str,
+    /// The sentence a violation says, with `{..}` holes.
+    pub message: &'static str,
+    /// The keys of the values a violation of it carries.
+    pub values: &'static [&'static str],
+    /// An operation (JSON) that violates it, for `explain`.
+    pub example: &'static str,
+}
+
+impl Rule {
+    /// How serious a violation is: always `error`.
+    pub fn level(&self) -> Level {
+        Level::Error
+    }
+}
+
+/// A rule id with no rule of its own yet: a refusal of the domain that no variant maps to a rule. It carries the
+/// text of the error under `error`, and is a bug to be mapped, tracked by the test that lists the variants still
+/// here.
+pub const UNMAPPED: RuleId = RuleId::from_static("domain.unmapped");
+/// The same for a refusal of the application that has no rule yet.
+pub const APP_UNMAPPED: RuleId = RuleId::from_static("app.unmapped");
+/// A change request is resolved and the operation needs it open.
+pub const CR_ALREADY_RESOLVED: RuleId = RuleId::from_static("cr.already-resolved");
+/// A change request is to be resolved as done while its crux is not answered.
+pub const CR_CRUX_UNANSWERED: RuleId = RuleId::from_static("cr.crux-unanswered");
+/// A change request is to be resolved while parts of it are open.
+pub const CR_PARENT_OPEN: RuleId = RuleId::from_static("cr.parent-open");
+/// A crux is answered once.
+pub const CR_CRUX_ANSWERED: RuleId = RuleId::from_static("cr.crux-answered");
+/// A duplicate or superseded resolution points at a change request that does not exist.
+pub const CR_REFERENCE_UNKNOWN: RuleId = RuleId::from_static("cr.reference-unknown");
+/// A resolution points at the change request it resolves.
+pub const CR_REFERENCE_ITSELF: RuleId = RuleId::from_static("cr.reference-itself");
+/// A crux is to supersede the crux of a change request that does not exist.
+pub const CR_SUPERSEDES_UNKNOWN: RuleId = RuleId::from_static("cr.supersedes-unknown");
+/// A crux is to supersede a crux that is not answered.
+pub const CR_SUPERSEDES_UNANSWERED: RuleId = RuleId::from_static("cr.supersedes-unanswered");
+/// A decision rests on a policy line that does not exist.
+pub const CR_POLICY_LINE_UNKNOWN: RuleId = RuleId::from_static("cr.policy-line-unknown");
+/// A change request is titled as another is.
+pub const CR_TITLE_TAKEN: RuleId = RuleId::from_static("cr.title-taken");
+/// A Case cites an Item or a Clause it cannot reach.
+pub const PROJECT_CITE_UNREACHABLE: RuleId = RuleId::from_static("project.cite-unreachable");
+/// A sim Harness builds an Interface it cannot reach.
+pub const PROJECT_BUILD_UNREACHABLE: RuleId = RuleId::from_static("project.build-unreachable");
+/// A retirement would take away what Cases that stay cite.
+pub const PROJECT_RETIRE_CITED: RuleId = RuleId::from_static("project.retire-cited");
+/// A retirement would take away a Context that others use.
+pub const PROJECT_RETIRE_USED: RuleId = RuleId::from_static("project.retire-used");
+/// A Context is not in the Project.
+pub const PROJECT_UNKNOWN_CONTEXT: RuleId = RuleId::from_static("project.unknown-context");
+/// An asset was retired and its name is reserved.
+pub const PROJECT_ASSET_RETIRED: RuleId = RuleId::from_static("project.asset-retired");
+/// There is no project to work on.
+pub const PROJECT_NONE: RuleId = RuleId::from_static("project.none");
+/// A change set names one thing twice.
+pub const CHANGE_SET_NAMED_TWICE: RuleId = RuleId::from_static("change-set.named-twice");
+/// A Context based on its Contracts keeps one.
+pub const CONTEXT_LAST_CONTRACT: RuleId = RuleId::from_static("context.last-contract");
+/// A Context has no asset with this id.
+pub const CONTEXT_NO_SUCH_ASSET: RuleId = RuleId::from_static("context.no-such-asset");
+/// The code of an Interface is pinned only when a Case checks it.
+pub const PIN_UNCHECKED: RuleId = RuleId::from_static("pin.unchecked");
+/// An operation is not one chidev knows.
+pub const INPUT_UNKNOWN_OP: RuleId = RuleId::from_static("input.unknown-op");
+/// An operation has a field it does not take.
+pub const INPUT_UNKNOWN_FIELD: RuleId = RuleId::from_static("input.unknown-field");
+/// An operation lacks a field it needs.
+pub const INPUT_MISSING_FIELD: RuleId = RuleId::from_static("input.missing-field");
+/// A field has a value of another type.
+pub const INPUT_WRONG_TYPE: RuleId = RuleId::from_static("input.wrong-type");
+/// A name does not exist.
+pub const INPUT_UNKNOWN_NAME: RuleId = RuleId::from_static("input.unknown-name");
+/// A value is not well formed.
+pub const INPUT_INVALID: RuleId = RuleId::from_static("input.invalid");
+
+static RULES: &[Rule] = &[
+    Rule {
+        id: CR_ALREADY_RESOLVED,
+        kind: RuleKind::Invariant,
+        summary: "A resolved change request takes no more decisions, assumptions, work or resolutions.",
+        help: "The change request was resolved, and its record is closed. If the work goes on, reopen it with `cr_reopen` (a reason, and who reopens it); the resolution it had stays in its history. If the question is a new one, open a new change request.",
+        message: "the change request {s0} is resolved already",
+        values: &[],
+        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"up","basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_UNANSWERED,
+        kind: RuleKind::Invariant,
+        summary: "A change request cannot be resolved as done while its crux has no answer.",
+        help: "The crux is a choice only a decision maker can make; work that depends on it waits. Answer it with `cr_decide` (a choice, the basis it rests on, and who decides), then resolve. If the question no longer matters, resolve the change request as `wont_do` or `invalid` instead.",
+        message: "the change request {s0} cannot be resolved as done: its crux is not answered",
+        values: &[],
+        example: r#"{"op":"cr_resolve","title":"Round halves up","resolution":"done","reason":"shipped","by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_PARENT_OPEN,
+        kind: RuleKind::Invariant,
+        summary: "A change request cannot be resolved while a part of it is open.",
+        help: "A part is a change request whose `parent` is this one. Resolve each part first (`cr_resolve`), then the parent. A part that is not needed is resolved as `wont_do`.",
+        message: "the change request {s0} has {count} part(s) that are not resolved: {others}",
+        values: &["count"],
+        example: r#"{"op":"cr_resolve","title":"Parent","resolution":"done","reason":"all parts done","by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_ANSWERED,
+        kind: RuleKind::Invariant,
+        summary: "The crux of a change request is answered once and never rewritten.",
+        help: "An answer is an input from outside that cannot be reproduced, so it is kept as it was given. A different decision is a new change request whose crux supersedes this one (`supersedes` in its crux).",
+        message: "the crux of the change request {s0} is answered already",
+        values: &[],
+        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"down","basis":{"arbitrary":"changed my mind"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_REFERENCE_UNKNOWN,
+        kind: RuleKind::Invariant,
+        summary: "A duplicate or superseded resolution points at a change request that exists.",
+        help: "Name the change request that it duplicates or that supersedes it by its title. If it has not been opened yet, open it first with `cr_open`.",
+        message: "the change request that the resolution of {s0} points at does not exist",
+        values: &[],
+        example: r#"{"op":"cr_resolve","title":"Old","resolution":{"duplicate":"No such title"},"reason":"same","by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_REFERENCE_ITSELF,
+        kind: RuleKind::Invariant,
+        summary: "A change request is not resolved by pointing at itself.",
+        help: "Point at the other change request that duplicates it or supersedes it.",
+        message: "the change request {s0} cannot be resolved by pointing at itself",
+        values: &[],
+        example: r#"{"op":"cr_resolve","title":"A","resolution":{"duplicate":"A"},"reason":"same","by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_SUPERSEDES_UNKNOWN,
+        kind: RuleKind::Invariant,
+        summary: "A crux supersedes the crux of a change request that exists.",
+        help: "Name the change request whose answered crux the new one replaces, by its title.",
+        message: "the change request that the crux of {s0} supersedes does not exist",
+        values: &[],
+        example: r#"{"op":"cr_open","title":"Redecide","intent":"change_behavior","crux":{"kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"No such title"}}"#,
+    },
+    Rule {
+        id: CR_SUPERSEDES_UNANSWERED,
+        kind: RuleKind::Invariant,
+        summary: "A crux supersedes a crux that is answered; there is nothing to replace otherwise.",
+        help: "Answer the crux of the change request it supersedes first (`cr_decide`), or leave `supersedes` out and decide that crux itself.",
+        message: "the change request {s1} that the crux of {s0} supersedes has no answered crux",
+        values: &[],
+        example: r#"{"op":"cr_open","title":"Redecide","intent":"change_behavior","crux":{"kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"Unanswered"}}"#,
+    },
+    Rule {
+        id: CR_POLICY_LINE_UNKNOWN,
+        kind: RuleKind::Invariant,
+        summary: "A decision rests on a line the Project's policy has.",
+        help: "Put the line in the policy first (`policy_put` replaces the lines whole), or decide with an arbitrary reason instead of a policy line.",
+        message: "the decision of {s0} rests on the policy line {s1}, which the policy does not have",
+        values: &[],
+        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"up","basis":{"policy":"P9"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_TITLE_TAKEN,
+        kind: RuleKind::Invariant,
+        summary: "A change request is addressed by its title, so a title is given once.",
+        help: "Use another title, or work on the change request that has it.",
+        message: "a change request is titled {s0} already",
+        values: &[],
+        example: r#"{"op":"cr_open","title":"Round halves up","intent":"change_behavior"}"#,
+    },
+    Rule {
+        id: PROJECT_CITE_UNREACHABLE,
+        kind: RuleKind::Invariant,
+        summary: "A Case cites only Items and Clauses its Context owns or uses.",
+        help: "The cited item or clause is not in the Case's Context, nor in a Context it uses (it was removed, or the Context does not use the one that owns it). Put the Harness again without that citation, keep the item or clause (put it in the same change set), or make the Context use the one that owns it (`context_uses`).",
+        message: "the {kind} {s1} is cited by {s0}, which cannot reach it from {s2}",
+        values: &["kind"],
+        example: r#"{"op":"harness_put","context":"core","name":"t","source":"fn t() {}","cases":[{"name":"t","lines":[1,1],"clauses":[{"contract":"other","label":"C9"}]}]}"#,
+    },
+    Rule {
+        id: PROJECT_BUILD_UNREACHABLE,
+        kind: RuleKind::Invariant,
+        summary: "A sim Harness builds only Interfaces its Context owns or uses.",
+        help: "Put the sim Harness again without that Interface in `builds`, keep the Interface, or make the Context use the one that owns it.",
+        message: "the sim {s0} builds {s1}, which it cannot reach from {s2}",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["gone"],"source":"","cases":[]}"#,
+    },
+    Rule {
+        id: PROJECT_RETIRE_CITED,
+        kind: RuleKind::Invariant,
+        summary: "Retiring does not take away what Cases that stay still cite.",
+        help: "Retire the Harness of those Cases first, in the same change set (a change set checks the rules once, on the state it ends in), or put the Harness again without the citation. The peers are refused, not cascaded: what refers is retired first.",
+        message: "cannot retire: {subjects} cite {cited}",
+        values: &["cited"],
+        example: r#"{"op":"contract_retire","context":"core","contract":"rounding"}"#,
+    },
+    Rule {
+        id: PROJECT_RETIRE_USED,
+        kind: RuleKind::Invariant,
+        summary: "A Context that others use is not retired.",
+        help: "Change the uses of the Contexts that use it (`context_uses`), or retire them too, in the same change set.",
+        message: "cannot retire {s0}: {others} use it",
+        values: &[],
+        example: r#"{"op":"context_retire","context":"base"}"#,
+    },
+    Rule {
+        id: PROJECT_UNKNOWN_CONTEXT,
+        kind: RuleKind::Invariant,
+        summary: "A Context an operation is about is in the Project.",
+        help: "Add the Context first (`context_add`), or name one the Project has.",
+        message: "{s0} is not in the project",
+        values: &[],
+        example: r#"{"op":"context_uses","context":"gone","uses":[]}"#,
+    },
+    Rule {
+        id: PROJECT_ASSET_RETIRED,
+        kind: RuleKind::Invariant,
+        summary: "A retired asset is out of the model; its name and id stay reserved.",
+        help: "Use another name for a new asset. A retired one is not brought back.",
+        message: "the {kind} {s1} of the context {s0} was retired; its name and id are reserved, use another name",
+        values: &["kind"],
+        example: r#"{"op":"contract_put","context":"core","name":"retired-one","title":"T","clauses":[]}"#,
+    },
+    Rule {
+        id: PROJECT_NONE,
+        kind: RuleKind::Invariant,
+        summary: "An operation works on a Project, which `init` makes.",
+        help: "Run `init` first.",
+        message: "there is no project yet",
+        values: &[],
+        example: r#"{"op":"status"}"#,
+    },
+    Rule {
+        id: CHANGE_SET_NAMED_TWICE,
+        kind: RuleKind::Invariant,
+        summary: "A change set names one thing once: which end state it wants must be said.",
+        help: "A thing is put once, or retired once, not both and not twice. Merge the entries, or drop the one that is not wanted.",
+        message: "the change set names the {kind} {s0} twice",
+        values: &["kind"],
+        example: r#"{"op":"change_set","puts":[{"put":"contract","context":"core","name":"c","title":"T","clauses":[]}],"retires":[{"retire":"contract","context":"core","contract":"c"}]}"#,
+    },
+    Rule {
+        id: CONTEXT_LAST_CONTRACT,
+        kind: RuleKind::Invariant,
+        summary: "A Context based on its Contracts keeps at least one.",
+        help: "The basis of a Context only goes up: once it is based on its Contracts it cannot quietly stop owing one. Put another Contract in the same change set as the retirement, or keep this one.",
+        message: "the context is based on its contracts, and this is its last one",
+        values: &[],
+        example: r#"{"op":"contract_retire","context":"core","contract":"only"}"#,
+    },
+    Rule {
+        id: CONTEXT_NO_SUCH_ASSET,
+        kind: RuleKind::Invariant,
+        summary: "A Context changes only assets it has.",
+        help: "The id names no asset of that kind in the Context. Read the model with `status` and use the names it shows.",
+        message: "the context has no {kind} {s0}",
+        values: &["kind"],
+        example: r#"{"op":"harness_retire","context":"core","harness":"gone"}"#,
+    },
+    Rule {
+        id: PIN_UNCHECKED,
+        kind: RuleKind::Invariant,
+        summary: "Code is pinned only when a Case checks one of the Items of its Interface.",
+        help: "Nothing checked the code, so it is not accepted. Put a Harness whose Case cites an Item of the Interface (`harness_put`), then pin again.",
+        message: "no case cites an item of {s0}, so nothing checked the code to pin",
+        values: &[],
+        example: r#"{"op":"pin","context":"core","interface":"api","code":"fn a() {}"}"#,
+    },
+    Rule {
+        id: INPUT_UNKNOWN_OP,
+        kind: RuleKind::Input,
+        summary: "An operation is named by an `op` chidev knows.",
+        help: "Run `rules`, or read the README, for the operations. `did_you_mean` lists the closest names.",
+        message: "no operation is named `{name}`",
+        values: &["name"],
+        example: r#"{"op":"cr_opn","title":"x"}"#,
+    },
+    Rule {
+        id: INPUT_UNKNOWN_FIELD,
+        kind: RuleKind::Input,
+        summary: "An operation takes the fields it lists and no others.",
+        help: "Remove the field, or fix its spelling (`did_you_mean` lists the closest of the fields the operation takes).",
+        message: "the operation has no field `{name}`",
+        values: &["name"],
+        example: r#"{"op":"context_add","name":"core","usess":[]}"#,
+    },
+    Rule {
+        id: INPUT_MISSING_FIELD,
+        kind: RuleKind::Input,
+        summary: "An operation has the fields it needs.",
+        help: "Add the field. The README lists the fields of each operation.",
+        message: "the operation lacks the field `{name}`",
+        values: &["name"],
+        example: r#"{"op":"context_add"}"#,
+    },
+    Rule {
+        id: INPUT_WRONG_TYPE,
+        kind: RuleKind::Input,
+        summary: "A field has the type the operation reads (a string, a list, an object).",
+        help: "Write the value in the type the field takes; the message says what was found and what was expected.",
+        message: "a field has a value of the wrong type: {detail}",
+        values: &["detail"],
+        example: r#"{"op":"context_add","name":["core"]}"#,
+    },
+    Rule {
+        id: INPUT_UNKNOWN_NAME,
+        kind: RuleKind::Input,
+        summary: "A name an operation uses (a Context, an asset, a clause label, a signature, a case, a change request title) exists.",
+        help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does.",
+        message: "no {kind} is named `{name}`",
+        values: &["kind", "name"],
+        example: r#"{"op":"cr_decide","title":"No such title","choice":"up","basis":{"arbitrary":"x"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: INPUT_INVALID,
+        kind: RuleKind::Input,
+        summary: "A value is well formed: a name, a label, a line range, a text of the shape the field takes.",
+        help: "The message says what is wrong with the value; write it again.",
+        message: "{detail}",
+        values: &["detail"],
+        example: r#"{"op":"context_add","name":""}"#,
+    },
+    Rule {
+        id: UNMAPPED,
+        kind: RuleKind::Invariant,
+        summary: "A refusal of the domain that has no rule of its own yet (a bug to be mapped).",
+        help: "The domain refused the operation, and the variant of its error is not yet tied to a rule. `error` carries the debug text of the error. Report it: the variant should have an id, a help and remedies.",
+        message: "{text} (the domain has no rule id for this refusal yet: {error})",
+        values: &["error", "text"],
+        example: r#"{"op":"context_add","name":"core"}"#,
+    },
+    Rule {
+        id: APP_UNMAPPED,
+        kind: RuleKind::Invariant,
+        summary: "A refusal of the application that has no rule of its own yet (a bug to be mapped).",
+        help: "The operation was refused, and the refusal is not yet tied to a rule. `error` carries its text. Report it.",
+        message: "{error}",
+        values: &["error"],
+        example: r#"{"op":"measure","kind":"mutate","context":"core"}"#,
+    },
+];
+
+/// Every rule that is not a check: the invariants and the input rules.
+pub fn rules() -> &'static [Rule] {
+    RULES
+}
+
+/// The rule that is not a check with this id.
+pub fn rule(id: &str) -> Option<&'static Rule> {
+    RULES.iter().find(|r| r.id.as_str() == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[test]
+    fn rule_ids_are_unique_and_every_rule_is_an_error() {
+        let ids: BTreeSet<&str> = rules().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids.len(), rules().len());
+        assert!(rules().iter().all(|r| r.level() == Level::Error));
+        assert!(rules().iter().all(|r| r.kind != RuleKind::Check));
+    }
+
+    #[test]
+    fn every_template_hole_is_a_subject_a_reserved_word_or_a_value_the_rule_carries() {
+        for r in rules() {
+            let mut rest = r.message;
+            while let Some(open) = rest.find('{') {
+                let after = &rest[open + 1..];
+                let close = after.find('}').expect("a hole is closed");
+                let hole = &after[..close];
+                let subject = hole
+                    .strip_prefix('s')
+                    .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty());
+                assert!(
+                    subject || matches!(hole, "subjects" | "others") || r.values.contains(&hole),
+                    "{}: the hole {{{hole}}} is nothing the rule carries",
+                    r.id
+                );
+                rest = &after[close + 1..];
+            }
+        }
+    }
+
+    #[test]
+    fn a_rule_is_found_by_its_id() {
+        assert_eq!(
+            rule("cr.parent-open").map(|r| r.kind),
+            Some(RuleKind::Invariant)
+        );
+        assert!(rule("no.such-rule").is_none());
+    }
+}

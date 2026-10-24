@@ -13,9 +13,15 @@
 //! they hold, [`service`] holds the decisions that read more than one
 //! aggregate, and [`repository`] declares how the aggregates are kept (the
 //! implementations are outside the domain).
+//!
+//! A refusal is a [`violation::Violation`] of a rule in the registry ([`rule`], with the checks' descriptors): the
+//! error enums keep their variants, and each gives its violation as structure (a rule id, what it is about by id,
+//! typed values, typed remedies). The words, the names and the operations a remedy comes to are the application's.
 
 pub mod check;
 pub mod entity;
 pub mod repository;
+pub mod rule;
 pub mod service;
+pub mod violation;
 pub mod vo;

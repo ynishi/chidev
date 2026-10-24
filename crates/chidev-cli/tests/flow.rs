@@ -201,12 +201,8 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     // dropping the item the harnesses cite is refused, and the run reports the failure
     let refused = at(&results, 28);
     assert_eq!(refused["ok"], false);
-    assert!(
-        refused["error"]
-            .as_str()
-            .expect("error")
-            .contains("cannot reach")
-    );
+    assert!(message(refused).contains("cannot reach"), "{refused:#?}");
+    assert_eq!(diag(refused)["code"], "project.cite-unreachable");
     assert_eq!(code, Some(1));
 }
 
@@ -382,8 +378,9 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         serde_json::json!([{ "target": "discount C1", "progress": "not touched yet" }])
     );
     // a resolved request takes no more work
-    let closed = at(&results, 10)["error"].as_str().expect("error");
+    let closed = message(at(&results, 10));
     assert!(closed.contains("resolved"), "{closed}");
+    assert_eq!(diag(at(&results, 10))["code"], "cr.already-resolved");
 
     // reopened it takes the work, and is resolved anew: no finding this time, and the history keeps all three steps
     assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
@@ -394,12 +391,8 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
 
     // the second question: done needs the answer; after the choice of the second option C2 is a target
     assert_eq!(at(&results, 15)["ok"], false);
-    assert!(
-        at(&results, 15)["error"]
-            .as_str()
-            .expect("error")
-            .contains("no decision")
-    );
+    assert_eq!(diag(at(&results, 15))["code"], "cr.crux-unanswered");
+    assert!(message(at(&results, 15)).contains("not answered"));
     assert_eq!(at(&results, 16)["ok"], true, "{results:#?}");
     let chosen = &at(&results, 17)["change_requests"][1];
     assert_eq!(chosen["state"], "decided");
@@ -442,8 +435,9 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert!(last.get("unapplied").is_none());
 
     // a field cr_open does not know is refused, whatever it was once called
-    let old = at(&results, 20)["error"].as_str().expect("error");
+    let old = message(at(&results, 20));
     assert!(old.contains("change"), "{old}");
+    assert_eq!(diag(at(&results, 20))["code"], "input.unknown-field");
 }
 
 /// The e2e case "remove release": a parent without targets, a child with targets, one change set `for` the
@@ -865,7 +859,8 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
     // nothing to replace, a Policy line that is not there, evidence outside the repository
     assert!(error_at(&results, 14).contains("no answered crux"));
     assert!(error_at(&results, 16).contains(".."));
-    assert!(error_at(&results, 17).contains("no line P9"));
+    assert!(error_at(&results, 17).contains("`P9`"));
+    assert_eq!(diag(at(&results, 17))["code"], "cr.policy-line-unknown");
 
     // the third change request supersedes the first; the Assumption is on its change request
     let later = at(&results, 19);
@@ -907,9 +902,27 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
     assert_eq!(after["policy"]["lines"].as_array().expect("lines").len(), 1);
 }
 
-/// The `error` of the operation on line `n`.
-fn error_at(results: &[Value], n: u64) -> &str {
-    at(results, n)["error"].as_str().expect("an error")
+/// The first diagnostic of a refused result.
+fn diag(result: &Value) -> &Value {
+    assert_eq!(result["ok"], false, "{result:#?}");
+    &result["diagnostics"][0]
+}
+
+/// The messages of every diagnostic of a refused result, one per line.
+fn message(result: &Value) -> String {
+    assert_eq!(result["ok"], false, "{result:#?}");
+    result["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .map(|d| d["message"].as_str().expect("a message"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The messages of the diagnostics of the operation on line `n`.
+fn error_at(results: &[Value], n: u64) -> String {
+    message(at(results, n))
 }
 
 #[test]
@@ -1191,12 +1204,7 @@ fn a_second_run_continues_the_project_the_first_kept() {
     let (results, code) = exec(&second, &store);
     assert_eq!(code, Some(1), "{results:#?}");
     assert_eq!(at(&results, 1)["ok"], false);
-    assert!(
-        at(&results, 1)["error"]
-            .as_str()
-            .expect("error")
-            .contains("already")
-    );
+    assert!(message(at(&results, 1)).contains("already"));
     assert_eq!(at(&results, 2)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 3)["ok"], true);
 }
@@ -1529,12 +1537,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
 
     // a builtin check takes no report; a rule filtered by hook: this one belongs to put and check
     assert_eq!(at(&results, 13)["ok"], false);
-    assert!(
-        at(&results, 13)["error"]
-            .as_str()
-            .expect("error")
-            .contains("not judged")
-    );
+    assert!(message(at(&results, 13)).contains("not judged"));
     assert_eq!(at(&results, 14)["rules"], serde_json::json!([]));
 }
 
@@ -1717,13 +1720,8 @@ fn malformed_address_selectors_never_fall_back_to_the_project_or_write_a_request
     assert!(results[..6].iter().all(|r| r["ok"] == true));
     for result in &results[6..6 + invalid.len()] {
         assert_eq!(result["ok"], false, "{result}");
-        assert!(
-            result["error"]
-                .as_str()
-                .unwrap()
-                .contains("not an operation"),
-            "{result}"
-        );
+        let code = diag(result)["code"].as_str().unwrap();
+        assert!(code.starts_with("input."), "{result}");
     }
     let last = results.last().unwrap();
     assert_eq!(last["store_revision"], 6);
@@ -2181,9 +2179,9 @@ fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_comm
     for named in [
         "case stock-tests release_frees",
         "case stock-tests release_twice",
-        "the clause stock C7",
-        "the clause stock C8",
-        "the item stock fn release()",
+        "the clause `stock C7`",
+        "the clause `stock C8`",
+        "the item `stock fn release()`",
     ] {
         assert!(refused.contains(named), "{named} not in {refused}");
     }
@@ -2439,9 +2437,8 @@ fn a_change_set_takes_the_text_of_its_interface_and_harness_entries_from_files()
 }
 
 /// The error of a refused result, which is not ok.
-fn refusal(result: &Value) -> &str {
-    assert_eq!(result["ok"], false, "{result:#?}");
-    result["error"].as_str().expect("an error")
+fn refusal(result: &Value) -> String {
+    message(result)
 }
 
 #[test]
@@ -2538,7 +2535,14 @@ fn a_change_set_with_a_bad_file_is_refused_whole_and_names_every_bad_entry() {
     let (results, code, err) = run_values(&dir, &ops);
     assert_eq!(code, Some(1), "{err}\n{results:#?}");
     let error = refusal(at(&results, 4));
-    assert!(error.contains("3 problems"), "{error}");
+    assert_eq!(
+        at(&results, 4)["diagnostics"]
+            .as_array()
+            .expect("list")
+            .len(),
+        3,
+        "{error}"
+    );
     assert!(error.contains("src/missing.rs"), "{error}");
     assert!(error.contains("../outside.rs"), "{error}");
     assert!(error.contains("not both"), "{error}");

@@ -100,9 +100,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .unwrap_or_default();
         match cases.as_slice() {
             [one] => Ok(one.id()),
-            [] => Err(AppError::Input(format!(
-                "the harness `{harness}` has no case named `{name}`"
-            ))),
+            [] => Err(AppError::UnknownCase {
+                context: context.to_string(),
+                harness: harness.to_string(),
+                name: name.to_string(),
+            }),
             _ => Err(AppError::Input(format!(
                 "the harness `{harness}` has several cases named `{name}`; \
                  a reference cannot say which"
