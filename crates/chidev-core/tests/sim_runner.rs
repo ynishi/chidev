@@ -245,6 +245,80 @@ async fn a_program_that_does_not_build_fails_the_run_before_any_case() {
     assert_eq!(report.evidence[0].exit_code, Some(1));
 }
 
+/// A script that finds the program missing in the cases `missing` matches (a shell pattern for `$case`) and runs
+/// as `GOOD` in the others.
+fn cannot_start_in(missing: &str) -> String {
+    format!(
+        r#"
+case=$1
+out=$3
+case "$case" in
+  {missing})
+    printf 'schedule of %s\n' "$case" > "$out/schedule"
+    echo "CANNOT_START $5: not found"
+    echo "sim: findings=0"
+    exit 0 ;;
+esac
+{GOOD}
+"#
+    )
+}
+
+#[tokio::test]
+async fn cases_that_could_not_start_the_program_are_counted_apart_and_none_started_fails_the_run() {
+    // seed-0 and the regress case could not start the program; seed-1 and seed-2 drove it
+    let script = cannot_start_in("seed-0|regress-edge");
+    let project = Project::new(&script);
+    let report = project
+        .runner()
+        .simulate(&request("run-9", &script))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    let exits: Vec<(String, bool, usize)> = report
+        .cases
+        .iter()
+        .map(|c| (c.case.to_string(), c.exit.cannot_start(), c.findings.len()))
+        .collect();
+    assert_eq!(
+        exits,
+        [
+            ("seed-0".to_string(), true, 0),
+            ("seed-1".to_string(), false, 1),
+            ("seed-2".to_string(), false, 0),
+            ("regress-edge".to_string(), true, 0),
+        ]
+    );
+    assert!(report.cases[0].exit.word().starts_with("cannot_start:"));
+    // the case that could not start was not repeated
+    assert!(
+        report.reruns.iter().all(|r| r.case.to_string() != "seed-0"),
+        "{:?}",
+        report.reruns
+    );
+
+    // no case started the program: the run fails with its own kind, and the second runs are not made
+    let script = cannot_start_in("*");
+    let project = Project::new(&script);
+    let report = project
+        .runner()
+        .simulate(&request("run-10", &script))
+        .await
+        .unwrap();
+    let failure = report.failure.clone().expect("a failure");
+    assert_eq!(failure.kind(), FailureKind::NoStart, "{failure}");
+    assert!(
+        failure.message().contains("any of the 4 case(s)"),
+        "{failure}"
+    );
+    assert_eq!(report.cases.len(), 4);
+    assert!(report.cases.iter().all(|c| c.exit.cannot_start()));
+    assert!(report.cases.iter().all(|c| c.findings.is_empty()));
+    assert!(report.reruns.is_empty());
+    assert!(!steps(&report).iter().any(|s| s.starts_with("rerun")));
+    assert!(!project.0.join(WORK_DIR).join("run-10").exists());
+}
+
 #[tokio::test]
 async fn a_report_that_breaks_the_protocol_fails_the_run() {
     for (script, expect) in [

@@ -42,6 +42,9 @@ pub struct MeasurementDraft {
     pub at: Timestamp,
     /// How many places the provider found to change, before it chose among them (a mutation run).
     pub sites: u32,
+    /// How many mutants the provider gave to run: at most `max_mutants` of the sites. Fewer than the sites means the
+    /// run was capped; more than the mutants below means it stopped early, and then it failed (a mutation run).
+    pub planned: u32,
     /// Each mutant that was run and what became of it (a mutation run).
     pub mutants: Vec<MutantResult>,
     /// What each case of the script found, and how the second runs compared (a simulation).
@@ -62,6 +65,7 @@ pub struct Measurement {
     stamp: Stamp,
     at: Timestamp,
     sites: u32,
+    planned: u32,
     mutants: Vec<MutantResult>,
     sim: Option<SimOutcome>,
     failure: Option<MeasureFailure>,
@@ -70,8 +74,9 @@ pub struct Measurement {
 
 impl Measurement {
     /// The run `draft` describes. A mutation run is of an Interface, stands on a code stamp, has mutants with
-    /// different keys and no more than there were sites; a simulation is of a Harness, stands on a sim stamp and
-    /// has no mutants.
+    /// different keys, no more than the provider gave, and the provider gave no more than there were sites; a run
+    /// that did not fail evaluated every mutant it was given. A simulation is of a Harness, stands on a sim stamp
+    /// and has no mutants.
     pub fn new(draft: MeasurementDraft) -> Result<Measurement, MeasureError> {
         let not = |expected: &'static str, what: &'static str| MeasureError::NotOfKind {
             kind: draft.kind.word(),
@@ -97,7 +102,7 @@ impl Measurement {
                 if draft.stamp.sim().is_none() {
                     return Err(not("a harness", "a mutation run's stamp"));
                 }
-                if !draft.mutants.is_empty() || draft.sites != 0 {
+                if !draft.mutants.is_empty() || draft.sites != 0 || draft.planned != 0 {
                     return Err(not("a harness", "mutants"));
                 }
             }
@@ -108,10 +113,22 @@ impl Measurement {
                 return Err(MeasureError::DuplicateKey(m.mutant.key().to_string()));
             }
         }
-        if draft.mutants.len() > draft.sites as usize {
-            return Err(MeasureError::MoreMutantsThanSites {
+        if draft.mutants.len() > draft.planned as usize {
+            return Err(MeasureError::MoreMutantsThanPlanned {
                 mutants: draft.mutants.len(),
+                planned: draft.planned,
+            });
+        }
+        if draft.planned > draft.sites {
+            return Err(MeasureError::MorePlannedThanSites {
+                planned: draft.planned,
                 sites: draft.sites,
+            });
+        }
+        if draft.failure.is_none() && draft.mutants.len() < draft.planned as usize {
+            return Err(MeasureError::UnfinishedWithoutFailure {
+                mutants: draft.mutants.len(),
+                planned: draft.planned,
             });
         }
         Ok(Measurement {
@@ -121,6 +138,7 @@ impl Measurement {
             stamp: draft.stamp,
             at: draft.at,
             sites: draft.sites,
+            planned: draft.planned,
             mutants: draft.mutants,
             sim: draft.sim,
             failure: draft.failure,
@@ -172,6 +190,23 @@ impl Measurement {
     /// How many places the provider found to change.
     pub fn sites(&self) -> u32 {
         self.sites
+    }
+
+    /// How many mutants the provider gave to run (at most `max_mutants` of the sites).
+    pub fn planned(&self) -> u32 {
+        self.planned
+    }
+
+    /// How many mutants were run and have an outcome.
+    pub fn evaluated(&self) -> u32 {
+        u32::try_from(self.mutants.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Whether the run ended having evaluated fewer mutants than the code has sites, because the provider was
+    /// asked for no more than `max_mutants`. A run that failed is not capped: it did not end, and says why. What
+    /// the run left out is not measured, so an `ok` run that is capped does not show the whole code.
+    pub fn capped(&self) -> bool {
+        self.failure.is_none() && self.kind == MeasureKind::Mutate && self.planned < self.sites
     }
 
     /// The mutants it ran, in the order the provider gave them.
@@ -269,6 +304,7 @@ pub(crate) mod fixture {
             stamp: MeasureStamp::new(code, basis, "settings").unwrap().into(),
             at: Timestamp::from_millis(n as u64),
             sites: mutants.len() as u32 + 2,
+            planned: mutants.len() as u32,
             mutants,
             sim: None,
             failure: None,
@@ -290,6 +326,7 @@ pub(crate) mod fixture {
             stamp: SimStamp::new(basis, "settings").unwrap().into(),
             at: Timestamp::from_millis(n as u64),
             sites: 0,
+            planned: 0,
             mutants: Vec::new(),
             sim: Some(outcome),
             failure: None,
@@ -313,6 +350,7 @@ mod tests {
     use super::*;
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::measure::FailureKind;
     use crate::domain::vo::sim::SimBasis;
 
     fn iface() -> InterfaceId {
@@ -352,7 +390,50 @@ mod tests {
     }
 
     #[test]
-    fn a_key_given_twice_or_more_mutants_than_sites_is_refused() {
+    fn a_run_is_capped_when_it_gave_fewer_mutants_than_it_found_sites_and_did_not_fail() {
+        let run = |sites: u32, planned: u32, mutants: usize, failure: bool| {
+            let results = (0..mutants)
+                .map(|n| result(&format!("k{n}"), n as u32 + 1, MutantOutcome::Killed))
+                .collect();
+            let mut d = draft(1, iface(), Digest::of(b"c"), empty_basis(), results);
+            d.sites = sites;
+            d.planned = planned;
+            if failure {
+                d.failure = Some(MeasureFailure::of(FailureKind::Budget, "used up"));
+            }
+            Measurement::new(d)
+        };
+        // 41 sites, 40 given and evaluated: capped, with the numbers to say so
+        let capped = run(41, 40, 40, false).unwrap();
+        assert!(capped.capped());
+        assert_eq!(
+            (capped.sites(), capped.planned(), capped.evaluated()),
+            (41, 40, 40)
+        );
+        // every site evaluated: not capped
+        assert!(!run(40, 40, 40, false).unwrap().capped());
+        assert!(!run(0, 0, 0, false).unwrap().capped());
+        // a run that stopped early (the budget) is a failure and not a cap, whatever the sites
+        let stopped = run(41, 40, 12, true).unwrap();
+        assert!(!stopped.capped());
+        assert_eq!(stopped.evaluated(), 12);
+        // fewer evaluated than given, with no failure to say why, is not a measurement
+        assert_eq!(
+            run(41, 40, 12, false).unwrap_err(),
+            MeasureError::UnfinishedWithoutFailure {
+                mutants: 12,
+                planned: 40
+            }
+        );
+        // a simulation is never capped
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        let sim =
+            Measurement::new(sim_draft(2, harness, sim_basis(), SimOutcome::default())).unwrap();
+        assert!(!sim.capped());
+    }
+
+    #[test]
+    fn a_key_given_twice_or_more_mutants_than_the_provider_gave_is_refused() {
         let twice = draft(
             1,
             iface(),
@@ -374,11 +455,26 @@ mod tests {
             empty_basis(),
             vec![result("a", 1, MutantOutcome::Killed)],
         );
-        many.sites = 0;
+        many.planned = 0;
         assert_eq!(
             Measurement::new(many).unwrap_err(),
-            MeasureError::MoreMutantsThanSites {
+            MeasureError::MoreMutantsThanPlanned {
                 mutants: 1,
+                planned: 0
+            }
+        );
+        let mut beyond = draft(
+            1,
+            iface(),
+            Digest::of(b"c"),
+            empty_basis(),
+            vec![result("a", 1, MutantOutcome::Killed)],
+        );
+        beyond.sites = 0;
+        assert_eq!(
+            Measurement::new(beyond).unwrap_err(),
+            MeasureError::MorePlannedThanSites {
+                planned: 1,
                 sites: 0
             }
         );
@@ -412,6 +508,7 @@ mod tests {
         let mut with_mutants = sim_draft(3, harness, sim_basis(), SimOutcome::default());
         with_mutants.mutants = vec![result("a", 1, MutantOutcome::Killed)];
         with_mutants.sites = 1;
+        with_mutants.planned = 1;
         assert!(matches!(
             Measurement::new(with_mutants),
             Err(MeasureError::NotOfKind { .. })

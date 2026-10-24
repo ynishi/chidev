@@ -229,12 +229,26 @@ The checks read the record and run nothing (they are builtin, at the `check` hoo
 | `measure.failed` | warning | the latest run failed (baseline, provider, protocol, timeout, budget, io) |
 | `mutation.unmeasured` | note | a pinned Interface with no run |
 | `mutation.stale` | warning | the Pin's code, the Interface, a Harness that checks it, a Contract it cites, or the settings moved after the run |
+| `mutation.capped` | note | the run ended (`ok`) having evaluated fewer mutants than the provider found sites, `max_mutants` having limited it; about the Interface, `evaluated N of M sites` |
 | `mutation.survived` | note | one per mutant no case noticed, about the Interface, with key, line, column, operator and the change |
 
 A stale run is judged stale first, so a survivor of an old run is not reported for
 moved code. `status.measurements` lists the latest run per Interface: stamp,
-`killed` / `survived` / `stillborn` / `timeout`, `outcome` and `state`
-(`current` or `stale`).
+`sites` (the places the provider found), `evaluated` (the mutants run) and
+`capped`, `killed` / `survived` / `stillborn` / `timeout`, `outcome` and `state`
+(`current` or `stale`). The result of `measure` has the same `sites`, `evaluated` and
+`capped`.
+
+A run that did not look at every site says so. `max_mutants` limits what the
+provider is asked for, so it samples the sites; the run is still `ok`, the mutants
+it evaluated each have an outcome, and the record keeps `sites` (what the provider
+found) apart from the mutants it was given (`planned`, stored in the summary of the
+run) and the mutants evaluated. A run is *capped* when it ended with fewer mutants
+than sites, which is `mutation.capped` (a note: a Harness that kills every mutant of
+a sample may still miss the sites left out; raise `max_mutants` to cover them). A run
+that stopped before it had evaluated the mutants it was given (the budget ran out)
+is not capped: it is a failed run of kind `budget`, as before. A run that ended
+with fewer mutants than it was given and no failure is refused as a measurement.
 
 ### `[measure]` in `checks.toml`
 
@@ -247,7 +261,7 @@ env = { CARGO_TARGET_DIR = "{work}/target" }       # default; {work} is the run'
 timeout = 30            # seconds, one build or one test of a mutant
 baseline_timeout = 600  # the build and the test before any change
 budget = 900            # the whole run, at most 3600
-max_mutants = 40
+max_mutants = 40        # at most this many mutants are evaluated; more sites make the run capped
 seed = 0                # moves where the even sampling of sites starts
 
 [measure.mutants]       # language -> the provider command
@@ -367,6 +381,7 @@ program did under them), and prints, one per line:
 FINDING <case> step <k> <contract>:<label>: <text>
 UNREACHED <contract>:<label>: <text>
 UNDECIDED <text>
+CANNOT_START <text>
 sim: findings=<n>
 ```
 
@@ -384,7 +399,24 @@ sim: findings=<n>
 - `UNREACHED`: this case never reached the situation the Clause needs. A Clause is
   *unreached* for the run when every seed that ended normally said so.
 - `UNDECIDED`: the script could not decide something; counted, never a failure.
+- `CANNOT_START`: the script could not start the program at all (the program is not
+  there, it cannot be run), so it drove nothing and checked nothing. It is the script
+  that sees this, because it is the one that starts the program; chidev only starts
+  the script. The report is then this one line and `sim: findings=0`: a `FINDING`,
+  `UNREACHED` or `UNDECIDED` line beside it is a protocol failure, for it would tell
+  of a run that did not happen. The case is recorded as `cannot_start:<text>`; it
+  has no findings and says nothing of any Clause (it does not count towards
+  *unreached*, and it is not run again). A script that prints a `FINDING` for each
+  Clause because the program did not start makes every Clause look broken by a
+  program that was never run; print `CANNOT_START` instead. Exit 0 or 1, as for any
+  report that is read.
 - `sim: findings=<n>` is the last line and `n` is the number of `FINDING` lines.
+
+When *every* case that was run said `CANNOT_START`, the run is a failed run of kind
+`no_start` (the cases are kept, there are no second runs), judged by `sim.error`
+alone: no `sim.finding` and no `sim.unreached` come of it. When only some cases did,
+the run is `ok`, the others are judged as usual, and `sim.error` names the cases
+that could not start.
 
 Exit 0 or 1 (1 when there are findings) means the report is read. A name of a
 Contract the sweep Case cites no Clause of, or of a Clause of a Contract it cites
@@ -442,7 +474,7 @@ it is the run's directory (its parent).
 | `sim.finding` | error | one per Clause with findings, about the Clause, with the first case and step |
 | `sim.unreached` | error | one per Clause no seed reached, about the Clause |
 | `sim.nondeterministic` | error, **mandatory** | a case that gave another schedule or trace the second time, about the Case; no policy lowers it |
-| `sim.error` | warning | the run failed (`no_build`, protocol, budget, ...) or the script failed for a case |
+| `sim.error` | warning | the run failed (`no_build`, `no_start`, protocol, budget, ...) or the script failed for a case, or could not start the program in it (`CANNOT_START`) |
 
 A stale run is judged stale first (only a second run that did not reproduce is
 still reported). A failed run is judged by `sim.error` alone. `status.measurements`
@@ -459,6 +491,8 @@ and not the implementation. Therefore:
   or `UNREACHED` only with the name `<contract>:<label>` of a Clause it cites
   (the Contract is part of the name, because two Contracts may both have a `C1`);
   a script may check the Clauses of several Contracts of the Context;
+- when starting the program fails, print `CANNOT_START <text>` and `sim: findings=0`
+  and nothing else; never a `FINDING` per Clause for a program that did not run;
 - check each Clause literally, with an expected value computed from the Clause's
   sentence by the script's own model, never from the program's answers;
 - use only the seed for randomness (`random.Random(seed)`, not the clock, the

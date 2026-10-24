@@ -239,6 +239,7 @@ impl ProcessRunner {
         job.clean().await;
         Ok(MutateReport {
             sites: progress.sites,
+            planned: progress.planned,
             mutants: progress.mutants,
             failure: finished.err(),
             evidence: progress.evidence,
@@ -250,6 +251,7 @@ impl ProcessRunner {
 #[derive(Debug, Default)]
 struct Progress {
     sites: u32,
+    planned: u32,
     mutants: Vec<MutantResult>,
     evidence: Vec<StepEvidence>,
 }
@@ -485,6 +487,9 @@ impl Job<'_> {
         out.evidence.push(evidence);
         let mutants = asked?;
         out.sites = mutants.sites;
+        // What the provider gave is what the run owes; the sites it did not give (the cap) are told apart from the
+        // mutants a run did not get to (a failure).
+        out.planned = u32::try_from(mutants.planned.len()).unwrap_or(u32::MAX);
         for planned in &mutants.planned {
             if self.over_budget() {
                 return Err(from_process(
@@ -671,7 +676,7 @@ path = "check.txt"
                 ("f/int/1/0000", "survived"),
             ]
         );
-        assert_eq!(report.sites, 3);
+        assert_eq!((report.sites, report.planned), (3, 3));
         // the commands that ran are on record, with the digest of the program
         let steps: Vec<&str> = report.evidence.iter().map(|e| e.step.as_str()).collect();
         assert_eq!(steps, ["baseline-build", "baseline-test", "provider"]);
@@ -686,6 +691,27 @@ path = "check.txt"
         assert!(!project.0.join(WORK_DIR).join("run-1").exists());
         // the provider runs in the project's root, where it is configured, and not in the copy
         assert!(project.0.join("provider-called").exists());
+    }
+
+    #[tokio::test]
+    async fn sites_the_provider_found_and_did_not_give_are_told_from_mutants_given() {
+        let project = Project::new(TABLE);
+        // the provider saw 5 sites and, as `max` asks of it, gave 3 mutants
+        std::fs::write(
+            project.0.join("provider.sh"),
+            PROVIDER.replace("\"sites\":3", "\"sites\":5"),
+        )
+        .unwrap();
+        let report = project
+            .runner()
+            .mutate_run(&request("run-9"))
+            .await
+            .unwrap();
+        assert_eq!(report.failure, None, "{report:#?}");
+        assert_eq!(
+            (report.sites, report.planned, report.mutants.len()),
+            (5, 3, 3)
+        );
     }
 
     #[tokio::test]
@@ -750,6 +776,8 @@ path = "check.txt"
         let failure = report.failure.expect("a failure");
         assert_eq!(failure.kind(), FailureKind::Budget);
         assert!(report.mutants.is_empty());
+        // the provider had answered: what the run owed is on record beside what it got through
+        assert_eq!((report.sites, report.planned), (3, 3));
         assert!(!project.0.join(WORK_DIR).join("run-4").exists());
     }
 

@@ -158,6 +158,49 @@ impl Check for Stale {
     }
 }
 
+/// A mutation run that evaluated only some of the sites the provider found.
+#[derive(Debug, Clone, Copy)]
+pub struct Capped;
+
+static CAPPED: Descriptor = Descriptor {
+    id: RuleId::from_static("mutation.capped"),
+    summary: Cow::Borrowed("a mutation run that evaluated fewer mutants than the code has sites"),
+    help: Cow::Borrowed(
+        "The provider found more places to change than `max_mutants` allows, so the run sampled them and the \
+           rest were never tried: a harness that killed every mutant of the run may still miss a change at a site \
+           left out. Raise `max_mutants` in `[measure]` and run the measure again to cover every site, or accept \
+           the sample knowing it is one. A run that stopped early (the budget) is not capped; it failed.",
+    ),
+    hooks: Cow::Borrowed(&[Hook::Check]),
+    default_level: Level::Note,
+    mandatory: false,
+    params: Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for Capped {
+    fn descriptor(&self) -> &'static Descriptor {
+        &CAPPED
+    }
+
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        pinned(view)
+            .filter_map(|(i, pin, m)| {
+                let m = m?;
+                if !m.capped() || standing(m, view.after, pin, settings(view, m)) == Standing::Stale
+                {
+                    return None;
+                }
+                Some(Finding::new(
+                    &CAPPED,
+                    Some(Subject::Interface(i.id())),
+                    format!("evaluated {} of {} sites", m.evaluated(), m.sites()),
+                ))
+            })
+            .collect()
+    }
+}
+
 /// A mutant no test of the Harness noticed.
 #[derive(Debug, Clone, Copy)]
 pub struct Survived;
@@ -389,6 +432,56 @@ mod tests {
         // an ok latest run is not a failure
         let ok = Measurement::new(run_of(&p, &pins[0], 3, vec![])).unwrap();
         assert!(found(&MeasureFailed, &p, &pins, &[ok], &none).is_empty());
+    }
+
+    #[test]
+    fn a_run_that_evaluated_fewer_mutants_than_sites_is_capped_once_and_a_whole_one_is_not() {
+        let p = project();
+        let pins = [pin(&p)];
+        let none = BTreeMap::new();
+        // 3 sites, 2 given and evaluated
+        let mut sampled = run_of(
+            &p,
+            &pins[0],
+            1,
+            vec![
+                result("f/rel/1/aaaa", 7, MutantOutcome::Killed),
+                result("f/rel/2/bbbb", 9, MutantOutcome::Survived),
+            ],
+        );
+        sampled.sites = 3;
+        let run = Measurement::new(sampled).unwrap();
+        let all = found(&Capped, &p, &pins, std::slice::from_ref(&run), &none);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].subject(), Some(Subject::Interface(iface())));
+        assert_eq!(all[0].level(), Level::Note);
+        assert_eq!(all[0].message(), "evaluated 2 of 3 sites");
+        // every site evaluated
+        let mut whole = run_of(
+            &p,
+            &pins[0],
+            2,
+            vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
+        );
+        whole.sites = 1;
+        let whole = Measurement::new(whole).unwrap();
+        assert!(found(&Capped, &p, &pins, &[whole], &none).is_empty());
+        // a run that stopped early failed; it is not also capped
+        let mut stopped = run_of(
+            &p,
+            &pins[0],
+            3,
+            vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
+        );
+        stopped.sites = 9;
+        stopped.planned = 5;
+        stopped.failure = Some(MeasureFailure::of(FailureKind::Budget, "used up"));
+        let stopped = Measurement::new(stopped).unwrap();
+        assert!(found(&Capped, &p, &pins, &[stopped], &none).is_empty());
+        // a stale run is not judged: the code it sampled has moved
+        let mut moved = project();
+        revise_harness(&mut moved);
+        assert!(found(&Capped, &moved, &pins, &[run], &none).is_empty());
     }
 
     #[test]

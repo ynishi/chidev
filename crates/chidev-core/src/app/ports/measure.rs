@@ -45,6 +45,9 @@ pub struct MutateRequest {
 pub struct MutateReport {
     /// How many places the provider found to change.
     pub sites: u32,
+    /// How many mutants the provider gave to run (at most `max_mutants` of the sites); the mutants below are fewer
+    /// only when the run failed.
+    pub planned: u32,
     /// The mutants that were run, with their outcomes.
     pub mutants: Vec<MutantResult>,
     /// Why the run did not finish; none when it did.

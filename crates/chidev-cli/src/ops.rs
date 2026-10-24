@@ -428,7 +428,11 @@ struct MeasureOut<'a> {
     stamp: &'a str,
     outcome: &'static str,
     failure: Option<&'a str>,
+    /// The places the provider found to change.
     sites: u32,
+    /// The mutants evaluated; fewer than `sites` with `capped` set means `max_mutants` left sites out.
+    evaluated: u32,
+    capped: bool,
     killed: u32,
     survived: u32,
     stillborn: u32,
@@ -455,6 +459,14 @@ struct MeasurementOut<'a> {
     state: &'static str,
     outcome: &'static str,
     failure: Option<&'a str>,
+    /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
+    /// out of a run that ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sites: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evaluated: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capped: Option<bool>,
     killed: u32,
     survived: u32,
     stillborn: u32,
@@ -1746,6 +1758,8 @@ where
                 },
                 failure: done.failure.as_deref(),
                 sites: done.sites,
+                evaluated: done.evaluated,
+                capped: done.capped,
                 killed: done.counts.killed,
                 survived: done.counts.survived,
                 stillborn: done.counts.stillborn,
@@ -2217,6 +2231,9 @@ where
                         state: m.state,
                         outcome: m.outcome,
                         failure: m.failure.as_deref(),
+                        sites: m.coverage.map(|c| c.sites),
+                        evaluated: m.coverage.map(|c| c.evaluated),
+                        capped: m.coverage.map(|c| c.capped),
                         killed: m.counts.killed,
                         survived: m.counts.survived,
                         stillborn: m.counts.stillborn,

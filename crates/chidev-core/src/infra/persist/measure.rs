@@ -97,7 +97,10 @@ struct EvidenceDoc {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SummaryDoc {
+    /// How many places the provider found to change.
     sites: u32,
+    /// How many mutants it gave to run; fewer than `sites` is a run capped by `max_mutants`.
+    planned: u32,
     killed: u32,
     survived: u32,
     stillborn: u32,
@@ -235,6 +238,7 @@ fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
                 })?,
                 write(&SummaryDoc {
                     sites: m.sites(),
+                    planned: m.planned(),
                     killed: counts.killed,
                     survived: counts.survived,
                     stillborn: counts.stillborn,
@@ -468,48 +472,65 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
             return Err(corrupt(format!("a `{}` run of a `{other}`", kind.word())));
         }
     };
-    let (stamp, sites, mutants, sim): (Stamp, u32, Vec<MutantResult>, Option<SimOutcome>) =
-        match kind {
-            MeasureKind::Mutate => {
-                let stamp: StampDoc = read(&run.inputs, "its stamp")?;
-                let basis = PinBasis::new(
-                    Revision::restore(stamp.interface).ok_or_else(|| corrupt("a revision of 0"))?,
-                    unrevs(&stamp.harnesses, HarnessId::from_uuid)?,
-                    unrevs(&stamp.contracts, ContractId::from_uuid)?,
-                    unrevs(&stamp.used_interfaces, InterfaceId::from_uuid)?,
-                );
-                let code = Digest::restore(&stamp.code).ok_or_else(|| corrupt("a code digest"))?;
-                let stamp = MeasureStamp::new(code, basis, stamp.settings).map_err(corrupt)?;
-                let summary: SummaryDoc = read(&run.summary, "its summary")?;
-                (stamp.into(), summary.sites, mutants_of(items)?, None)
-            }
-            MeasureKind::Simulate => {
-                let stamp: SimStampDoc = read(&run.inputs, "its stamp")?;
-                let interfaces = stamp
-                    .interfaces
-                    .iter()
-                    .map(|p| {
-                        Ok((
-                            InterfaceId::from_uuid(uuid(&p.id)?),
-                            (
-                                Revision::restore(p.revision)
-                                    .ok_or_else(|| corrupt("a revision of 0"))?,
-                                p.pin.as_deref().map(digest_of).transpose()?,
-                            ),
-                        ))
-                    })
-                    .collect::<Result<_, StoreError>>()?;
-                let basis = SimBasis {
-                    harness: Revision::restore(stamp.harness)
-                        .ok_or_else(|| corrupt("a revision of 0"))?,
-                    contracts: unrevs(&stamp.contracts, ContractId::from_uuid)?,
-                    interfaces,
-                };
-                let stamp = SimStamp::new(basis, stamp.settings).map_err(corrupt)?;
-                let summary: SimSummaryDoc = read(&run.summary, "its summary")?;
-                (stamp.into(), 0, Vec::new(), Some(sim_of(&summary, items)?))
-            }
-        };
+    let (stamp, sites, planned, mutants, sim): (
+        Stamp,
+        u32,
+        u32,
+        Vec<MutantResult>,
+        Option<SimOutcome>,
+    ) = match kind {
+        MeasureKind::Mutate => {
+            let stamp: StampDoc = read(&run.inputs, "its stamp")?;
+            let basis = PinBasis::new(
+                Revision::restore(stamp.interface).ok_or_else(|| corrupt("a revision of 0"))?,
+                unrevs(&stamp.harnesses, HarnessId::from_uuid)?,
+                unrevs(&stamp.contracts, ContractId::from_uuid)?,
+                unrevs(&stamp.used_interfaces, InterfaceId::from_uuid)?,
+            );
+            let code = Digest::restore(&stamp.code).ok_or_else(|| corrupt("a code digest"))?;
+            let stamp = MeasureStamp::new(code, basis, stamp.settings).map_err(corrupt)?;
+            let summary: SummaryDoc = read(&run.summary, "its summary")?;
+            (
+                stamp.into(),
+                summary.sites,
+                summary.planned,
+                mutants_of(items)?,
+                None,
+            )
+        }
+        MeasureKind::Simulate => {
+            let stamp: SimStampDoc = read(&run.inputs, "its stamp")?;
+            let interfaces = stamp
+                .interfaces
+                .iter()
+                .map(|p| {
+                    Ok((
+                        InterfaceId::from_uuid(uuid(&p.id)?),
+                        (
+                            Revision::restore(p.revision)
+                                .ok_or_else(|| corrupt("a revision of 0"))?,
+                            p.pin.as_deref().map(digest_of).transpose()?,
+                        ),
+                    ))
+                })
+                .collect::<Result<_, StoreError>>()?;
+            let basis = SimBasis {
+                harness: Revision::restore(stamp.harness)
+                    .ok_or_else(|| corrupt("a revision of 0"))?,
+                contracts: unrevs(&stamp.contracts, ContractId::from_uuid)?,
+                interfaces,
+            };
+            let stamp = SimStamp::new(basis, stamp.settings).map_err(corrupt)?;
+            let summary: SimSummaryDoc = read(&run.summary, "its summary")?;
+            (
+                stamp.into(),
+                0,
+                0,
+                Vec::new(),
+                Some(sim_of(&summary, items)?),
+            )
+        }
+    };
     let failure = run
         .failure
         .as_deref()
@@ -546,6 +567,7 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
             u64::try_from(run.started_at).map_err(|_| corrupt("a negative time"))?,
         ),
         sites,
+        planned,
         mutants,
         sim,
         failure,
@@ -624,6 +646,68 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[1].outcome, "script:2");
         assert_eq!(decode(&run, &items).unwrap(), m);
+    }
+
+    #[test]
+    fn a_case_that_could_not_start_survives_the_rows_with_its_reason() {
+        let mut m = sim_measurement();
+        let mut draft = sim_draft(
+            8,
+            HarnessId::from_uuid(test_uuid(6)),
+            m.stamp().sim().expect("a sim stamp").basis().clone(),
+            SimOutcome {
+                cases: vec![CaseRun {
+                    case: SimCase::Seed(0),
+                    exit: CaseExit::CannotStart("python3: No such file or directory".into()),
+                    findings: Vec::new(),
+                    unreached: Vec::new(),
+                    undecided: Vec::new(),
+                    schedule: None,
+                    trace: None,
+                }],
+                reruns: Vec::new(),
+            },
+        );
+        draft.failure = Some(MeasureFailure::of(FailureKind::NoStart, "none started"));
+        m = Measurement::new(draft).unwrap();
+        let (run, items) = encode(&m).unwrap();
+        assert_eq!(run.outcome, "failed");
+        assert_eq!(
+            items[0].outcome,
+            "cannot_start:python3: No such file or directory"
+        );
+        assert_eq!(decode(&run, &items).unwrap(), m);
+    }
+
+    #[test]
+    fn a_mutation_run_keeps_the_sites_it_found_and_the_mutants_it_was_given() {
+        use crate::domain::entity::measurement::fixture::{draft, empty_basis, result};
+        let mut d = draft(
+            9,
+            InterfaceId::from_uuid(test_uuid(100)),
+            Digest::of(b"code"),
+            empty_basis(),
+            vec![
+                result("a", 1, MutantOutcome::Killed),
+                result("b", 2, MutantOutcome::Survived),
+            ],
+        );
+        d.sites = 41;
+        let m = Measurement::new(d).unwrap();
+        assert!(m.capped());
+        let (run, items) = encode(&m).unwrap();
+        assert!(run.summary.contains("\"sites\":41") && run.summary.contains("\"planned\":2"));
+        let back = decode(&run, &items).unwrap();
+        assert_eq!(back, m);
+        assert_eq!((back.sites(), back.planned(), back.evaluated()), (41, 2, 2));
+        // a row whose summary says more mutants were given than items exist, with no failure, is not a run
+        let mut short = run.clone();
+        short.summary = short.summary.replace("\"planned\":2", "\"planned\":3");
+        assert!(decode(&short, &items).is_err());
+        // and a row from before the field existed is not read quietly
+        let mut old = run.clone();
+        old.summary = old.summary.replace("\"planned\":2,", "");
+        assert!(decode(&old, &items).is_err());
     }
 
     #[test]

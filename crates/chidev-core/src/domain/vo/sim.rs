@@ -254,7 +254,7 @@ pub struct CaseUnreached {
 }
 
 /// How the run of the script for one case ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaseExit {
     /// Exit 0 or 1 and a report that follows the protocol.
     Normal,
@@ -262,15 +262,20 @@ pub enum CaseExit {
     Script(i32),
     /// The script did not end within the time allowed for a case.
     Timeout,
+    /// The script said (`CANNOT_START <text>`) it could not start the program, so it drove nothing and checked
+    /// nothing: the case has no findings and no unreached Clause, and it is not a case in which the program kept
+    /// its promises. The text is one line, as the script gave it.
+    CannotStart(String),
 }
 
 impl CaseExit {
-    /// The word the record keeps: `normal`, `timeout` or `script:<code>`.
-    pub fn word(self) -> String {
+    /// The word the record keeps: `normal`, `timeout`, `script:<code>` or `cannot_start:<text>`.
+    pub fn word(&self) -> String {
         match self {
             CaseExit::Normal => "normal".to_string(),
             CaseExit::Script(code) => format!("script:{code}"),
             CaseExit::Timeout => "timeout".to_string(),
+            CaseExit::CannotStart(why) => format!("cannot_start:{why}"),
         }
     }
 
@@ -282,8 +287,18 @@ impl CaseExit {
             _ => word
                 .strip_prefix("script:")
                 .and_then(|c| c.parse().ok())
-                .map(CaseExit::Script),
+                .map(CaseExit::Script)
+                .or_else(|| {
+                    word.strip_prefix("cannot_start:")
+                        .filter(|why| !why.trim().is_empty() && !why.contains('\n'))
+                        .map(|why| CaseExit::CannotStart(why.to_string()))
+                }),
         }
+    }
+
+    /// Whether the script said it could not start the program.
+    pub fn cannot_start(&self) -> bool {
+        matches!(self, CaseExit::CannotStart(_))
     }
 }
 
@@ -362,12 +377,15 @@ pub fn reproduction(first: &CaseRun, second: &CaseRun) -> Reproduction {
     }
 }
 
-/// The cases to run a second time: `seed-0` (the first case of the sweep) if it was run, then up to `sample` of
-/// the cases that had findings, in the order they were run. A finding is what is worth reproducing, so those are
-/// the cases a person will read.
+/// The cases to run a second time: `seed-0` (the first case of the sweep) if it was run and started the program,
+/// then up to `sample` of the cases that had findings, in the order they were run. A finding is what is worth
+/// reproducing, so those are the cases a person will read.
 pub fn rerun_cases(runs: &[CaseRun], sample: usize) -> Vec<SimCase> {
     let mut chosen: Vec<SimCase> = Vec::new();
-    if runs.iter().any(|r| r.case == SimCase::Seed(0)) {
+    if runs
+        .iter()
+        .any(|r| r.case == SimCase::Seed(0) && !r.exit.cannot_start())
+    {
         chosen.push(SimCase::Seed(0));
     }
     let mut with_findings = 0;
@@ -462,6 +480,17 @@ impl SimOutcome {
     /// The runs that did not end normally.
     pub fn abnormal(&self) -> impl Iterator<Item = &CaseRun> {
         self.cases.iter().filter(|r| r.exit != CaseExit::Normal)
+    }
+
+    /// The runs in which the program could not be started.
+    pub fn cannot_start(&self) -> impl Iterator<Item = &CaseRun> {
+        self.cases.iter().filter(|r| r.exit.cannot_start())
+    }
+
+    /// Whether the program could not be started in any case that was run (and some case was run): nothing was
+    /// checked, and the cases say nothing of the Contracts.
+    pub fn none_started(&self) -> bool {
+        !self.cases.is_empty() && self.cases.iter().all(|r| r.exit.cannot_start())
     }
 }
 
@@ -616,10 +645,15 @@ mod tests {
             CaseExit::Timeout,
             CaseExit::Script(2),
             CaseExit::Script(-1),
+            CaseExit::CannotStart("bank.py: No such file or directory".to_string()),
         ] {
             assert_eq!(CaseExit::from_word(&e.word()), Some(e));
         }
         assert_eq!(CaseExit::from_word("script:x"), None);
+        // a start that gave no reason is not a word
+        assert_eq!(CaseExit::from_word("cannot_start:"), None);
+        assert_eq!(CaseExit::from_word("cannot_start: "), None);
+        assert_eq!(CaseExit::from_word("cannot_start"), None);
         for r in Reproduction::ALL {
             assert_eq!(Reproduction::from_word(r.word()), Some(r));
         }
@@ -737,6 +771,53 @@ mod tests {
         assert_eq!(unreached[0].clause, clause(5));
         assert_eq!(unreached[0].text, "needs 5");
         assert!(SimOutcome::default().unreached().is_empty());
+    }
+
+    fn unstarted(case: SimCase) -> CaseRun {
+        CaseRun {
+            exit: CaseExit::CannotStart("no such program".to_string()),
+            schedule: None,
+            trace: None,
+            ..run(case)
+        }
+    }
+
+    #[test]
+    fn a_case_that_could_not_start_the_program_is_counted_apart_and_shows_nothing_of_the_clauses() {
+        let outcome = SimOutcome {
+            cases: vec![
+                unstarted(SimCase::Seed(0)),
+                found(run(SimCase::Seed(1)), 2, 4, "broken"),
+                unstarted(SimCase::Seed(2)),
+            ],
+            reruns: Vec::new(),
+        };
+        assert_eq!(outcome.cannot_start().count(), 2);
+        assert!(!outcome.none_started());
+        // only the case that drove the program found anything
+        assert_eq!(outcome.found().len(), 1);
+        // a seed that did not start says nothing of the Clauses it did not reach
+        assert!(outcome.unreached().is_empty());
+        // the case that could not start is not repeated, and seed-1 is the one with a finding
+        assert_eq!(
+            rerun_cases(&outcome.cases, 3)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["seed-1"]
+        );
+
+        let none = SimOutcome {
+            cases: vec![
+                unstarted(SimCase::Seed(0)),
+                unstarted(SimCase::Regress(name("r"))),
+            ],
+            reruns: Vec::new(),
+        };
+        assert!(none.none_started());
+        assert!(none.found().is_empty() && none.unreached().is_empty());
+        // no case run is not a program that never started
+        assert!(!SimOutcome::default().none_started());
     }
 
     #[test]

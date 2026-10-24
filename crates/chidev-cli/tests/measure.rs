@@ -53,6 +53,11 @@ fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
 }
 
 fn project(name: &str) -> PathBuf {
+    project_with(name, "")
+}
+
+/// As [`project`], with `extra` lines (TOML) added to the `[measure]` table.
+fn project_with(name: &str, extra: &str) -> PathBuf {
     let dir = fresh_dir(name);
     std::fs::create_dir_all(dir.join("src")).expect("src");
     std::fs::write(
@@ -76,6 +81,7 @@ test = ["cargo", "test", "--quiet", "--offline"]
 baseline_timeout = 300
 timeout = 120
 budget = 900
+{extra}
 
 [measure.mutants]
 rust = [{bin:?}, "provider", "mutants-rust"]
@@ -91,7 +97,8 @@ context = "inventory"
 harness = "stock-tests"
 path = "tests/stock.rs"
 "#,
-            bin = env!("CARGO_BIN_EXE_chidev")
+            bin = env!("CARGO_BIN_EXE_chidev"),
+            extra = extra
         ),
     )
     .expect("checks.toml");
@@ -161,6 +168,11 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
         (m["sites"].as_u64(), m["killed"].as_u64()),
         (Some(2), Some(1))
     );
+    // every site was evaluated: the run is not capped
+    assert_eq!(
+        (m["evaluated"].as_u64(), m["capped"].as_bool()),
+        (Some(2), Some(false))
+    );
     assert_eq!(
         (
             m["survived"].as_u64(),
@@ -226,7 +238,16 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     );
     assert!(findings(&after[0], "mutation.stale").is_empty());
     assert!(findings(&after[0], "mutation.unmeasured").is_empty());
+    assert!(findings(&after[0], "mutation.capped").is_empty());
     let standing = &after[1]["measurements"][0];
+    assert_eq!(
+        (
+            standing["sites"].as_u64(),
+            standing["evaluated"].as_u64(),
+            standing["capped"].as_bool()
+        ),
+        (Some(2), Some(2), Some(false))
+    );
     assert_eq!(standing["interface"], "stock");
     assert_eq!(standing["state"], "current");
     assert_eq!(standing["outcome"], "ok");
@@ -268,6 +289,63 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
         "measure e2e: first measure {:.1}s, whole test {:.1}s",
         measure_time.as_secs_f64(),
         all.elapsed().as_secs_f64()
+    );
+}
+
+#[test]
+fn a_run_limited_by_max_mutants_says_how_many_sites_it_left_out() {
+    // The provider finds 2 sites; `max_mutants = 1` lets the run evaluate one of them.
+    let dir = project_with("measure-e2e-capped", "max_mutants = 1");
+    exec(
+        &dir,
+        &[
+            json!({"op":"init"}),
+            json!({"op":"context_add","name":"inventory"}),
+            json!({"op":"contract_put","context":"inventory","name":"capacity","title":"Capacity",
+                   "clauses":[{"label":"C1","text":"a load up to the limit fits"},
+                              {"label":"C2","text":"spare is the limit less the used"}]}),
+            json!({"op":"interface_put","context":"inventory","name":"stock",
+                   "source":"pub fn fits(used: u32, limit: u32) -> bool;\npub fn spare(limit: u32, used: u32) -> u32;\n",
+                   "items":[{"signature":"fn fits(used: u32, limit: u32) -> bool","lines":[1,1]},
+                            {"signature":"fn spare(limit: u32, used: u32) -> u32","lines":[2,2]}]}),
+            harness_put(HARNESS),
+            json!({"op":"pin","context":"inventory","interface":"stock","code":PINNED}),
+        ],
+    );
+    let measured = exec(
+        &dir,
+        &[json!({"op":"measure","kind":"mutate","context":"inventory","interface":"stock"})],
+    );
+    let m = &measured[0];
+    // the run is `ok`, and says it did not look at everything
+    assert_eq!(m["outcome"], "ok", "{m:#?}");
+    assert_eq!(
+        (
+            m["sites"].as_u64(),
+            m["evaluated"].as_u64(),
+            m["capped"].as_bool()
+        ),
+        (Some(2), Some(1), Some(true)),
+        "{m:#?}"
+    );
+    assert_eq!(m["mutants"].as_array().expect("mutants").len(), 1);
+
+    let after = exec(&dir, &[json!({"op":"check"}), json!({"op":"status"})]);
+    let capped = findings(&after[0], "mutation.capped");
+    assert_eq!(capped.len(), 1, "{:#?}", after[0]);
+    assert_eq!(capped[0]["level"], "note");
+    assert_eq!(capped[0]["about"], "interface stock");
+    assert_eq!(capped[0]["message"], "evaluated 1 of 2 sites");
+    assert!(findings(&after[0], "measure.failed").is_empty());
+    let standing = &after[1]["measurements"][0];
+    assert_eq!(standing["outcome"], "ok");
+    assert_eq!(
+        (
+            standing["sites"].as_u64(),
+            standing["evaluated"].as_u64(),
+            standing["capped"].as_bool()
+        ),
+        (Some(2), Some(1), Some(true))
     );
 }
 

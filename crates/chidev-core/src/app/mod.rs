@@ -23,8 +23,8 @@ use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod measure;
 pub use self::measure::{
-    CaseLine, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding, MutantLine, RerunLine,
-    SimSummary, UnreachedLine,
+    CaseLine, Coverage, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding, MutantLine,
+    RerunLine, SimSummary, UnreachedLine,
 };
 use self::ports::measure::{NoRunner, Runner, RunnerError};
 mod model_view;

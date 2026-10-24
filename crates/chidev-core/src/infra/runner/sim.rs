@@ -18,8 +18,16 @@
 //! FINDING <case> step <k> <contract>:<label>: <text>   a promise of the Clause did not hold after step k (k from 1)
 //! UNREACHED <contract>:<label>: <text>                 this case never reached the situation the Clause needs
 //! UNDECIDED <text>                                     the script could not decide something (counted, never failed)
+//! CANNOT_START <text>                                  the script could not start the program, so it drove nothing
 //! sim: findings=<n>                                    last line; n is the number of FINDING lines
 //! ```
+//!
+//! `CANNOT_START` is the one line a script prints when starting the program failed (a program that is not there, a
+//! file that cannot be run): the script, which starts the program, is the only one who sees it. The report then
+//! holds that line and the summary `sim: findings=0` and nothing else; a `FINDING`, `UNREACHED` or `UNDECIDED` line
+//! beside it is a protocol failure, for they would tell of a run that did not happen. The case is recorded as
+//! `cannot_start`: it has no findings and says nothing of the Clauses. When *every* case that was run could not
+//! start the program, the run is a failure of kind `no_start` and the second runs are not made.
 //!
 //! A Clause is named `<contract>:<label>`: the Contract's name (as chidev knows it, without white space) and the
 //! label (`C<n>`) of the Clause in it. Labels are unique only within a Contract, so a sim Harness that checks
@@ -61,6 +69,8 @@ pub(super) struct Reported {
     pub findings: Vec<CaseFinding>,
     pub unreached: Vec<CaseUnreached>,
     pub undecided: Vec<String>,
+    /// Why the script could not start the program (`CANNOT_START <text>`); then it reported nothing else.
+    pub cannot_start: Option<String>,
 }
 
 fn shown(line: &str) -> String {
@@ -156,6 +166,14 @@ pub(super) fn parse_report(
                 return Err(bad("an empty reason".to_string()));
             }
             out.undecided.push(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("CANNOT_START ") {
+            if rest.trim().is_empty() {
+                return Err(bad("an empty reason".to_string()));
+            }
+            if out.cannot_start.is_some() {
+                return Err(bad("`CANNOT_START` twice".to_string()));
+            }
+            out.cannot_start = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("sim: findings=") {
             let count: u32 = rest
                 .trim()
@@ -176,6 +194,19 @@ pub(super) fn parse_report(
             "line {at}: the summary says findings={n} and the report has {}",
             out.findings.len()
         )),
+        // A script that never drove the program checked nothing: a report that also names findings, unreached
+        // Clauses or undecided things would be telling of a run that did not happen.
+        Some(_)
+            if out.cannot_start.is_some()
+                && !(out.findings.is_empty()
+                    && out.unreached.is_empty()
+                    && out.undecided.is_empty()) =>
+        {
+            Err(
+                "`CANNOT_START` goes with no `FINDING`, `UNREACHED` or `UNDECIDED` line"
+                    .to_string(),
+            )
+        }
         Some(_) => Ok(out),
     }
 }
@@ -454,17 +485,21 @@ impl Job<'_> {
             )
             .map_err(protocol)?,
         };
-        let exit = match ended {
-            Some(exit) => exit,
+        let exit = match (ended, &reported.cannot_start) {
+            (Some(exit), _) => exit,
+            // The script says it never started the program: a case that failed to run, with no findings, which
+            // needs no schedule and trace since nothing was driven.
+            (None, Some(why)) => CaseExit::CannotStart(why.clone()),
             // Exit 1 says there are findings; one that names none (and no unreached clause) is a script that
             // failed without saying why.
-            None if capture.exit_code == Some(1)
-                && reported.findings.is_empty()
-                && reported.unreached.is_empty() =>
+            (None, None)
+                if capture.exit_code == Some(1)
+                    && reported.findings.is_empty()
+                    && reported.unreached.is_empty() =>
             {
                 CaseExit::Script(1)
             }
-            None => CaseExit::Normal,
+            (None, None) => CaseExit::Normal,
         };
         let schedule = digest_of(&dir.join("schedule"))
             .await
@@ -500,6 +535,27 @@ impl Job<'_> {
         for case in &cases {
             let run = self.sim_case(plan, &interpreter, case, "sim", out).await?;
             out.cases.push(run);
+        }
+        // Every case said the program could not be started: nothing was checked, so the run is a failure of its
+        // own kind and not a run with no findings. The second runs would repeat nothing.
+        let unstarted: Vec<&CaseRun> = out.cases.iter().filter(|c| c.exit.cannot_start()).collect();
+        if let Some(first) = unstarted
+            .first()
+            .filter(|_| unstarted.len() == out.cases.len())
+        {
+            let why = match &first.exit {
+                CaseExit::CannotStart(why) => why.as_str(),
+                _ => "",
+            };
+            return Err(MeasureFailure::of(
+                FailureKind::NoStart,
+                format!(
+                    "the script could not start the program in any of the {} case(s); {}: {}",
+                    unstarted.len(),
+                    first.case,
+                    why
+                ),
+            ));
         }
         let again = rerun_cases(&out.cases, plan.cfg.sample);
         if again.is_empty() {
@@ -612,6 +668,43 @@ mod tests {
             parse_report(&seed(0), &cited(), "sim: findings=0\n").unwrap(),
             Reported::default()
         );
+    }
+
+    #[test]
+    fn a_report_that_says_the_program_could_not_start_holds_that_and_nothing_else() {
+        let ok = parse_report(
+            &seed(3),
+            &cited(),
+            "CANNOT_START python3: No such file or directory\nsim: findings=0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ok.cannot_start.as_deref(),
+            Some("python3: No such file or directory")
+        );
+        assert!(ok.findings.is_empty() && ok.unreached.is_empty());
+        for text in [
+            "CANNOT_START x\nFINDING seed-3 step 1 stock:C1: y\nsim: findings=1\n",
+            "UNREACHED stock:C1: y\nCANNOT_START x\nsim: findings=0\n",
+            "CANNOT_START x\nUNDECIDED y\nsim: findings=0\n",
+        ] {
+            let error = parse_report(&seed(3), &cited(), text).unwrap_err();
+            assert!(
+                error.contains("goes with no `FINDING`"),
+                "{text:?}: {error}"
+            );
+        }
+        let twice = parse_report(
+            &seed(3),
+            &cited(),
+            "CANNOT_START x\nCANNOT_START y\nsim: findings=0\n",
+        )
+        .unwrap_err();
+        assert!(twice.contains("twice"), "{twice}");
+        // a start that gave no reason, or with no summary, is not a report
+        for text in ["CANNOT_START \nsim: findings=0\n", "CANNOT_START x\n"] {
+            assert!(parse_report(&seed(3), &cited(), text).is_err(), "{text:?}");
+        }
     }
 
     #[test]

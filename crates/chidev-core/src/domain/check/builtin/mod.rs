@@ -20,7 +20,7 @@ pub use self::change_requests::{
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
-pub use self::measure::{MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
+pub use self::measure::{Capped, MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
 pub use self::pins::{StalePin, Unpinned};
 pub use self::sim::{
     SimError, SimFinding, SimNondeterministic, SimShape, SimStale, SimUncitedClause, SimUnreached,
@@ -47,6 +47,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &MeasureFailed,
         &Unmeasured,
         &StaleMutation,
+        &Capped,
         &Survived,
         &SimShape,
         &SimUncitedClause,
@@ -297,6 +298,7 @@ mod tests {
                     | "crux.policy-line-gone"
                     | "mutation.unmeasured"
                     | "mutation.survived"
+                    | "mutation.capped"
             );
             let error = matches!(
                 d.id.as_str(),

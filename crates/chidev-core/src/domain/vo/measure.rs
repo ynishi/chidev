@@ -30,13 +30,29 @@ pub enum MeasureError {
     /// Two mutants of one run have one key.
     #[error("the mutant key `{0}` is given twice")]
     DuplicateKey(String),
-    /// A run has more mutants than sites.
-    #[error("{mutants} mutants from {sites} sites")]
-    MoreMutantsThanSites {
-        /// The mutants.
+    /// A run evaluated more mutants than the provider gave.
+    #[error("{mutants} mutants evaluated of the {planned} the provider gave")]
+    MoreMutantsThanPlanned {
+        /// The mutants evaluated.
         mutants: usize,
-        /// The sites.
+        /// The mutants the provider gave.
+        planned: u32,
+    },
+    /// The provider gave more mutants than it found sites.
+    #[error("{planned} mutants from {sites} sites")]
+    MorePlannedThanSites {
+        /// The mutants the provider gave.
+        planned: u32,
+        /// The sites it found.
         sites: u32,
+    },
+    /// A run that did not fail evaluated fewer mutants than the provider gave: it would pass for a whole one.
+    #[error("{mutants} of the {planned} mutants evaluated, and no failure says why")]
+    UnfinishedWithoutFailure {
+        /// The mutants evaluated.
+        mutants: usize,
+        /// The mutants the provider gave.
+        planned: u32,
     },
     /// A failure has no message.
     #[error("a failure says what failed")]
@@ -306,11 +322,14 @@ pub enum FailureKind {
     Io,
     /// The program a simulation drives does not build, so the script was not run.
     NoBuild,
+    /// The program a simulation drives was built, but the script could not start it in any case: nothing was
+    /// checked, and the cases say nothing of the Contracts.
+    NoStart,
 }
 
 impl FailureKind {
     /// Every kind.
-    pub const ALL: [FailureKind; 7] = [
+    pub const ALL: [FailureKind; 8] = [
         FailureKind::Baseline,
         FailureKind::Provider,
         FailureKind::Protocol,
@@ -318,6 +337,7 @@ impl FailureKind {
         FailureKind::Budget,
         FailureKind::Io,
         FailureKind::NoBuild,
+        FailureKind::NoStart,
     ];
 
     /// The word for it.
@@ -330,6 +350,7 @@ impl FailureKind {
             FailureKind::Budget => "budget",
             FailureKind::Io => "io",
             FailureKind::NoBuild => "no_build",
+            FailureKind::NoStart => "no_start",
         }
     }
 

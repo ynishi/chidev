@@ -425,10 +425,11 @@ static SIM_ERROR: Descriptor = Descriptor {
     id: RuleId::from_static("sim.error"),
     summary: Cow::Borrowed("a simulation that failed, or whose script failed for some case"),
     help: Cow::Borrowed(
-        "The run could not finish (the program does not build, the script broke the protocol, the time ran out), \
-           or the script itself failed for a case (an exit other than 0 or 1, or too slow). The evidence of the \
-           run is in its record. Fix the cause and run the simulate measure again; a failed run is not judged for \
-           findings.",
+        "The run could not finish (the program does not build, the script could not start the program in any case, \
+           the script broke the protocol, the time ran out), or the script itself failed for a case (an exit other \
+           than 0 or 1, too slow, or the program could not be started in it). The evidence of the run is in its \
+           record. Fix the cause and run the simulate measure again; a failed run is not judged for findings, and a \
+           case that could not start the program found nothing and reached nothing.",
     ),
     hooks: Cow::Borrowed(&[Hook::Check]),
     default_level: Level::Warning,
@@ -464,11 +465,17 @@ impl Check for SimError {
                 .map(|r| format!("{} ended {}", r.case, r.exit.word()))
                 .collect();
             if let Some(first) = abnormal.first() {
+                let unstarted = outcome.cannot_start().count();
+                let apart = if unstarted == 0 {
+                    String::new()
+                } else {
+                    format!("; the program could not be started in {unstarted} of them")
+                };
                 out.push(Finding::new(
                     &SIM_ERROR,
                     subject,
                     format!(
-                        "the script failed in {} case(s); first: {first}",
+                        "the script failed in {} case(s); first: {first}{apart}",
                         abnormal.len()
                     ),
                 ));
@@ -1068,6 +1075,83 @@ mod tests {
         );
         let clean = simulated(&p, 4, SimOutcome::default());
         assert!(found(&SimError, &p, &[clean], &none()).is_empty());
+    }
+
+    fn unstarted(case: SimCase) -> CaseRun {
+        CaseRun {
+            exit: CaseExit::CannotStart("python3: No such file or directory".to_string()),
+            schedule: None,
+            trace: None,
+            ..run_of(case)
+        }
+    }
+
+    #[test]
+    fn a_case_that_could_not_start_the_program_is_a_script_error_and_gives_no_finding() {
+        let p = sim_project();
+        let run = simulated(
+            &p,
+            5,
+            SimOutcome {
+                cases: vec![
+                    unstarted(SimCase::Seed(0)),
+                    broke(run_of(SimCase::Seed(1)), 2, 30, "broke"),
+                    unstarted(SimCase::Seed(2)),
+                ],
+                reruns: Vec::new(),
+            },
+        );
+        let runs = std::slice::from_ref(&run);
+        let errors = found(&SimError, &p, runs, &none());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message(),
+            "the script failed in 2 case(s); first: seed-0 ended \
+             cannot_start:python3: No such file or directory; \
+             the program could not be started in 2 of them"
+        );
+        // the one case that drove the program is the only finding; the two that did not add none
+        let findings = found(&SimFinding, &p, runs, &none());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message().contains("broke in 1 case(s)"));
+    }
+
+    #[test]
+    fn a_run_in_which_no_case_started_the_program_fails_and_only_sim_error_speaks() {
+        let p = sim_project();
+        let mut failed = sim_draft(
+            6,
+            hid(),
+            basis_of(&p, hid(), &[]).unwrap(),
+            SimOutcome {
+                cases: vec![
+                    unstarted(SimCase::Seed(0)),
+                    unstarted(SimCase::Seed(1)),
+                    unstarted(SimCase::Regress(
+                        crate::domain::vo::sim::RegressName::try_from("lost").unwrap(),
+                    )),
+                ],
+                reruns: Vec::new(),
+            },
+        );
+        failed.failure = Some(MeasureFailure::of(
+            FailureKind::NoStart,
+            "the script could not start the program in any of the 3 case(s)",
+        ));
+        let run = Measurement::new(failed).unwrap();
+        let runs = std::slice::from_ref(&run);
+        let errors = found(&SimError, &p, runs, &none());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].level(), Level::Warning);
+        assert!(
+            errors[0]
+                .message()
+                .contains("no_start: the script could not start")
+        );
+        assert!(found(&SimFinding, &p, runs, &none()).is_empty());
+        assert!(found(&SimUnreached, &p, runs, &none()).is_empty());
+        assert!(found(&SimNondeterministic, &p, runs, &none()).is_empty());
+        assert!(found(&SimStale, &p, runs, &none()).is_empty());
     }
 
     #[test]

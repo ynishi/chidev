@@ -124,6 +124,11 @@ pub struct MeasureDone {
     pub failure: Option<String>,
     /// How many places the provider found to change.
     pub sites: u32,
+    /// How many mutants were evaluated (the length of `mutants`).
+    pub evaluated: u32,
+    /// Whether the run ended having evaluated fewer mutants than there are sites, `max_mutants` having limited it
+    /// (see `mutation.capped`); a run that failed is not capped.
+    pub capped: bool,
     /// How many mutants ended each way.
     pub counts: Counts,
     /// Each mutant that was run.
@@ -153,6 +158,17 @@ pub struct SimSummary {
     pub differing: u32,
 }
 
+/// How much of the code a mutation run looked at: the places the provider found, and the mutants evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coverage {
+    /// How many places the provider found to change.
+    pub sites: u32,
+    /// How many mutants were evaluated.
+    pub evaluated: u32,
+    /// Whether `max_mutants` left sites out of an `ok` run.
+    pub capped: bool,
+}
+
 /// Where the latest measurement of an Interface or a sim Harness stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementStanding {
@@ -177,10 +193,21 @@ pub struct MeasurementStanding {
     pub failure: Option<String>,
     /// How many mutants ended each way.
     pub counts: Counts,
+    /// How much of the code's sites a mutation run evaluated; none for a simulation.
+    pub coverage: Option<Coverage>,
     /// What a simulation found; none for a mutation run.
     pub sim: Option<SimSummary>,
     /// When the run began, in milliseconds since the epoch.
     pub at: u64,
+}
+
+/// How much of the code a mutation run looked at; none for a simulation.
+fn coverage_of(m: &Measurement) -> Option<Coverage> {
+    (m.kind() == MeasureKind::Mutate).then(|| Coverage {
+        sites: m.sites(),
+        evaluated: m.evaluated(),
+        capped: m.capped(),
+    })
 }
 
 fn summary_of(outcome: &SimOutcome) -> SimSummary {
@@ -319,6 +346,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             stamp: stamp.into(),
             at,
             sites: report.sites,
+            planned: report.planned,
             mutants: report.mutants,
             sim: None,
             failure: report.failure,
@@ -426,6 +454,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             stamp: stamp.into(),
             at,
             sites: 0,
+            planned: 0,
             mutants: Vec::new(),
             sim: Some(SimOutcome {
                 cases: report.cases,
@@ -504,6 +533,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             stamp: m.stamp().fingerprint().to_string(),
             failure: m.failure().map(ToString::to_string),
             sites: m.sites(),
+            evaluated: m.evaluated(),
+            capped: m.capped(),
             counts: m.counts(),
             mutants: m
                 .mutants()
@@ -610,6 +641,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         },
                         failure: m.failure().map(ToString::to_string),
                         counts: m.counts(),
+                        coverage: coverage_of(m),
                         sim: None,
                         at: m.at().millis(),
                     });
@@ -642,6 +674,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         },
                         failure: m.failure().map(ToString::to_string),
                         counts: m.counts(),
+                        coverage: None,
                         sim: m.sim().map(summary_of),
                         at: m.at().millis(),
                     });
@@ -675,6 +708,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 },
                 failure: m.failure().map(ToString::to_string),
                 counts: m.counts(),
+                coverage: coverage_of(m),
                 sim: m.sim().map(summary_of),
                 at: m.at().millis(),
             });

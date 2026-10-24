@@ -60,6 +60,11 @@ fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
 }
 
 fn project(name: &str) -> PathBuf {
+    project_running(name, r#"["python3", "{work}/bank.py"]"#)
+}
+
+/// As [`project`], the program under test being the command `program` (a TOML array).
+fn project_running(name: &str, program: &str) -> PathBuf {
     let python = Command::new("python3")
         .arg("--version")
         .output()
@@ -70,13 +75,14 @@ fn project(name: &str) -> PathBuf {
     std::fs::write(dir.join("bank.py"), "import sys\nsys.exit(1)\n").expect("bank.py");
     std::fs::write(
         dir.join("checks.toml"),
-        r#"[measure]
+        format!(
+            r#"[measure]
 build = ["python3", "-m", "py_compile", "bank.py"]
-env = {}
+env = {{}}
 
 [measure.sim.ledger]
 interpreter = ["python3"]
-program = ["python3", "{work}/bank.py"]
+program = {program}
 seeds = 8
 sample = 3
 timeout = 30
@@ -91,7 +97,8 @@ path = "bank.py"
 context = "ledger"
 harness = "bank-sim"
 path = "sim.py"
-"#,
+"#
+        ),
     )
     .expect("checks.toml");
     dir
@@ -441,6 +448,63 @@ fn one_sim_over_two_contracts_with_a_label_in_common_puts_each_finding_on_its_ow
         findings(&repinned[0], "sim.stale").len(),
         1,
         "{repinned:#?}"
+    );
+}
+
+#[test]
+fn a_program_that_cannot_be_started_is_a_failed_run_with_no_finding_and_only_sim_error_speaks() {
+    // The program is a path that is not there: the script cannot start it in any case and says so.
+    let dir = project_running("sim-e2e-nostart", r#"["{work}/no-such-program"]"#);
+    let mut setup = vec![json!({"op":"init"})];
+    setup.extend(model(SIM));
+    setup.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
+    exec(&dir, &setup);
+
+    let measured = exec(
+        &dir,
+        &[json!({"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"})],
+    );
+    let m = &measured[0];
+    assert_eq!(m["outcome"], "failed", "{m:#?}");
+    let failure = m["failure"].as_str().expect("a failure");
+    assert!(failure.starts_with("no_start: "), "{failure}");
+    assert!(failure.contains("no-such-program"), "{failure}");
+    // every case is recorded as one that could not start, with no finding and nothing unreached
+    let cases = m["cases"].as_array().expect("cases");
+    assert_eq!(cases.len(), 9, "8 seeds and the regress case");
+    for c in cases {
+        let exit = c["exit"].as_str().expect("exit");
+        assert!(exit.starts_with("cannot_start:"), "{c:#?}");
+        assert!(c["findings"].as_array().expect("findings").is_empty());
+        assert!(c["unreached"].as_array().expect("unreached").is_empty());
+    }
+    // no second runs: there was nothing to repeat
+    assert!(m.get("reruns").is_none(), "{m:#?}");
+
+    let after = exec(&dir, &[json!({"op":"check"}), json!({"op":"status"})]);
+    let errors = findings(&after[0], "sim.error");
+    assert_eq!(errors.len(), 1, "{:#?}", after[0]);
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .expect("message")
+            .contains("no_start"),
+        "{errors:#?}"
+    );
+    assert!(
+        findings(&after[0], "sim.finding").is_empty(),
+        "{:#?}",
+        after[0]
+    );
+    assert!(findings(&after[0], "sim.unreached").is_empty());
+    assert!(findings(&after[0], "sim.nondeterministic").is_empty());
+    let standing = &after[1]["measurements"][0];
+    assert_eq!(standing["outcome"], "failed");
+    assert!(
+        standing["failure"]
+            .as_str()
+            .expect("failure")
+            .starts_with("no_start")
     );
 }
 

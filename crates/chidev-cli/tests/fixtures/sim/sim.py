@@ -8,7 +8,8 @@ Contract `account`:
 Protocol chidev-sim 2:  sim.py <case> --out <dir> -- <program argv...>
 The case is `seed-<n>` or `regress-<name>`. The script draws everything from the seed (nothing from the clock or
 the environment), writes `schedule` and `trace` into <dir>, and prints the report. A clause is named
-`<contract>:<label>` (`account:C2`): labels are unique only within a contract.
+`<contract>:<label>` (`account:C2`): labels are unique only within a contract. A program that cannot be started is
+reported as `CANNOT_START <text>` and nothing else (no finding for any clause).
 """
 import json
 import random
@@ -48,7 +49,14 @@ def main():
         if CLOCK:
             f.write(str(time.time_ns()))
     stdin = "".join("%s %d\n" % (cmd, n) if cmd != "balance" else "balance\n" for cmd, n in steps)
-    ran = subprocess.run(program, input=stdin, capture_output=True, text=True, timeout=20)
+    try:
+        ran = subprocess.run(program, input=stdin, capture_output=True, text=True, timeout=20)
+    except OSError as error:
+        # The program could not be started (it is not there, it cannot be run): nothing was driven, so nothing is
+        # checked. Saying so is not a finding of any clause; the report is this line and the summary.
+        print("CANNOT_START %s: %s" % (program[0], error.strerror or error))
+        print("sim: findings=0")
+        sys.exit(0)
     with open(out + "/trace", "w") as f:
         f.write(ran.stdout)
     answers = ran.stdout.splitlines()
