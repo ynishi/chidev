@@ -68,6 +68,39 @@ saved result does not re-hash the executable or check the filesystem. The check
 input consists of the selected model sections, not a snapshot of the working
 tree. Re-run a check after changing inputs outside that model.
 
+## Change-request addresses
+
+Each entry in `cr_open.addresses` names a rule and the subject of its finding.
+It uses the same `subject` form as `finding_report`:
+
+```json
+[
+  {"rule":"context.no-harness","subject":{"context":"pricing"}},
+  {"rule":"pin.unpinned","subject":{"interface":{"context":"pricing","interface":"rounding"}}},
+  {"rule":"cite.uncited-item","subject":{"item":{"context":"pricing","interface":"rounding","signature":"fn round()"}}},
+  {"rule":"cite.uncited-clause","subject":{"clause":{"context":"pricing","contract":"totals","label":"C1"}}},
+  {"rule":"judged.case-review","subject":{"case":{"context":"pricing","harness":"rounding-tests","name":"half rounds up"}}},
+  {"rule":"cr.unapplied","subject":{"change_request":"change rounding"}},
+  {"rule":"judged.project-review","subject":null}
+]
+```
+
+Omitting `subject` also names the whole Project. The legacy address forms with
+an `item` or `clause` directly beside `rule` remain accepted. Each address may
+contain only one selector key (`subject`, `item`, or `clause`), even when a value
+is null. Unknown address fields and unknown fields inside a subject are rejected.
+
+Names must resolve when the change request opens. After that, the reference uses
+stable ids and survives later changes to the subject. The rule need not be
+registered or currently report a finding; its id must be well formed. Opening a
+request does not itself run a checker or judge a rule.
+
+For Rust callers, `FindingInput` uses `subject: Option<SubjectInput>` in place of
+its former `item` / `clause` fields. Wrap those references in
+`SubjectInput::Item` / `SubjectInput::Clause`; `app::SubjectInput` remains the
+public re-export. See `app::subject` and `domain::check::FindingState` in the
+RustDoc for subject resolution and how a finding's state follows its requests.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

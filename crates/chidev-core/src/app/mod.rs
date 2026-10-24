@@ -16,6 +16,8 @@ pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
 use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod model_view;
+pub mod subject;
+pub use self::subject::SubjectInput;
 pub mod ports;
 
 use std::collections::BTreeSet;
@@ -26,7 +28,6 @@ use thiserror::Error;
 pub use self::check::{CheckInfo, Checked, Found, Judgment, Registry, RegistryError, Run};
 pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
-    SubjectInput,
 };
 pub use self::model_view::{ModelView, VIEW_VERSION};
 use self::ports::{AssetKind, AssetName, Changes, IdSource, Invocation, Store, StoreRevision};
@@ -345,16 +346,20 @@ pub struct ChangeRequestInput {
     pub addresses: Vec<FindingInput>,
 }
 
-/// A finding a change request addresses, as a person writes it: the rule, and the Item or the Clause it is about
-/// (at most one of them; none: the finding is about no Item or Clause that can be named).
+/// A finding a change request addresses: its rule and the shared subject input.
+///
+/// `subject: None` means the Project as a whole. Names must resolve to an existing subject when the request
+/// opens; the domain keeps the resolved id thereafter, even if the subject later disappears. Rule ids are
+/// syntax-checked, but need not be registered or have a currently reported finding.
+///
+/// Rust callers migrating from `item` / `clause` fields use `Some(SubjectInput::Item(r))` /
+/// `Some(SubjectInput::Clause(r))`. The CLI separately accepts its legacy wire format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingInput {
     /// The rule (`cite.uncited-clause`).
     pub rule: String,
-    /// The Item it is about.
-    pub item: Option<ItemRef>,
-    /// The Clause it is about.
-    pub clause: Option<ClauseRef>,
+    /// What the finding is about; none for the Project.
+    pub subject: Option<SubjectInput>,
 }
 
 /// What the person decided about a Crux.
@@ -1246,15 +1251,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// The finding a person names (`input`) as the thing a change request addresses.
     async fn finding_ref(&self, p: &Project, named: &FindingInput) -> Result<FindingRef, AppError> {
         let rule = RuleId::try_from(named.rule.as_str()).map_err(input)?;
-        let subject = match (&named.item, &named.clause) {
-            (None, None) => None,
-            (Some(r), None) => Some(Subject::Item(self.item(p, None, r).await?.0)),
-            (None, Some(r)) => Some(Subject::Clause(self.clause(p, None, r).await?.0)),
-            (Some(_), Some(_)) => {
-                return Err(AppError::Input(
-                    "a finding is about an item or a clause, not both".to_string(),
-                ));
-            }
+        let subject = match &named.subject {
+            Some(subject) => Some(self.subject_of(p, subject).await?),
+            None => None,
         };
         Ok(FindingRef::new(rule, subject))
     }

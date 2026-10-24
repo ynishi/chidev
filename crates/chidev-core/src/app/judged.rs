@@ -14,15 +14,13 @@ use uuid::Uuid;
 use super::check::{Found, Judgment};
 use super::model_view::ModelView;
 use super::ports::{
-    AssetKind, Changes, IdSource, Invocation, JudgedFinding, JudgedReport, Outcome, Store,
-    StoreRevision,
+    Changes, IdSource, Invocation, JudgedFinding, JudgedReport, Outcome, Store, StoreRevision,
 };
-use super::{App, AppError, ClauseRef, ItemRef, context_id, input};
+use super::{App, AppError, SubjectInput, input};
 use crate::domain::check::{Executor, Finding, Hook, JudgedRule, Level};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
-use crate::domain::vo::id::{HarnessId, InterfaceId};
+use crate::domain::vo::finding::{RuleId, SubjectKind};
 
 /// Whether what an agent reported for a judged rule can still be relied on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,35 +80,6 @@ pub struct RuleStanding {
     pub subject: SubjectKind,
     /// `Never` or `Stale`.
     pub state: JudgedState,
-}
-
-/// What a finding is about, as an agent names it: by the names the view shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubjectInput {
-    /// A Context, by name.
-    Context(String),
-    /// An Interface of a Context.
-    Interface {
-        /// The Context.
-        context: String,
-        /// The Interface.
-        interface: String,
-    },
-    /// An Item, by the Interface's name and the signature.
-    Item(ItemRef),
-    /// A Clause, by the Contract's name and the label.
-    Clause(ClauseRef),
-    /// A Case of a Harness.
-    Case {
-        /// The Context.
-        context: String,
-        /// The Harness.
-        harness: String,
-        /// The Case's name.
-        name: String,
-    },
-    /// A change request, by title.
-    ChangeRequest(String),
 }
 
 /// A finding an agent reports.
@@ -441,59 +410,5 @@ where
             }
         }
         Ok(ModelView::build(at.0, p, crs, &names))
-    }
-
-    /// The subject an agent names, found in the model.
-    async fn subject_of(&self, p: &Project, s: &SubjectInput) -> Result<Subject, AppError> {
-        Ok(match s {
-            SubjectInput::Context(name) => Subject::Context(context_id(p, name)?),
-            SubjectInput::Interface { context, interface } => {
-                let ctx = context_id(p, context)?;
-                let id = self
-                    .asset(ctx, context, AssetKind::Interface, interface)
-                    .await?;
-                Subject::Interface(InterfaceId::from_uuid(id))
-            }
-            SubjectInput::Item(r) => Subject::Item(self.item(p, None, r).await?.0),
-            SubjectInput::Clause(r) => Subject::Clause(self.clause(p, None, r).await?.0),
-            SubjectInput::Case {
-                context,
-                harness,
-                name,
-            } => {
-                let ctx = context_id(p, context)?;
-                let id = HarnessId::from_uuid(
-                    self.asset(ctx, context, AssetKind::Harness, harness)
-                        .await?,
-                );
-                let cases: Vec<_> = p
-                    .context(ctx)
-                    .and_then(|c| c.harness(id))
-                    .map(|h| {
-                        h.cases()
-                            .iter()
-                            .filter(|k| k.name().as_str() == name)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                match cases.as_slice() {
-                    [one] => Subject::Case(one.id()),
-                    [] => {
-                        return Err(AppError::Input(format!(
-                            "the harness `{harness}` has no case named `{name}`"
-                        )));
-                    }
-                    _ => {
-                        return Err(AppError::Input(format!(
-                            "the harness `{harness}` has several cases named `{name}`; \
-                             a finding cannot say which"
-                        )));
-                    }
-                }
-            }
-            SubjectInput::ChangeRequest(title) => {
-                Subject::ChangeRequest(self.change_request_titled(title).await?.id())
-            }
-        })
     }
 }

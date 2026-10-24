@@ -76,6 +76,7 @@ mod checks {
     use chidev_core::app::ports::{Invocation, Outcome};
     use chidev_core::app::{
         App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, FindingInput, Intent, Registry,
+        SubjectInput,
     };
     use chidev_core::domain::check::{
         Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, Level, Params,
@@ -198,12 +199,11 @@ mod checks {
             crux: None,
             addresses: vec![FindingInput {
                 rule: "cite.uncited-clause".to_string(),
-                item: None,
-                clause: Some(ClauseRef {
+                subject: Some(SubjectInput::Clause(ClauseRef {
                     context: Some("core".to_string()),
                     contract: "stack".to_string(),
                     label: "C1".to_string(),
-                }),
+                })),
             }],
         };
         let state = |found: &[chidev_core::app::Found]| {
@@ -713,12 +713,11 @@ mod judged {
             crux: None,
             addresses: vec![FindingInput {
                 rule: "judged.vague".to_string(),
-                item: None,
-                clause: Some(ClauseRef {
+                subject: Some(SubjectInput::Clause(ClauseRef {
                     context: Some("core".to_string()),
                     contract: "stack".to_string(),
                     label: "C1".to_string(),
-                }),
+                })),
             }],
         })
         .await

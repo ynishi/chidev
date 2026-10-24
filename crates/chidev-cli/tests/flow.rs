@@ -569,3 +569,177 @@ fn a_policy_holds_a_judged_rule_like_any_check() {
     assert_eq!(entry["default_level"], "warning");
     assert_eq!(entry["mandatory"], false);
 }
+
+fn address_setup() -> String {
+    use serde_json::json;
+    [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        json!({"op":"contract_put","context":"core","name":"rules","title":"Rules","clauses":[{"label":"C1","text":"a value is returned"}]}),
+        json!({"op":"interface_put","context":"core","name":"api","source":"fn value();\n","items":[{"signature":"fn value()","lines":[1,1]}]}),
+        json!({"op":"harness_put","context":"core","name":"tests","source":"fn checks_value() {}\n","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]}),
+        json!({"op":"cr_open","title":"Existing request","intent":"keep_behavior"}),
+    ]
+    .into_iter()
+    .map(|op| format!("{op}\n"))
+    .collect()
+}
+
+#[test]
+fn addresses_accept_every_subject_and_legacy_inputs_refer_to_the_same_finding() {
+    use serde_json::json;
+    let dir = fresh_dir("addresses-all-subjects");
+    let item = json!({"context":"core","interface":"api","signature":"fn value()"});
+    let clause = json!({"context":"core","contract":"rules","label":"C1"});
+    let subjects = [
+        json!({"context":"core"}),
+        json!({"interface":{"context":"core","interface":"api"}}),
+        json!({"item":item}),
+        json!({"clause":clause}),
+        json!({"case":{"context":"core","harness":"tests","name":"checks_value"}}),
+        json!({"change_request":"Existing request"}),
+        Value::Null,
+    ];
+    // Unregistered rule ids are valid: addresses can retain historical and prospective references.
+    let addresses: Vec<_> = subjects
+        .iter()
+        .map(|subject| json!({"rule":"future.rule","subject":subject}))
+        .collect();
+    let mut ops = address_setup();
+    ops.push_str(&format!("{}\n", json!({"op":"cr_open","title":"All subjects","intent":"keep_behavior","addresses":addresses})));
+    ops.push_str(&format!(
+        "{}\n",
+        json!({"op":"cr_open","title":"Legacy parity","intent":"keep_behavior","addresses":[
+            {"rule":"future.rule","item":item},
+            {"rule":"future.rule","subject":{"item":item}},
+            {"rule":"future.rule","clause":clause},
+            {"rule":"future.rule","subject":{"clause":clause}},
+            {"rule":"future.rule"},
+            {"rule":"future.rule","subject":null},
+            {"rule":"future.rule","item":null},
+            {"rule":"future.rule","clause":null}
+        ]})
+    ));
+    let (results, code, stderr) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{stderr}\n{results:#?}");
+    // Read in a fresh process, verifying that the CLI has kept UUID subjects in the existing storage format.
+    let (results, code, stderr) = exec_in(&dir, "{\"op\":\"check_rules\"}\n");
+    assert_eq!(code, Some(0), "{stderr}");
+    let model = &results[0]["model"];
+    let crs = model["change_requests"].as_array().unwrap();
+    let all = crs.iter().find(|cr| cr["title"] == "All subjects").unwrap();
+    let addresses = all["addresses"].as_array().unwrap();
+    assert_eq!(addresses.len(), 7);
+    let context = &model["contexts"][0];
+    let existing = crs
+        .iter()
+        .find(|cr| cr["title"] == "Existing request")
+        .unwrap();
+    let expected = [
+        ("context", context["id"].clone()),
+        ("interface", context["interfaces"][0]["id"].clone()),
+        ("item", context["interfaces"][0]["items"][0]["id"].clone()),
+        (
+            "clause",
+            context["contracts"][0]["clauses"][0]["id"].clone(),
+        ),
+        ("case", context["harnesses"][0]["cases"][0]["id"].clone()),
+        ("change_request", existing["id"].clone()),
+    ];
+    for (address, (kind, id)) in addresses.iter().zip(expected) {
+        assert_eq!(address["rule"], "future.rule");
+        assert_eq!(address["subject"], json!({"kind":kind,"id":id}));
+    }
+    assert_eq!(addresses[6]["subject"], Value::Null);
+    let parity = crs
+        .iter()
+        .find(|cr| cr["title"] == "Legacy parity")
+        .unwrap();
+    assert_eq!(parity["addresses"].as_array().unwrap().len(), 3);
+    assert_eq!(parity["addresses"][0], addresses[2]);
+    assert_eq!(parity["addresses"][1], addresses[3]);
+    assert_eq!(parity["addresses"][2], addresses[6]);
+}
+
+#[test]
+fn malformed_address_selectors_never_fall_back_to_the_project_or_write_a_request() {
+    let dir = fresh_dir("addresses-invalid-shapes");
+    let mut ops = address_setup();
+    // Raw JSON preserves duplicate keys, which a serde_json::Value would otherwise discard.
+    let invalid = [
+        r#"{"rule":"future.rule","subjet":null}"#,
+        r#"{"rule":"future.rule","subject":{"unknown":"core"}}"#,
+        r#"{"rule":"future.rule","subject":{}}"#,
+        r#"{"rule":"future.rule","subject":{"context":null}}"#,
+        r#"{"rule":"future.rule","subject":{"context":"core","change_request":"Existing request"}}"#,
+        r#"{"rule":"future.rule","subject":{"interface":{"context":"core","interface":"api","extra":null}}}"#,
+        r#"{"rule":"future.rule","subject":{"case":{"context":"core","harness":"tests","name":"checks_value","extra":null}}}"#,
+        r#"{"rule":"future.rule","subject":{"item":{"context":"core","interface":"api","signature":"fn value()","extra":null}}}"#,
+        r#"{"rule":"future.rule","subject":{"clause":{"context":"core","contract":"rules","label":"C1","extra":null}}}"#,
+        r#"{"rule":"future.rule","subject":null,"item":null}"#,
+        r#"{"rule":"future.rule","subject":null,"clause":null}"#,
+        r#"{"rule":"future.rule","item":null,"clause":null}"#,
+        r#"{"rule":"future.rule","subject":{"context":"core"},"item":null}"#,
+        r#"{"rule":"future.rule","subject":null,"item":{"context":"core","interface":"api","signature":"fn value()"}}"#,
+        r#"{"rule":"future.rule","subject":null,"subject":null}"#,
+        r#"{"rule":"future.rule","item":null,"item":null}"#,
+        r#"{"rule":"future.rule","clause":null,"clause":null}"#,
+        r#"{"rule":"future.rule","rule":"future.other"}"#,
+        r#"{"rule":"future.rule","item":{"context":"core","interface":"api","signature":"fn value()","extra":null}}"#,
+        r#"{"rule":"future.rule","clause":{"context":"core","contract":"rules","label":"C1","extra":null}}"#,
+    ];
+    for (k, address) in invalid.iter().enumerate() {
+        ops.push_str(&format!("{{\"op\":\"cr_open\",\"title\":\"Invalid {k}\",\"intent\":\"keep_behavior\",\"addresses\":[{address}]}}\n"));
+    }
+    ops.push_str("{\"op\":\"check_rules\"}\n");
+    let (results, code, stderr) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{stderr}\n{results:#?}");
+    assert!(results[..6].iter().all(|r| r["ok"] == true));
+    for result in &results[6..6 + invalid.len()] {
+        assert_eq!(result["ok"], false, "{result}");
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("not an operation"),
+            "{result}"
+        );
+    }
+    let last = results.last().unwrap();
+    assert_eq!(last["store_revision"], 6);
+    assert_eq!(
+        last["model"]["change_requests"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn missing_address_targets_are_rejected_before_the_request_is_saved() {
+    use serde_json::json;
+    let dir = fresh_dir("addresses-missing-targets");
+    let mut ops = address_setup();
+    let invalid = [
+        json!({"context":"missing"}),
+        json!({"interface":{"context":"core","interface":"missing"}}),
+        json!({"item":{"context":"core","interface":"api","signature":"fn missing()"}}),
+        json!({"clause":{"context":"core","contract":"rules","label":"C2"}}),
+        json!({"case":{"context":"core","harness":"tests","name":"missing"}}),
+        json!({"change_request":"missing"}),
+    ];
+    for (k, subject) in invalid.iter().enumerate() {
+        ops.push_str(&format!("{}\n", json!({"op":"cr_open","title":format!("Missing {k}"),"intent":"keep_behavior","addresses":[{"rule":"future.rule","subject":subject}]})));
+    }
+    ops.push_str("{\"op\":\"check_rules\"}\n");
+    let (results, code, stderr) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{stderr}\n{results:#?}");
+    assert!(results[..6].iter().all(|r| r["ok"] == true));
+    for result in &results[6..6 + invalid.len()] {
+        assert_eq!(result["ok"], false, "{result}");
+    }
+    let last = results.last().unwrap();
+    assert_eq!(last["store_revision"], 6);
+    assert_eq!(
+        last["model"]["change_requests"].as_array().unwrap().len(),
+        1
+    );
+}

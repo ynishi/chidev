@@ -120,7 +120,7 @@ struct ReportedFindingDto {
 
 /// What a finding is about, tagged by its kind: `{ "clause": { ... } }`.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum SubjectDto {
     Context(String),
     Interface {
@@ -215,22 +215,65 @@ struct OpenDto {
     addresses: Vec<AddressDto>,
 }
 
-/// A finding a change request addresses: the rule, and the item or clause it is about.
+/// A finding a change request addresses. New and legacy input forms normalize at the CLI boundary.
 #[derive(Debug, Deserialize)]
+#[serde(try_from = "AddressWire")]
 struct AddressDto {
     rule: String,
-    #[serde(default)]
-    item: Option<ItemRefDto>,
-    #[serde(default)]
-    clause: Option<ClauseRefDto>,
+    subject: Option<SubjectDto>,
+}
+
+/// Preserve presence separately from null so mixed selectors and duplicate null fields are refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressWire {
+    rule: String,
+    #[serde(default, deserialize_with = "present")]
+    subject: Option<Option<SubjectDto>>,
+    #[serde(default, deserialize_with = "present")]
+    item: Option<Option<ItemRefDto>>,
+    #[serde(default, deserialize_with = "present")]
+    clause: Option<Option<ClauseRefDto>>,
+}
+
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+impl TryFrom<AddressWire> for AddressDto {
+    type Error = String;
+
+    fn try_from(a: AddressWire) -> Result<Self, Self::Error> {
+        let selectors = usize::from(a.subject.is_some())
+            + usize::from(a.item.is_some())
+            + usize::from(a.clause.is_some());
+        if selectors > 1 {
+            return Err(
+                "an address accepts only one of subject, item and clause, including null fields"
+                    .into(),
+            );
+        }
+        let subject = a
+            .subject
+            .flatten()
+            .or_else(|| a.item.flatten().map(SubjectDto::Item))
+            .or_else(|| a.clause.flatten().map(SubjectDto::Clause));
+        Ok(Self {
+            rule: a.rule,
+            subject,
+        })
+    }
 }
 
 impl From<AddressDto> for FindingInput {
     fn from(a: AddressDto) -> FindingInput {
         FindingInput {
             rule: a.rule,
-            item: a.item.map(ItemRef::from),
-            clause: a.clause.map(ClauseRef::from),
+            subject: a.subject.map(SubjectInput::from),
         }
     }
 }
@@ -495,6 +538,7 @@ struct ItemDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ItemRefDto {
     #[serde(default)]
     context: Option<String>,
@@ -503,6 +547,7 @@ struct ItemRefDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClauseRefDto {
     #[serde(default)]
     context: Option<String>,
