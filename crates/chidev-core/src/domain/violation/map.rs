@@ -8,7 +8,7 @@ use super::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::ContextError;
 use crate::domain::entity::contract::ContractError;
-use crate::domain::entity::harness::HarnessError;
+use crate::domain::entity::harness::{HarnessError, SimShapeProblem};
 use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
@@ -16,10 +16,12 @@ use crate::domain::rule::{
     CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN,
     CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN,
     PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
-    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT,
+    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
+    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
+    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
-use crate::domain::vo::id::ChangeRequestId;
+use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
 use crate::domain::vo::policy::PolicyError;
 use crate::domain::vo::target::Target;
 
@@ -169,6 +171,7 @@ impl ProjectError {
                         Applicability::Review,
                     ),
             ],
+            ProjectError::SimShape(problem) => vec![problem.violation()],
             ProjectError::Repeated { what, id } => vec![
                 Violation::of(CHANGE_SET_NAMED_TWICE)
                     .about(Party::Id(*id))
@@ -275,14 +278,81 @@ impl InterfaceError {
 }
 
 impl HarnessError {
-    /// The violation this refusal is: not yet tied to a rule.
+    /// The violation this refusal is.
     pub fn violation(&self) -> Violation {
         match self {
+            HarnessError::SimCitesItem(case) => {
+                Violation::of(SIM_CASE_CITES_ITEM).about(Party::Target(Target::Case(*case)))
+            }
+            HarnessError::BuildsOfTests(harness) => {
+                Violation::of(SIM_BUILDS_OF_TESTS).about(Party::Target(Target::Harness(*harness)))
+            }
             HarnessError::DuplicateId(_)
             | HarnessError::RangeOutside { .. }
-            | HarnessError::NoItem(_)
-            | HarnessError::SimCitesItem(_)
-            | HarnessError::BuildsOfTests => Violation::unmapped(self),
+            | HarnessError::NoItem(_) => Violation::unmapped(self),
+        }
+    }
+}
+
+impl SimShapeProblem {
+    /// The violation this problem is. The names of the Harness, the Case and the Clause are the application's: the
+    /// violation holds their ids.
+    pub fn violation(&self) -> Violation {
+        let harness = |h: &HarnessId| Party::Target(Target::Harness(*h));
+        let case = |c: &CaseId| Party::Target(Target::Case(*c));
+        match self {
+            SimShapeProblem::OnePerContext { context, harnesses } => {
+                Violation::of(SIM_ONE_PER_CONTEXT)
+                    .about(Party::Target(Target::Context(*context)))
+                    .subjects_of(harnesses.iter().map(harness))
+            }
+            SimShapeProblem::SweepOnce {
+                harness: h,
+                count,
+                extra,
+            } => {
+                let v = Violation::of(SIM_SWEEP_ONCE)
+                    .about(harness(h))
+                    .with_value("count", Value::Count(*count));
+                match extra {
+                    Some(c) => v.about(case(c)),
+                    None => v,
+                }
+            }
+            SimShapeProblem::CaseName {
+                harness: h,
+                case: c,
+                fault,
+            } => Violation::of(SIM_CASE_NAME)
+                .about(case(c))
+                .about(harness(h))
+                .with_value("reason", Value::Word(fault.word())),
+            SimShapeProblem::CaseCitesNone {
+                harness: h,
+                case: c,
+            } => Violation::of(SIM_CASE_CITES_NONE)
+                .about(case(c))
+                .about(harness(h)),
+            SimShapeProblem::ClauseForeign {
+                harness: _,
+                case: c,
+                clause,
+            } => {
+                let cited = Target::Clause(*clause);
+                Violation::of(SIM_CLAUSE_FOREIGN)
+                    .about(case(c))
+                    .about(Party::Target(cited))
+                    .with_remedy(
+                        Remedy::PutAgainWithoutCitation {
+                            case: Target::Case(*c),
+                            cited,
+                        },
+                        Applicability::Review,
+                    )
+            }
+            SimShapeProblem::BuildsNone { harness: h } => {
+                Violation::of(SIM_BUILDS_NONE).about(harness(h))
+            }
         }
     }
 }
@@ -307,9 +377,7 @@ mod tests {
     use crate::domain::rule::{UNMAPPED, rule};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::ClauseLabel;
-    use crate::domain::vo::id::{
-        CaseId, ClauseId, ContextId, HarnessId, InterfaceId, ItemId, test_uuid,
-    };
+    use crate::domain::vo::id::{ClauseId, ContextId, InterfaceId, ItemId, test_uuid};
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::revision::Revision;
@@ -389,6 +457,7 @@ mod tests {
             ProjectError::ItemNotReached { .. } => "ItemNotReached",
             ProjectError::ClauseNotReached { .. } => "ClauseNotReached",
             ProjectError::BuildNotReached { .. } => "BuildNotReached",
+            ProjectError::SimShape(_) => "SimShape",
             ProjectError::Repeated { .. } => "Repeated",
             ProjectError::Many(_) => "Many",
             ProjectError::Context(_) => "Context",
@@ -434,6 +503,9 @@ mod tests {
                 harness: HarnessId::from_uuid(test_uuid(400)),
                 interface: InterfaceId::from_uuid(test_uuid(100)),
             },
+            ProjectError::SimShape(SimShapeProblem::BuildsNone {
+                harness: HarnessId::from_uuid(test_uuid(400)),
+            }),
             ProjectError::Repeated {
                 what: "contract",
                 id: test_uuid(7),
@@ -471,7 +543,9 @@ mod tests {
                 1,
             )))),
             ContextError::Interface(InterfaceError::DuplicateId(ItemId::from_uuid(test_uuid(1)))),
-            ContextError::Harness(HarnessError::BuildsOfTests),
+            ContextError::Harness(HarnessError::BuildsOfTests(HarnessId::from_uuid(
+                test_uuid(400),
+            ))),
         ]
     }
 
@@ -493,11 +567,9 @@ mod tests {
         "ContextError::UsesItself",
         "ContractError::DuplicateId",
         "ContractError::DuplicateLabel",
-        "HarnessError::BuildsOfTests",
         "HarnessError::DuplicateId",
         "HarnessError::NoItem",
         "HarnessError::RangeOutside",
-        "HarnessError::SimCitesItem",
         "InterfaceError::DuplicateId",
         "InterfaceError::RangeOutside",
         "PinError::UnknownInterface",
@@ -589,7 +661,7 @@ mod tests {
             ),
             (
                 "HarnessError::BuildsOfTests",
-                HarnessError::BuildsOfTests.violation(),
+                HarnessError::BuildsOfTests(HarnessId::from_uuid(test_uuid(1))).violation(),
             ),
             (
                 "PolicyError::BadLineId",
@@ -647,11 +719,11 @@ mod tests {
                 );
             }
         }
-        // The count only goes down: 18 + 15 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
+        // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 18 + 12 + 5 + 2 + 2 + 5 + 4 + 2);
-        assert_eq!(STILL_UNMAPPED.len(), 31);
+        assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2);
+        assert_eq!(STILL_UNMAPPED.len(), 29);
     }
 
     #[test]
@@ -849,6 +921,114 @@ mod tests {
         .violation();
         assert_eq!(asset.rule().as_str(), "context.no-such-asset");
         assert_eq!(asset.values().get("kind"), Some(&Value::Word("interface")));
+    }
+
+    #[test]
+    fn each_problem_of_the_shape_of_a_sim_harness_is_a_violation_of_its_rule_about_what_it_names() {
+        use crate::domain::entity::harness::CaseNameFault;
+
+        let h = |n: u128| HarnessId::from_uuid(test_uuid(n));
+        let c = |n: u128| CaseId::from_uuid(test_uuid(n));
+        let k = ClauseId::from_uuid(test_uuid(30));
+        let target = |t: Target| Party::Target(t);
+        let problems = [
+            SimShapeProblem::OnePerContext {
+                context: ctx(1),
+                harnesses: vec![h(400), h(401)],
+            },
+            SimShapeProblem::SweepOnce {
+                harness: h(400),
+                count: 2,
+                extra: Some(c(41)),
+            },
+            SimShapeProblem::CaseName {
+                harness: h(400),
+                case: c(41),
+                fault: CaseNameFault::RegressNamedTwice,
+            },
+            SimShapeProblem::CaseCitesNone {
+                harness: h(400),
+                case: c(41),
+            },
+            SimShapeProblem::ClauseForeign {
+                harness: h(400),
+                case: c(41),
+                clause: k,
+            },
+            SimShapeProblem::BuildsNone { harness: h(400) },
+        ];
+        let seen: Vec<(String, Vec<Party>)> = problems
+            .iter()
+            .map(|p| {
+                let v = p.violation();
+                (v.rule().to_string(), v.subjects().to_vec())
+            })
+            .collect();
+        let want = |rule: &str, subjects: Vec<Party>| (rule.to_string(), subjects);
+        assert_eq!(
+            seen,
+            [
+                want(
+                    "sim.one-per-context",
+                    vec![
+                        target(Target::Context(ctx(1))),
+                        target(Target::Harness(h(400))),
+                        target(Target::Harness(h(401)))
+                    ]
+                ),
+                want(
+                    "sim.sweep-once",
+                    vec![target(Target::Harness(h(400))), target(Target::Case(c(41)))]
+                ),
+                want(
+                    "sim.case-name",
+                    vec![target(Target::Case(c(41))), target(Target::Harness(h(400)))]
+                ),
+                want(
+                    "sim.case-cites-none",
+                    vec![target(Target::Case(c(41))), target(Target::Harness(h(400)))]
+                ),
+                want(
+                    "sim.clause-foreign",
+                    vec![target(Target::Case(c(41))), target(Target::Clause(k))]
+                ),
+                want("sim.builds-none", vec![target(Target::Harness(h(400)))]),
+            ]
+        );
+        assert_eq!(
+            problems[1].violation().values().get("count"),
+            Some(&Value::Count(2))
+        );
+        assert_eq!(
+            problems[2].violation().values().get("reason"),
+            Some(&Value::Word("regress-named-twice"))
+        );
+        // a Clause outside the Context is mended by putting the Harness again without the citation
+        assert_eq!(
+            problems[4].violation().remedies()[0].0,
+            Remedy::PutAgainWithoutCitation {
+                case: Target::Case(c(41)),
+                cited: Target::Clause(k)
+            }
+        );
+        // the two refusals of a Harness's own content name the Case or the Harness they are about
+        assert_eq!(
+            HarnessError::SimCitesItem(c(41)).violation().subjects(),
+            &[target(Target::Case(c(41)))]
+        );
+        assert_eq!(
+            HarnessError::BuildsOfTests(h(400))
+                .violation()
+                .rule()
+                .as_str(),
+            "sim.builds-of-tests"
+        );
+        // every rule the problems give carries only the value keys it lists
+        for p in &problems {
+            let v = p.violation();
+            let listed = rule(v.rule().as_str()).expect("registered").values;
+            assert!(v.values().keys().all(|key| listed.contains(key)));
+        }
     }
 
     #[test]

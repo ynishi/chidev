@@ -1,5 +1,7 @@
-//! The sim Harness read against the model: which Harnesses of a Context are simulations, whether each has the shape
-//! the protocol needs, which Clauses its sweep names for the script, and what a simulation of it stands on.
+//! The sim Harness read against the model: which Harnesses of a Context are simulations, which Clauses its sweep
+//! names for the script, and what a simulation of it stands on. Whether a sim Harness has the shape the protocol
+//! runs is for the Harness and the Context to say (`Harness::sim_problems`, `Context::sim_problems`), and the
+//! Project refuses a put of one that has not.
 //!
 //! A sim Harness is one script. Its Cases are not tests in the script's code: they are the names the protocol
 //! runs it under. The one `sweep` Case stands for the seeded runs (`seed-0`, `seed-1`, ...) and cites every Clause
@@ -8,7 +10,7 @@
 //! script keeps. The Harness cites Clauses only; the program the script drives is built from the pinned code of
 //! the Interfaces it `builds`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::{Case, Harness};
@@ -16,26 +18,8 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::harness_kind::HarnessKind;
-use crate::domain::vo::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId};
+use crate::domain::vo::id::{ClauseId, ContractId, HarnessId};
 use crate::domain::vo::sim::{CaseRole, RegressName, SimBasis, role_of};
-
-/// What a problem of shape is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShapeAbout {
-    /// The Context (a sim Harness as a whole).
-    Context(ContextId),
-    /// One Case of a sim Harness.
-    Case(CaseId),
-}
-
-/// A way a sim Harness is not the shape the protocol runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShapeProblem {
-    /// What it is about.
-    pub about: ShapeAbout,
-    /// What is wrong, and what to do.
-    pub message: String,
-}
 
 /// The Harnesses of `context` that are simulations, in the order of their ids.
 pub fn sim_harnesses(context: &Context) -> impl Iterator<Item = &Harness> {
@@ -93,99 +77,6 @@ pub fn cited_in(project: &Project, case: &Case) -> Vec<CitedIn> {
         .collect()
 }
 
-/// Every way the sim Harnesses of `context` are not the shape the protocol runs: more than one sim Harness, no
-/// `sweep` Case or two, a Case that is neither `sweep` nor `regress-<name>` or whose name another has, a Case
-/// that cites no Clause, a Clause of no Contract of the Context or an Item, and a sim Harness that builds no
-/// Interface (and so has no program). A Context with no sim Harness has none.
-///
-/// Two Clauses of the sweep may have one label if they are in different Contracts: the script names a Clause by
-/// its Contract and label.
-pub fn shape(context: &Context) -> Vec<ShapeProblem> {
-    let mut out = Vec::new();
-    let harnesses: Vec<&Harness> = sim_harnesses(context).collect();
-    let about_context = ShapeAbout::Context(context.id());
-    if harnesses.len() > 1 {
-        out.push(ShapeProblem {
-            about: about_context,
-            message: format!(
-                "the context has {} sim harnesses; it has at most one, so that a clause is checked by one script",
-                harnesses.len()
-            ),
-        });
-    }
-    let own: BTreeSet<ClauseId> = context
-        .contracts()
-        .flat_map(|k| k.clauses().iter().map(|c| c.id()))
-        .collect();
-    for h in harnesses {
-        let sweeps: Vec<&Case> = h
-            .cases()
-            .iter()
-            .filter(|c| role_of(c.name().as_str()) == Some(CaseRole::Sweep))
-            .collect();
-        if sweeps.is_empty() {
-            out.push(ShapeProblem {
-                about: about_context,
-                message: "a sim harness has no case named `sweep`; it has exactly one, citing every clause the script checks".to_string(),
-            });
-        }
-        for extra in sweeps.iter().skip(1) {
-            out.push(ShapeProblem {
-                about: ShapeAbout::Case(extra.id()),
-                message: "a sim harness has one case named `sweep`; this is another".to_string(),
-            });
-        }
-        let mut seen: Vec<RegressName> = Vec::new();
-        for c in h.cases() {
-            let case = ShapeAbout::Case(c.id());
-            let name = c.name().as_str();
-            match role_of(name) {
-                None => out.push(ShapeProblem {
-                    about: case,
-                    message: format!(
-                        "`{name}` is neither `sweep` nor `regress-<name>` (a name of a-z, 0-9 and `-`)"
-                    ),
-                }),
-                Some(CaseRole::Regress(n)) => {
-                    if seen.contains(&n) {
-                        out.push(ShapeProblem {
-                            about: case,
-                            message: format!("the regress case `{n}` is named twice"),
-                        });
-                    }
-                    seen.push(n);
-                }
-                Some(CaseRole::Sweep) => {}
-            }
-            if role_of(name).is_some() {
-                if c.cites().clauses().is_empty() {
-                    out.push(ShapeProblem {
-                        about: case,
-                        message: format!(
-                            "`{name}` cites no clause; a sim case cites the clauses it checks"
-                        ),
-                    });
-                }
-                if let Some(foreign) = c.cites().clauses().keys().find(|k| !own.contains(k)) {
-                    out.push(ShapeProblem {
-                        about: case,
-                        message: format!(
-                            "`{name}` cites the clause {foreign}, which is in no contract of this context"
-                        ),
-                    });
-                }
-            }
-        }
-        if h.builds().is_empty() {
-            out.push(ShapeProblem {
-                about: about_context,
-                message: "a sim harness builds no interface; name the interfaces whose pinned code the program is built from in `builds`".to_string(),
-            });
-        }
-    }
-    out
-}
-
 /// What a simulation of the sim Harness `harness` stands on now: its revision, the Contracts its Cases cite a
 /// Clause of, the Interfaces it builds, each with the digest of the code pinned for it in `pins`. `None` when no
 /// sim Harness has this id. The Interfaces are the ones it names in `builds`, not ones its Cases cite (a sim Case
@@ -221,11 +112,14 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::domain::entity::harness::SimShapeProblem;
     use crate::domain::service::pin::record;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseText};
     use crate::domain::vo::digest::Digest;
-    use crate::domain::vo::id::{ContractId, InterfaceId, ItemId, PinId, ProjectId, test_uuid};
+    use crate::domain::vo::id::{
+        CaseId, ContextId, ContractId, InterfaceId, ItemId, PinId, ProjectId, test_uuid,
+    };
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::revision::Revision;
@@ -330,11 +224,10 @@ mod tests {
         .unwrap();
     }
 
-    fn problems(p: &Project) -> Vec<String> {
-        shape(p.context(ctx()).unwrap())
-            .into_iter()
-            .map(|s| s.message)
-            .collect()
+    /// What is wrong with the sim Harnesses of the Context, as the Context says it.
+    fn problems(p: &Project) -> Vec<SimShapeProblem> {
+        let c = p.context(ctx()).unwrap();
+        c.harnesses().flat_map(|h| c.sim_problems(h)).collect()
     }
 
     #[test]
@@ -390,145 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn each_way_to_be_malformed_is_a_problem() {
-        // no sweep
-        let mut p = project();
-        put_sim(&mut p, 500, vec![case(51, "regress-a", &[30])]);
-        assert_eq!(problems(&p).len(), 1);
-        assert!(problems(&p)[0].contains("no case named `sweep`"));
-
-        // two sweeps, a stray name, a repeated regress name, a case that cites no clause
-        let mut p = project();
-        put_sim(
-            &mut p,
-            500,
-            vec![
-                case(50, "sweep", &[30]),
-                case(51, "sweep", &[30]),
-                case(52, "Regress-A", &[30]),
-                case(53, "regress-a", &[30]),
-                case(54, "regress-a", &[30]),
-                case(55, "regress-b", &[]),
-            ],
-        );
-        let all = shape(p.context(ctx()).unwrap());
-        let about = |n: u128| {
-            all.iter()
-                .filter(|s| s.about == ShapeAbout::Case(CaseId::from_uuid(test_uuid(n))))
-                .map(|s| s.message.as_str())
-                .collect::<Vec<_>>()
-        };
-        assert!(about(51)[0].contains("another"));
-        assert!(about(52)[0].contains("neither `sweep` nor"));
-        assert!(about(54)[0].contains("named twice"));
-        assert!(about(55)[0].contains("cites no clause"));
-        assert!(about(50).is_empty() && about(53).is_empty());
-        assert_eq!(all.len(), 4);
-
-        // a Clause the Project does not have is refused before the shape is asked
-        let mut p = project();
-        assert!(
-            p.put_harness_as(
-                ctx(),
-                HarnessId::from_uuid(test_uuid(500)),
-                Some(HarnessKind::Sim),
-                BTreeSet::from([iface()]),
-                Source::new("s\n".into()),
-                vec![case(50, "sweep", &[99])]
-            )
-            .is_err()
-        );
-
-        // a sim that builds nothing has no program to drive
-        let mut p = project();
-        p.put_harness_as(
-            ctx(),
-            HarnessId::from_uuid(test_uuid(500)),
-            Some(HarnessKind::Sim),
-            BTreeSet::new(),
-            Source::new("s\n".into()),
-            vec![case(50, "sweep", &[30])],
-        )
-        .unwrap();
-        let found = problems(&p);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("builds no interface"));
-
-        // an Interface it builds must be one the Context reaches
-        let err = p
-            .put_harness_as(
-                ctx(),
-                HarnessId::from_uuid(test_uuid(500)),
-                Some(HarnessKind::Sim),
-                BTreeSet::from([InterfaceId::from_uuid(test_uuid(999))]),
-                Source::new("s\n".into()),
-                vec![case(50, "sweep", &[30])],
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("builds the interface"), "{err}");
-    }
-
-    #[test]
-    fn a_clause_of_a_contract_of_another_context_is_not_one_the_script_checks() {
-        let mut p = Project::new(ProjectId::from_uuid(test_uuid(1000)));
-        let base = ContextId::from_uuid(test_uuid(2));
-        p.add_context(
-            Context::new(
-                base,
-                ContextName::try_from("base").unwrap(),
-                BTreeSet::new(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        p.put_contract(
-            base,
-            ContractId::from_uuid(test_uuid(310)),
-            Title::try_from("B").unwrap(),
-            vec![(
-                clause(90),
-                ClauseContent::new(
-                    ClauseLabel::try_from("C1").unwrap(),
-                    ClauseText::try_from("base promise").unwrap(),
-                ),
-            )],
-        )
-        .unwrap();
-        p.add_context(
-            Context::new(
-                ctx(),
-                ContextName::try_from("core").unwrap(),
-                BTreeSet::from([base]),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        p.put_interface(
-            ctx(),
-            InterfaceId::from_uuid(test_uuid(100)),
-            Source::new("fn a()\n".to_string()),
-            vec![(
-                ItemId::from_uuid(test_uuid(10)),
-                Signature::try_from("fn a()").unwrap(),
-                LineRange::new(1, 1).unwrap(),
-            )],
-        )
-        .unwrap();
-        put_sim(&mut p, 500, vec![case(50, "sweep", &[90])]);
-        let found = problems(&p);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("in no contract of this context"));
-    }
-
-    #[test]
-    fn two_sim_harnesses_are_a_problem_and_one_label_in_two_contracts_is_not() {
-        let mut p = project();
-        put_sim(&mut p, 500, vec![case(50, "sweep", &[30])]);
-        put_sim(&mut p, 501, vec![case(60, "sweep", &[31])]);
-        let found = problems(&p);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].contains("2 sim harnesses"));
-
+    fn one_label_in_two_contracts_is_no_problem_and_each_clause_is_named_by_its_contract() {
         // a second Contract whose clause is also C1: one sweep cites both, and each is named by its Contract
         let mut p = project();
         p.put_contract(

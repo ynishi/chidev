@@ -1245,6 +1245,20 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_id_names_one_rule_across_the_invariants_the_input_rules_and_the_builtin_checks() {
+        // `rules` lists them as one registry and `explain` looks the invariants up first, so an id in two lists
+        // would hide the check behind the invariant
+        let mut ids: Vec<String> = rule::rules().iter().map(|r| r.id.to_string()).collect();
+        ids.extend(
+            crate::domain::check::builtin::all()
+                .iter()
+                .map(|c| c.descriptor().id.to_string()),
+        );
+        let distinct: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), ids.len(), "an id is used twice: {ids:?}");
+    }
+
+    #[test]
     fn a_suggestion_with_a_hole_is_a_placeholder_whatever_it_was_given() {
         assert_eq!(
             suggest(json!({"op": "x", "a": ["<fill>"]}), Applicability::Machine).applicability,

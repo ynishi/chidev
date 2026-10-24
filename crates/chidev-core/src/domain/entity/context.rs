@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use super::contract::{Contract, ContractError};
-use super::harness::{CaseFound, Harness, HarnessError};
+use super::harness::{CaseFound, Harness, HarnessError, SimShapeProblem};
 use super::interface::{Interface, InterfaceError, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
 use crate::domain::vo::harness_kind::HarnessKind;
@@ -14,6 +14,7 @@ use crate::domain::vo::id::{
 };
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::revision::Revision;
+use crate::domain::vo::sim::role_of;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::title::Title;
 
@@ -229,6 +230,50 @@ impl Context {
     /// The Harness that has the Case with this id.
     pub fn harness_of(&self, case: CaseId) -> Option<&Harness> {
         self.harnesses().find(|h| h.case(case).is_some())
+    }
+
+    /// The ways the sim Harness `harness` of this Context is not the shape the protocol runs: those the Harness
+    /// decides alone ([`Harness::sim_problems`]), more than one sim Harness in the Context, and a Clause a Case
+    /// cites that no Contract of this Context has (one in a Context it uses is reachable, but a script is run
+    /// against the Contracts of its own Context). None for a Harness of tests.
+    ///
+    /// `harness` is one of this Context's. A problem about the Context as a whole comes with each of its sim
+    /// Harnesses, so a caller that asks for several keeps each problem once.
+    pub(crate) fn sim_problems(&self, harness: &Harness) -> Vec<SimShapeProblem> {
+        if harness.kind() != HarnessKind::Sim {
+            return Vec::new();
+        }
+        let sims: Vec<HarnessId> = self
+            .harnesses()
+            .filter(|h| h.kind() == HarnessKind::Sim)
+            .map(Harness::id)
+            .collect();
+        let mut out = Vec::new();
+        if sims.len() > 1 {
+            out.push(SimShapeProblem::OnePerContext {
+                context: self.id,
+                harnesses: sims,
+            });
+        }
+        out.extend(harness.sim_problems());
+        let own: BTreeSet<ClauseId> = self
+            .contracts()
+            .flat_map(|k| k.clauses().iter().map(|c| c.id()))
+            .collect();
+        for case in harness
+            .cases()
+            .iter()
+            .filter(|c| role_of(c.name().as_str()).is_some())
+        {
+            for clause in case.cites().clauses().keys().filter(|k| !own.contains(k)) {
+                out.push(SimShapeProblem::ClauseForeign {
+                    harness: harness.id(),
+                    case: case.id(),
+                    clause: *clause,
+                });
+            }
+        }
+        out
     }
 
     /// Sets the Contexts it uses. Its revision goes up when they differ.

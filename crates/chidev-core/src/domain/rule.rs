@@ -97,6 +97,22 @@ pub const CR_TITLE_TAKEN: RuleId = RuleId::from_static("cr.title-taken");
 pub const PROJECT_CITE_UNREACHABLE: RuleId = RuleId::from_static("project.cite-unreachable");
 /// A sim Harness builds an Interface it cannot reach.
 pub const PROJECT_BUILD_UNREACHABLE: RuleId = RuleId::from_static("project.build-unreachable");
+/// A Context has more than one sim Harness.
+pub const SIM_ONE_PER_CONTEXT: RuleId = RuleId::from_static("sim.one-per-context");
+/// A sim Harness has no Case named `sweep`, or more than one.
+pub const SIM_SWEEP_ONCE: RuleId = RuleId::from_static("sim.sweep-once");
+/// A Case of a sim Harness is not named `sweep` or `regress-<name>`, or repeats a regress name.
+pub const SIM_CASE_NAME: RuleId = RuleId::from_static("sim.case-name");
+/// A sim Case cites no Clause.
+pub const SIM_CASE_CITES_NONE: RuleId = RuleId::from_static("sim.case-cites-none");
+/// A sim Case cites a Clause that no Contract of its Context has.
+pub const SIM_CLAUSE_FOREIGN: RuleId = RuleId::from_static("sim.clause-foreign");
+/// A sim Harness builds no Interface.
+pub const SIM_BUILDS_NONE: RuleId = RuleId::from_static("sim.builds-none");
+/// A sim Case cites an Item.
+pub const SIM_CASE_CITES_ITEM: RuleId = RuleId::from_static("sim.case-cites-item");
+/// A Harness of tests names Interfaces to build.
+pub const SIM_BUILDS_OF_TESTS: RuleId = RuleId::from_static("sim.builds-of-tests");
 /// A retirement would take away what Cases that stay cite.
 pub const PROJECT_RETIRE_CITED: RuleId = RuleId::from_static("project.retire-cited");
 /// A retirement would take away a Context that others use.
@@ -236,6 +252,78 @@ static RULES: &[Rule] = &[
         message: "the sim {s0} builds {s1}, which it cannot reach from {s2}",
         values: &[],
         example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["gone"],"source":"","cases":[]}"#,
+    },
+    Rule {
+        id: SIM_ONE_PER_CONTEXT,
+        kind: RuleKind::Invariant,
+        summary: "A Context has at most one sim Harness, so that a Clause is checked by one script.",
+        help: "A simulation is one script per Context, which cites every Clause it checks. To replace the sim Harness, put the new one and retire the old one in the same change set (a change set checks the rules once, on the state it ends in). A Context that already has two, from before this was refused, takes a put of either only in a change set that retires the other.",
+        message: "the context {s0} has more than one sim harness: {others}",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim-b","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: SIM_SWEEP_ONCE,
+        kind: RuleKind::Invariant,
+        summary: "A sim Harness has exactly one Case named `sweep`.",
+        help: "A sim Harness is run case by case: the one Case named `sweep` stands for the seeded runs and cites every Clause the script checks. Name exactly one Case `sweep` (`count` is how many the Harness has), and put the Harness again.",
+        message: "the sim {s0} has {count} case(s) named `sweep`; it has exactly one",
+        values: &["count"],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"regress-a","lines":[1,1],"clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: SIM_CASE_NAME,
+        kind: RuleKind::Invariant,
+        summary: "A Case of a sim Harness is named `sweep` or `regress-<name>`, each regress name once.",
+        help: "A sim Case is run under a name the protocol knows: `sweep` for the seeded runs, `regress-<name>` for a fixed schedule the script keeps (`<name>` is 1 to 64 of a-z, 0-9 and `-`, not starting with `-`). `reason` says which: a name that is neither, or a regress name that another Case has. Rename the Case, and put the Harness again.",
+        message: "the name of {s0} is not one the sim {s1} can have: {reason}",
+        values: &["reason"],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"clauses":[{"contract":"rounding","label":"C1"}]},{"name":"Stray","lines":[1,1],"clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: SIM_CASE_CITES_NONE,
+        kind: RuleKind::Invariant,
+        summary: "A sim Case cites the Clauses it checks, at least one.",
+        help: "A sim Case stands for the Clauses the script checks in that run, so that a Clause named in the script's report is traced to a Clause. Cite the Clauses it checks (`clauses`), and put the Harness again.",
+        message: "{s0} of the sim {s1} cites no clause; a sim case cites the clauses it checks",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1]}]}"#,
+    },
+    Rule {
+        id: SIM_CLAUSE_FOREIGN,
+        kind: RuleKind::Invariant,
+        summary: "A sim Case cites only Clauses of the Contracts of its own Context.",
+        help: "The script names a Clause `<contract>:<label>` and is run against the Contracts of the Context its Harness is in. A Clause of a Contract of a Context it uses can be reached, but is not one of them. Cite the Clauses of this Context's Contracts, and put the Harness again, or put the sim Harness in the Context whose Contract it checks.",
+        message: "{s0} cites the clause {s1}, which is in no contract of its context",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"clauses":[{"context":"base","contract":"other","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: SIM_BUILDS_NONE,
+        kind: RuleKind::Invariant,
+        summary: "A sim Harness builds at least one Interface, the program its script drives.",
+        help: "A simulation drives a program built from the pinned code of the Interfaces the Harness names in `builds`. Name the Interfaces to build, and put the Harness again.",
+        message: "the sim {s0} builds no interface, so it has no program to drive",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":[],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: SIM_CASE_CITES_ITEM,
+        kind: RuleKind::Invariant,
+        summary: "A sim Case cites Clauses only, never an Item.",
+        help: "A simulation checks Clauses. The Interfaces whose pinned code the script drives are the ones the Harness names in `builds`; naming one is not citing it, and puts the Harness on no Pin's basis. Cite Clauses only, and name the Interfaces in `builds`.",
+        message: "{s0} of a sim harness cites an item; a sim case cites clauses only",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"items":[{"interface":"api","signature":"fn price()"}]}]}"#,
+    },
+    Rule {
+        id: SIM_BUILDS_OF_TESTS,
+        kind: RuleKind::Invariant,
+        summary: "Only a sim Harness names Interfaces to build.",
+        help: "A Harness of tests checks the code of the Interfaces its Cases cite. Only a sim Harness builds the program it drives. Remove `builds`, or put the Harness with `kind` `sim`.",
+        message: "{s0} is a harness of tests and names interfaces to build",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"tests","builds":["api"],"source":"fn t() {}\n","cases":[{"name":"t","lines":[1,1],"items":[{"interface":"api","signature":"fn price()"}]}]}"#,
     },
     Rule {
         id: PROJECT_RETIRE_CITED,

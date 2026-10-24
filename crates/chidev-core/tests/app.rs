@@ -3,10 +3,12 @@
 
 use chidev_core::app::ports::{AssetKind, AssetNames, IdSource, Store};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, HarnessPut,
-    InterfacePut, ItemInput, ItemRef, PutInput, RetireInput,
+    App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, Diagnostic,
+    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, PutInput, RetireInput,
 };
+use chidev_core::domain::entity::contract::Clause;
 use chidev_core::domain::repository::ProjectRepository;
+use chidev_core::domain::vo::finding::Subject;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -58,6 +60,164 @@ async fn a_use_case_before_init_finds_no_project() {
     let mut app = app("no-project").await;
     assert_eq!(app.add_context("core", &[]).await, Err(AppError::NoProject));
     assert_eq!(app.status().await, Err(AppError::NoProject));
+}
+
+/// The sim Harness `sim` of `core`, which builds `api`: a sweep Case citing the Clause `label` of the Contract
+/// `contract` of the Context `context`.
+async fn put_sim(
+    app: &mut App<SqliteStore, Counter>,
+    context: Option<&str>,
+    contract: &str,
+    label: &str,
+) -> Result<(), AppError> {
+    app.put_harness_of(
+        "core",
+        "sim",
+        Some(HarnessKind::Sim),
+        &["api".to_string()],
+        "x\n",
+        &[CaseInput {
+            name: "sweep".to_string(),
+            lines: (1, 1),
+            items: Vec::new(),
+            clauses: vec![ClauseRef {
+                context: context.map(str::to_string),
+                contract: contract.to_string(),
+                label: label.to_string(),
+            }],
+        }],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The Clause with this label of the Contract `contract`, in any Context of the Project.
+async fn clause_of(app: &App<SqliteStore, Counter>, label: &str) -> Clause {
+    let p = app.store().project().await.unwrap().unwrap();
+    p.contexts()
+        .flat_map(|c| c.contracts())
+        .flat_map(|k| k.clauses())
+        .find(|c| c.content().label().to_string() == label)
+        .cloned()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_reported_and_mended_by_a_put()
+ {
+    let dir = std::env::temp_dir().join(format!("chidev-app-sim-kept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("chidev.db");
+    let open = |start: u128| {
+        let path = path.clone();
+        async move {
+            App::new(
+                SqliteStore::open(&path).await.unwrap(),
+                Counter(start),
+                FixedClock(Timestamp::from_millis(1_000)),
+            )
+        }
+    };
+    let mut app = open(0).await;
+    app.init().await.unwrap();
+    app.add_context("base", &[]).await.unwrap();
+    app.add_context("core", &["base".to_string()])
+        .await
+        .unwrap();
+    app.put_contract("core", "stock", "Stock", &clauses(&["C1"]))
+        .await
+        .unwrap();
+    app.put_contract("base", "rules", "Rules", &clauses(&["C2"]))
+        .await
+        .unwrap();
+    app.put_interface("core", "api", "fn a()\n", &[item("fn a()", 1)])
+        .await
+        .unwrap();
+
+    // a Clause of the Context it uses is reached, but a sim Harness is run against the Contracts of its own
+    let err = put_sim(&mut app, Some("base"), "rules", "C2")
+        .await
+        .unwrap_err();
+    let refused = app.diagnose(&err).await;
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert_eq!(refused[0].code, "sim.clause-foreign");
+    assert_eq!(refused[0].level, "error");
+    let named: Vec<(&str, &str)> = refused[0]
+        .subjects
+        .iter()
+        .map(|s| (s.kind, s.name.as_str()))
+        .collect();
+    assert_eq!(named, [("case", "case sim sweep"), ("clause", "rules C2")]);
+    assert!(!refused[0].message.contains("0000-0000"), "{refused:#?}");
+
+    // in a shape the protocol runs it is kept
+    put_sim(&mut app, None, "stock", "C1").await.unwrap();
+
+    // a store from before the rule, with the sweep citing the Clause of `base`: the document is rewritten
+    let stock = clause_of(&app, "C1").await;
+    let rules = clause_of(&app, "C2").await;
+    let cite = |c: &chidev_core::domain::entity::contract::Clause| {
+        format!(
+            "\"clauses\":[{{\"id\":\"{}\",\"revision\":{}}}]",
+            c.id().as_uuid(),
+            c.revision().number()
+        )
+    };
+    app.into_store().close().await.unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let rewritten = conn
+        .execute(
+            "UPDATE project SET doc = replace(doc, ?1, ?2)",
+            [cite(&stock), cite(&rules)],
+        )
+        .unwrap();
+    assert_eq!(rewritten, 1);
+    drop(conn);
+    let mut app = open(1_000).await;
+
+    // the store is read, and `check` reports the shape by the Clause, once, by name and not by id
+    let found = app.check().await.unwrap();
+    let kept: Vec<_> = found
+        .iter()
+        .filter(|f| f.rule.as_str() == "sim.shape-kept")
+        .collect();
+    assert_eq!(kept.len(), 1, "{found:#?}");
+    assert_eq!(kept[0].level, chidev_core::domain::check::Level::Error);
+    assert_eq!(kept[0].subject, Some(Subject::Clause(rules.id())));
+    assert_eq!(kept[0].about.as_deref(), Some("rules C2"));
+    assert!(
+        !kept[0].message.contains("0000-0000"),
+        "{}",
+        kept[0].message
+    );
+    let shown = Diagnostic::of_found(kept[0]);
+    assert_eq!(shown.code, "sim.shape-kept");
+    assert_eq!(shown.subjects[0].kind, "clause");
+    assert_eq!(shown.subjects[0].name, "rules C2");
+
+    // a change that does not put it goes through
+    app.put_contract("core", "extra", "Extra", &clauses(&["C3"]))
+        .await
+        .unwrap();
+    // simulating it is refused for the rule a put of it breaks
+    let err = app.simulate("core", "sim").await.unwrap_err();
+    let refused = app.diagnose(&err).await;
+    assert_eq!(refused[0].code, "sim.clause-foreign", "{refused:#?}");
+    // a put of it as it is, is refused for the same rule
+    let err = put_sim(&mut app, Some("base"), "rules", "C2")
+        .await
+        .unwrap_err();
+    let refused = app.diagnose(&err).await;
+    assert_eq!(refused[0].code, "sim.clause-foreign");
+    // the Harness is in the store now, so the remedy is an operation that puts it again
+    assert_eq!(refused[0].suggestions.len(), 1, "{refused:#?}");
+    // and a put in the shape the protocol runs mends it
+    put_sim(&mut app, None, "stock", "C1").await.unwrap();
+    let found = app.check().await.unwrap();
+    assert!(
+        found.iter().all(|f| f.rule.as_str() != "sim.shape-kept"),
+        "{found:#?}"
+    );
 }
 
 #[tokio::test]

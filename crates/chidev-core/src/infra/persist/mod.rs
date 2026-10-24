@@ -513,6 +513,7 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
 
         use crate::domain::vo::case::CaseCites;
+        use crate::domain::vo::case::CaseName;
         use crate::domain::vo::harness_kind::HarnessKind;
         use crate::domain::vo::id::{HarnessId, InterfaceId};
         use crate::domain::vo::source::Source;
@@ -526,7 +527,7 @@ mod tests {
             .find(|c| c.harness(harness).is_some())
             .map(|c| c.id())
             .unwrap();
-        // a Case of a sim cites Clauses and no Item
+        // a Case of a sim cites Clauses and no Item, and is named `sweep`
         let given = || {
             let c = p.context(top).and_then(|c| c.harness(harness)).unwrap();
             c.cases()
@@ -534,7 +535,7 @@ mod tests {
                 .map(|k| {
                     (
                         k.id(),
-                        k.name().clone(),
+                        CaseName::try_from("sweep").unwrap(),
                         k.lines(),
                         CaseCites::of(BTreeMap::new(), k.cites().clauses().clone()),
                     )

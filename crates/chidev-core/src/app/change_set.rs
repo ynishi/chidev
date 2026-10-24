@@ -579,6 +579,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 return None;
             }
         };
+        // A Harness put is named by the set, so that a refusal that is about it says its name before it is kept.
+        plan.words
+            .insert(Target::Harness(id), format!("harness {}", h.name));
         let old = p.context(ctx).and_then(|x| x.harness(id));
         let mut cases = Vec::with_capacity(h.cases.len());
         for c in &h.cases {

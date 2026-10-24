@@ -7,13 +7,13 @@ use uuid::Uuid;
 
 use super::{
     Project, ProjectError, Taken, check_structure, cite_problems, contract_records, dropped_leaves,
-    harness_records, interface_records, refuse_cited,
+    harness_records, interface_records, refuse_cited, refused, sim_shape_problems,
 };
 use crate::domain::entity::context::{Context, ContextError};
 use crate::domain::entity::harness::CaseFound;
 use crate::domain::vo::case::CaseCites;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
-use crate::domain::vo::id::{ClauseId, ContextId, ItemId};
+use crate::domain::vo::id::{ClauseId, ContextId, HarnessId, ItemId};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -36,6 +36,10 @@ impl Project {
     /// When it is refused, nothing changes, and the error names every problem found: a single one as it is, several
     /// as [`ProjectError::Many`]. Problems with the entries themselves (an unknown Context, a Contract that breaks
     /// a rule of its own) are found first; the rules of the Project are only checked when the entries all applied.
+    ///
+    /// The shape of a sim Harness is asked, on the state the set ends in, of the Harnesses the set puts and of the
+    /// Context each is in (a Context has at most one sim Harness): to swap one, put the new and retire the old in
+    /// one set. A sim Harness the set does not put is not asked, however it was kept.
     pub fn apply(&mut self, set: ChangeSet) -> Result<(), ProjectError> {
         let repeated = repeats(&set);
         if !repeated.is_empty() {
@@ -46,6 +50,13 @@ impl Project {
             .iter()
             .filter(|p| matches!(p, AssetPut::Context(_)))
             .count();
+        let put_harnesses: BTreeSet<HarnessId> = puts
+            .iter()
+            .filter_map(|p| match p {
+                AssetPut::Harness { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
         puts.sort_by_key(stage);
         let mut problems = Vec::new();
         let mut next = self.contexts.clone();
@@ -103,6 +114,7 @@ impl Project {
                     problems.extend(cite_problems(&next, &going));
                 }
             }
+            problems.extend(sim_shape_problems(&next, &put_harnesses));
         }
         if !problems.is_empty() {
             return Err(refused(problems));
@@ -111,14 +123,6 @@ impl Project {
         self.retired = retired;
         self.revision = revision;
         Ok(())
-    }
-}
-
-/// The error of a refused change set: the one problem, or all of them.
-fn refused(problems: Vec<ProjectError>) -> ProjectError {
-    match problems.as_slice() {
-        [only] => only.clone(),
-        _ => ProjectError::Many(problems),
     }
 }
 
@@ -344,7 +348,8 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::vo::case::CaseName;
+    use crate::domain::entity::harness::{CaseNameFault, Harness, SimShapeProblem};
+    use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
@@ -452,8 +457,19 @@ mod tests {
             kind: Some(HarnessKind::Sim),
             builds: builds.iter().copied().collect(),
             source: Source::new("fn s() {}\n".to_string()),
-            cases: vec![draft(70, &[], clauses)],
+            cases: vec![sweep(70, clauses)],
         }
+    }
+
+    /// A Case named `sweep`, citing the Clauses `clauses` and no Item.
+    fn sweep(case: u128, clauses: &[u128]) -> CaseDraft {
+        CaseDraft::new(
+            CaseId::from_uuid(test_uuid(case)),
+            CaseName::try_from("sweep").unwrap(),
+            LineRange::new(1, 1).unwrap(),
+            BTreeSet::new(),
+            clauses.iter().map(|k| clause(*k)).collect(),
+        )
     }
 
     /// A Project with `core`: the Interface has Items 10 (`fn a()`) and 11 (`fn release()`), the Contract Clauses 20
@@ -854,5 +870,352 @@ mod tests {
             ))
             .unwrap_err();
         assert_eq!(err, ProjectError::UnknownContext(missing));
+    }
+
+    fn sim_id(n: u128) -> HarnessId {
+        HarnessId::from_uuid(test_uuid(n))
+    }
+
+    /// A Case named `name`, citing the Clauses `clauses` and no Item.
+    fn named(case: u128, name: &str, clauses: &[u128]) -> CaseDraft {
+        CaseDraft::new(
+            CaseId::from_uuid(test_uuid(case)),
+            CaseName::try_from(name).unwrap(),
+            LineRange::new(1, 1).unwrap(),
+            BTreeSet::new(),
+            clauses.iter().map(|k| clause(*k)).collect(),
+        )
+    }
+
+    /// A sim Harness `id` that builds `builds`, with these Cases.
+    fn sim_put(id: u128, builds: &[InterfaceId], cases: Vec<CaseDraft>) -> AssetPut {
+        AssetPut::Harness {
+            context: ctx(),
+            id: sim_id(id),
+            kind: Some(HarnessKind::Sim),
+            builds: builds.iter().copied().collect(),
+            source: Source::new("fn s() {}\n".to_string()),
+            cases,
+        }
+    }
+
+    /// The problems of shape a refusal is made of.
+    fn shape_of(err: ProjectError) -> Vec<SimShapeProblem> {
+        let all = match err {
+            ProjectError::Many(all) => all,
+            one => vec![one],
+        };
+        all.into_iter()
+            .map(|e| match e {
+                ProjectError::SimShape(p) => p,
+                other => panic!("not a problem of shape: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// `p` with these sim Harnesses besides the ones it has, as a store keeps them: read, not put.
+    fn with_kept(p: &Project, kept: Vec<Harness>) -> Project {
+        let mut all: Vec<Harness> = p.context(ctx()).unwrap().harnesses().cloned().collect();
+        all.extend(kept);
+        p.with_harnesses_kept(ctx(), all)
+    }
+
+    /// A sim Harness `id` as a store kept it, whatever its shape: it builds Interface 101, and its Cases are
+    /// `(id, name, Clauses cited)`.
+    fn kept_sim(id: u128, cases: &[(u128, &str, &[u128])]) -> Harness {
+        Harness::of_kind(
+            HarnessKind::Sim,
+            sim_id(id),
+            BTreeSet::from([interface_id()]),
+            Source::new("fn s() {}\n".to_string()),
+            cases
+                .iter()
+                .map(|(n, name, cited)| {
+                    (
+                        CaseId::from_uuid(test_uuid(*n)),
+                        CaseName::try_from(*name).unwrap(),
+                        LineRange::new(1, 1).unwrap(),
+                        CaseCites::of(
+                            BTreeMap::new(),
+                            cited
+                                .iter()
+                                .map(|k| (clause(*k), Revision::first()))
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_sim_harness_put_in_a_shape_the_protocol_does_not_run_is_refused_by_the_rule_it_breaks() {
+        let id = sim_id(106);
+        let refused = |cases: Vec<CaseDraft>, builds: &[InterfaceId]| {
+            let mut p = project();
+            let before = p.clone();
+            let err = p
+                .apply(ChangeSet::new(
+                    vec![sim_put(106, builds, cases)],
+                    Vec::new(),
+                ))
+                .unwrap_err();
+            assert_eq!(p, before, "a refused set changes nothing");
+            shape_of(err)
+        };
+        let built = [interface_id()];
+        assert_eq!(
+            refused(vec![named(70, "regress-a", &[20])], &built),
+            [SimShapeProblem::SweepOnce {
+                harness: id,
+                count: 0,
+                extra: None
+            }]
+        );
+        assert_eq!(
+            refused(
+                vec![named(70, "sweep", &[20]), named(71, "sweep", &[20])],
+                &built
+            ),
+            [SimShapeProblem::SweepOnce {
+                harness: id,
+                count: 2,
+                extra: Some(CaseId::from_uuid(test_uuid(71)))
+            }]
+        );
+        assert_eq!(
+            refused(
+                vec![named(70, "sweep", &[20]), named(71, "Regress-A", &[20])],
+                &built
+            ),
+            [SimShapeProblem::CaseName {
+                harness: id,
+                case: CaseId::from_uuid(test_uuid(71)),
+                fault: CaseNameFault::NeitherSweepNorRegress
+            }]
+        );
+        assert_eq!(
+            refused(
+                vec![
+                    named(70, "sweep", &[20]),
+                    named(71, "regress-a", &[20]),
+                    named(72, "regress-a", &[20])
+                ],
+                &built
+            ),
+            [SimShapeProblem::CaseName {
+                harness: id,
+                case: CaseId::from_uuid(test_uuid(72)),
+                fault: CaseNameFault::RegressNamedTwice
+            }]
+        );
+        assert_eq!(
+            refused(
+                vec![named(70, "sweep", &[20]), named(71, "regress-a", &[])],
+                &built
+            ),
+            [SimShapeProblem::CaseCitesNone {
+                harness: id,
+                case: CaseId::from_uuid(test_uuid(71))
+            }]
+        );
+        assert_eq!(
+            refused(vec![named(70, "sweep", &[20])], &[]),
+            [SimShapeProblem::BuildsNone { harness: id }]
+        );
+        // several at once come back as the problems of one refusal, each once
+        let many = refused(vec![named(70, "regress-a", &[])], &[]);
+        assert_eq!(many.len(), 3, "{many:?}");
+    }
+
+    #[test]
+    fn a_sim_case_that_cites_a_clause_of_a_context_it_uses_is_refused_though_it_reaches_it() {
+        let mut p = project();
+        let base = ContextId::from_uuid(test_uuid(2));
+        p.apply(ChangeSet::new(
+            vec![
+                AssetPut::Context(
+                    Context::new(
+                        base,
+                        ContextName::try_from("base").unwrap(),
+                        BTreeSet::new(),
+                    )
+                    .unwrap(),
+                ),
+                AssetPut::Uses {
+                    context: ctx(),
+                    uses: BTreeSet::from([base]),
+                },
+                AssetPut::Contract {
+                    context: base,
+                    id: ContractId::from_uuid(test_uuid(110)),
+                    title: Title::try_from("B").unwrap(),
+                    clauses: clauses(&[(90, "C1")]),
+                },
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let err = p
+            .apply(ChangeSet::new(
+                vec![sim_put(
+                    106,
+                    &[interface_id()],
+                    vec![named(70, "sweep", &[20, 90])],
+                )],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(
+            shape_of(err),
+            [SimShapeProblem::ClauseForeign {
+                harness: sim_id(106),
+                case: CaseId::from_uuid(test_uuid(70)),
+                clause: clause(90)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_sim_harness_and_the_contract_it_cites_are_put_in_one_set_and_are_judged_on_the_end_state()
+    {
+        let mut p = Project::new(ProjectId::from_uuid(test_uuid(1000)));
+        p.add_context(
+            Context::new(
+                ctx(),
+                ContextName::try_from("core").unwrap(),
+                BTreeSet::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        p.apply(ChangeSet::new(
+            vec![
+                sim_put(106, &[interface_id()], vec![named(70, "sweep", &[20])]),
+                contract(&[(20, "C1")]),
+                interface(&[(10, "fn a()")]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(
+            p.context(ctx())
+                .unwrap()
+                .harness(sim_id(106))
+                .unwrap()
+                .kind(),
+            HarnessKind::Sim
+        );
+    }
+
+    #[test]
+    fn a_sim_harness_is_swapped_for_another_in_one_set_and_not_by_a_put_alone() {
+        let mut p = project();
+        let built = [interface_id()];
+        p.apply(ChangeSet::new(
+            vec![sim_put(106, &built, vec![named(70, "sweep", &[20])])],
+            Vec::new(),
+        ))
+        .unwrap();
+        // the new one alone: the Context would have two
+        let before = p.clone();
+        let err = p
+            .apply(ChangeSet::new(
+                vec![sim_put(107, &built, vec![named(71, "sweep", &[20])])],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(
+            shape_of(err),
+            [SimShapeProblem::OnePerContext {
+                context: ctx(),
+                harnesses: vec![sim_id(106), sim_id(107)]
+            }]
+        );
+        assert_eq!(p, before);
+        // the new one and the retirement of the old one, in one set: judged on the state it ends in
+        p.apply(ChangeSet::new(
+            vec![sim_put(107, &built, vec![named(71, "sweep", &[20])])],
+            vec![AssetRetire::Harness {
+                context: ctx(),
+                id: sim_id(106),
+            }],
+        ))
+        .unwrap();
+        let c = p.context(ctx()).unwrap();
+        assert!(c.harness(sim_id(106)).is_none() && c.harness(sim_id(107)).is_some());
+    }
+
+    #[test]
+    fn a_shape_kept_from_before_stops_the_put_of_that_harness_and_no_other_change() {
+        let built = [interface_id()];
+        let kept = with_kept(&project(), vec![kept_sim(106, &[(70, "stray", &[20])])]);
+        // a change that does not put it goes through
+        let mut p = kept.clone();
+        p.apply(ChangeSet::new(
+            vec![contract(&[(20, "C1"), (21, "C7"), (22, "C8")])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let mut p = kept.clone();
+        p.apply(ChangeSet::new(
+            Vec::new(),
+            vec![AssetRetire::Harness {
+                context: ctx(),
+                id: harness_id(),
+            }],
+        ))
+        .unwrap();
+        // a put of it is held to the shape, as a put of a new one is
+        let mut p = kept.clone();
+        let err = p
+            .apply(ChangeSet::new(
+                vec![sim_put(106, &built, vec![named(70, "stray", &[20])])],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(shape_of(err).len(), 2);
+        assert_eq!(p, kept);
+        // and the put in the shape the protocol runs mends it
+        p.apply(ChangeSet::new(
+            vec![sim_put(106, &built, vec![named(70, "sweep", &[20])])],
+            Vec::new(),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn of_two_sim_harnesses_kept_in_a_context_one_is_mended_only_while_the_other_is_retired() {
+        let built = [interface_id()];
+        let kept = with_kept(
+            &project(),
+            vec![
+                kept_sim(106, &[(70, "stray", &[20])]),
+                kept_sim(107, &[(71, "stray", &[20])]),
+            ],
+        );
+        let mended = || sim_put(106, &built, vec![named(70, "sweep", &[20])]);
+        let mut p = kept.clone();
+        let err = p
+            .apply(ChangeSet::new(vec![mended()], Vec::new()))
+            .unwrap_err();
+        assert_eq!(
+            shape_of(err),
+            [SimShapeProblem::OnePerContext {
+                context: ctx(),
+                harnesses: vec![sim_id(106), sim_id(107)]
+            }]
+        );
+        assert_eq!(p, kept);
+        p.apply(ChangeSet::new(
+            vec![mended()],
+            vec![AssetRetire::Harness {
+                context: ctx(),
+                id: sim_id(107),
+            }],
+        ))
+        .unwrap();
+        assert!(p.context(ctx()).unwrap().harness(sim_id(107)).is_none());
     }
 }

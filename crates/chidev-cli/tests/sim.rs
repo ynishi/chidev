@@ -152,12 +152,16 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
     let mut setup = vec![json!({"op":"init"})];
     setup.extend(model(SIM));
     setup.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
+    // the sim Harness is well formed: the put of it went through (a malformed one is refused)
     let put = exec(&dir, &setup);
-    // the sim Harness is well formed: nothing on `sim.shape`
-    assert!(findings(&put[5], "sim.shape").is_empty(), "{:#?}", put[5]);
+    assert_eq!(put[5]["ok"], true, "{:#?}", put[5]);
 
-    // Before a simulation: the Harness was never run.
+    // Before a simulation: the Harness was never run, and the shape a store kept is not reported for it.
     let before = exec(&dir, &[json!({"op":"check"})]);
+    assert!(
+        findings(&before[0], "sim.shape-kept").is_empty(),
+        "{before:#?}"
+    );
     assert_eq!(findings(&before[0], "sim.unrun").len(), 1, "{before:#?}");
     assert!(findings(&before[0], "sim.uncited-clause").is_empty());
 
@@ -279,50 +283,51 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
 }
 
 #[test]
-fn a_sim_harness_that_is_not_one_sweep_and_regress_cases_is_a_shape_error_and_is_not_simulated() {
+fn a_sim_harness_that_is_not_one_sweep_and_regress_cases_is_refused_by_the_rule_it_breaks() {
     let dir = project("sim-e2e-shape");
     let mut ops = vec![json!({"op":"init"})];
     ops.extend(model(SIM));
     ops.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
     exec(&dir, &ops);
-    // a case that is neither `sweep` nor `regress-<name>`, and no clause cited by the sweep's twin
+    // a case that is neither `sweep` nor `regress-<name>`
     let bad = json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],"source":SIM,"cases":[
         {"name":"sweep","lines":[1,1],
          "clauses":[{"contract":"account","label":"C1"}]},
-        {"name":"a_test","lines":[2,2],"clauses":[]}]});
-    let put = exec(&dir, &[bad]);
-    let shape = findings(&put[0], "sim.shape");
-    assert_eq!(shape.len(), 1, "{:#?}", put[0]);
-    assert_eq!(shape[0]["level"], "error");
-    let checked = exec(&dir, &[json!({"op":"check"})]);
-    // C2 is cited by no sim case any more
+        {"name":"a_test","lines":[2,2],"clauses":[{"contract":"account","label":"C2"}]}]});
+    let (put, _) = run_ops(&dir, &[bad]);
+    assert_eq!(put[0]["ok"], false, "{:#?}", put[0]);
+    let diagnostics = put[0]["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(diagnostics.len(), 1, "{:#?}", put[0]);
+    let d = &diagnostics[0];
+    assert_eq!(d["code"], "sim.case-name");
+    assert_eq!(d["level"], "error");
+    assert_eq!(d["values"]["reason"], "neither-sweep-nor-regress");
+    // the case and the harness are named, never given by id
     assert_eq!(
-        findings(&checked[0], "sim.uncited-clause").len(),
-        1,
-        "{checked:#?}"
+        d["subjects"],
+        json!([
+            {"kind":"case","name":"case bank-sim a_test"},
+            {"kind":"harness","name":"harness bank-sim"}
+        ])
+    );
+    assert_eq!(
+        d["message"],
+        "the name of `case bank-sim a_test` is not one the sim `harness bank-sim` can have: neither-sweep-nor-regress"
     );
 
-    // the measure refuses it, and a tests harness cannot be simulated either
-    let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
-        .current_dir(&dir)
-        .arg("exec")
-        .arg(write_ops(
-            &dir,
-            &[json!({"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"})],
-        ))
-        .arg("--store")
-        .arg(dir.join("chidev.db"))
-        .output()
-        .expect("chidev runs");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("not well formed"), "{stdout}");
-}
-
-fn write_ops(dir: &Path, ops: &[Value]) -> PathBuf {
-    let file = dir.join("refused.jsonl");
-    let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
-    std::fs::write(&file, text).expect("a file");
-    file
+    // nothing was kept: the sim Harness the model had stands, with the shape it had
+    let checked = exec(&dir, &[json!({"op":"check"})]);
+    assert!(
+        findings(&checked[0], "sim.shape-kept").is_empty(),
+        "{checked:#?}"
+    );
+    assert!(
+        findings(&checked[0], "sim.uncited-clause").is_empty(),
+        "{checked:#?}"
+    );
+    // and the rule can be read: `explain` gives it by its id
+    let rule = exec(&dir, &[json!({"op":"explain","rule":"sim.case-name"})]);
+    assert_eq!(rule[0]["kind"], "invariant");
 }
 
 /// A script that does not drive the program at all: on every case it finds `audit:C1` broken and says that
@@ -374,7 +379,7 @@ fn one_sim_over_two_contracts_with_a_label_in_common_puts_each_finding_on_its_ow
             ("audit", "C1"),
         ])],
     );
-    assert!(findings(&put[0], "sim.shape").is_empty(), "{put:#?}");
+    assert_eq!(put[0]["ok"], true, "{put:#?}");
     // and with only one Clause of `audit` cited and one of `account`, `account`'s C2 is the silence reported
     let partial = exec(
         &dir,
@@ -382,6 +387,10 @@ fn one_sim_over_two_contracts_with_a_label_in_common_puts_each_finding_on_its_ow
             two_contract_sim(&[("account", "C1"), ("audit", "C1")]),
             json!({"op":"check"}),
         ],
+    );
+    assert!(
+        findings(&partial[1], "sim.shape-kept").is_empty(),
+        "{partial:#?}"
     );
     let uncited = findings(&partial[1], "sim.uncited-clause");
     assert_eq!(uncited.len(), 1, "{partial:#?}");

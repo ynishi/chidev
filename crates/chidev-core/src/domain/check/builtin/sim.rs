@@ -1,5 +1,5 @@
-//! Checks on the simulations: whether a sim Harness has the shape the protocol runs, whether every Clause of the
-//! Contracts it takes on is named by it, and what the latest simulation found. They read what a run left in the store and run
+//! Checks on the simulations: whether a sim Harness is kept in a shape the protocol does not run, whether every
+//! Clause of the Contracts it takes on is named by it, and what the latest simulation found. They read what a run left in the store and run
 //! nothing: a simulation takes as long as its program, so `measure` runs it and these only judge its record.
 //!
 //! A simulation that no longer describes the model (the script, a Contract or an Interface it cites, or the code
@@ -17,11 +17,11 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::context::Context;
-use crate::domain::entity::harness::{Case, Harness};
+use crate::domain::entity::harness::{Case, CaseNameFault, Harness, SimShapeProblem};
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::project::Project;
 use crate::domain::service::measure::{Standing, latest_sim, sim_standing};
-use crate::domain::service::sim::{ShapeAbout, shape, sim_harnesses, sweep};
+use crate::domain::service::sim::{sim_harnesses, sweep};
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::ClauseId;
@@ -50,7 +50,7 @@ impl Sim<'_> {
 }
 
 /// The sim Harnesses of the Project that have a sweep Case (one without is a fault of shape, found by
-/// `sim.shape`), each with its latest simulation.
+/// `sim.shape-kept`), each with its latest simulation.
 fn sims<'a>(view: &'a CheckView<'a>) -> impl Iterator<Item = (&'a Context, Sim<'a>)> + 'a {
     view.after.contexts().flat_map(move |c| {
         sim_harnesses(c).filter_map(move |h| {
@@ -75,47 +75,97 @@ fn label_of(project: &Project, id: ClauseId) -> Option<ClauseLabel> {
         .map(|c| c.content().label())
 }
 
-/// A sim Harness is not the shape the protocol runs.
+/// A sim Harness kept in a shape the protocol does not run: the store has it from before a put was held to the
+/// shape (the `sim.*` rules), or it stands beside one that is.
 #[derive(Debug, Clone, Copy)]
-pub struct SimShape;
+pub struct SimShapeKept;
 
-static SIM_SHAPE: Descriptor = Descriptor {
-    id: RuleId::from_static("sim.shape"),
+static SIM_SHAPE_KEPT: Descriptor = Descriptor {
+    id: RuleId::from_static("sim.shape-kept"),
     summary: Cow::Borrowed(
-        "a sim harness that is not one `sweep` case and `regress-<name>` cases citing clauses",
+        "a sim harness kept in a shape the protocol does not run, which a put of it would be refused for",
     ),
     help: Cow::Borrowed(
-        "A sim harness is run case by case under the protocol chidev-sim 2: the one case named `sweep` stands for \
-           the seeded runs and cites every clause the script checks (of any of the context's contracts; the script \
-           names a clause `<contract>:<label>`), each `regress-<name>` case stands for a fixed schedule, and each \
-           cites the clauses it checks and no item. The harness names in `builds` the interfaces whose pinned code \
-           the program is built from. A context has at most one. Rename or add the cases, cite the clauses, name \
-           the interfaces to build, and put the harness again.",
+        "A put of a sim harness is refused unless it is one `sweep` case and `regress-<name>` cases that cite \
+           clauses of the contracts of its context, builds an interface, and is the only sim harness of its context \
+           (the rules are `sim.*`; `explain` gives each). This one was kept before that was so, and a change that \
+           does not put it goes through. It cannot be simulated. Put it again in the shape the rules ask for; a \
+           context with two sim harnesses is mended by putting one in the same change set that retires the other.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    hooks: Cow::Borrowed(&[Hook::Check]),
     default_level: Level::Error,
     mandatory: false,
     params: Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
-impl Check for SimShape {
+impl Check for SimShapeKept {
     fn descriptor(&self) -> &'static Descriptor {
-        &SIM_SHAPE
+        &SIM_SHAPE_KEPT
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        view.after
-            .contexts()
-            .flat_map(shape)
-            .map(|p| {
-                let subject = match p.about {
-                    ShapeAbout::Context(c) => Subject::Context(c),
-                    ShapeAbout::Case(c) => Subject::Case(c),
-                };
-                Finding::new(&SIM_SHAPE, Some(subject), p.message)
-            })
-            .collect()
+        let mut out = Vec::new();
+        // A problem of a Context comes with each of its sim Harnesses, and a Clause foreign to a Context may be
+        // cited by several Cases: each is reported once.
+        let mut foreign: BTreeSet<ClauseId> = BTreeSet::new();
+        for context in view.after.contexts() {
+            let mut seen: Vec<SimShapeProblem> = Vec::new();
+            for harness in sim_harnesses(context) {
+                for problem in context.sim_problems(harness) {
+                    if seen.contains(&problem) {
+                        continue;
+                    }
+                    let (subject, message) = match &problem {
+                        SimShapeProblem::OnePerContext { .. } => (
+                            Subject::Context(context.id()),
+                            "the context has more than one sim harness; it has at most one",
+                        ),
+                        SimShapeProblem::SweepOnce { extra: None, .. } => (
+                            Subject::Context(context.id()),
+                            "a sim harness has no case named `sweep`; it has exactly one",
+                        ),
+                        SimShapeProblem::SweepOnce {
+                            extra: Some(case), ..
+                        } => (
+                            Subject::Case(*case),
+                            "a sim harness has one case named `sweep`; this is another",
+                        ),
+                        SimShapeProblem::CaseName { case, fault, .. } => (
+                            Subject::Case(*case),
+                            match fault {
+                                CaseNameFault::NeitherSweepNorRegress => {
+                                    "the case is neither `sweep` nor `regress-<name>`"
+                                }
+                                CaseNameFault::RegressNamedTwice => {
+                                    "the regress name of the case is another case's"
+                                }
+                            },
+                        ),
+                        SimShapeProblem::CaseCitesNone { case, .. } => (
+                            Subject::Case(*case),
+                            "the case cites no clause; a sim case cites the clauses it checks",
+                        ),
+                        SimShapeProblem::ClauseForeign { clause, .. } => {
+                            if !foreign.insert(*clause) {
+                                continue;
+                            }
+                            (
+                                Subject::Clause(*clause),
+                                "a case of a sim harness cites this clause, which is in no contract of the harness's context",
+                            )
+                        }
+                        SimShapeProblem::BuildsNone { .. } => (
+                            Subject::Context(context.id()),
+                            "a sim harness builds no interface, so it has no program to drive",
+                        ),
+                    };
+                    seen.push(problem);
+                    out.push(Finding::new(&SIM_SHAPE_KEPT, Some(subject), message));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -625,7 +675,7 @@ mod tests {
     fn a_context_without_a_sim_harness_has_nothing_for_these_rules_to_say() {
         let p = project();
         for check in [
-            &SimShape as &dyn Check,
+            &SimShapeKept as &dyn Check,
             &SimUncitedClause,
             &SimUnrun,
             &SimStale,
@@ -638,25 +688,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_malformed_sim_harness_is_a_shape_error_on_the_context_or_the_case() {
-        let mut p = project();
-        let at = LineRange::new(1, 1).unwrap();
-        p.put_harness_as(
-            ctx(),
-            hid(),
-            Some(HarnessKind::Sim),
+    /// A sim Harness `id` that builds Interface 100, with these Cases `(id, name, Clauses cited)`, as a store kept
+    /// it: whatever its shape, for it was not put.
+    fn kept_sim(id: u128, cases: &[(u128, &str, &[u128])]) -> Harness {
+        Harness::of_kind(
+            HarnessKind::Sim,
+            HarnessId::from_uuid(test_uuid(id)),
             BTreeSet::from([iface()]),
             Source::new("x\n".into()),
-            vec![(
-                sweep_id(),
-                CaseName::try_from("a_test").unwrap(),
-                at,
-                cites(&[30]),
-            )],
+            cases
+                .iter()
+                .map(|(n, name, clauses)| {
+                    (
+                        CaseId::from_uuid(test_uuid(*n)),
+                        CaseName::try_from(*name).unwrap(),
+                        LineRange::new(1, 1).unwrap(),
+                        cites(clauses),
+                    )
+                })
+                .collect(),
         )
-        .unwrap();
-        let all = found(&SimShape, &p, &[], &none());
+        .unwrap()
+    }
+
+    #[test]
+    fn a_sim_harness_kept_malformed_is_a_shape_error_on_the_context_or_the_case() {
+        let p = project().with_harnesses_kept(ctx(), vec![kept_sim(500, &[(50, "a_test", &[30])])]);
+        let all = found(&SimShapeKept, &p, &[], &none());
         let subjects: Vec<_> = all.iter().map(Finding::subject).collect();
         assert_eq!(
             subjects,
@@ -667,7 +725,67 @@ mod tests {
         );
         assert!(all.iter().all(|f| f.level() == Level::Error));
         // and a well-formed one is quiet
-        assert!(found(&SimShape, &sim_project(), &[], &none()).is_empty());
+        assert!(found(&SimShapeKept, &sim_project(), &[], &none()).is_empty());
+    }
+
+    #[test]
+    fn two_sim_harnesses_kept_in_a_context_are_one_finding_on_the_context() {
+        let p = project().with_harnesses_kept(
+            ctx(),
+            vec![
+                kept_sim(500, &[(50, "sweep", &[30])]),
+                kept_sim(501, &[(60, "sweep", &[31])]),
+            ],
+        );
+        let all = found(&SimShapeKept, &p, &[], &none());
+        assert_eq!(
+            all.iter().map(Finding::subject).collect::<Vec<_>>(),
+            [Some(Subject::Context(ctx()))]
+        );
+    }
+
+    #[test]
+    fn a_foreign_clause_is_a_finding_on_the_clause_once_however_many_cases_cite_it() {
+        // Clause 90 is in a Contract of `empty`, which `core` uses: it is reached but is in no Contract of `core`.
+        // Two Cases cite it, and the sweep cites a Clause of its own too
+        let mut p = project();
+        p.put_contract(
+            empty_ctx(),
+            ContractId::from_uuid(test_uuid(310)),
+            Title::try_from("B").unwrap(),
+            vec![(
+                clause(90),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C1").unwrap(),
+                    ClauseText::try_from("a base promise").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+        p.set_uses(ctx(), BTreeSet::from([empty_ctx()])).unwrap();
+        let p = p.with_harnesses_kept(
+            ctx(),
+            vec![kept_sim(
+                500,
+                &[(50, "sweep", &[30, 90]), (51, "regress-a", &[90])],
+            )],
+        );
+        let all = found(&SimShapeKept, &p, &[], &none());
+        assert_eq!(
+            all.iter().map(Finding::subject).collect::<Vec<_>>(),
+            [Some(Subject::Clause(clause(90)))]
+        );
+        // the message says no id, for the subject is named by the application
+        let message = all[0].message();
+        assert!(!message.contains(&clause(90).to_string()), "{message}");
+    }
+
+    #[test]
+    fn the_findings_of_a_kept_shape_are_not_a_hook_of_put() {
+        // a put is refused by the rules (`sim.*`), so the check runs on demand only
+        assert_eq!(SimShapeKept.descriptor().hooks.as_ref(), &[Hook::Check]);
+        assert!(!SimShapeKept.descriptor().mandatory);
+        assert_eq!(SimShapeKept.descriptor().default_level, Level::Error);
     }
 
     /// Adds a second Contract to `core`, whose Clauses 32 and 33 are C1 and C2 again.
@@ -714,7 +832,7 @@ mod tests {
         let mut p = project();
         put_second_contract(&mut p);
         put_sim_citing(&mut p, "script", &[30, 31, 32, 33]);
-        assert!(found(&SimShape, &p, &[], &none()).is_empty());
+        assert!(found(&SimShapeKept, &p, &[], &none()).is_empty());
         assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
         let outcome = SimOutcome {
             cases: vec![
@@ -760,9 +878,9 @@ mod tests {
         let all = found(&SimUncitedClause, &p, &[], &none());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(33))));
-        // no Clause cited at all: nothing is taken on
-        put_sim_citing(&mut p, "script", &[]);
-        assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
+        // no Clause cited at all (a shape a put is refused for, kept by a store): nothing is taken on
+        let kept = p.with_harnesses_kept(ctx(), vec![kept_sim(500, &[(50, "sweep", &[])])]);
+        assert!(found(&SimUncitedClause, &kept, &[], &none()).is_empty());
     }
 
     #[test]

@@ -382,7 +382,8 @@ from. It is not a citation: it asks no Item of the Interface, a name the Context
 no Interface of is refused (also in a `change_set`, where the Interface may be one
 the same change set makes), and an Interface cannot be retired while a sim Harness
 builds it. Only a sim Harness has `builds` (a Harness of tests with it is refused),
-a sim Harness builds at least one Interface (`sim.shape` says so otherwise), and a
+a sim Harness builds at least one Interface (a put without one is refused; the rule
+is found with `{"op":"explain","rule":"sim.builds-none"}`), and a
 put states the whole list, as it states the code. Because a sim cites no Item, it is
 on no Pin's basis: putting or changing the sim never makes the Pin of an Interface
 stale. The Pin of an Interface still needs a tests Harness whose Case cites one of
@@ -504,9 +505,18 @@ it is the run's directory (its parent).
 
 #### Rules
 
+A put of a sim Harness is refused unless it has the shape above (the `sim.*` rules
+that are invariants; `{"op":"rules"}` lists them and `{"op":"explain"}` gives each):
+exactly one `sweep`, Cases that are `sweep` or `regress-<name>` and cite Clauses of
+the Contracts of its own Context, at least one Interface built, and no other sim
+Harness in the Context. To replace the sim Harness of a Context, put the new one and
+retire the old one in the same change set. The shape is asked of the Harness a put
+names, so a store that holds a sim Harness from before the rule is read as it is, and
+only a put of that Harness is refused; `sim.shape-kept` reports it.
+
 | rule | default | finds |
 |---|---|---|
-| `sim.shape` | error | a sim Harness without exactly one `sweep`, with a Case that is neither `sweep` nor `regress-<name>`, that cites no Clause or a Clause of another Context, that builds no Interface, or two sim Harnesses in a Context (hook `put`, and `check`). One label in two Contracts of the sweep is fine |
+| `sim.shape-kept` | error | a sim Harness kept in a shape a put of it is refused for: one the store held before the rule, or one beside another sim Harness of its Context; about the Case, the Clause or the Context (hook `check` only; it does not refuse a change). One label in two Contracts of the sweep is fine |
 | `sim.uncited-clause` | warning | a Clause that no sim Case cites, of a Contract a sim Harness takes on (cites at least one Clause of); a Contract the sim cites nothing of is left to the tests and not reported |
 | `sim.unrun` | warning | a sim Harness never simulated |
 | `sim.stale` | warning | the script, a Case or the `builds` of the Harness, a Contract it cites a Clause of, a built Interface, the code pinned for it, or the settings moved after the run |
@@ -913,6 +923,11 @@ as a sentence to be parsed:
   finding in any result has the same fields (`code` is its rule, `help` its rule's).
   A refusal that has no rule of its own yet is `domain.unmapped` (or `app.unmapped`),
   which says what was refused; it is a bug to report.
+
+A rule's `level` is what is shown, not what refuses. A change is refused for a
+violation of an invariant (always `error`; no policy lowers it), for an `error` of a
+*mandatory* check, and for a finding of a gate (see "External checks"); every other
+check says what it finds at its level and the change is kept.
 
 `{"op":"rules"}` lists every rule (the invariants an operation is refused for, the
 input rules, and the checks with the level the policy gives them), and

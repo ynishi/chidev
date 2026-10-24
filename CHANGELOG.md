@@ -159,7 +159,7 @@ and this project adheres to
   for the root of the copy), `seeds` (50), `sample` (6), `timeout` and `budget`. A
   layout entry for an Interface needs a `lang` only for mutation, and `test` is
   needed only for mutation, so a project that is only simulated needs neither.
-- Eight builtin checks: `sim.shape` (error, also at the `put` hook),
+- Eight builtin checks: `sim.shape-kept` (error, hook `check`),
   `sim.uncited-clause` (warning), `sim.unrun` (warning), `sim.stale` (warning),
   `sim.finding` (error, one per Clause, with the first case and step), `sim.unreached`
   (error, per Clause), `sim.nondeterministic` (error, mandatory, per Case) and
@@ -224,6 +224,27 @@ and this project adheres to
 
 ### Changed
 
+- A put of a sim Harness that is not the shape the protocol runs is refused (it was
+  kept, and `sim.shape` reported an `error` that refused nothing: only a mandatory
+  check at `error`, an invariant or a gate refuses, and the level of any other check
+  is what is shown). The shape is eight invariants, each with a diagnostic that
+  names the Harness, the Case or the Clause: `sim.one-per-context`,
+  `sim.sweep-once`, `sim.case-name`, `sim.case-cites-none`, `sim.clause-foreign`,
+  `sim.builds-none`, and the two that were `domain.unmapped` before,
+  `sim.case-cites-item` and `sim.builds-of-tests`. A message no longer carries the
+  id of a Clause. The rules are judged on the state a change ends in, so a sim
+  Harness is swapped by putting the new one and retiring the old one in one
+  `change_set`; a `measure` of a sim Harness in a shape a put is refused for is
+  refused with the same diagnostics. The check `sim.shape` is replaced by
+  `sim.shape-kept` (`error`, hook `check` only, not mandatory): a store from before
+  the rule is read as it is (a put of a sim Harness is held to the shape, nothing
+  else is), and the check reports what it holds, once per Clause for a Clause of no
+  Contract of the Context. A Context that holds two sim Harnesses takes a put of
+  either only in a `change_set` that retires the other. **A policy that names
+  `sim.shape` stops with `UnknownCheck` (no operation runs): write `sim.shape-kept`
+  instead.** `ProjectError::SimShape` and `HarnessError::BuildsOfTests(HarnessId)` are
+  new; `domain::service::sim::shape` is gone (`Harness::sim_problems` and
+  `Context::sim_problems` give the typed problems).
 - A refused operation prints `{"ok":false,"line":n,"diagnostics":[...]}`; the
   `error` string is gone (unreleased: no compatibility). Read the `code` of a
   diagnostic, or its `message`. A line that is not an operation (bad JSON, an
@@ -275,7 +296,7 @@ and this project adheres to
   no Pin's basis and putting it never makes a Pin stale. The simulation's own basis
   is the Harness (script, Cases and `builds`), the Contracts it cites a Clause of and
   each built Interface with the digest of its pinned code. A sim Harness that builds
-  no Interface is a `sim.shape` error. The stored Harness document gains `builds` (left
+  no Interface is refused (`sim.builds-none`). The stored Harness document gains `builds` (left
   out when empty).
 - Errors name things, not ids: a Case that cites what it cannot reach is
   `the case stock-tests reserve refuses (context `core`) cites the clause stock C7,

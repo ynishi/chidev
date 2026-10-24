@@ -9,7 +9,7 @@ mod apply;
 
 use super::context::{Context, ContextError};
 use super::contract::{Clause, Contract};
-use super::harness::{Case, CaseFound, Harness};
+use super::harness::{Case, CaseFound, Harness, SimShapeProblem};
 use super::interface::{Interface, Item, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
 use crate::domain::vo::harness_kind::HarnessKind;
@@ -109,6 +109,10 @@ pub enum ProjectError {
         /// The Interface it builds.
         interface: InterfaceId,
     },
+    /// A sim Harness that is put is not the shape the protocol runs, or the Context it is put in has more than one
+    /// sim Harness (see [`SimShapeProblem`]).
+    #[error("a sim harness is not the shape the protocol runs: {0}")]
+    SimShape(SimShapeProblem),
     /// A change set names one thing twice (puts it twice, or puts and retires it): which end state it wants is not
     /// said.
     #[error("the change set names the {what} {id} twice")]
@@ -134,7 +138,8 @@ pub enum ProjectError {
 /// The Contexts of one repository. Every change is made on a copy and kept only when the Project still holds:
 /// names are unique, every Context it uses is in the Project, `uses` forms no ring, every id of an asset or a
 /// definition is given once in the whole Project, every Case cites only Items and Clauses its Context owns or
-/// uses, and a sim Harness builds only Interfaces its Context owns or uses. A change to one Context can break a
+/// uses, a sim Harness builds only Interfaces its Context owns or uses, and a sim Harness that a change puts has
+/// the shape the protocol runs and is the only one in its Context. A change to one Context can break a
 /// citation in another (an Item removed from an Interface that another Context's Case cites), so the whole Project
 /// is checked each time.
 ///
@@ -176,6 +181,12 @@ impl Project {
 
     /// A Project as a store kept it, with its revision, its Policy and what it retired. Every rule of the Project
     /// is checked on it, as on a change: a retired id is given to no live thing and to no other retired one.
+    ///
+    /// The one exception is the shape of a sim Harness ([`ProjectError::SimShape`]). It is a rule of what a change
+    /// puts, not of what a store holds: a rule made stricter is held to what is written again and not to what was
+    /// kept (a ratchet), because a store that is refused on reading cannot be mended by a put. The sim Harnesses a
+    /// store keeps in a shape the protocol does not run are read as they are, and the `sim.shape-kept` check
+    /// reports them.
     pub(crate) fn restore(
         id: ProjectId,
         revision: Revision,
@@ -253,7 +264,7 @@ impl Project {
         }
         let mut next = self.contexts.clone();
         next.insert(context.id(), context);
-        self.keep(next, Vec::new())?;
+        self.keep(next, Vec::new(), &BTreeSet::new())?;
         self.revision = self.revision.next();
         Ok(())
     }
@@ -350,7 +361,7 @@ impl Project {
         records: Vec<Retired>,
     ) -> Result<(), ProjectError> {
         refuse_cited(&next, &records)?;
-        self.keep(next, records)
+        self.keep(next, records, &BTreeSet::new())
     }
 
     /// Sets the Contexts a Context uses.
@@ -359,12 +370,12 @@ impl Project {
         context: ContextId,
         uses: BTreeSet<ContextId>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.set_uses(uses))
+        self.change(context, &BTreeSet::new(), |c| c.set_uses(uses))
     }
 
     /// Bases a Context on its Contracts, of which it must have one. There is no way back.
     pub fn base_on_contract(&mut self, context: ContextId) -> Result<(), ProjectError> {
-        self.change(context, Context::base_on_contract)
+        self.change(context, &BTreeSet::new(), Context::base_on_contract)
     }
 
     /// Makes or revises a Contract of a Context.
@@ -375,7 +386,9 @@ impl Project {
         title: Title,
         clauses: Vec<(ClauseId, ClauseContent)>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.put_contract(id, title, clauses))
+        self.change(context, &BTreeSet::new(), |c| {
+            c.put_contract(id, title, clauses)
+        })
     }
 
     /// Makes or revises an Interface of a Context.
@@ -386,7 +399,9 @@ impl Project {
         source: Source,
         items: Vec<ItemFound>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.put_interface(id, source, items))
+        self.change(context, &BTreeSet::new(), |c| {
+            c.put_interface(id, source, items)
+        })
     }
 
     /// Makes or revises a Harness of a Context. A new one is of tests, and an existing one keeps its kind.
@@ -401,7 +416,8 @@ impl Project {
     }
 
     /// Makes or revises a Harness of a Context as one of `kind` (none: the kind it has, or tests for a new one),
-    /// which builds `builds` (a sim Harness; the Interfaces must be ones the Context owns or uses).
+    /// which builds `builds` (a sim Harness; the Interfaces must be ones the Context owns or uses). A sim Harness
+    /// put is held to the shape the protocol runs ([`ProjectError::SimShape`]).
     pub fn put_harness_as(
         &mut self,
         context: ContextId,
@@ -411,14 +427,17 @@ impl Project {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.put_harness(id, kind, builds, source, cases))
+        self.change(context, &BTreeSet::from([id]), |c| {
+            c.put_harness(id, kind, builds, source, cases)
+        })
     }
 
     /// Applies `f` to a copy of the Context and keeps the result when the Project still holds. A Clause, an Item or
-    /// a Case that `f` dropped from an asset is recorded as retired.
+    /// a Case that `f` dropped from an asset is recorded as retired. `put` is the Harnesses `f` puts.
     fn change(
         &mut self,
         context: ContextId,
+        put: &BTreeSet<HarnessId>,
         f: impl FnOnce(&mut Context) -> Result<(), ContextError>,
     ) -> Result<(), ProjectError> {
         let mut next = self.contexts.clone();
@@ -428,18 +447,25 @@ impl Project {
         let before = c.clone();
         f(c)?;
         let dropped = dropped_leaves(&before, c);
-        self.keep(next, dropped)
+        self.keep(next, dropped, put)
     }
 
-    /// Takes `next` as the Contexts, and `added` as retired besides, when they break no rule of the Project.
+    /// Takes `next` as the Contexts, and `added` as retired besides, when they break no rule of the Project. `put`
+    /// is the Harnesses the change puts: the shape of a sim Harness is held to what is put and no other (see
+    /// [`sim_shape_problems`]).
     fn keep(
         &mut self,
         next: BTreeMap<ContextId, Context>,
         added: Vec<Retired>,
+        put: &BTreeSet<HarnessId>,
     ) -> Result<(), ProjectError> {
         let mut retired = self.retired.clone();
         retired.extend(added);
         check(&next, &retired)?;
+        let shape = sim_shape_problems(&next, put);
+        if !shape.is_empty() {
+            return Err(refused(shape));
+        }
         self.contexts = next;
         self.retired = retired;
         Ok(())
@@ -588,6 +614,39 @@ fn refuse_cited(
             cases,
         })
     }
+}
+
+/// The error of a refused change: the one problem, or all of them.
+pub(crate) fn refused(problems: Vec<ProjectError>) -> ProjectError {
+    match problems.as_slice() {
+        [only] => only.clone(),
+        _ => ProjectError::Many(problems),
+    }
+}
+
+/// The problems of shape of the sim Harnesses in `put` that `next` has, each once: what each is in its Context
+/// (see [`Context::sim_problems`]), which includes how many sim Harnesses the Context has. A Harness in `put`
+/// that `next` no longer has, or has as a Harness of tests, has none; a sim Harness not in `put` is not asked, so
+/// a shape that was kept before the rule held does not stop a change that does not put it (a ratchet; see
+/// [`Project::restore`]).
+///
+/// Every entry a change makes is in `next`, so a Harness put and another retired in the same change is judged on
+/// the state it ends in, as the other rules are.
+pub(crate) fn sim_shape_problems(
+    next: &BTreeMap<ContextId, Context>,
+    put: &BTreeSet<HarnessId>,
+) -> Vec<ProjectError> {
+    let mut found: Vec<SimShapeProblem> = Vec::new();
+    for context in next.values() {
+        for harness in context.harnesses().filter(|h| put.contains(&h.id())) {
+            for problem in context.sim_problems(harness) {
+                if !found.contains(&problem) {
+                    found.push(problem);
+                }
+            }
+        }
+    }
+    found.into_iter().map(ProjectError::SimShape).collect()
 }
 
 /// The ids of `ids`, separated by commas, for a message.
@@ -767,6 +826,56 @@ fn find_cycle(contexts: &BTreeMap<ContextId, Context>) -> Option<Vec<ContextId>>
     contexts
         .keys()
         .find_map(|id| visit(*id, contexts, &mut Vec::new(), &mut done))
+}
+
+#[cfg(test)]
+mod fixture {
+    //! A Project as a store keeps it, whatever the rules of a put are now.
+
+    use super::*;
+    use crate::domain::entity::context::ContextHead;
+
+    impl Project {
+        /// This Project with the Harnesses of the Context `context` replaced by `harnesses`, as a store keeps them:
+        /// read and not put, so that the shape of a sim Harness is not asked.
+        pub(crate) fn with_harnesses_kept(
+            &self,
+            context: ContextId,
+            harnesses: Vec<Harness>,
+        ) -> Project {
+            let contexts = self
+                .contexts
+                .values()
+                .map(|c| {
+                    if c.id() != context {
+                        return c.clone();
+                    }
+                    let head = ContextHead {
+                        id: c.id(),
+                        revision: c.revision(),
+                        name: c.name().clone(),
+                        basis: c.basis(),
+                        uses: c.uses().clone(),
+                    };
+                    Context::restore(
+                        head,
+                        c.contracts().cloned().collect(),
+                        c.interfaces().cloned().collect(),
+                        harnesses.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            Project::restore(
+                self.id,
+                self.revision,
+                contexts,
+                self.policy.clone(),
+                self.retired.clone(),
+            )
+            .unwrap()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1457,5 +1566,166 @@ mod tests {
             Project::restore(p.id(), p.revision(), Vec::new(), p.policy().clone(), twice),
             Err(ProjectError::IdTaken(_))
         ));
+    }
+
+    fn sim_id(n: u128) -> HarnessId {
+        HarnessId::from_uuid(test_uuid(n))
+    }
+
+    fn sim_case_id(n: u128) -> CaseId {
+        CaseId::from_uuid(test_uuid(1000 + n))
+    }
+
+    /// A Case of a sim named `name`, on line 1, citing these Clauses and no Item.
+    fn sim_case(n: u128, name: &str, clauses: &[u128]) -> CaseFound {
+        (
+            sim_case_id(n),
+            CaseName::try_from(name).unwrap(),
+            LineRange::new(1, 1).unwrap(),
+            CaseCites::of(
+                BTreeMap::new(),
+                clauses
+                    .iter()
+                    .map(|k| (clause(*k), Revision::first()))
+                    .collect(),
+            ),
+        )
+    }
+
+    /// Puts the sim Harness `id` of `core`, which builds Interface 101, with these Cases.
+    fn put_sim(p: &mut Project, id: u128, cases: Vec<CaseFound>) -> Result<(), ProjectError> {
+        p.put_harness_as(
+            ctx_id(1),
+            sim_id(id),
+            Some(HarnessKind::Sim),
+            BTreeSet::from([InterfaceId::from_uuid(test_uuid(101))]),
+            Source::new("script\n".to_string()),
+            cases,
+        )
+    }
+
+    /// The problem of shape that is the whole of a refusal.
+    fn only_shape(err: ProjectError) -> SimShapeProblem {
+        match err {
+            ProjectError::SimShape(p) => p,
+            other => panic!("not a problem of shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sim_harness_put_on_its_own_is_held_to_the_shape_the_protocol_runs() {
+        let id = sim_id(500);
+        let mut p = project();
+        let before = p.clone();
+        // no sweep
+        let err = put_sim(&mut p, 500, vec![sim_case(50, "regress-a", &[11])]).unwrap_err();
+        assert_eq!(
+            only_shape(err),
+            SimShapeProblem::SweepOnce {
+                harness: id,
+                count: 0,
+                extra: None
+            }
+        );
+        // a Clause of the Context it uses is reached, but is not one of its Contracts
+        let err = put_sim(&mut p, 500, vec![sim_case(50, "sweep", &[11, 30])]).unwrap_err();
+        assert_eq!(
+            only_shape(err),
+            SimShapeProblem::ClauseForeign {
+                harness: id,
+                case: sim_case_id(50),
+                clause: clause(30)
+            }
+        );
+        // a sim that builds nothing
+        let err = p
+            .put_harness_as(
+                ctx_id(1),
+                id,
+                Some(HarnessKind::Sim),
+                BTreeSet::new(),
+                Source::new("script\n".to_string()),
+                vec![sim_case(50, "sweep", &[11])],
+            )
+            .unwrap_err();
+        assert_eq!(only_shape(err), SimShapeProblem::BuildsNone { harness: id });
+        // several at once are one refusal of all of them
+        let err = put_sim(&mut p, 500, vec![sim_case(50, "stray", &[])]).unwrap_err();
+        assert!(
+            matches!(&err, ProjectError::Many(all) if all.len() == 2),
+            "{err:?}"
+        );
+        assert_eq!(p, before, "a refused put changes nothing");
+        // and the shape the protocol runs is kept
+        put_sim(&mut p, 500, vec![sim_case(50, "sweep", &[11])]).unwrap();
+        assert_eq!(
+            p.context(ctx_id(1)).unwrap().harness(id).unwrap().kind(),
+            HarnessKind::Sim
+        );
+        // a Harness of tests is not asked
+        put_harness(&mut p, &[10], &[]).unwrap();
+    }
+
+    #[test]
+    fn a_second_sim_harness_put_on_its_own_is_refused_until_the_first_is_retired() {
+        let mut p = project();
+        put_sim(&mut p, 500, vec![sim_case(50, "sweep", &[11])]).unwrap();
+        let err = put_sim(&mut p, 501, vec![sim_case(51, "sweep", &[11])]).unwrap_err();
+        assert_eq!(
+            only_shape(err),
+            SimShapeProblem::OnePerContext {
+                context: ctx_id(1),
+                harnesses: vec![sim_id(500), sim_id(501)]
+            }
+        );
+        p.retire_harness(ctx_id(1), sim_id(500)).unwrap();
+        put_sim(&mut p, 501, vec![sim_case(51, "sweep", &[11])]).unwrap();
+    }
+
+    #[test]
+    fn a_shape_a_store_kept_is_read_and_stops_only_a_put_of_that_harness() {
+        let stray = Harness::of_kind(
+            HarnessKind::Sim,
+            sim_id(500),
+            BTreeSet::new(),
+            Source::new("script\n".to_string()),
+            vec![sim_case(50, "stray", &[11])],
+        )
+        .unwrap();
+        // restored: the store is read as it is
+        let kept = project().with_harnesses_kept(ctx_id(1), vec![stray]);
+        assert_eq!(kept.context(ctx_id(1)).unwrap().harnesses().count(), 1);
+        // every other way to change the Project goes through
+        let mut p = kept.clone();
+        p.set_uses(ctx_id(1), BTreeSet::new()).unwrap();
+        put_contract(&mut p, 1, 105, 12);
+        put_interface(&mut p, 1, 106, 13);
+        p.add_context(context(3, "extra", &[])).unwrap();
+        p.retire_interface(ctx_id(1), interface_id(106)).unwrap();
+        put_harness(&mut p, &[10], &[]).unwrap();
+        // a put of it is held to the shape, whether it is put as a sim or with the kind it has
+        let mut p = kept.clone();
+        let err = put_sim(&mut p, 500, vec![sim_case(50, "stray", &[11])]).unwrap_err();
+        assert!(matches!(err, ProjectError::Many(_)), "{err:?}");
+        let err = p
+            .put_harness(
+                ctx_id(1),
+                sim_id(500),
+                Source::new("script\n".to_string()),
+                vec![sim_case(50, "stray", &[11])],
+            )
+            .unwrap_err();
+        assert!(matches!(err, ProjectError::Many(_)), "{err:?}");
+        assert_eq!(p, kept);
+        // put in the shape the protocol runs, it is mended
+        p.put_harness_as(
+            ctx_id(1),
+            sim_id(500),
+            None,
+            BTreeSet::from([InterfaceId::from_uuid(test_uuid(101))]),
+            Source::new("script\n".to_string()),
+            vec![sim_case(50, "sweep", &[11])],
+        )
+        .unwrap();
     }
 }

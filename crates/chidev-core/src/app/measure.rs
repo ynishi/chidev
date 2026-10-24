@@ -11,11 +11,11 @@ use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateR
 use super::ports::{AssetKind, Changes, IdSource, Store, StoreRevision};
 use super::{App, AppError, context_id};
 use crate::domain::entity::measurement::{Counts, Measurement, MeasurementDraft};
-use crate::domain::entity::project::Project;
+use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
 use crate::domain::service::measure::{Standing, sim_standing, standing};
 use crate::domain::service::pin::current_basis;
-use crate::domain::service::sim::{basis_of, cited_in, regress_names, shape, sim_harnesses, sweep};
+use crate::domain::service::sim::{basis_of, cited_in, regress_names, sweep};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
@@ -387,13 +387,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 h.kind().word()
             )));
         }
-        let problems = shape(owner);
-        if !problems.is_empty() || !sim_harnesses(owner).any(|k| k.id() == id) {
-            let said: Vec<String> = problems.into_iter().map(|s| s.message).collect();
-            return Err(AppError::Input(format!(
-                "the sim harness `{harness}` is not well formed ({}); see `sim.shape`",
-                said.join("; ")
-            )));
+        // A sim Harness kept in a shape the protocol does not run is refused for the rules a put of it breaks.
+        let problems: Vec<ProjectError> = owner
+            .sim_problems(h)
+            .into_iter()
+            .map(ProjectError::SimShape)
+            .collect();
+        if !problems.is_empty() {
+            return Err(refused(problems).into());
         }
         let sweep_case = sweep(h).ok_or_else(|| {
             AppError::Input(format!("the sim harness `{harness}` has no `sweep` case"))

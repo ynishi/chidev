@@ -6,9 +6,10 @@ use thiserror::Error;
 
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::harness_kind::HarnessKind;
-use crate::domain::vo::id::{CaseId, HarnessId, InterfaceId};
+use crate::domain::vo::id::{CaseId, ClauseId, ContextId, HarnessId, InterfaceId};
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::revision::Revision;
+use crate::domain::vo::sim::{CaseRole, RegressName, role_of};
 use crate::domain::vo::source::Source;
 
 /// One case of a Harness (a test). It is known by its id, so a record of it survives a rename; its revision says
@@ -79,9 +80,88 @@ pub enum HarnessError {
     SimCitesItem(CaseId),
     /// A Harness of tests names Interfaces to build; only a sim Harness builds the program it drives.
     #[error(
-        "a harness of tests has no `builds`; only a sim harness builds the interfaces it drives"
+        "the harness {0} of tests has no `builds`; only a sim harness builds the interfaces it drives"
     )]
-    BuildsOfTests,
+    BuildsOfTests(HarnessId),
+}
+
+/// What is wrong with the name of a Case of a sim Harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseNameFault {
+    /// The name is neither `sweep` nor `regress-<name>` (a name of a-z, 0-9 and `-`).
+    NeitherSweepNorRegress,
+    /// Another Case of the Harness has the regress name.
+    RegressNamedTwice,
+}
+
+impl CaseNameFault {
+    /// The word for it, as a violation carries it.
+    pub fn word(self) -> &'static str {
+        match self {
+            CaseNameFault::NeitherSweepNorRegress => "neither-sweep-nor-regress",
+            CaseNameFault::RegressNamedTwice => "regress-named-twice",
+        }
+    }
+}
+
+/// A way a sim Harness is not the shape the protocol runs. It holds ids and words, never a sentence: the rule it
+/// breaks is given by its violation (see `domain::violation::map`), and the names are the application's.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SimShapeProblem {
+    /// A Context has more than one sim Harness, so a Clause would be checked by several scripts.
+    #[error("the context {context} has {} sim harnesses", .harnesses.len())]
+    OnePerContext {
+        /// The Context.
+        context: ContextId,
+        /// Its sim Harnesses, in the order of their ids.
+        harnesses: Vec<HarnessId>,
+    },
+    /// A sim Harness has no Case named `sweep`, or more than one.
+    #[error("the sim harness {harness} has {count} cases named `sweep`")]
+    SweepOnce {
+        /// The Harness.
+        harness: HarnessId,
+        /// How many Cases are named `sweep`.
+        count: usize,
+        /// One of the Cases beyond the first; none when there is no sweep at all.
+        extra: Option<CaseId>,
+    },
+    /// A Case of a sim Harness is not named `sweep` or `regress-<name>`, or repeats a regress name.
+    #[error("the case {case} of the sim harness {harness} is named wrongly: {}", .fault.word())]
+    CaseName {
+        /// The Harness.
+        harness: HarnessId,
+        /// The Case.
+        case: CaseId,
+        /// What is wrong with the name.
+        fault: CaseNameFault,
+    },
+    /// A sim Case cites no Clause.
+    #[error("the case {case} of the sim harness {harness} cites no clause")]
+    CaseCitesNone {
+        /// The Harness.
+        harness: HarnessId,
+        /// The Case.
+        case: CaseId,
+    },
+    /// A sim Case cites a Clause that no Contract of the Harness's Context has.
+    #[error(
+        "the case {case} of the sim harness {harness} cites the clause {clause}, which is in no contract of its context"
+    )]
+    ClauseForeign {
+        /// The Harness.
+        harness: HarnessId,
+        /// The Case.
+        case: CaseId,
+        /// The Clause.
+        clause: ClauseId,
+    },
+    /// A sim Harness builds no Interface, so it has no program to drive.
+    #[error("the sim harness {harness} builds no interface")]
+    BuildsNone {
+        /// The Harness.
+        harness: HarnessId,
+    },
 }
 
 /// The cases that check a Context. The code is the content (it is what runs); the Cases are the tests in it,
@@ -109,13 +189,14 @@ pub type CaseFound = (CaseId, CaseName, LineRange, CaseCites);
 /// The ids of `cases` are each given once, every Case's lines are inside `source`, and `kind` takes the Cases and
 /// `builds` as given: a Case of tests cites an Item, a Case of a sim none, and only a sim builds.
 fn check(
+    id: HarnessId,
     kind: HarnessKind,
     builds: &BTreeSet<InterfaceId>,
     source: &Source,
     cases: &[CaseFound],
 ) -> Result<(), HarnessError> {
     if kind == HarnessKind::Tests && !builds.is_empty() {
-        return Err(HarnessError::BuildsOfTests);
+        return Err(HarnessError::BuildsOfTests(id));
     }
     for (k, (id, _, lines, cites)) in cases.iter().enumerate() {
         if cases[..k].iter().any(|(i, ..)| i == id) {
@@ -161,7 +242,7 @@ impl Harness {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
-        check(kind, &builds, &source, &cases)?;
+        check(id, kind, &builds, &source, &cases)?;
         Ok(Harness {
             id,
             revision: Revision::first(),
@@ -194,7 +275,7 @@ impl Harness {
             .iter()
             .map(|(i, _, n, l, c)| (*i, n.clone(), *l, c.clone()))
             .collect();
-        check(kind, &builds, &source, &found)?;
+        check(id, kind, &builds, &source, &found)?;
         Ok(Harness {
             id,
             revision,
@@ -250,6 +331,72 @@ impl Harness {
         self.cases.iter().find(|c| c.id == id)
     }
 
+    /// The ways a sim Harness is not the shape the protocol runs that the Harness alone decides: not exactly one
+    /// `sweep` Case, a Case that is neither `sweep` nor `regress-<name>` or whose regress name another has, a Case
+    /// that cites no Clause, and no Interface to build. A Harness of tests has none. What needs the Context (one
+    /// sim Harness, the Clauses the Cases cite) is asked of [`Context::sim_problems`].
+    ///
+    /// These are not rules of [`Harness::new`] or [`Harness::restore`]: a Harness a store kept before they held is
+    /// read as it is, and only a Harness put again is held to them (see `Project::apply`).
+    ///
+    /// [`Context::sim_problems`]: crate::domain::entity::context::Context::sim_problems
+    pub(crate) fn sim_problems(&self) -> Vec<SimShapeProblem> {
+        if self.kind != HarnessKind::Sim {
+            return Vec::new();
+        }
+        let harness = self.id;
+        let mut out = Vec::new();
+        let sweeps: Vec<&Case> = self
+            .cases
+            .iter()
+            .filter(|c| role_of(c.name.as_str()) == Some(CaseRole::Sweep))
+            .collect();
+        if sweeps.is_empty() {
+            out.push(SimShapeProblem::SweepOnce {
+                harness,
+                count: 0,
+                extra: None,
+            });
+        }
+        for extra in sweeps.iter().skip(1) {
+            out.push(SimShapeProblem::SweepOnce {
+                harness,
+                count: sweeps.len(),
+                extra: Some(extra.id),
+            });
+        }
+        let mut seen: Vec<RegressName> = Vec::new();
+        for c in &self.cases {
+            let case = c.id;
+            let role = role_of(c.name.as_str());
+            match &role {
+                None => out.push(SimShapeProblem::CaseName {
+                    harness,
+                    case,
+                    fault: CaseNameFault::NeitherSweepNorRegress,
+                }),
+                Some(CaseRole::Regress(n)) => {
+                    if seen.contains(n) {
+                        out.push(SimShapeProblem::CaseName {
+                            harness,
+                            case,
+                            fault: CaseNameFault::RegressNamedTwice,
+                        });
+                    }
+                    seen.push(n.clone());
+                }
+                Some(CaseRole::Sweep) => {}
+            }
+            if role.is_some() && c.cites.clauses().is_empty() {
+                out.push(SimShapeProblem::CaseCitesNone { harness, case });
+            }
+        }
+        if self.builds.is_empty() {
+            out.push(SimShapeProblem::BuildsNone { harness });
+        }
+        out
+    }
+
     /// Gives the Harness new code and Cases. A Case whose id was there keeps its revision when its name, the text
     /// of its lines and its citations are the same (wherever it now is) and goes to the next one when any differs;
     /// a new id starts at the first; an id left out is gone. The Harness goes to its next revision when the code or
@@ -268,7 +415,7 @@ impl Harness {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), HarnessError> {
-        check(kind, &builds, &source, &cases)?;
+        check(self.id, kind, &builds, &source, &cases)?;
         let revised: Vec<Case> = cases
             .into_iter()
             .map(|(id, name, lines, cites)| {
@@ -625,7 +772,7 @@ mod tests {
                 src(CODE),
                 vec![(cid(1), name("a"), at(1, 1), cites(50, Revision::first()))]
             ),
-            Err(HarnessError::BuildsOfTests)
+            Err(HarnessError::BuildsOfTests(id))
         );
         let mut sim = Harness::of_kind(
             HarnessKind::Sim,
@@ -658,9 +805,163 @@ mod tests {
                 src(CODE),
                 vec![(cid(3), name("a"), at(1, 1), cites(50, Revision::first()))]
             ),
-            Err(HarnessError::BuildsOfTests)
+            Err(HarnessError::BuildsOfTests(id))
         );
         assert_eq!(sim, before);
+    }
+
+    /// A sim Harness that builds Interface 7, with these Cases.
+    fn sim_of(cases: Vec<CaseFound>) -> Harness {
+        Harness::of_kind(
+            HarnessKind::Sim,
+            HarnessId::from_uuid(test_uuid(100)),
+            BTreeSet::from([iid(7)]),
+            src(CODE),
+            cases,
+        )
+        .unwrap()
+    }
+
+    fn case_named(n: u128, text: &str, clauses: bool) -> CaseFound {
+        let cites = if clauses {
+            sim_cites()
+        } else {
+            CaseCites::of(BTreeMap::new(), BTreeMap::new())
+        };
+        (cid(n), name(text), at(1, 1), cites)
+    }
+
+    #[test]
+    fn a_sweep_and_regress_cases_that_cite_clauses_and_a_build_are_no_problem() {
+        let h = sim_of(vec![
+            case_named(1, "sweep", true),
+            case_named(2, "regress-lease-lost", true),
+        ]);
+        assert!(h.sim_problems().is_empty());
+    }
+
+    #[test]
+    fn a_harness_of_tests_has_no_sim_problem_whatever_its_cases_are_called() {
+        let h = stack();
+        assert_eq!(h.kind(), HarnessKind::Tests);
+        assert!(h.sim_problems().is_empty());
+    }
+
+    #[test]
+    fn a_sim_without_a_sweep_or_with_two_is_a_sweep_once_problem() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        assert_eq!(
+            sim_of(vec![case_named(1, "regress-a", true)]).sim_problems(),
+            [SimShapeProblem::SweepOnce {
+                harness: id,
+                count: 0,
+                extra: None
+            }]
+        );
+        assert_eq!(
+            sim_of(vec![
+                case_named(1, "sweep", true),
+                case_named(2, "sweep", true)
+            ])
+            .sim_problems(),
+            [SimShapeProblem::SweepOnce {
+                harness: id,
+                count: 2,
+                extra: Some(cid(2))
+            }]
+        );
+    }
+
+    #[test]
+    fn a_case_name_that_is_no_role_or_repeats_a_regress_name_is_a_case_name_problem() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let problems = sim_of(vec![
+            case_named(1, "sweep", true),
+            case_named(2, "Regress-A", true),
+            case_named(3, "regress-a", true),
+            case_named(4, "regress-a", true),
+        ])
+        .sim_problems();
+        assert_eq!(
+            problems,
+            [
+                SimShapeProblem::CaseName {
+                    harness: id,
+                    case: cid(2),
+                    fault: CaseNameFault::NeitherSweepNorRegress
+                },
+                SimShapeProblem::CaseName {
+                    harness: id,
+                    case: cid(4),
+                    fault: CaseNameFault::RegressNamedTwice
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sim_case_that_cites_no_clause_is_a_problem_only_when_it_has_a_role() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let problems = sim_of(vec![
+            case_named(1, "sweep", true),
+            case_named(2, "regress-b", false),
+            case_named(3, "stray", false),
+        ])
+        .sim_problems();
+        assert_eq!(
+            problems,
+            [
+                SimShapeProblem::CaseCitesNone {
+                    harness: id,
+                    case: cid(2)
+                },
+                SimShapeProblem::CaseName {
+                    harness: id,
+                    case: cid(3),
+                    fault: CaseNameFault::NeitherSweepNorRegress
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sim_that_builds_nothing_is_a_builds_none_problem() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let h = Harness::of_kind(
+            HarnessKind::Sim,
+            id,
+            BTreeSet::new(),
+            src(CODE),
+            vec![case_named(1, "sweep", true)],
+        )
+        .unwrap();
+        assert_eq!(
+            h.sim_problems(),
+            [SimShapeProblem::BuildsNone { harness: id }]
+        );
+    }
+
+    #[test]
+    fn a_harness_kept_in_a_shape_the_rules_refuse_now_is_still_read() {
+        // `restore` holds a Harness to the rules of its kind, not to the shape of a sim: a store from before the
+        // shape was refused on a put is read, and `Project::apply` holds only what is put again to it.
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let h = Harness::restore(
+            id,
+            HarnessKind::Sim,
+            Revision::first(),
+            BTreeSet::new(),
+            src(CODE),
+            vec![(
+                cid(1),
+                Revision::first(),
+                name("stray"),
+                at(1, 1),
+                sim_cites(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(h.sim_problems().len(), 3);
     }
 
     #[test]

@@ -23,8 +23,8 @@ pub use self::contexts::{NoHarness, NoInterface};
 pub use self::measure::{Capped, MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
 pub use self::pins::{StalePin, Unpinned};
 pub use self::sim::{
-    SimError, SimFinding, SimNondeterministic, SimShape, SimStale, SimUncitedClause, SimUnreached,
-    SimUnrun,
+    SimError, SimFinding, SimNondeterministic, SimShapeKept, SimStale, SimUncitedClause,
+    SimUnreached, SimUnrun,
 };
 
 /// Every builtin check.
@@ -49,7 +49,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &StaleMutation,
         &Capped,
         &Survived,
-        &SimShape,
+        &SimShapeKept,
         &SimUncitedClause,
         &SimUnrun,
         &SimStale,
@@ -302,7 +302,7 @@ mod tests {
             );
             let error = matches!(
                 d.id.as_str(),
-                "sim.shape" | "sim.finding" | "sim.unreached" | "sim.nondeterministic"
+                "sim.shape-kept" | "sim.finding" | "sim.unreached" | "sim.nondeterministic"
             );
             assert_eq!(
                 d.default_level,
