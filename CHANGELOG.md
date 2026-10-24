@@ -10,6 +10,35 @@ and this project adheres to
 
 ### Added
 
+- Diagnostics: a refusal is a violation of a rule, as structure, from the domain to
+  the output. One registry holds the rules: the checks (as before), the
+  *invariants* an operation is refused for (`cr.already-resolved`,
+  `cr.crux-unanswered`, `cr.parent-open`, `cr.crux-answered`,
+  `cr.reference-unknown`, `cr.reference-itself`, `cr.supersedes-unknown`,
+  `cr.supersedes-unanswered`, `cr.policy-line-unknown`, `cr.title-taken`,
+  `project.cite-unreachable`, `project.build-unreachable`, `project.retire-cited`,
+  `project.retire-used`, `project.unknown-context`, `project.asset-retired`,
+  `project.none`, `change-set.named-twice`, `context.last-contract`,
+  `context.no-such-asset`, `pin.unchecked`) and the *input* rules
+  (`input.unknown-op`, `input.unknown-field`, `input.missing-field`,
+  `input.wrong-type`, `input.unknown-name`, `input.invalid`). An invariant is always
+  `error` and no policy lowers it. Each rule has an id, a summary, a help (why, and
+  how to fix), the keys of the values it carries (a key is added, never removed) and
+  a message template. The domain gives `Violation { rule, subjects, values,
+  remedies }` (ids, typed values, and typed `Remedy`s each with an `Applicability`:
+  `machine`, `review`, `placeholder`); the app gives `Diagnostic { code, level,
+  message, subjects, field, values, help, suggestions, did_you_mean }` with the
+  names the store has. A name that does not exist (a Context, an asset, a clause
+  label, a signature, a case, a change request title) is `input.unknown-name` with
+  the close names that do (a match that differs only in case first, then an edit
+  distance of at most a third of the length, as rustc does) and, where it helps, the
+  operation that makes it (`cr_open` for a change request title). Error variants
+  that have no rule yet give `domain.unmapped` (or `app.unmapped`), which carries
+  the text of the error; a test lists those variants so that the list can only
+  shrink.
+- `{"op":"rules"}` lists every rule (id, kind, level, summary) and
+  `{"op":"explain","rule":"<id>"}` explains one (help, the keys of its values, an
+  example operation that violates it).
 - String-literal mutants in the bundled Rust provider: the operator class `str`
   gives each string literal in a function body two mutants, the text emptied
   (`{...}` placeholders kept, so a format string still builds) and `*` appended
@@ -195,6 +224,24 @@ and this project adheres to
 
 ### Changed
 
+- A refused operation prints `{"ok":false,"line":n,"diagnostics":[...]}`; the
+  `error` string is gone (unreleased: no compatibility). Read the `code` of a
+  diagnostic, or its `message`. A line that is not an operation (bad JSON, an
+  unknown `op`, an unknown or missing field, a value of another type) is a
+  diagnostic of an `input.*` rule, with the `field` it is about. A change refused by
+  checks keeps `findings` (and `external`). A finding in a result is a diagnostic
+  too: it keeps `rule`, `level`, `state`, `message`, `about`, `stale` and `judged`,
+  and gains `code` (the rule), `subjects`, `values`, `help`, `suggestions` and
+  `did_you_mean`.
+- The app's errors change with it: `AppError::RetireCited`, `RetireUsed`,
+  `NotReached`, `BuildNotReached`, `NamedTwice`, `NothingChecksIt` and
+  `ChildrenNotResolved` are gone, in favour of `AppError::Violated` (a list of
+  `Violation`s and the names of what they are about) and the domain's own errors;
+  `UnknownItem` and `UnknownClause` carry the Context; `UnknownCase` replaces an
+  `Input`; an operation on a change request is refused as `ChangeRequestOf { id,
+  title, error }`. `App::diagnose` gives the `Diagnostic`s of an `AppError`.
+  `ChangeRequestError`, `ProjectError`, `ContextError` and `PinError` give a
+  `Violation` (`violation`, `violations`). `app::Found` has `help`.
 - `change` and `remove` of `cr_open` (and of the options of a Crux) are replaced
   by `targets` (what the request asks to have revised or retired) and `keep`.
   Neither list gates resolving a request; they are its content. `cr_open` refuses a
