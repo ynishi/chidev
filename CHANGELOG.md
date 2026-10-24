@@ -8,7 +8,45 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Mutation testing of the pinned code, end to end for Rust. `{"op":"measure",
+  "kind":"mutate","context":..,"interface":..}` copies the project to
+  `.chidev/measure/<run>/`, writes the code the Pin accepted and the Harness sources
+  of the model over the copy (the working tree's own code is not read), builds and
+  tests it as it is, asks a provider for mutants, and for each one builds (a failure
+  is stillborn) and tests (killed, survived or timeout). The result is kept as a
+  measurement with a stamp (the Pin's code digest, the revisions the Pin stands on,
+  a digest of the settings and of the provider program), the mutants with site,
+  operator and outcome, and the evidence of the commands. `pin` now keeps the code
+  text beside the Pin (`pin_codes`); a Pin made before has none and has to be made
+  again to be measured.
+- `[measure]` in `checks.toml`: `build` and `test` commands, `[measure.mutants]`
+  (language to provider command), `[[measure.layout]]` (the file of each Interface
+  and Harness), and `copy_exclude`, `env`, `timeout`, `baseline_timeout`, `budget`,
+  `max_mutants`, `seed`. See the README, "Measurements".
+- The provider protocol `chidev-mutants 1` (JSON on stdin and stdout; a mutant is an
+  edit `{key, line, col, operator, span, from, to}` that chidev checks against the
+  source before applying), and the bundled Rust provider, a new crate
+  `chidev-provider-rust` exposed as `chidev provider mutants-rust`. It is a pure
+  function of the request, ported from ryo-synth's operator table and even
+  sampling of sites; it skips `#[cfg(test)]` and `#[test]` code, and finds sites by
+  token spans inside function bodies, so a one-line function is mutated too.
+- Four builtin checks that read the record of measurements: `measure.failed`
+  (warning), `mutation.unmeasured` (note), `mutation.stale` (warning) and
+  `mutation.survived` (note, one per surviving mutant). `check_list` has 16 checks.
+  `status.measurements` shows the latest run per Interface: stamp, counts, `outcome`
+  and `state` (`current` or `stale`).
+- Store: tables `measure_runs` and `measure_items` (appended; the newest per kind and
+  Interface is current) and `pin_codes`, created when an older database is opened.
+
 ### Changed
+
+- The process machinery of the external checks (spawn without a shell, process
+  group, deadline, output caps) moved to `infra::process`, which the measure runner
+  shares. External behaviour is unchanged; the runner also takes a `locate` that
+  does not follow the executable's links, because `cargo` is a link to `rustup`,
+  which picks what to run by the name it was started as.
 
 - A Crux is a choice that can be derived neither from the repository and general
   knowledge (an Assumption) nor from the Project's decision Policy, so a decision
