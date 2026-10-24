@@ -15,3 +15,7 @@ and this project adheres to
   cleanup, advisory results and mandatory change gates.
 - Explicit `check_run` operations, saved external result freshness in `status`,
   and atomic SQLite storage of results and execution evidence alongside changes.
+- Change-request addresses accept every finding subject through the shared
+  `SubjectInput`, with legacy CLI item/clause input retained and ambiguous or
+  misspelled subject selectors rejected. Rust `FindingInput` callers migrate
+  from item/clause fields to `subject`.
