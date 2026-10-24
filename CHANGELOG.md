@@ -102,6 +102,29 @@ and this project adheres to
   (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) or `retire`
   (`context`, `contract`, `interface`, `harness`). The single puts and retirements
   are change sets of one and answer as before. See the README, "Change sets".
+- Attribution of work to a change request, and its frame. `change_set` takes `for`,
+  the title of a change request that exists and is not resolved. The set records its
+  footprint for the request in the same commit: the targets whose revision differs
+  between the Project before and after (made, revised or gone, containers included),
+  each with the containers it was in. It is kept in the request's document (`work`),
+  so the layout stays 1; a database written before does not load. A `change` or
+  `remove` is now met only by a move in the footprints of the request or of its parts
+  (children, recursively): a target that moved in a set for another request, or in a
+  put, a retire or a set without `for`, does not meet it (those are judged by
+  revision only for `keep`, which guards against anyone). `cr_resolve` names the
+  targets that moved but not under the request; `status.unapplied` lists them as
+  `elsewhere`. The targets a request expects to `change` or `remove` are its frame
+  (a container frames everything in it), and the new check `cr.out-of-frame`
+  (warning; hooks `put`, `check`) reports an unresolved request whose work moved a
+  target outside its frame or the frame of a request it is a part of (a parent only
+  aggregates: with no frame it bounds nothing, with one it bounds its parts).
+  `status.change_requests` has `work` (each footprint's `store_revision` and the
+  targets it moved) and `out_of_frame` for each request. `check_list` has 25 checks.
+  A change set can add a Context: the entry `{"put":"context","name":..,"uses":[..]}`
+  (as `context_add`; applied first, so the same set can put the Context's first assets
+  and cite into it; it may use a Context the set adds). A `change` of the Project is
+  met by a set `for` the request that adds a Context. See the README, "Change
+  requests".
 - The README describes the operations that build the model (`init`, `context_add`,
   `context_uses`, `base_on_contract`, `contract_put`, `interface_put`, `harness_put`,
   `pin`, `status`) with their JSON.
