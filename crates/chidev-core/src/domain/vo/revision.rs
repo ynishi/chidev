@@ -23,6 +23,11 @@ impl Revision {
     pub fn number(self) -> u64 {
         self.0
     }
+
+    /// The revision with this number, as a store kept it; `None` for 0.
+    pub(crate) fn restore(number: u64) -> Option<Revision> {
+        (number >= 1).then_some(Revision(number))
+    }
 }
 
 impl fmt::Display for Revision {

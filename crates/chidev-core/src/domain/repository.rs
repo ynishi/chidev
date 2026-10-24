@@ -1,5 +1,9 @@
-//! The repositories: how each aggregate (the Project, a Pin, a change request) is kept and found again. They are
-//! declared here, beside the aggregates they keep, and implemented outside the domain; the domain never calls one.
+//! The repositories: how each aggregate (the Project, a Pin, a change request) is found again. They are declared
+//! here, beside the aggregates they keep, and implemented outside the domain; the domain never calls one. Writing
+//! is not here: a use case gathers what it changed and commits it at once (`app::ports::Store`), so that what one
+//! use case writes is kept whole or not at all.
+
+use std::future::Future;
 
 use thiserror::Error;
 
@@ -8,41 +12,48 @@ use super::entity::pin::Pin;
 use super::entity::project::Project;
 use super::vo::id::{ChangeRequestId, InterfaceId};
 
-/// Why a repository could not keep or give back an aggregate (the store is unreadable, a write failed). It holds
-/// the store's own words: the domain does not interpret them.
+/// Why a store could not give back or keep what was asked. The domain does not interpret the store's words.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("store: {0}")]
-pub struct StoreError(pub String);
+pub enum StoreError {
+    /// Someone else committed since this use case read: its reads may be out of date, so nothing was written.
+    #[error("the store changed since it was read; nothing was written")]
+    Conflict,
+    /// What the store keeps cannot be read as the model (a broken or newer record).
+    #[error("the store holds what cannot be read: {0}")]
+    Corrupt(String),
+    /// The store failed (unreadable, a write refused).
+    #[error("store: {0}")]
+    Failed(String),
+}
 
-/// Keeps the one Project of a repository.
+/// Finds the one Project of a repository.
 pub trait ProjectRepository {
     /// The Project, or `None` before one is kept.
-    fn project(&self) -> Result<Option<Project>, StoreError>;
-
-    /// Keeps `project`, replacing the one kept before.
-    fn save_project(&mut self, project: &Project) -> Result<(), StoreError>;
+    fn project(&self) -> impl Future<Output = Result<Option<Project>, StoreError>> + Send;
 }
 
-/// Keeps the Pins, one per Interface.
+/// Finds the Pins, one per Interface.
 pub trait PinRepository {
     /// The Pin of `interface`, if its code was pinned.
-    fn pin_of(&self, interface: InterfaceId) -> Result<Option<Pin>, StoreError>;
+    fn pin_of(
+        &self,
+        interface: InterfaceId,
+    ) -> impl Future<Output = Result<Option<Pin>, StoreError>> + Send;
 
     /// Every Pin, in the order of their Interfaces' ids.
-    fn pins(&self) -> Result<Vec<Pin>, StoreError>;
-
-    /// Keeps `pin`, replacing the Pin of the same Interface.
-    fn save_pin(&mut self, pin: &Pin) -> Result<(), StoreError>;
+    fn pins(&self) -> impl Future<Output = Result<Vec<Pin>, StoreError>> + Send;
 }
 
-/// Keeps the change requests.
+/// Finds the change requests.
 pub trait ChangeRequestRepository {
     /// The change request with this id.
-    fn change_request(&self, id: ChangeRequestId) -> Result<Option<ChangeRequest>, StoreError>;
+    fn change_request(
+        &self,
+        id: ChangeRequestId,
+    ) -> impl Future<Output = Result<Option<ChangeRequest>, StoreError>> + Send;
 
     /// Every change request, in the order of their ids.
-    fn change_requests(&self) -> Result<Vec<ChangeRequest>, StoreError>;
-
-    /// Keeps `cr`, replacing the one with the same id.
-    fn save_change_request(&mut self, cr: &ChangeRequest) -> Result<(), StoreError>;
+    fn change_requests(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ChangeRequest>, StoreError>> + Send;
 }

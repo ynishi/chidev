@@ -125,6 +125,35 @@ impl Harness {
         })
     }
 
+    /// A Harness as a store kept it, revisions included. The rules of [`Harness::new`] hold on it.
+    pub(crate) fn restore(
+        id: HarnessId,
+        revision: Revision,
+        source: Source,
+        cases: Vec<(CaseId, Revision, CaseName, LineRange, CaseCites)>,
+    ) -> Result<Harness, HarnessError> {
+        let found: Vec<CaseFound> = cases
+            .iter()
+            .map(|(i, _, n, l, c)| (*i, n.clone(), *l, c.clone()))
+            .collect();
+        check(&source, &found)?;
+        Ok(Harness {
+            id,
+            revision,
+            source,
+            cases: cases
+                .into_iter()
+                .map(|(id, revision, name, lines, cites)| Case {
+                    id,
+                    revision,
+                    name,
+                    lines,
+                    cites,
+                })
+                .collect(),
+        })
+    }
+
     /// Its id.
     pub fn id(&self) -> HarnessId {
         self.id

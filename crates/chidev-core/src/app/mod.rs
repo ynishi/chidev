@@ -17,14 +17,12 @@ use std::fmt::Display;
 
 use thiserror::Error;
 
-use self::ports::{AssetKind, AssetNames, IdSource};
+use self::ports::{AssetKind, AssetName, Changes, IdSource, Store, StoreRevision};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestError, ChangeRequestState, Crux, Route,
 };
 use crate::domain::entity::project::{Project, ProjectError};
-use crate::domain::repository::{
-    ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
-};
+use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{decide, resolve, revisions_now, unapplied};
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
@@ -370,12 +368,17 @@ pub struct App<S, G> {
 
 impl<S, G> App<S, G>
 where
-    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
+    S: Store,
     G: IdSource,
 {
     /// The use cases over `store`, with fresh ids from `ids`.
     pub fn new(store: S, ids: G) -> App<S, G> {
         App { store, ids }
+    }
+
+    /// The store, given back (to close it).
+    pub fn into_store(self) -> S {
+        self.store
     }
 
     /// The store.
@@ -384,18 +387,24 @@ where
     }
 
     /// Makes the Project.
-    pub fn init(&mut self) -> Result<ProjectId, AppError> {
-        if self.store.project()?.is_some() {
+    pub async fn init(&mut self) -> Result<ProjectId, AppError> {
+        let at = self.store.revision().await?;
+        if self.store.project().await?.is_some() {
             return Err(AppError::AlreadyInitialized);
         }
         let id = ProjectId::from_uuid(self.ids.next_uuid());
-        self.store.save_project(&Project::new(id))?;
+        self.commit_project(at, Project::new(id)).await?;
         Ok(id)
     }
 
     /// Adds a Context named `name` that uses the Contexts named in `uses`.
-    pub fn add_context(&mut self, name: &str, uses: &[String]) -> Result<ContextId, AppError> {
-        let mut p = self.project()?;
+    pub async fn add_context(
+        &mut self,
+        name: &str,
+        uses: &[String],
+    ) -> Result<ContextId, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let uses = context_ids(&p, uses)?;
         let id = ContextId::from_uuid(self.ids.next_uuid());
         let context = crate::domain::entity::context::Context::new(
@@ -405,43 +414,47 @@ where
         )
         .map_err(ProjectError::from)?;
         p.add_context(context)?;
-        self.store.save_project(&p)?;
+        self.commit_project(at, p).await?;
         Ok(id)
     }
 
     /// Sets the Contexts the Context named `context` uses.
-    pub fn set_uses(&mut self, context: &str, uses: &[String]) -> Result<(), AppError> {
-        let mut p = self.project()?;
+    pub async fn set_uses(&mut self, context: &str, uses: &[String]) -> Result<(), AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
         let uses = context_ids(&p, uses)?;
         p.set_uses(ctx, uses)?;
-        self.store.save_project(&p)?;
+        self.commit_project(at, p).await?;
         Ok(())
     }
 
     /// Bases the Context named `context` on its Contracts.
-    pub fn base_on_contract(&mut self, context: &str) -> Result<(), AppError> {
-        let mut p = self.project()?;
+    pub async fn base_on_contract(&mut self, context: &str) -> Result<(), AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
         p.base_on_contract(ctx)?;
-        self.store.save_project(&p)?;
+        self.commit_project(at, p).await?;
         Ok(())
     }
 
     /// Makes or revises the Contract named `name` of the Context `context`. A Clause keeps its id when its label
     /// is one the Contract has.
-    pub fn put_contract(
+    pub async fn put_contract(
         &mut self,
         context: &str,
         name: &str,
         title: &str,
         clauses: &[ClauseInput],
     ) -> Result<Put<ContractId>, AppError> {
-        let mut p = self.project()?;
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
         let id = self
             .store
-            .asset_id(ctx, AssetKind::Contract, name)?
+            .asset_id(ctx, AssetKind::Contract, name)
+            .await?
             .map(ContractId::from_uuid);
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.contract(id)));
         let mut given = Vec::with_capacity(clauses.len());
@@ -461,24 +474,27 @@ where
             .and_then(|c| c.contract(id))
             .map(|k| k.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(&p, ctx, AssetKind::Contract, name, id.as_uuid())?;
+        self.keep(at, p, ctx, AssetKind::Contract, name, id.as_uuid())
+            .await?;
         Ok(Put { id, revision })
     }
 
     /// Makes or revises the Interface named `name` of the Context `context` from its code and the Items found in
     /// it. An Item keeps its id when its signature (or the one it `replaces`) is one the Interface has.
-    pub fn put_interface(
+    pub async fn put_interface(
         &mut self,
         context: &str,
         name: &str,
         source: &str,
         items: &[ItemInput],
     ) -> Result<Put<InterfaceId>, AppError> {
-        let mut p = self.project()?;
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
         let id = self
             .store
-            .asset_id(ctx, AssetKind::Interface, name)?
+            .asset_id(ctx, AssetKind::Interface, name)
+            .await?
             .map(InterfaceId::from_uuid);
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.interface(id)));
         let find = |sig: &str| {
@@ -508,25 +524,28 @@ where
             .and_then(|c| c.interface(id))
             .map(|i| i.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(&p, ctx, AssetKind::Interface, name, id.as_uuid())?;
+        self.keep(at, p, ctx, AssetKind::Interface, name, id.as_uuid())
+            .await?;
         Ok(Put { id, revision })
     }
 
     /// Makes or revises the Harness named `name` of the Context `context` from its code and the Cases found in
     /// it. A Case keeps its id when its name is one the Harness has. Each citation records the revision its target
     /// has now: putting a Case says it is written against the definitions as they are.
-    pub fn put_harness(
+    pub async fn put_harness(
         &mut self,
         context: &str,
         name: &str,
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Put<HarnessId>, AppError> {
-        let mut p = self.project()?;
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
         let id = self
             .store
-            .asset_id(ctx, AssetKind::Harness, name)?
+            .asset_id(ctx, AssetKind::Harness, name)
+            .await?
             .map(HarnessId::from_uuid);
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.harness(id)));
         let mut given = Vec::with_capacity(cases.len());
@@ -535,12 +554,12 @@ where
             let lines = LineRange::new(c.lines.0, c.lines.1).map_err(input)?;
             let mut items = std::collections::BTreeMap::new();
             for r in &c.items {
-                let (item, revision) = self.item(&p, Some(ctx), r)?;
+                let (item, revision) = self.item(&p, Some(ctx), r).await?;
                 items.insert(item, revision);
             }
             let mut clauses = std::collections::BTreeMap::new();
             for r in &c.clauses {
-                let (clause, revision) = self.clause(&p, Some(ctx), r)?;
+                let (clause, revision) = self.clause(&p, Some(ctx), r).await?;
                 clauses.insert(clause, revision);
             }
             let cites = CaseCites::new(items, clauses).map_err(input)?;
@@ -557,15 +576,24 @@ where
             .and_then(|c| c.harness(id))
             .map(|h| h.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(&p, ctx, AssetKind::Harness, name, id.as_uuid())?;
+        self.keep(at, p, ctx, AssetKind::Harness, name, id.as_uuid())
+            .await?;
         Ok(Put { id, revision })
     }
 
     /// Pins `code` as the code of the Interface named `interface` of the Context `context`, replacing its Pin.
-    pub fn pin(&mut self, context: &str, interface: &str, code: &str) -> Result<PinId, AppError> {
-        let p = self.project()?;
+    pub async fn pin(
+        &mut self,
+        context: &str,
+        interface: &str,
+        code: &str,
+    ) -> Result<PinId, AppError> {
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
         let ctx = context_id(&p, context)?;
-        let iface = self.asset(ctx, context, AssetKind::Interface, interface)?;
+        let iface = self
+            .asset(ctx, context, AssetKind::Interface, interface)
+            .await?;
         let id = PinId::from_uuid(self.ids.next_uuid());
         let pin = record(
             &p,
@@ -573,20 +601,25 @@ where
             id,
             Digest::of(code.as_bytes()),
         )?;
-        self.store.save_pin(&pin)?;
+        let changes = Changes {
+            pins: vec![pin],
+            ..Changes::default()
+        };
+        self.store.commit(at, changes).await?;
         Ok(id)
     }
 
     /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
     /// it is a part of, who raises it, the definitions it is about (each citation names its Context), and the
     /// question for a person when the machine cannot resolve it.
-    pub fn open_change_request(
+    pub async fn open_change_request(
         &mut self,
         c: &ChangeRequestInput,
     ) -> Result<ChangeRequestId, AppError> {
-        let p = self.project()?;
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
-        let existing = self.store.change_requests()?;
+        let existing = self.store.change_requests().await?;
         if existing.iter().any(|cr| *cr.title() == title) {
             return Err(AppError::TitleTaken(title.to_string()));
         }
@@ -602,10 +635,10 @@ where
         };
         let mut targets = Vec::new();
         for r in &c.items {
-            targets.push(Target::Item(self.item(&p, None, r)?.0));
+            targets.push(Target::Item(self.item(&p, None, r).await?.0));
         }
         for r in &c.clauses {
-            targets.push(Target::Clause(self.clause(&p, None, r)?.0));
+            targets.push(Target::Clause(self.clause(&p, None, r).await?.0));
         }
         let route = match &c.crux {
             None => Route::Machine,
@@ -644,18 +677,19 @@ where
                 route,
             },
         );
-        self.store.save_change_request(&cr)?;
+        self.commit_change_request(at, cr).await?;
         Ok(id)
     }
 
     /// Takes the person's decision on the Crux of the change request titled `title`.
-    pub fn decide_change_request(
+    pub async fn decide_change_request(
         &mut self,
         title: &str,
         decision: &DecisionInput,
     ) -> Result<(), AppError> {
-        let p = self.project()?;
-        let mut cr = self.change_request_titled(title)?;
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
+        let mut cr = self.change_request_titled(title).await?;
         let decision = match decision {
             DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
             DecisionInput::Worded { wording, reason } => Decision::Worded {
@@ -670,60 +704,64 @@ where
             },
         };
         decide(&mut cr, decision, &p)?;
-        self.store.save_change_request(&cr)?;
+        self.commit_change_request(at, cr).await?;
         Ok(())
     }
 
     /// Closes the record of the change request titled `title`, once the change is applied.
-    pub fn resolve_change_request(&mut self, title: &str) -> Result<(), AppError> {
-        let p = self.project()?;
-        let mut cr = self.change_request_titled(title)?;
+    pub async fn resolve_change_request(&mut self, title: &str) -> Result<(), AppError> {
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
+        let mut cr = self.change_request_titled(title).await?;
         resolve(&mut cr, &p)?;
-        self.store.save_change_request(&cr)?;
+        self.commit_change_request(at, cr).await?;
         Ok(())
     }
 
     /// The change request titled `title`.
-    fn change_request_titled(&self, title: &str) -> Result<ChangeRequest, AppError> {
+    async fn change_request_titled(&self, title: &str) -> Result<ChangeRequest, AppError> {
         self.store
-            .change_requests()?
+            .change_requests()
+            .await?
             .into_iter()
             .find(|c| c.title().as_str() == title.trim())
             .ok_or_else(|| AppError::UnknownChangeRequest(title.to_string()))
     }
 
     /// Where the Project stands.
-    pub fn status(&self) -> Result<Status, AppError> {
-        let p = self.project()?;
+    pub async fn status(&self) -> Result<Status, AppError> {
+        let p = self.project().await?;
         let mut pins = Vec::new();
         let mut seen = BTreeSet::new();
         for c in p.contexts() {
             for i in c.interfaces() {
                 seen.insert(i.id());
-                let state = match self.store.pin_of(i.id())? {
+                let state = match self.store.pin_of(i.id()).await? {
                     None => PinState::Unpinned,
                     Some(pin) => match staleness(&pin, &p) {
                         Staleness::Fresh => PinState::Fresh,
                         Staleness::InterfaceGone => PinState::Gone,
-                        Staleness::Stale(why) => PinState::Stale(
-                            why.iter()
-                                .map(|r| self.reason(r))
-                                .collect::<Result<_, _>>()?,
-                        ),
+                        Staleness::Stale(why) => {
+                            let mut said = Vec::with_capacity(why.len());
+                            for r in &why {
+                                said.push(self.reason(r).await?);
+                            }
+                            PinState::Stale(said)
+                        }
                     },
                 };
                 pins.push(PinStatus {
                     context: c.name().to_string(),
-                    interface: self.name_of(i.id().as_uuid())?,
+                    interface: self.name_of(i.id().as_uuid()).await?,
                     state,
                 });
             }
         }
-        for pin in self.store.pins()? {
+        for pin in self.store.pins().await? {
             if !seen.contains(&pin.interface()) {
                 pins.push(PinStatus {
                     context: String::new(),
-                    interface: self.name_of(pin.interface().as_uuid())?,
+                    interface: self.name_of(pin.interface().as_uuid()).await?,
                     state: PinState::Gone,
                 });
             }
@@ -732,12 +770,12 @@ where
         for s in stale_cites(&p) {
             stale.push(StaleCiteStatus {
                 case: case_name(&p, s.case),
-                target: self.describe(&p, s.target)?,
+                target: self.describe(&p, s.target).await?,
                 cited: s.cited.number(),
                 now: s.now.number(),
             });
         }
-        let crs = self.store.change_requests()?;
+        let crs = self.store.change_requests().await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
                 .find(|c| c.id() == id)
@@ -770,16 +808,8 @@ where
             open.push(UnappliedStatus {
                 cr: cr.title().to_string(),
                 decision: decision_of(cr),
-                unchanged: u
-                    .unchanged
-                    .iter()
-                    .map(|t| self.describe(&p, *t))
-                    .collect::<Result<_, _>>()?,
-                gone: u
-                    .gone
-                    .iter()
-                    .map(|t| self.describe(&p, *t))
-                    .collect::<Result<_, _>>()?,
+                unchanged: self.describe_all(&p, &u.unchanged).await?,
+                gone: self.describe_all(&p, &u.gone).await?,
             });
         }
         Ok(Status {
@@ -790,26 +820,58 @@ where
         })
     }
 
-    fn project(&self) -> Result<Project, AppError> {
-        self.store.project()?.ok_or(AppError::NoProject)
+    async fn project(&self) -> Result<Project, AppError> {
+        self.store.project().await?.ok_or(AppError::NoProject)
     }
 
-    /// Keeps `p` and names the asset `id` that was just made or revised.
-    fn keep(
-        &mut self,
-        p: &Project,
+    /// Commits `p` alone, as the store stood at `at` when the use case began to read.
+    async fn commit_project(&self, at: StoreRevision, p: Project) -> Result<(), AppError> {
+        let changes = Changes {
+            project: Some(p),
+            ..Changes::default()
+        };
+        Ok(self.store.commit(at, changes).await?)
+    }
+
+    /// Commits `cr` alone, as the store stood at `at` when the use case began to read.
+    async fn commit_change_request(
+        &self,
+        at: StoreRevision,
+        cr: ChangeRequest,
+    ) -> Result<(), AppError> {
+        let changes = Changes {
+            change_requests: vec![cr],
+            ..Changes::default()
+        };
+        Ok(self.store.commit(at, changes).await?)
+    }
+
+    /// Commits `p` and the name of the asset `id` that was just made or revised, together: a Project holding an
+    /// asset its name does not reach (or the reverse) is never kept.
+    async fn keep(
+        &self,
+        at: StoreRevision,
+        p: Project,
         ctx: ContextId,
         kind: AssetKind,
         name: &str,
         id: uuid::Uuid,
     ) -> Result<(), AppError> {
-        self.store.save_project(p)?;
-        self.store.name_asset(ctx, kind, name, id)?;
-        Ok(())
+        let changes = Changes {
+            project: Some(p),
+            names: vec![AssetName {
+                context: ctx,
+                kind,
+                name: name.to_string(),
+                id,
+            }],
+            ..Changes::default()
+        };
+        Ok(self.store.commit(at, changes).await?)
     }
 
     /// The id of the asset of `kind` named `name` in the Context `ctx` (named `context`).
-    fn asset(
+    async fn asset(
         &self,
         ctx: ContextId,
         context: &str,
@@ -817,7 +879,8 @@ where
         name: &str,
     ) -> Result<uuid::Uuid, AppError> {
         self.store
-            .asset_id(ctx, kind, name)?
+            .asset_id(ctx, kind, name)
+            .await?
             .ok_or_else(|| AppError::UnknownAsset {
                 context: context.to_string(),
                 kind: kind.word(),
@@ -845,19 +908,17 @@ where
     }
 
     /// The id and current revision of the Item `r` cites.
-    fn item(
+    async fn item(
         &self,
         p: &Project,
         default: Option<ContextId>,
         r: &ItemRef,
     ) -> Result<(ItemId, Revision), AppError> {
         let (ctx, ctx_name) = self.cite_context(p, r.context.as_ref(), default)?;
-        let iface = InterfaceId::from_uuid(self.asset(
-            ctx,
-            &ctx_name,
-            AssetKind::Interface,
-            &r.interface,
-        )?);
+        let iface = InterfaceId::from_uuid(
+            self.asset(ctx, &ctx_name, AssetKind::Interface, &r.interface)
+                .await?,
+        );
         p.context(ctx)
             .and_then(|c| c.interface(iface))
             .and_then(|i| {
@@ -873,15 +934,17 @@ where
     }
 
     /// The id and current revision of the Clause `r` cites.
-    fn clause(
+    async fn clause(
         &self,
         p: &Project,
         default: Option<ContextId>,
         r: &ClauseRef,
     ) -> Result<(ClauseId, Revision), AppError> {
         let (ctx, ctx_name) = self.cite_context(p, r.context.as_ref(), default)?;
-        let contract =
-            ContractId::from_uuid(self.asset(ctx, &ctx_name, AssetKind::Contract, &r.contract)?);
+        let contract = ContractId::from_uuid(
+            self.asset(ctx, &ctx_name, AssetKind::Contract, &r.contract)
+                .await?,
+        );
         let label = ClauseLabel::try_from(r.label.as_str()).map_err(input)?;
         p.context(ctx)
             .and_then(|c| c.contract(contract))
@@ -894,24 +957,39 @@ where
     }
 
     /// The name of an asset, or its id when it has none.
-    fn name_of(&self, id: uuid::Uuid) -> Result<String, AppError> {
-        Ok(self.store.asset_name(id)?.unwrap_or_else(|| id.to_string()))
+    async fn name_of(&self, id: uuid::Uuid) -> Result<String, AppError> {
+        Ok(self
+            .store
+            .asset_name(id)
+            .await?
+            .unwrap_or_else(|| id.to_string()))
     }
 
     /// A Pin's reason, in words.
-    fn reason(&self, r: &StaleReason) -> Result<String, AppError> {
+    async fn reason(&self, r: &StaleReason) -> Result<String, AppError> {
         Ok(match r {
             StaleReason::Interface => "the interface changed".to_string(),
-            StaleReason::Harness(id) => format!("harness `{}`", self.name_of(id.as_uuid())?),
-            StaleReason::Contract(id) => format!("contract `{}`", self.name_of(id.as_uuid())?),
+            StaleReason::Harness(id) => format!("harness `{}`", self.name_of(id.as_uuid()).await?),
+            StaleReason::Contract(id) => {
+                format!("contract `{}`", self.name_of(id.as_uuid()).await?)
+            }
             StaleReason::UsedInterface(id) => {
-                format!("interface `{}`", self.name_of(id.as_uuid())?)
+                format!("interface `{}`", self.name_of(id.as_uuid()).await?)
             }
         })
     }
 
+    /// Several targets, in words, in order.
+    async fn describe_all(&self, p: &Project, targets: &[Target]) -> Result<Vec<String>, AppError> {
+        let mut said = Vec::with_capacity(targets.len());
+        for t in targets {
+            said.push(self.describe(p, *t).await?);
+        }
+        Ok(said)
+    }
+
     /// A citation's target, in words: the asset's name and the signature or label.
-    fn describe(&self, p: &Project, target: Target) -> Result<String, AppError> {
+    async fn describe(&self, p: &Project, target: Target) -> Result<String, AppError> {
         let found = p.contexts().find_map(|c| match target {
             Target::Item(id) => c.interface_of(id).and_then(|i| {
                 i.item(id)
@@ -923,7 +1001,7 @@ where
             }),
         });
         Ok(match found {
-            Some((asset, what)) => format!("{} {what}", self.name_of(asset)?),
+            Some((asset, what)) => format!("{} {what}", self.name_of(asset).await?),
             None => match target {
                 Target::Item(id) => format!("item {id} (gone)"),
                 Target::Clause(id) => format!("clause {id} (gone)"),

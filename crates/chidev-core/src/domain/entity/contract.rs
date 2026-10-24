@@ -92,6 +92,31 @@ impl Contract {
         })
     }
 
+    /// A Contract as a store kept it, revisions included. The rules of [`Contract::new`] hold on it.
+    pub(crate) fn restore(
+        id: ContractId,
+        revision: Revision,
+        title: Title,
+        clauses: Vec<(ClauseId, Revision, ClauseContent)>,
+    ) -> Result<Contract, ContractError> {
+        let given: Vec<(ClauseId, ClauseContent)> =
+            clauses.iter().map(|(i, _, c)| (*i, c.clone())).collect();
+        check(&given)?;
+        Ok(Contract {
+            id,
+            revision,
+            title,
+            clauses: clauses
+                .into_iter()
+                .map(|(id, revision, content)| Clause {
+                    id,
+                    revision,
+                    content,
+                })
+                .collect(),
+        })
+    }
+
     /// Its id.
     pub fn id(&self) -> ContractId {
         self.id

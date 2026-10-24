@@ -3,12 +3,11 @@
 
 use std::io::{self, BufRead, Write};
 
-use chidev_core::app::ports::{AssetNames, IdSource};
+use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
     DecisionInput, Intent, ItemInput, ItemRef, OptionInput, PinState, ReasonedInput,
 };
-use chidev_core::domain::repository::{ChangeRequestRepository, PinRepository, ProjectRepository};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -229,9 +228,13 @@ impl From<ClauseRefDto> for ClauseRef {
 /// Runs every line of `input` against `app` and writes one result line per operation to `out`. A blank line is
 /// skipped. A line that fails (bad JSON or a refused operation) gets a result with `"ok": false` and the run goes
 /// on. Returns whether every operation succeeded; an error is only a failure to read or write.
-pub fn run<S, G>(app: &mut App<S, G>, input: impl BufRead, out: &mut impl Write) -> io::Result<bool>
+pub async fn run<S, G>(
+    app: &mut App<S, G>,
+    input: impl BufRead,
+    out: &mut impl Write,
+) -> io::Result<bool>
 where
-    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
+    S: Store,
     G: IdSource,
 {
     let mut all_ok = true;
@@ -241,7 +244,7 @@ where
             continue;
         }
         let result = match serde_json::from_str::<Op>(&line) {
-            Ok(op) => apply(app, op).map_err(|e| e.to_string()),
+            Ok(op) => apply(app, op).await.map_err(|e| e.to_string()),
             Err(e) => Err(format!("not an operation: {e}")),
         };
         let mut result = match result {
@@ -261,22 +264,22 @@ where
     Ok(all_ok)
 }
 
-fn apply<S, G>(app: &mut App<S, G>, op: Op) -> Result<Value, AppError>
+async fn apply<S, G>(app: &mut App<S, G>, op: Op) -> Result<Value, AppError>
 where
-    S: ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames,
+    S: Store,
     G: IdSource,
 {
     Ok(match op {
-        Op::Init => json!({ "op": "init", "project": app.init()?.to_string() }),
+        Op::Init => json!({ "op": "init", "project": app.init().await?.to_string() }),
         Op::ContextAdd { name, uses } => {
-            json!({ "op": "context_add", "context": app.add_context(&name, &uses)?.to_string() })
+            json!({ "op": "context_add", "context": app.add_context(&name, &uses).await?.to_string() })
         }
         Op::ContextUses { context, uses } => {
-            app.set_uses(&context, &uses)?;
+            app.set_uses(&context, &uses).await?;
             json!({ "op": "context_uses" })
         }
         Op::BaseOnContract { context } => {
-            app.base_on_contract(&context)?;
+            app.base_on_contract(&context).await?;
             json!({ "op": "base_on_contract" })
         }
         Op::ContractPut {
@@ -292,7 +295,7 @@ where
                     text: c.text,
                 })
                 .collect();
-            let put = app.put_contract(&context, &name, &title, &clauses)?;
+            let put = app.put_contract(&context, &name, &title, &clauses).await?;
             json!({ "op": "contract_put", "id": put.id.to_string(), "revision": put.revision.number() })
         }
         Op::InterfacePut {
@@ -309,7 +312,7 @@ where
                     replaces: i.replaces,
                 })
                 .collect();
-            let put = app.put_interface(&context, &name, &source, &items)?;
+            let put = app.put_interface(&context, &name, &source, &items).await?;
             json!({ "op": "interface_put", "id": put.id.to_string(), "revision": put.revision.number() })
         }
         Op::HarnessPut {
@@ -327,7 +330,7 @@ where
                     clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
                 })
                 .collect();
-            let put = app.put_harness(&context, &name, &source, &cases)?;
+            let put = app.put_harness(&context, &name, &source, &cases).await?;
             json!({ "op": "harness_put", "id": put.id.to_string(), "revision": put.revision.number() })
         }
         Op::Pin {
@@ -335,7 +338,7 @@ where
             interface,
             code,
         } => {
-            json!({ "op": "pin", "pin": app.pin(&context, &interface, &code)?.to_string() })
+            json!({ "op": "pin", "pin": app.pin(&context, &interface, &code).await?.to_string() })
         }
         Op::CrOpen(open) => {
             let OpenDto {
@@ -372,7 +375,7 @@ where
                 clauses: clauses.into_iter().map(ClauseRef::from).collect(),
                 crux,
             };
-            let id = app.open_change_request(&input)?;
+            let id = app.open_change_request(&input).await?;
             json!({ "op": "cr_open", "cr": id.to_string() })
         }
         Op::CrDecide {
@@ -394,15 +397,15 @@ where
                     ));
                 }
             };
-            app.decide_change_request(&title, &decision)?;
+            app.decide_change_request(&title, &decision).await?;
             json!({ "op": "cr_decide" })
         }
         Op::CrResolve { title } => {
-            app.resolve_change_request(&title)?;
+            app.resolve_change_request(&title).await?;
             json!({ "op": "cr_resolve" })
         }
         Op::Status => {
-            let s = app.status()?;
+            let s = app.status().await?;
             let pins: Vec<Value> = s
                 .pins
                 .iter()

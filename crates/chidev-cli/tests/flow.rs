@@ -3,14 +3,25 @@
 //! change is made and both change requests resolved; the Pins and citations go stale, the Harnesses are brought up
 //! to date, the code is pinned again, and a change that would orphan a citation is refused.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
-fn run() -> (Vec<Value>, Option<i32>) {
+/// A directory of its own under cargo's temporary one, empty, so that a run starts from no store.
+fn fresh_dir(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    dir
+}
+
+fn exec(file: &Path, store: &Path) -> (Vec<Value>, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
         .arg("exec")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flow.jsonl"))
+        .arg(file)
+        .arg("--store")
+        .arg(store)
         .output()
         .expect("chidev runs");
     let lines = String::from_utf8(out.stdout)
@@ -19,6 +30,15 @@ fn run() -> (Vec<Value>, Option<i32>) {
         .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
         .collect();
     (lines, out.status.code())
+}
+
+/// The flow, run on a store of its own.
+fn run() -> (Vec<Value>, Option<i32>) {
+    let dir = fresh_dir("flow");
+    exec(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flow.jsonl")),
+        &dir.join("chidev.db"),
+    )
 }
 
 /// The result of the operation on line `n` of the flow.
@@ -121,4 +141,43 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
             .contains("cannot reach")
     );
     assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_second_run_continues_the_project_the_first_kept() {
+    let dir = fresh_dir("persist");
+    let store = dir.join("nested").join("chidev.db");
+    let first = dir.join("first.jsonl");
+    let second = dir.join("second.jsonl");
+    std::fs::write(
+        &first,
+        "{\"op\":\"init\"}\n{\"op\":\"context_add\",\"name\":\"pricing\"}\n",
+    )
+    .expect("a file");
+    std::fs::write(
+        &second,
+        concat!(
+            "{\"op\":\"init\"}\n",
+            "{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
+            "\"clauses\":[{\"label\":\"C1\",\"text\":\"a total is rounded to whole cents\"}]}\n",
+            "{\"op\":\"status\"}\n",
+        ),
+    )
+    .expect("a file");
+
+    let (results, code) = exec(&first, &store);
+    assert_eq!(code, Some(0), "{results:#?}");
+
+    // the project is there: `init` is refused, and the Context the first run added takes a Contract
+    let (results, code) = exec(&second, &store);
+    assert_eq!(code, Some(1), "{results:#?}");
+    assert_eq!(at(&results, 1)["ok"], false);
+    assert!(
+        at(&results, 1)["error"]
+            .as_str()
+            .expect("error")
+            .contains("already")
+    );
+    assert_eq!(at(&results, 2)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 3)["ok"], true);
 }

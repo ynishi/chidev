@@ -11,9 +11,14 @@ documentation = "https://docs.rs/chidev-core"
 readme.workspace = true
 
 [dependencies]
+rusqlite.workspace = true
+rusqlite-isle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
 arch-lint.workspace = true
+tokio.workspace = true

@@ -117,6 +117,34 @@ impl Interface {
         })
     }
 
+    /// An Interface as a store kept it, revisions included. The rules of [`Interface::new`] hold on it.
+    pub(crate) fn restore(
+        id: InterfaceId,
+        revision: Revision,
+        source: Source,
+        items: Vec<(ItemId, Revision, Signature, LineRange)>,
+    ) -> Result<Interface, InterfaceError> {
+        let found: Vec<ItemFound> = items
+            .iter()
+            .map(|(i, _, s, l)| (*i, s.clone(), *l))
+            .collect();
+        check(&source, &found)?;
+        Ok(Interface {
+            id,
+            revision,
+            source,
+            items: items
+                .into_iter()
+                .map(|(id, revision, signature, lines)| Item {
+                    id,
+                    revision,
+                    signature,
+                    lines,
+                })
+                .collect(),
+        })
+    }
+
     /// Its id.
     pub fn id(&self) -> InterfaceId {
         self.id

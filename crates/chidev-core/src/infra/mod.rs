@@ -6,4 +6,5 @@
 //! moves to a crate of its own.
 
 pub mod ids;
-pub mod memory;
+mod persist;
+pub mod sqlite;

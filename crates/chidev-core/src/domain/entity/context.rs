@@ -82,6 +82,34 @@ impl Context {
         })
     }
 
+    /// A Context as a store kept it, with its basis and assets. It does not use itself, and a Context based on its
+    /// Contracts has one at least.
+    pub(crate) fn restore(
+        id: ContextId,
+        name: ContextName,
+        basis: Basis,
+        uses: BTreeSet<ContextId>,
+        contracts: Vec<Contract>,
+        interfaces: Vec<Interface>,
+        harnesses: Vec<Harness>,
+    ) -> Result<Context, ContextError> {
+        if uses.contains(&id) {
+            return Err(ContextError::UsesItself);
+        }
+        if basis == Basis::Contract && contracts.is_empty() {
+            return Err(ContextError::NoContract);
+        }
+        Ok(Context {
+            id,
+            name,
+            basis,
+            uses,
+            contracts: contracts.into_iter().map(|c| (c.id(), c)).collect(),
+            interfaces: interfaces.into_iter().map(|i| (i.id(), i)).collect(),
+            harnesses: harnesses.into_iter().map(|h| (h.id(), h)).collect(),
+        })
+    }
+
     /// Its id.
     pub fn id(&self) -> ContextId {
         self.id

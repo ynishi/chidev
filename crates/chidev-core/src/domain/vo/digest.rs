@@ -15,6 +15,23 @@ impl Digest {
     pub fn of(bytes: &[u8]) -> Digest {
         Digest(Sha256::digest(bytes).into())
     }
+
+    /// The digest written as [`Digest`]'s `Display` writes it (64 lower-case hex digits), as a store kept it;
+    /// `None` for any other text.
+    pub(crate) fn restore(hex: &str) -> Option<Digest> {
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        let mut raw = [0u8; 32];
+        for (k, byte) in raw.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * k..2 * k + 2], 16).ok()?;
+        }
+        Some(Digest(raw))
+    }
 }
 
 /// Lower-case hex, 64 digits, as `sha256sum` prints it.
@@ -41,6 +58,14 @@ mod tests {
             Digest::of(b"abc").to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn a_digest_is_restored_from_its_hex_and_nothing_else() {
+        let d = Digest::of(b"abc");
+        assert_eq!(Digest::restore(&d.to_string()), Some(d));
+        assert_eq!(Digest::restore("abc"), None);
+        assert_eq!(Digest::restore(&d.to_string().to_uppercase()), None);
     }
 
     #[test]

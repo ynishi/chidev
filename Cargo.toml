@@ -16,8 +16,12 @@ readme = "README.md"
 chidev-core = { path = "crates/chidev-core", version = "0.1.0" }
 arch-lint = "0.11"
 clap = { version = "4", features = ["derive"] }
+# rusqlite-isle 0.6 tracks rusqlite 0.40; the two move together (one libsqlite3-sys in the graph).
+rusqlite = { version = "0.40", default-features = false }
+rusqlite-isle = { version = "0.6", features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
+tokio = { version = "1", features = ["rt", "macros"] }
 uuid = { version = "1", default-features = false, features = ["std"] }

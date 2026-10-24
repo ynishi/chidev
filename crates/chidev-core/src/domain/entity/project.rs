@@ -92,6 +92,19 @@ impl Project {
         }
     }
 
+    /// A Project as a store kept it. Every rule of the Project is checked on it, as on a change.
+    pub(crate) fn restore(id: ProjectId, contexts: Vec<Context>) -> Result<Project, ProjectError> {
+        let mut map = BTreeMap::new();
+        for c in contexts {
+            if map.contains_key(&c.id()) {
+                return Err(ProjectError::DuplicateId(c.id()));
+            }
+            map.insert(c.id(), c);
+        }
+        check(&map)?;
+        Ok(Project { id, contexts: map })
+    }
+
     /// Its id.
     pub fn id(&self) -> ProjectId {
         self.id

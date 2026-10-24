@@ -15,8 +15,11 @@ use std::process::ExitCode;
 
 use chidev_core::app::App;
 use chidev_core::infra::ids::UuidV7;
-use chidev_core::infra::memory::MemoryStore;
+use chidev_core::infra::sqlite::SqliteStore;
 use clap::{Parser, Subcommand};
+
+/// Where the project is kept when `--store` is not given, under the current directory.
+const DEFAULT_STORE: &str = ".chidev/chidev.db";
 
 /// Contract, Interface and Harness as the assets of a codebase; the code is a cache pinned to them.
 #[derive(Debug, Parser)]
@@ -28,18 +31,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Runs the operations in FILE (or stdin), one JSON object per line, against one project kept in memory, and
-    /// prints one JSON result per operation. The project is gone when the run ends.
+    /// Runs the operations in FILE (or stdin), one JSON object per line, against the project kept in the store, and
+    /// prints one JSON result per operation. What the run changes is kept for the next one.
     Exec {
         /// The JSON lines to run; stdin when not given.
         file: Option<PathBuf>,
+        /// The database that keeps the project.
+        #[arg(long, value_name = "PATH", default_value = DEFAULT_STORE)]
+        store: PathBuf,
     },
 }
 
-fn main() -> ExitCode {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Exec { file } => {
+        Command::Exec { file, store } => {
             let reader: Box<dyn BufRead> = match file {
                 Some(path) => match File::open(&path) {
                     Ok(f) => Box::new(BufReader::new(f)),
@@ -50,9 +57,16 @@ fn main() -> ExitCode {
                 },
                 None => Box::new(BufReader::new(io::stdin())),
             };
-            let mut app = App::new(MemoryStore::default(), UuidV7);
+            let sqlite = match SqliteStore::open(&store).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("chidev: {}: {e}", store.display());
+                    return ExitCode::from(2);
+                }
+            };
+            let mut app = App::new(sqlite, UuidV7);
             let mut out = io::stdout().lock();
-            match ops::run(&mut app, reader, &mut out) {
+            let code = match ops::run(&mut app, reader, &mut out).await {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::from(1),
                 Err(e) => {
@@ -60,7 +74,12 @@ fn main() -> ExitCode {
                     eprintln!("chidev: {e}");
                     ExitCode::from(2)
                 }
+            };
+            if let Err(e) = app.into_store().close().await {
+                eprintln!("chidev: {}: {e}", store.display());
+                return ExitCode::from(2);
             }
+            code
         }
     }
 }

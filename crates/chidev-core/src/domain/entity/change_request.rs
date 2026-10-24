@@ -237,6 +237,41 @@ impl ChangeRequest {
         }
     }
 
+    /// A change request as a store kept it: its Crux with the decision taken, and whether it is resolved. A
+    /// resolved one with a Crux has a decision.
+    pub(crate) fn restore(
+        id: ChangeRequestId,
+        draft: ChangeRequestDraft,
+        decision: Option<Decision>,
+        resolved: bool,
+    ) -> Result<ChangeRequest, ChangeRequestError> {
+        let route = match draft.route {
+            Route::Machine if decision.is_some() => return Err(ChangeRequestError::NoCrux),
+            Route::Machine => Route::Machine,
+            Route::Person(mut crux) => {
+                crux.decision = None;
+                if let Some(d) = decision {
+                    crux.decide(d)?;
+                }
+                if resolved && crux.decision.is_none() {
+                    return Err(ChangeRequestError::Undecided);
+                }
+                Route::Person(crux)
+            }
+        };
+        Ok(ChangeRequest {
+            id,
+            title: draft.title,
+            situation: draft.situation,
+            intent: draft.intent,
+            parent: draft.parent.filter(|p| *p != id),
+            issuer: draft.issuer,
+            lines: draft.lines,
+            route,
+            resolved,
+        })
+    }
+
     /// Its id.
     pub fn id(&self) -> ChangeRequestId {
         self.id
