@@ -73,9 +73,27 @@ and this project adheres to
   `sim.error` (warning). `check_list` has 24 checks. `status.measurements` also lists
   the latest simulation per sim Harness, with a `sim` summary.
 - Failure kind `no_build`: the program a simulation drives does not build.
+- Retiring assets, the D of CRUD. `context_retire`, `contract_retire`,
+  `interface_retire` and `harness_retire` take a Context or an asset out of the live
+  model and record it in the Project's `retired` (kind, names, the revision it had
+  and the revision of what held it when it went; the text is not kept). Ids are
+  reserved for good: a retired id is never given again, and nothing brings a thing
+  back. The parts go with the whole (a Context takes its assets, an asset its Clauses,
+  Items or Cases), and a Clause, an Item or a Case that a `*_put` drops is recorded as
+  retired too. The peers are not cascaded: a retirement is refused, naming the
+  Cases, when a Case that stays cites what would go, and a Context is refused while
+  another uses it. The Project's revision moves when a Context is retired, a
+  Context's when one of its assets is. A Context based on its Contracts keeps one.
+  Outside the Project, Pins, change requests and measurements keep their ids: the Pin
+  of a retired Interface reads `gone` and `pin.stale` does not report it, a `remove` expectation of a retired target is
+  met, and wherever chidev names a target the live model no longer has (`status`,
+  errors, `unapplied`, findings, measurements) it names it from `retired` with
+  `(retired)`. `status.retired` lists the records. See the README, "Retiring".
 
 ### Changed
 
+- The stored Project document carries `retired` (layout 1, no compatibility code): a
+  database written before does not load.
 - The process machinery of the external checks (spawn without a shell, process
   group, deadline, output caps) moved to `infra::process`, which the measure runner
   shares. External behaviour is unchanged; the runner also takes a `locate` that
