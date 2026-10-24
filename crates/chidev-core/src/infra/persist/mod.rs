@@ -86,6 +86,7 @@ pub(crate) mod fixture {
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
     use crate::domain::vo::digest::Digest;
+    use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
     use crate::domain::vo::id::{
         CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
         PinId, ProjectId,
@@ -218,6 +219,7 @@ pub(crate) mod fixture {
                 issuer: None,
                 lines: revisions_now(p, targets),
                 route: Route::Machine,
+                addresses: Vec::new(),
             },
         );
         first.resolve().unwrap();
@@ -245,6 +247,13 @@ pub(crate) mod fixture {
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
                 lines: revisions_now(p, targets),
                 route: Route::Person(crux),
+                addresses: vec![
+                    FindingRef::new(
+                        RuleId::from_static("cite.uncited-clause"),
+                        Some(Subject::Clause(ClauseId::from_uuid(id(22)))),
+                    ),
+                    FindingRef::new(RuleId::from_static("context.no-harness"), None),
+                ],
             },
         );
         decide(&mut second, Decision::Chosen(reasoned("zero")), p).unwrap();
@@ -272,6 +281,7 @@ pub(crate) mod fixture {
                         )
                         .unwrap(),
                     ),
+                    addresses: Vec::new(),
                 },
             )
         };
@@ -323,6 +333,20 @@ mod tests {
         for cr in change_requests(&p).into_iter().chain(other_decisions(&p)) {
             let text = encode_change_request(&cr).unwrap();
             assert_eq!(decode_change_request(CURRENT, &text).unwrap(), cr);
+        }
+    }
+
+    #[test]
+    fn a_change_request_stored_before_it_could_address_findings_still_reads() {
+        let p = project();
+        for cr in change_requests(&p) {
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&encode_change_request(&cr).unwrap()).unwrap();
+            // A document of the first layout of this schema has no `addresses` at all.
+            doc.as_object_mut().unwrap().remove("addresses");
+            let read = decode_change_request(CURRENT, &doc.to_string()).unwrap();
+            assert!(read.addresses().is_empty());
+            assert_eq!(read.title(), cr.title());
         }
     }
 

@@ -1,7 +1,9 @@
 //! Runs `tests/flow.jsonl` through `chidev exec`: two Contexts get their Contract, Interfaces and Harnesses, are
 //! pinned; a change request is opened, with a part a person decides through its Crux against the default; the
 //! change is made and both change requests resolved; the Pins and citations go stale, the Harnesses are brought up
-//! to date, the code is pinned again, and a change that would orphan a citation is refused.
+//! to date, the code is pinned again, and a change that would orphan a citation is refused. Each step reports what the
+//! checks find: the Clause the new contract gains is cited by no Case until the Harness is brought up, and a change
+//! request opened for it turns the finding from open to addressed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,9 +75,9 @@ fn states(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     let (results, code) = run();
-    assert_eq!(results.len(), 27);
+    assert_eq!(results.len(), 28);
     assert!(
-        results[..26].iter().all(|r| r["ok"] == true),
+        results[..27].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
 
@@ -99,9 +101,9 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(crs[1]["decision"], "half to even");
     assert_eq!(decided["unapplied"][0]["unchanged"][0], "rounding C1");
 
-    // the clause changed (line 17), so both change requests resolve (lines 18, 19); then the interface changes
+    // the clause changed (line 17), so both change requests resolve (lines 19, 20); then the interface changes
     // too: the pins and the citations are behind, and the change requests stay resolved
-    let changed = at(&results, 21);
+    let changed = at(&results, 22);
     assert_eq!(changed["change_requests"][0]["state"], "resolved");
     assert_eq!(changed["change_requests"][1]["state"], "resolved");
     assert_eq!(
@@ -119,12 +121,44 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
     assert_eq!(changed["unapplied"], serde_json::json!([]));
     // the interface was revised, not replaced; its item kept its id across the signature change (`replaces`),
-    // or line 20 would have been refused for orphaning the cases that cite it
-    assert_eq!(at(&results, 20)["revision"], 2);
-    assert_eq!(at(&results, 20)["id"], at(&results, 6)["id"]);
+    // or line 21 would have been refused for orphaning the cases that cite it
+    assert_eq!(at(&results, 21)["revision"], 2);
+    assert_eq!(at(&results, 21)["id"], at(&results, 6)["id"]);
+
+    // the new Clause C2 is cited by no Case when the contract is put (line 17): an open warning, with the name of
+    // the clause; the change request opened for it (line 18) makes it addressed from then on, and it stays so
+    // while that request is unresolved
+    let uncited = |r: &Value| -> Option<Value> {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .find(|f| f["rule"] == "cite.uncited-clause" && f["about"] == "rounding C2")
+            .cloned()
+    };
+    let found = uncited(at(&results, 17)).expect("C2 is uncited");
+    assert_eq!(found["level"], "warning");
+    assert_eq!(found["state"], "open");
+    assert_eq!(
+        uncited(at(&results, 22)).expect("still uncited")["state"],
+        "addressed"
+    );
+    // the harness put (line 24) cites it: the finding is gone
+    assert!(uncited(at(&results, 24)).is_none());
+    // a pin made against what has moved is reported while it lasts, and not once it is pinned again
+    let pin_stale = |r: &Value| {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["rule"] == "pin.stale")
+            .count()
+    };
+    assert_eq!(pin_stale(at(&results, 22)), 2);
+    assert_eq!(pin_stale(at(&results, 27)), 0);
 
     // the harnesses brought up to date and the code pinned again: everything is fresh
-    let again = at(&results, 26);
+    let again = at(&results, 27);
     assert_eq!(
         pin_states(again),
         states(&[("price", "fresh"), ("print", "fresh")])
@@ -132,7 +166,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(again["stale_cites"], serde_json::json!([]));
 
     // dropping the item the harnesses cite is refused, and the run reports the failure
-    let refused = at(&results, 27);
+    let refused = at(&results, 28);
     assert_eq!(refused["ok"], false);
     assert!(
         refused["error"]
@@ -180,4 +214,99 @@ fn a_second_run_continues_the_project_the_first_kept() {
     );
     assert_eq!(at(&results, 2)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 3)["ok"], true);
+}
+
+/// `chidev exec` run with `dir` as the project's root (its working directory), on a store inside it.
+fn exec_in(dir: &Path, ops: &str) -> (Vec<Value>, Option<i32>, String) {
+    let file = dir.join("ops.jsonl");
+    std::fs::write(&file, ops).expect("a file");
+    let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
+        .current_dir(dir)
+        .arg("exec")
+        .arg(&file)
+        .arg("--store")
+        .arg(dir.join("chidev.db"))
+        .output()
+        .expect("chidev runs");
+    let lines = String::from_utf8(out.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
+        .collect();
+    (
+        lines,
+        out.status.code(),
+        String::from_utf8(out.stderr).expect("utf-8"),
+    )
+}
+
+const CHECK_OPS: &str = concat!(
+    "{\"op\":\"init\"}\n",
+    "{\"op\":\"context_add\",\"name\":\"pricing\"}\n",
+    "{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"rounding\",\"title\":\"Rounding\",",
+    "\"clauses\":[{\"label\":\"C1\",\"text\":\"a total is rounded to whole cents\"}]}\n",
+    "{\"op\":\"check\"}\n",
+    "{\"op\":\"check_list\"}\n",
+);
+
+#[test]
+fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
+    let dir = fresh_dir("policy");
+    std::fs::create_dir_all(dir.join(".chidev")).expect("a directory");
+    std::fs::write(
+        dir.join("checks.toml"),
+        "[checks.\"context.\"]\nlevel = \"off\"\n\n[checks.\"pin.unpinned\"]\nlevel = \"error\"\n",
+    )
+    .expect("a file");
+    std::fs::write(
+        dir.join(".chidev/checks.local.toml"),
+        "[checks.\"pin.unpinned\"]\nlevel = \"warning\"\n",
+    )
+    .expect("a file");
+    let (results, code, _) = exec_in(&dir, CHECK_OPS);
+    assert_eq!(code, Some(0), "{results:#?}");
+
+    let rules: Vec<&str> = at(&results, 4)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|f| f["rule"].as_str().expect("rule"))
+        .collect();
+    assert_eq!(rules, ["cite.uncited-clause"]);
+
+    let listed = at(&results, 5);
+    let entry = |id: &str| {
+        listed["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no check {id}"))
+    };
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 10);
+    assert_eq!(entry("context.no-harness")["level"], "off");
+    assert_eq!(entry("context.no-harness")["default_level"], "note");
+    // the person's layer comes after the project's
+    assert_eq!(entry("pin.unpinned")["level"], "warning");
+    assert_eq!(entry("cite.stale")["level"], "warning");
+    assert_eq!(entry("cite.stale")["mandatory"], false);
+    assert_eq!(entry("cite.stale")["executor"], "builtin");
+    assert!(listed["policy"].as_str().expect("policy").len() == 64);
+}
+
+#[test]
+fn a_policy_that_names_no_check_stops_the_run_before_any_operation() {
+    let dir = fresh_dir("bad-policy");
+    std::fs::write(
+        dir.join("checks.toml"),
+        "[checks.\"cite.nothing\"]\nlevel = \"off\"\n",
+    )
+    .expect("a file");
+    let (results, code, stderr) = exec_in(&dir, CHECK_OPS);
+    assert_eq!(code, Some(2));
+    assert!(results.is_empty());
+    assert!(
+        stderr.contains("cite.nothing") && stderr.contains("no check"),
+        "{stderr}"
+    );
 }

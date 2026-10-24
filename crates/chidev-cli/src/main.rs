@@ -13,8 +13,9 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chidev_core::app::App;
+use chidev_core::app::{App, Registry};
 use chidev_core::infra::ids::UuidV7;
+use chidev_core::infra::policy;
 use chidev_core::infra::sqlite::SqliteStore;
 use clap::{Parser, Subcommand};
 
@@ -57,6 +58,18 @@ async fn main() -> ExitCode {
                 },
                 None => Box::new(BufReader::new(io::stdin())),
             };
+            // The project's root is the directory the command runs in; its policy files are read from there.
+            let registry = match std::env::current_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|root| policy::load(&root).map_err(|e| e.to_string()))
+                .and_then(|layers| Registry::builtin(&layers).map_err(|e| e.to_string()))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("chidev: policy: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             let sqlite = match SqliteStore::open(&store).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -64,7 +77,7 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let mut app = App::new(sqlite, UuidV7);
+            let mut app = App::with_registry(sqlite, UuidV7, registry);
             let mut out = io::stdout().lock();
             let code = match ops::run(&mut app, reader, &mut out).await {
                 Ok(true) => ExitCode::SUCCESS,

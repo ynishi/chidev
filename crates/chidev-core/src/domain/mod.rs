@@ -6,13 +6,15 @@
 //! A value with rules is a type, not a `String`: an enum for a closed set,
 //! a newtype that checks its input for anything else.
 //!
-//! The model is split by what a type is: [`entity`] holds what is kept over
+//! The model is split by what a type is: [`check`] holds the rules that find what is worth a person's attention
+//! in it, [`entity`] holds what is kept over
 //! time and known by an id (the assets and the definitions inside them), [`vo`]
 //! holds the values (ids, names, labels, revisions, texts), compared by what
 //! they hold, [`service`] holds the decisions that read more than one
 //! aggregate, and [`repository`] declares how the aggregates are kept (the
 //! implementations are outside the domain).
 
+pub mod check;
 pub mod entity;
 pub mod repository;
 pub mod service;

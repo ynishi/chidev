@@ -160,6 +160,7 @@ mod tests {
                 issuer: None,
                 lines: revisions_now(p, [clause()]),
                 route,
+                addresses: Vec::new(),
             },
         )
     }

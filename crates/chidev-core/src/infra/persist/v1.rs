@@ -21,6 +21,7 @@ use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{
     CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
     PinId, ProjectId,
@@ -456,7 +457,83 @@ pub(crate) struct ChangeRequestDoc {
     lines: Vec<LineDoc>,
     crux: Option<CruxDoc>,
     decision: Option<DecisionDoc>,
+    /// Absent in the documents written before a change request could address findings.
+    #[serde(default)]
+    addresses: Vec<AddressDoc>,
     resolved: bool,
+}
+
+/// A finding a change request addresses: the rule, and what it is about.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddressDoc {
+    rule: String,
+    subject: Option<SubjectDoc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubjectKindDoc {
+    Context,
+    Interface,
+    Item,
+    Clause,
+    Case,
+    ChangeRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubjectDoc {
+    kind: SubjectKindDoc,
+    id: String,
+}
+
+impl From<&FindingRef> for AddressDoc {
+    fn from(f: &FindingRef) -> AddressDoc {
+        let (kind, id) = match f.subject() {
+            None => (None, String::new()),
+            Some(Subject::Context(i)) => (Some(SubjectKindDoc::Context), i.as_uuid().to_string()),
+            Some(Subject::Interface(i)) => {
+                (Some(SubjectKindDoc::Interface), i.as_uuid().to_string())
+            }
+            Some(Subject::Item(i)) => (Some(SubjectKindDoc::Item), i.as_uuid().to_string()),
+            Some(Subject::Clause(i)) => (Some(SubjectKindDoc::Clause), i.as_uuid().to_string()),
+            Some(Subject::Case(i)) => (Some(SubjectKindDoc::Case), i.as_uuid().to_string()),
+            Some(Subject::ChangeRequest(i)) => {
+                (Some(SubjectKindDoc::ChangeRequest), i.as_uuid().to_string())
+            }
+        };
+        AddressDoc {
+            rule: f.rule().to_string(),
+            subject: kind.map(|kind| SubjectDoc { kind, id }),
+        }
+    }
+}
+
+impl TryFrom<&AddressDoc> for FindingRef {
+    type Error = Bad;
+
+    fn try_from(d: &AddressDoc) -> Result<FindingRef, Bad> {
+        let subject = match &d.subject {
+            None => None,
+            Some(s) => {
+                let id = uuid(&s.id)?;
+                Some(match s.kind {
+                    SubjectKindDoc::Context => Subject::Context(ContextId::from_uuid(id)),
+                    SubjectKindDoc::Interface => Subject::Interface(InterfaceId::from_uuid(id)),
+                    SubjectKindDoc::Item => Subject::Item(ItemId::from_uuid(id)),
+                    SubjectKindDoc::Clause => Subject::Clause(ClauseId::from_uuid(id)),
+                    SubjectKindDoc::Case => Subject::Case(CaseId::from_uuid(id)),
+                    SubjectKindDoc::ChangeRequest => {
+                        Subject::ChangeRequest(ChangeRequestId::from_uuid(id))
+                    }
+                })
+            }
+        };
+        Ok(FindingRef::new(
+            RuleId::try_from(d.rule.as_str()).map_err(bad)?,
+            subject,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,6 +678,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                     keep: keep.iter().map(|p| p.to_string()).collect(),
                 },
             }),
+            addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             resolved: c.state() == ChangeRequestState::Resolved,
         }
     }
@@ -680,6 +758,11 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .transpose()?,
             lines,
             route,
+            addresses: d
+                .addresses
+                .iter()
+                .map(FindingRef::try_from)
+                .collect::<Result<_, _>>()?,
         };
         ChangeRequest::restore(
             ChangeRequestId::from_uuid(uuid(&d.id)?),

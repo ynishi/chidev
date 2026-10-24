@@ -5,12 +5,14 @@ use std::future::Future;
 
 use uuid::Uuid;
 
+use crate::domain::check::Hook;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
+use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::ContextId;
 
 /// Gives a fresh id each time. The domain makes no ids; the use cases take them from here.
@@ -72,6 +74,56 @@ pub trait AssetNames {
     ) -> impl Future<Output = Result<Option<String>, StoreError>> + Send;
 }
 
+/// How a check run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// It found nothing.
+    Ok,
+    /// It found something (at any level).
+    Found,
+}
+
+impl Outcome {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Found => "found",
+        }
+    }
+}
+
+impl Outcome {
+    /// The outcome a word names; `None` for any other.
+    pub fn from_word(word: &str) -> Option<Outcome> {
+        [Outcome::Ok, Outcome::Found]
+            .into_iter()
+            .find(|o| o.word() == word)
+    }
+}
+
+/// The record of one check run by one use case: which check, at which hook, over the store as it stood, and how many
+/// findings of each level it gave. Kept apart from the Project (append-only), so a run can be told apart later
+/// from the model it read: the store's revision names the model. There is no duration yet; timing needs a clock
+/// port, which the use cases do not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// The check.
+    pub check: RuleId,
+    /// The hook it ran at.
+    pub hook: Hook,
+    /// The revision of the store the use case read.
+    pub read_at: StoreRevision,
+    /// Findings at `note`.
+    pub notes: u32,
+    /// Findings at `warning`.
+    pub warnings: u32,
+    /// Findings at `error`.
+    pub errors: u32,
+    /// How it ended.
+    pub outcome: Outcome,
+}
+
 /// What one use case changed, to be kept at once.
 #[derive(Debug, Clone, Default)]
 pub struct Changes {
@@ -83,6 +135,8 @@ pub struct Changes {
     pub change_requests: Vec<ChangeRequest>,
     /// Asset names given.
     pub names: Vec<AssetName>,
+    /// The checks the use case ran, appended to the record of runs.
+    pub invocations: Vec<Invocation>,
 }
 
 /// Where the store stood when a use case began to read. A commit given an older one is refused

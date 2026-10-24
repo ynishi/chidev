@@ -7,4 +7,5 @@
 
 pub mod ids;
 mod persist;
+pub mod policy;
 pub mod sqlite;

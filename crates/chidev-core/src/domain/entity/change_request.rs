@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+use crate::domain::vo::finding::FindingRef;
 use crate::domain::vo::id::ChangeRequestId;
 use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::prose::Prose;
@@ -194,6 +195,19 @@ pub struct ChangeRequestDraft {
     pub lines: BTreeMap<Target, Revision>,
     /// Who resolves it. A Crux given here is undecided.
     pub route: Route,
+    /// The findings of the checks it deals with: while it is unresolved they are addressed, once resolved decided.
+    pub addresses: Vec<FindingRef>,
+}
+
+/// `addresses` without a finding twice, in the order given.
+fn distinct(addresses: Vec<FindingRef>) -> Vec<FindingRef> {
+    let mut out: Vec<FindingRef> = Vec::with_capacity(addresses.len());
+    for a in addresses {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out
 }
 
 /// A request that the definitions change, or a confirmation that they need not: whatever is there now does not
@@ -211,6 +225,7 @@ pub struct ChangeRequest {
     issuer: Option<Issuer>,
     lines: BTreeMap<Target, Revision>,
     route: Route,
+    addresses: Vec<FindingRef>,
     resolved: bool,
 }
 
@@ -233,6 +248,7 @@ impl ChangeRequest {
             issuer: draft.issuer,
             lines: draft.lines,
             route,
+            addresses: distinct(draft.addresses),
             resolved: false,
         }
     }
@@ -268,6 +284,7 @@ impl ChangeRequest {
             issuer: draft.issuer,
             lines: draft.lines,
             route,
+            addresses: distinct(draft.addresses),
             resolved,
         })
     }
@@ -305,6 +322,12 @@ impl ChangeRequest {
     /// The definitions it is about, with the revision each had when it was opened or its Crux last decided.
     pub fn lines(&self) -> &BTreeMap<Target, Revision> {
         &self.lines
+    }
+
+    /// The findings it deals with: a finding listed here is addressed while the change request is unresolved and
+    /// decided once it is resolved (see `Finding::state_in`).
+    pub fn addresses(&self) -> &[FindingRef] {
+        &self.addresses
     }
 
     /// Who resolves it.
@@ -426,6 +449,7 @@ mod tests {
                 issuer: Some(Issuer::try_from("designer").unwrap()),
                 lines: BTreeMap::from([(line(), Revision::first())]),
                 route,
+                addresses: Vec::new(),
             },
         )
     }
@@ -455,6 +479,27 @@ mod tests {
     }
 
     #[test]
+    fn a_change_request_keeps_the_findings_it_addresses_once_each() {
+        use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+        let a = FindingRef::new(
+            RuleId::from_static("cite.uncited-clause"),
+            Some(Subject::Clause(ClauseId::from_uuid(test_uuid(30)))),
+        );
+        let b = FindingRef::new(RuleId::from_static("context.no-harness"), None);
+        let d = ChangeRequestDraft {
+            title: Title::try_from("T").unwrap(),
+            situation: None,
+            intent: Intent::KeepBehavior,
+            parent: None,
+            issuer: None,
+            lines: BTreeMap::new(),
+            route: Route::Machine,
+            addresses: vec![a.clone(), b.clone(), a.clone()],
+        };
+        assert_eq!(ChangeRequest::open(id(1), d).addresses(), [a, b]);
+    }
+
+    #[test]
     fn a_change_request_is_not_its_own_parent() {
         let mut d = ChangeRequestDraft {
             title: Title::try_from("T").unwrap(),
@@ -464,6 +509,7 @@ mod tests {
             issuer: None,
             lines: BTreeMap::new(),
             route: Route::Machine,
+            addresses: Vec::new(),
         };
         assert_eq!(ChangeRequest::open(id(1), d.clone()).parent(), None);
         d.parent = Some(id(2));

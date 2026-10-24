@@ -6,9 +6,10 @@ use std::io::{self, BufRead, Write};
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, Intent, ItemInput, ItemRef, OptionInput, PinState, ReasonedInput,
+    DecisionInput, FindingInput, Found, Intent, ItemInput, ItemRef, OptionInput, ParamValue,
+    PinState, ReasonedInput,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// One operation. `op` names it; the other fields are its arguments.
@@ -72,6 +73,10 @@ enum Op {
     CrResolve { title: String },
     /// Where the project stands.
     Status,
+    /// Runs every check on the project as it is; nothing is kept.
+    Check,
+    /// Lists every check with the level it runs at.
+    CheckList,
 }
 
 /// The fields of `cr_open`, boxed: they are far larger than any other operation's.
@@ -92,6 +97,91 @@ struct OpenDto {
     /// The question for a person; none: the machine resolves it.
     #[serde(default)]
     crux: Option<CruxDto>,
+    /// The findings it deals with.
+    #[serde(default)]
+    addresses: Vec<AddressDto>,
+}
+
+/// A finding a change request addresses: the rule, and the item or clause it is about.
+#[derive(Debug, Deserialize)]
+struct AddressDto {
+    rule: String,
+    #[serde(default)]
+    item: Option<ItemRefDto>,
+    #[serde(default)]
+    clause: Option<ClauseRefDto>,
+}
+
+impl From<AddressDto> for FindingInput {
+    fn from(a: AddressDto) -> FindingInput {
+        FindingInput {
+            rule: a.rule,
+            item: a.item.map(ItemRef::from),
+            clause: a.clause.map(ClauseRef::from),
+        }
+    }
+}
+
+/// A finding in a result.
+#[derive(Debug, Serialize)]
+struct FindingOut<'a> {
+    rule: &'a str,
+    level: &'static str,
+    /// `open`, `addressed` or `decided`.
+    state: &'static str,
+    message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about: Option<&'a str>,
+}
+
+fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
+    found
+        .iter()
+        .map(|f| FindingOut {
+            rule: f.rule.as_str(),
+            level: f.level.word(),
+            state: f.state.word(),
+            message: &f.message,
+            about: f.about.as_deref(),
+        })
+        .collect()
+}
+
+/// The result of `check`.
+#[derive(Debug, Serialize)]
+struct CheckOut<'a> {
+    op: &'static str,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// A parameter's value in a listing.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ParamOut {
+    Bool(bool),
+    Int(i64),
+    Str(String),
+}
+
+/// A check in the result of `check_list`.
+#[derive(Debug, Serialize)]
+struct CheckEntryOut {
+    id: String,
+    summary: &'static str,
+    level: &'static str,
+    default_level: &'static str,
+    mandatory: bool,
+    executor: &'static str,
+    hooks: Vec<&'static str>,
+    params: std::collections::BTreeMap<String, ParamOut>,
+}
+
+/// The result of `check_list`: the checks, and a fingerprint of the policy they run under.
+#[derive(Debug, Serialize)]
+struct CheckListOut {
+    op: &'static str,
+    policy: String,
+    checks: Vec<CheckEntryOut>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -244,8 +334,8 @@ where
             continue;
         }
         let result = match serde_json::from_str::<Op>(&line) {
-            Ok(op) => apply(app, op).await.map_err(|e| e.to_string()),
-            Err(e) => Err(format!("not an operation: {e}")),
+            Ok(op) => apply(app, op).await,
+            Err(e) => Err(AppError::Input(format!("not an operation: {e}"))),
         };
         let mut result = match result {
             Ok(Value::Object(mut fields)) => {
@@ -253,15 +343,24 @@ where
                 Value::Object(fields)
             }
             Ok(other) => json!({ "ok": true, "result": other }),
+            Err(AppError::Refused(found)) => {
+                all_ok = false;
+                json!({ "ok": false, "error": AppError::Refused(found.clone()).to_string(), "findings": findings_out(&found) })
+            }
             Err(error) => {
                 all_ok = false;
-                json!({ "ok": false, "error": error })
+                json!({ "ok": false, "error": error.to_string() })
             }
         };
         result["line"] = json!(k + 1);
         writeln!(out, "{result}")?;
     }
     Ok(all_ok)
+}
+
+/// A typed result as the JSON object the run prints.
+fn to_value(out: &impl Serialize) -> Result<Value, AppError> {
+    serde_json::to_value(out).map_err(|e| AppError::Input(format!("cannot write the result: {e}")))
 }
 
 async fn apply<S, G>(app: &mut App<S, G>, op: Op) -> Result<Value, AppError>
@@ -295,8 +394,8 @@ where
                     text: c.text,
                 })
                 .collect();
-            let put = app.put_contract(&context, &name, &title, &clauses).await?;
-            json!({ "op": "contract_put", "id": put.id.to_string(), "revision": put.revision.number() })
+            let done = app.put_contract(&context, &name, &title, &clauses).await?;
+            json!({ "op": "contract_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::InterfacePut {
             context,
@@ -312,8 +411,8 @@ where
                     replaces: i.replaces,
                 })
                 .collect();
-            let put = app.put_interface(&context, &name, &source, &items).await?;
-            json!({ "op": "interface_put", "id": put.id.to_string(), "revision": put.revision.number() })
+            let done = app.put_interface(&context, &name, &source, &items).await?;
+            json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::HarnessPut {
             context,
@@ -330,15 +429,16 @@ where
                     clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
                 })
                 .collect();
-            let put = app.put_harness(&context, &name, &source, &cases).await?;
-            json!({ "op": "harness_put", "id": put.id.to_string(), "revision": put.revision.number() })
+            let done = app.put_harness(&context, &name, &source, &cases).await?;
+            json!({ "op": "harness_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::Pin {
             context,
             interface,
             code,
         } => {
-            json!({ "op": "pin", "pin": app.pin(&context, &interface, &code).await?.to_string() })
+            let done = app.pin(&context, &interface, &code).await?;
+            json!({ "op": "pin", "pin": done.value.to_string(), "findings": findings_out(&done.findings) })
         }
         Op::CrOpen(open) => {
             let OpenDto {
@@ -350,6 +450,7 @@ where
                 items,
                 clauses,
                 crux,
+                addresses,
             } = *open;
             let crux = crux.map(|q| CruxInput {
                 kind: q.kind.into(),
@@ -374,6 +475,7 @@ where
                 items: items.into_iter().map(ItemRef::from).collect(),
                 clauses: clauses.into_iter().map(ClauseRef::from).collect(),
                 crux,
+                addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
             let id = app.open_change_request(&input).await?;
             json!({ "op": "cr_open", "cr": id.to_string() })
@@ -401,8 +503,8 @@ where
             json!({ "op": "cr_decide" })
         }
         Op::CrResolve { title } => {
-            app.resolve_change_request(&title).await?;
-            json!({ "op": "cr_resolve" })
+            let done = app.resolve_change_request(&title).await?;
+            json!({ "op": "cr_resolve", "findings": findings_out(&done.findings) })
         }
         Op::Status => {
             let s = app.status().await?;
@@ -439,7 +541,47 @@ where
                 .iter()
                 .map(|u| json!({ "cr": u.cr, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
                 .collect();
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open })
+            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings) })
+        }
+        Op::Check => {
+            let found = app.check().await?;
+            to_value(&CheckOut {
+                op: "check",
+                findings: findings_out(&found),
+            })?
+        }
+        Op::CheckList => {
+            let registry = app.registry();
+            let checks = registry
+                .list()
+                .into_iter()
+                .map(|c| CheckEntryOut {
+                    id: c.descriptor.id.to_string(),
+                    summary: c.descriptor.summary,
+                    level: c.level.word(),
+                    default_level: c.descriptor.default_level.word(),
+                    mandatory: c.descriptor.mandatory,
+                    executor: c.descriptor.executor.word(),
+                    hooks: c.descriptor.hooks.iter().map(|h| h.word()).collect(),
+                    params: c
+                        .params
+                        .iter()
+                        .map(|(name, v)| {
+                            let out = match v {
+                                ParamValue::Bool(b) => ParamOut::Bool(*b),
+                                ParamValue::Int(i) => ParamOut::Int(*i),
+                                ParamValue::Str(s) => ParamOut::Str(s.clone()),
+                            };
+                            (name.to_string(), out)
+                        })
+                        .collect(),
+                })
+                .collect();
+            to_value(&CheckListOut {
+                op: "check_list",
+                policy: registry.policy().hash().to_string(),
+                checks,
+            })?
         }
     })
 }

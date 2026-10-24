@@ -10,6 +10,7 @@
 //! the ids the domain works with: a definition given again under the same
 //! label, signature or case name keeps its id, and a new one gets a fresh id.
 
+mod check;
 pub mod ports;
 
 use std::collections::BTreeSet;
@@ -17,10 +18,14 @@ use std::fmt::Display;
 
 use thiserror::Error;
 
-use self::ports::{AssetKind, AssetName, Changes, IdSource, Store, StoreRevision};
+pub use self::check::{CheckInfo, Checked, Found, Registry, Run};
+use self::ports::{AssetKind, AssetName, Changes, IdSource, Invocation, Store, StoreRevision};
+pub use crate::domain::check::ParamValue;
+use crate::domain::check::{CheckView, Hook};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestError, ChangeRequestState, Crux, Route,
 };
+use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{decide, resolve, revisions_now, unapplied};
@@ -32,6 +37,7 @@ use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 pub use crate::domain::vo::crux::CruxKind;
 use crate::domain::vo::crux::{CruxOption, Decision, Reasoned};
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{
     CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
     PinId, ProjectId,
@@ -109,10 +115,42 @@ pub enum AppError {
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// A mandatory check found something at `error`; nothing was kept.
+    #[error("refused by the mandatory check(s) {}", rules_of(.0))]
+    Refused(Vec<Found>),
+}
+
+/// The rules of `found`, once each, for a message.
+fn rules_of(found: &[Found]) -> String {
+    let mut rules: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+    rules.sort_unstable();
+    rules.dedup();
+    rules.join(", ")
 }
 
 fn input(e: impl Display) -> AppError {
     AppError::Input(e.to_string())
+}
+
+/// What the checks of a hook read.
+fn view<'a>(
+    before: Option<&'a Project>,
+    after: &'a Project,
+    pins: &'a [Pin],
+    change_requests: &'a [ChangeRequest],
+) -> CheckView<'a> {
+    CheckView {
+        before,
+        after,
+        pins,
+        change_requests,
+    }
+}
+
+/// What the checks of a hook gave: the findings for the caller, the records to keep with the change.
+struct Gate {
+    found: Vec<Found>,
+    invocations: Vec<Invocation>,
 }
 
 /// A Clause of a Contract, as a person writes it.
@@ -270,6 +308,20 @@ pub struct ChangeRequestInput {
     pub clauses: Vec<ClauseRef>,
     /// The question for a person; none: the machine resolves it.
     pub crux: Option<CruxInput>,
+    /// The findings it deals with.
+    pub addresses: Vec<FindingInput>,
+}
+
+/// A finding a change request addresses, as a person writes it: the rule, and the Item or the Clause it is about
+/// (at most one of them; none: the finding is about no Item or Clause that can be named).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingInput {
+    /// The rule (`cite.uncited-clause`).
+    pub rule: String,
+    /// The Item it is about.
+    pub item: Option<ItemRef>,
+    /// The Clause it is about.
+    pub clause: Option<ClauseRef>,
 }
 
 /// What the person decided about a Crux.
@@ -335,6 +387,8 @@ pub struct Status {
     pub change_requests: Vec<ChangeRequestStatus>,
     /// The change requests not yet applied.
     pub unapplied: Vec<UnappliedStatus>,
+    /// What every check finds in the state as it is, each with whether a change request deals with it.
+    pub findings: Vec<Found>,
 }
 
 /// A decision, in words.
@@ -364,6 +418,7 @@ fn reasoned(r: &ReasonedInput) -> Result<Reasoned, AppError> {
 pub struct App<S, G> {
     store: S,
     ids: G,
+    registry: Registry,
 }
 
 impl<S, G> App<S, G>
@@ -371,9 +426,23 @@ where
     S: Store,
     G: IdSource,
 {
-    /// The use cases over `store`, with fresh ids from `ids`.
+    /// The use cases over `store`, with fresh ids from `ids`, running the builtin checks at their default levels.
     pub fn new(store: S, ids: G) -> App<S, G> {
-        App { store, ids }
+        App::with_registry(store, ids, Registry::defaults())
+    }
+
+    /// The use cases over `store`, with fresh ids from `ids`, running the checks of `registry`.
+    pub fn with_registry(store: S, ids: G, registry: Registry) -> App<S, G> {
+        App {
+            store,
+            ids,
+            registry,
+        }
+    }
+
+    /// The checks and the policy they run under.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// The store, given back (to close it).
@@ -447,9 +516,10 @@ where
         name: &str,
         title: &str,
         clauses: &[ClauseInput],
-    ) -> Result<Put<ContractId>, AppError> {
+    ) -> Result<Checked<Put<ContractId>>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
+        let before = p.clone();
         let ctx = context_id(&p, context)?;
         let id = self
             .store
@@ -474,9 +544,26 @@ where
             .and_then(|c| c.contract(id))
             .map(|k| k.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(at, p, ctx, AssetKind::Contract, name, id.as_uuid())
+        let named = AssetName {
+            context: ctx,
+            kind: AssetKind::Contract,
+            name: name.to_string(),
+            id: id.as_uuid(),
+        };
+        let gate = self
+            .gate(
+                Hook::Put,
+                at,
+                Some(&before),
+                &p,
+                std::slice::from_ref(&named),
+            )
             .await?;
-        Ok(Put { id, revision })
+        self.keep(at, p, named, gate.invocations).await?;
+        Ok(Checked {
+            value: Put { id, revision },
+            findings: gate.found,
+        })
     }
 
     /// Makes or revises the Interface named `name` of the Context `context` from its code and the Items found in
@@ -487,9 +574,10 @@ where
         name: &str,
         source: &str,
         items: &[ItemInput],
-    ) -> Result<Put<InterfaceId>, AppError> {
+    ) -> Result<Checked<Put<InterfaceId>>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
+        let before = p.clone();
         let ctx = context_id(&p, context)?;
         let id = self
             .store
@@ -524,9 +612,26 @@ where
             .and_then(|c| c.interface(id))
             .map(|i| i.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(at, p, ctx, AssetKind::Interface, name, id.as_uuid())
+        let named = AssetName {
+            context: ctx,
+            kind: AssetKind::Interface,
+            name: name.to_string(),
+            id: id.as_uuid(),
+        };
+        let gate = self
+            .gate(
+                Hook::Put,
+                at,
+                Some(&before),
+                &p,
+                std::slice::from_ref(&named),
+            )
             .await?;
-        Ok(Put { id, revision })
+        self.keep(at, p, named, gate.invocations).await?;
+        Ok(Checked {
+            value: Put { id, revision },
+            findings: gate.found,
+        })
     }
 
     /// Makes or revises the Harness named `name` of the Context `context` from its code and the Cases found in
@@ -538,9 +643,10 @@ where
         name: &str,
         source: &str,
         cases: &[CaseInput],
-    ) -> Result<Put<HarnessId>, AppError> {
+    ) -> Result<Checked<Put<HarnessId>>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
+        let before = p.clone();
         let ctx = context_id(&p, context)?;
         let id = self
             .store
@@ -576,9 +682,26 @@ where
             .and_then(|c| c.harness(id))
             .map(|h| h.revision())
             .unwrap_or_else(Revision::first);
-        self.keep(at, p, ctx, AssetKind::Harness, name, id.as_uuid())
+        let named = AssetName {
+            context: ctx,
+            kind: AssetKind::Harness,
+            name: name.to_string(),
+            id: id.as_uuid(),
+        };
+        let gate = self
+            .gate(
+                Hook::Put,
+                at,
+                Some(&before),
+                &p,
+                std::slice::from_ref(&named),
+            )
             .await?;
-        Ok(Put { id, revision })
+        self.keep(at, p, named, gate.invocations).await?;
+        Ok(Checked {
+            value: Put { id, revision },
+            findings: gate.found,
+        })
     }
 
     /// Pins `code` as the code of the Interface named `interface` of the Context `context`, replacing its Pin.
@@ -587,7 +710,7 @@ where
         context: &str,
         interface: &str,
         code: &str,
-    ) -> Result<PinId, AppError> {
+    ) -> Result<Checked<PinId>, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let ctx = context_id(&p, context)?;
@@ -601,12 +724,23 @@ where
             id,
             Digest::of(code.as_bytes()),
         )?;
+        let mut pins = self.store.pins().await?;
+        pins.retain(|k| k.interface() != pin.interface());
+        pins.push(pin.clone());
+        let crs = self.store.change_requests().await?;
+        let gate = self
+            .gate_with(Hook::Pin, at, &view(Some(&p), &p, &pins, &crs), &[])
+            .await?;
         let changes = Changes {
             pins: vec![pin],
+            invocations: gate.invocations,
             ..Changes::default()
         };
         self.store.commit(at, changes).await?;
-        Ok(id)
+        Ok(Checked {
+            value: id,
+            findings: gate.found,
+        })
     }
 
     /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
@@ -664,6 +798,10 @@ where
             .as_deref()
             .map(|i| Issuer::try_from(i).map_err(input))
             .transpose()?;
+        let mut addresses = Vec::with_capacity(c.addresses.len());
+        for a in &c.addresses {
+            addresses.push(self.finding_ref(&p, a).await?);
+        }
         let id = ChangeRequestId::from_uuid(self.ids.next_uuid());
         let cr = ChangeRequest::open(
             id,
@@ -675,9 +813,10 @@ where
                 issuer,
                 lines: revisions_now(&p, targets),
                 route,
+                addresses,
             },
         );
-        self.commit_change_request(at, cr).await?;
+        self.commit_change_request(at, cr, Vec::new()).await?;
         Ok(id)
     }
 
@@ -704,18 +843,48 @@ where
             },
         };
         decide(&mut cr, decision, &p)?;
-        self.commit_change_request(at, cr).await?;
+        self.commit_change_request(at, cr, Vec::new()).await?;
         Ok(())
     }
 
     /// Closes the record of the change request titled `title`, once the change is applied.
-    pub async fn resolve_change_request(&mut self, title: &str) -> Result<(), AppError> {
+    pub async fn resolve_change_request(&mut self, title: &str) -> Result<Checked<()>, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let mut cr = self.change_request_titled(title).await?;
         resolve(&mut cr, &p)?;
-        self.commit_change_request(at, cr).await?;
-        Ok(())
+        let pins = self.store.pins().await?;
+        let mut crs = self.store.change_requests().await?;
+        crs.retain(|k| k.id() != cr.id());
+        crs.push(cr.clone());
+        let gate = self
+            .gate_with(Hook::Resolve, at, &view(Some(&p), &p, &pins, &crs), &[])
+            .await?;
+        self.commit_change_request(at, cr, gate.invocations).await?;
+        Ok(Checked {
+            value: (),
+            findings: gate.found,
+        })
+    }
+
+    /// Runs every check on the state as it is: what the person would see if each check ran now. Nothing is kept,
+    /// and the runs are not recorded.
+    pub async fn check(&self) -> Result<Vec<Found>, AppError> {
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
+        let pins = self.store.pins().await?;
+        let crs = self.store.change_requests().await?;
+        let run = self.registry.run(
+            Hook::Check,
+            at,
+            &CheckView {
+                before: None,
+                after: &p,
+                pins: &pins,
+                change_requests: &crs,
+            },
+        );
+        self.found(&run.findings, &p, &crs, &[]).await
     }
 
     /// The change request titled `title`.
@@ -776,6 +945,7 @@ where
             });
         }
         let crs = self.store.change_requests().await?;
+        let findings = self.check().await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
                 .find(|c| c.id() == id)
@@ -817,6 +987,7 @@ where
             stale_cites: stale,
             change_requests: records,
             unapplied: open,
+            findings,
         })
     }
 
@@ -838,36 +1009,141 @@ where
         &self,
         at: StoreRevision,
         cr: ChangeRequest,
+        invocations: Vec<Invocation>,
     ) -> Result<(), AppError> {
         let changes = Changes {
             change_requests: vec![cr],
+            invocations,
             ..Changes::default()
         };
         Ok(self.store.commit(at, changes).await?)
     }
 
-    /// Commits `p` and the name of the asset `id` that was just made or revised, together: a Project holding an
-    /// asset its name does not reach (or the reverse) is never kept.
+    /// Commits `p` and the name of the asset that was just made or revised, together: a Project holding an asset
+    /// its name does not reach (or the reverse) is never kept. The `invocations` of the checks that ran go with
+    /// them.
     async fn keep(
         &self,
         at: StoreRevision,
         p: Project,
-        ctx: ContextId,
-        kind: AssetKind,
-        name: &str,
-        id: uuid::Uuid,
+        name: AssetName,
+        invocations: Vec<Invocation>,
     ) -> Result<(), AppError> {
         let changes = Changes {
             project: Some(p),
-            names: vec![AssetName {
-                context: ctx,
-                kind,
-                name: name.to_string(),
-                id,
-            }],
+            names: vec![name],
+            invocations,
             ..Changes::default()
         };
         Ok(self.store.commit(at, changes).await?)
+    }
+
+    /// Runs the checks of `hook` on `after`, the Project as the use case would keep it, with the Pins and the
+    /// change requests as the store has them. `pending` are the names the use case is about to give, which the
+    /// store does not have yet.
+    async fn gate(
+        &self,
+        hook: Hook,
+        at: StoreRevision,
+        before: Option<&Project>,
+        after: &Project,
+        pending: &[AssetName],
+    ) -> Result<Gate, AppError> {
+        let pins = self.store.pins().await?;
+        let crs = self.store.change_requests().await?;
+        self.gate_with(hook, at, &view(before, after, &pins, &crs), pending)
+            .await
+    }
+
+    /// Runs the checks of `hook` on `after`, with the Pins and change requests the use case would leave. A finding
+    /// of a mandatory check at `error` refuses the use case before anything is kept.
+    async fn gate_with(
+        &self,
+        hook: Hook,
+        at: StoreRevision,
+        view: &CheckView<'_>,
+        pending: &[AssetName],
+    ) -> Result<Gate, AppError> {
+        let run = self.registry.run(hook, at, view);
+        let (after, crs) = (view.after, view.change_requests);
+        if !run.refusing.is_empty() {
+            return Err(AppError::Refused(
+                self.found(&run.refusing, after, crs, pending).await?,
+            ));
+        }
+        Ok(Gate {
+            found: self.found(&run.findings, after, crs, pending).await?,
+            invocations: run.invocations,
+        })
+    }
+
+    /// The findings as a caller sees them: their state among `crs`, and what they are about in words.
+    async fn found(
+        &self,
+        findings: &[crate::domain::check::Finding],
+        p: &Project,
+        crs: &[ChangeRequest],
+        pending: &[AssetName],
+    ) -> Result<Vec<Found>, AppError> {
+        let mut out = Vec::with_capacity(findings.len());
+        for f in findings {
+            let about = match f.subject() {
+                None => None,
+                Some(s) => Some(self.describe_subject(p, crs, s, pending).await?),
+            };
+            out.push(Found {
+                rule: f.rule().clone(),
+                level: f.level(),
+                state: f.state_in(crs),
+                message: f.message().to_string(),
+                about,
+                subject: f.subject(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// What a finding is about, in words.
+    async fn describe_subject(
+        &self,
+        p: &Project,
+        crs: &[ChangeRequest],
+        subject: Subject,
+        pending: &[AssetName],
+    ) -> Result<String, AppError> {
+        Ok(match subject {
+            Subject::Context(id) => p
+                .context(id)
+                .map(|c| format!("context {}", c.name()))
+                .unwrap_or_else(|| format!("context {id}")),
+            Subject::Interface(id) => {
+                format!("interface {}", self.name_in(id.as_uuid(), pending).await?)
+            }
+            Subject::Item(id) => self.describe_in(p, Target::Item(id), pending).await?,
+            Subject::Clause(id) => self.describe_in(p, Target::Clause(id), pending).await?,
+            Subject::Case(id) => format!("case {}", case_name(p, id)),
+            Subject::ChangeRequest(id) => crs
+                .iter()
+                .find(|c| c.id() == id)
+                .map(|c| format!("change request `{}`", c.title()))
+                .unwrap_or_else(|| format!("change request {id}")),
+        })
+    }
+
+    /// The finding a person names (`input`) as the thing a change request addresses.
+    async fn finding_ref(&self, p: &Project, named: &FindingInput) -> Result<FindingRef, AppError> {
+        let rule = RuleId::try_from(named.rule.as_str()).map_err(input)?;
+        let subject = match (&named.item, &named.clause) {
+            (None, None) => None,
+            (Some(r), None) => Some(Subject::Item(self.item(p, None, r).await?.0)),
+            (None, Some(r)) => Some(Subject::Clause(self.clause(p, None, r).await?.0)),
+            (Some(_), Some(_)) => {
+                return Err(AppError::Input(
+                    "a finding is about an item or a clause, not both".to_string(),
+                ));
+            }
+        };
+        Ok(FindingRef::new(rule, subject))
     }
 
     /// The id of the asset of `kind` named `name` in the Context `ctx` (named `context`).
@@ -958,6 +1234,14 @@ where
 
     /// The name of an asset, or its id when it has none.
     async fn name_of(&self, id: uuid::Uuid) -> Result<String, AppError> {
+        self.name_in(id, &[]).await
+    }
+
+    /// The name of an asset, a `pending` one (given by the use case, not kept yet) first.
+    async fn name_in(&self, id: uuid::Uuid, pending: &[AssetName]) -> Result<String, AppError> {
+        if let Some(n) = pending.iter().find(|n| n.id == id) {
+            return Ok(n.name.clone());
+        }
         Ok(self
             .store
             .asset_name(id)
@@ -990,6 +1274,16 @@ where
 
     /// A citation's target, in words: the asset's name and the signature or label.
     async fn describe(&self, p: &Project, target: Target) -> Result<String, AppError> {
+        self.describe_in(p, target, &[]).await
+    }
+
+    /// A citation's target, in words, with the names a use case is about to give.
+    async fn describe_in(
+        &self,
+        p: &Project,
+        target: Target,
+        pending: &[AssetName],
+    ) -> Result<String, AppError> {
         let found = p.contexts().find_map(|c| match target {
             Target::Item(id) => c.interface_of(id).and_then(|i| {
                 i.item(id)
@@ -1001,7 +1295,7 @@ where
             }),
         });
         Ok(match found {
-            Some((asset, what)) => format!("{} {what}", self.name_of(asset).await?),
+            Some((asset, what)) => format!("{} {what}", self.name_in(asset, pending).await?),
             None => match target {
                 Target::Item(id) => format!("item {id} (gone)"),
                 Target::Clause(id) => format!("clause {id} (gone)"),

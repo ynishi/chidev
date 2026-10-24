@@ -3,9 +3,12 @@
 //! `.await`, so [`Store::commit`] writes everything of one use case in a single `call_write` closure, after
 //! checking that nothing was committed since the use case began to read.
 //!
-//! The file holds five tables: `meta` (the store's revision, which every commit bumps), `project`, `pins` and
-//! `change_requests` (one JSON document each, in the schema the record names; see `persist`), and `asset_names`.
-//! `PRAGMA user_version` is the layout of the tables; a file with a higher one is refused.
+//! The file holds six tables: `meta` (the store's revision, which every commit bumps), `project`, `pins` and
+//! `change_requests` (one JSON document each, in the schema the record names; see `persist`), `asset_names`, and
+//! `check_invocations` (the checks each use case ran, appended and never changed). `PRAGMA user_version` is the
+//! layout of the tables; a file with a higher one is refused. `check_invocations` was added without a new layout
+//! number: it is created `IF NOT EXISTS` each time a file of layout 1 is opened, so a database made before it gets
+//! the table and nothing else in it changes.
 
 use std::path::Path;
 use std::time::Duration;
@@ -15,13 +18,17 @@ use rusqlite_isle::{AsyncIsle, AsyncIsleDriver, IsleError};
 use uuid::Uuid;
 
 use super::persist::{self, CURRENT};
-use crate::app::ports::{AssetKind, AssetNames, Changes, Store, StoreRevision};
+use crate::app::ports::{
+    AssetKind, AssetNames, Changes, Invocation, Outcome, Store, StoreRevision,
+};
+use crate::domain::check::Hook;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
+use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId};
 
 /// The layout of the tables this code creates and reads.
@@ -64,6 +71,21 @@ PRAGMA user_version = 1;
 COMMIT;
 ";
 
+/// The record of the checks the use cases ran. Append-only: a row is written with the commit of the use case that
+/// ran the check, and `store_revision` is the revision that use case read (the model the check saw).
+const CREATE_INVOCATIONS: &str = "
+CREATE TABLE IF NOT EXISTS check_invocations (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_revision INTEGER NOT NULL,
+    check_id TEXT NOT NULL,
+    hook TEXT NOT NULL,
+    notes INTEGER NOT NULL,
+    warnings INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    outcome TEXT NOT NULL
+);
+";
+
 fn failed(e: IsleError) -> StoreError {
     StoreError::Failed(e.to_string())
 }
@@ -73,6 +95,9 @@ fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     let layout: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if layout == 0 {
         conn.execute_batch(CREATE)?;
+    }
+    if layout <= LAYOUT {
+        conn.execute_batch(CREATE_INVOCATIONS)?;
     }
     Ok(())
 }
@@ -122,6 +147,47 @@ impl SqliteStore {
         let SqliteStore { isle, driver } = self;
         drop(isle);
         driver.shutdown().await.map_err(failed)
+    }
+
+    /// The checks the use cases have run, in the order they were kept. Not part of the [`Store`] port: nothing in a
+    /// use case reads them back; they are for the person (or a test) who asks what ran.
+    pub async fn invocations(&self) -> Result<Vec<Invocation>, StoreError> {
+        let rows: Vec<(i64, String, String, i64, i64, i64, String)> = self
+            .isle
+            .call(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome
+                     FROM check_invocations ORDER BY seq",
+                )?;
+                stmt.query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?
+                .collect()
+            })
+            .await
+            .map_err(failed)?;
+        let corrupt = |what: &str| StoreError::Corrupt(format!("an invocation: {what}"));
+        rows.into_iter()
+            .map(|(at, check, hook, notes, warnings, errors, outcome)| {
+                Ok(Invocation {
+                    check: RuleId::try_from(check.as_str()).map_err(|e| corrupt(&e.to_string()))?,
+                    hook: Hook::from_word(&hook).ok_or_else(|| corrupt(&hook))?,
+                    read_at: StoreRevision(u64::try_from(at).map_err(|_| corrupt("a revision"))?),
+                    notes: u32::try_from(notes).map_err(|_| corrupt("a count"))?,
+                    warnings: u32::try_from(warnings).map_err(|_| corrupt("a count"))?,
+                    errors: u32::try_from(errors).map_err(|_| corrupt("a count"))?,
+                    outcome: Outcome::from_word(&outcome).ok_or_else(|| corrupt(&outcome))?,
+                })
+            })
+            .collect()
     }
 
     /// The documents `sql` selects (`schema`, `doc`), with at most one text parameter.
@@ -283,6 +349,23 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let names = changes.names;
+        let invocations = changes
+            .invocations
+            .iter()
+            .map(|i| {
+                Ok((
+                    i64::try_from(i.read_at.0).map_err(|_| {
+                        StoreError::Failed("a revision too large to keep".to_string())
+                    })?,
+                    i.check.to_string(),
+                    i.hook.word(),
+                    i64::from(i.notes),
+                    i64::from(i.warnings),
+                    i64::from(i.errors),
+                    i.outcome.word(),
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let current = CURRENT;
         let kept = self
             .isle
@@ -326,6 +409,14 @@ impl Store for SqliteStore {
                         ],
                     )?;
                 }
+                for (at, check, hook, notes, warnings, errors, outcome) in &invocations {
+                    tx.execute(
+                        "INSERT INTO check_invocations
+                         (store_revision, check_id, hook, notes, warnings, errors, outcome)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![at, check, hook, notes, warnings, errors, outcome],
+                    )?;
+                }
                 tx.execute("UPDATE meta SET revision = revision + 1 WHERE id = 1", [])?;
                 Ok(true)
             })
@@ -362,6 +453,15 @@ mod tests {
                 id: fixture::id(fixture::IFACE),
             }],
             project: Some(p),
+            invocations: vec![Invocation {
+                check: RuleId::from_static("cite.uncited-clause"),
+                hook: Hook::Put,
+                read_at: StoreRevision(0),
+                notes: 0,
+                warnings: 2,
+                errors: 0,
+                outcome: Outcome::Found,
+            }],
         }
     }
 
@@ -390,6 +490,42 @@ mod tests {
             Some(n.id)
         );
         assert_eq!(store.asset_name(n.id).await.unwrap(), Some(n.name.clone()));
+        assert_eq!(store.invocations().await.unwrap(), c.invocations);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invocations_are_appended_and_a_refused_commit_appends_none() {
+        let path = temp_db("invocations");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let at = store.revision().await.unwrap();
+        store.commit(at, changes()).await.unwrap();
+        let again = store.revision().await.unwrap();
+        store.commit(again, changes()).await.unwrap();
+        assert_eq!(store.invocations().await.unwrap().len(), 2);
+        // Committed at an old revision: refused, so its record is not kept either.
+        assert_eq!(store.commit(at, changes()).await, Err(StoreError::Conflict));
+        assert_eq!(store.invocations().await.unwrap().len(), 2);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_database_made_before_the_invocations_table_gets_it_on_opening() {
+        let path = temp_db("before-invocations");
+        SqliteStore::open(&path)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE check_invocations", []).unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(store.invocations().await.unwrap().is_empty());
+        let at = store.revision().await.unwrap();
+        store.commit(at, changes()).await.unwrap();
+        assert_eq!(store.invocations().await.unwrap().len(), 1);
         store.close().await.unwrap();
     }
 
