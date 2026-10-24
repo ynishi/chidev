@@ -65,8 +65,8 @@ belong):
   targets, the change requests, what was retired and the findings of every check.
 
 A put or a retire does not need an open change request, but it belongs to none: it
-does not meet what any change request expects to change or remove (only a
-`change_set` `for` the request does, see "Change requests"). A change that touches
+shows in the targets of no change request (only a `change_set` `for` the request
+does, see "Change requests"). A change that touches
 several assets and holds only as a whole is one `change_set` (next section).
 
 ## Change sets
@@ -133,9 +133,9 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   something in it was added or removed), each with the containers it was in. The
   answer is the same; `findings` includes `cr.out-of-frame` when the set left the
   frame (see "Change requests"). A set without `for`, a put or a retire alone,
-  belongs to no request: it records nothing, meets no `change` or `remove`, and is
-  judged by revision only for the `keep` of requests. There is no way to add a
-  Context in a set, so a Context added by `context_add` meets no expectation.
+  belongs to no request: it records nothing, shows in no request's `targets`, and
+  is judged by revision only for the `keep` of requests. A Context added by
+  `context_add` (and not by a set `for` a request) is such a move too.
 
 ## External checks
 
@@ -471,10 +471,14 @@ and not the implementation. Therefore:
 
 ## Change requests
 
-A change request says what it expects of the targets it points at, in three
-lists, and may carry a `crux`, a choice a decision maker has to make, and the
-`assumptions` made while raising it (see below). The targets are the assets, as a
-tree, and each has a revision:
+A change request says what is asked, why (`situation`, in the words of whoever
+raised it, and the `issuer`: both are kept and `status` shows them), which
+targets it asks to have revised or retired (`targets`) and which to keep as they
+are (`keep`). It may carry a `crux`, a choice a decision maker has to make, and the
+`assumptions` made while raising it (see below). A request is **closed by a
+decision a person or a role takes and records** (`cr_resolve`), never by what
+the definitions did: the targets are the content of the request, not a condition
+of closing it. The targets are the assets, as a tree, and each has a revision:
 
 ```text
 Project
@@ -490,66 +494,133 @@ A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
 `{"item":{"context":..,"interface":..,"signature":..}}`,
 `{"clause":{"context":..,"contract":..,"label":..}}` and
 `{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
-the request opens, and a target has one expectation.
+the request opens, and a target is in one list, once. `cr_open` refuses a field it
+does not know (`change` and `remove` of earlier versions among them).
 
-- `change`: the revision of the target goes past the one recorded at `cr_open`,
-  and the target moved in the work of the request or of a part of it (see
-  "Attribution" below). Adding something is a change of what holds it: a Clause,
-  `change` its Contract; a Contract, Interface or Harness, `change` its Context; a
-  Context, `change` the Project. A Context's revision moves when one of its assets
-  is added or removed, or its `uses` or basis change, not when an asset's content
-  does; the Project's moves when a Context is added or removed. `change` of the
-  Project is met by a change set `for` the request that adds a Context
-  (`{"put":"context",..}`); a Context added by `context_add` or by a set for no
-  request does not meet it.
-- `remove`: the target is no longer there (a Context takes its assets with it), and
-  it went in the work of the request or of a part of it.
-- `keep`: the revision of the target is still the one recorded, whoever moved it.
-  A request cannot be resolved once a target it keeps has moved.
-- Each option of the Crux takes the same `change` / `remove` / `keep` lists
-  (and `wording`, the exact new text of the definitions, which was `change`
-  before the lists took that name). `cr_decide` records the revision each of
-  them has at that moment. Deciding with the decision maker's own wording, or
-  leaving it unspecified, expects nothing more.
+- `targets`: what the request asks to have revised or retired. A request that
+  adds something names what holds it, as adding is a move of the container: a
+  Clause, its Contract; a Contract, Interface or Harness, its Context; a
+  Context, the Project. A Context's revision moves when one of its assets is
+  added or removed, or its `uses` or basis change, not when an asset's content
+  does; the Project's moves when a Context is added or removed. A **parent**
+  (a request other requests name as their `parent`) may have no targets: it keeps
+  the request in the requester's words and the split, and is closed when its
+  parts are.
+- `keep`: the targets that must stay as they are; the revision recorded at
+  `cr_open` is compared, whoever moved the target.
+- Each option of the Crux takes the same `targets` / `keep` lists (and
+  `wording`, the exact new text of the definitions). `cr_decide` records the
+  revision each of them has at that moment. Deciding with the decision maker's
+  own wording, or leaving it unspecified, names nothing more.
+- Neither list gates the closing of the request. `status` shows, for each of its
+  `targets`, **what the work did to it**, read from the footprints of the
+  request's change sets and of its parts (see "Attribution and frame"): `revised`,
+  `retired` or `not touched yet`; and for each `keep`, whether it `moved`.
 - `intent` (`change_behavior` or `keep_behavior`) is a record. No rule of
   resolving reads it; the note `cr.intent-mismatch` points out a keep-behavior
-  request that changes or removes a Clause, and a change-behavior request that
-  changes or removes nothing.
-- `cr_resolve` needs the Crux answered, every `change` and `remove` met (the
-  request's own and the chosen option's), no `keep` moved, and every request
-  whose `parent` it is resolved. When it refuses it names what is missing, by
-  name (`rounding C1`): what has not changed, what is gone, what is not removed
-  yet, what moved, or which parts are open, and which of the targets moved but
-  not in the work of the request.
+  request that names a Clause as a target, and a change-behavior request that
+  names no target (a parent is left out).
+
+### Lifecycle and resolution
+
+```text
+open ──cr_resolve──▶ resolved ──cr_reopen──▶ open ──cr_resolve──▶ resolved ...
+```
+
+`cr_resolve` is a decision, recorded with how the request ended, why, who says
+so, and when (from the clock):
+
+```json
+{"op":"cr_resolve","title":"Refuse big discounts","resolution":"done",
+ "reason":"C1 now refuses above 50%","by":{"person":"alice"}}
+{"op":"cr_resolve","title":"Name the error","resolution":"wont_do",
+ "reason":"callers do not tell the errors apart","by":{"role":"orchestrator"}}
+{"op":"cr_resolve","title":"Cap discounts","resolution":{"duplicate":"Refuse big discounts"},
+ "reason":"the same ask","by":{"person":"alice"}}
+```
+
+`resolution` is `"done"`, `"wont_do"`, `"invalid"`, `{"duplicate":"<title>"}` or
+`{"superseded":"<title>"}`; the title is another change request, which has to
+exist. The `reason` and `by` (`{"person":..}` or `{"role":..}`) are required.
+Only explicit states refuse it, in this order:
+
+1. the request is resolved already;
+2. it is `done` and its Crux has no answer (any other resolution may leave the
+   question open);
+3. a `duplicate` or a `superseded` points at itself or at a request that does not
+   exist;
+4. a request whose `parent` it is is not resolved (whatever way it would end).
+
+The revisions of the targets and the work recorded for the request are **not**
+consulted, so a request whose targets were never touched can be resolved as done.
+The checks then say where the record and the work disagree (below).
+
+`cr_reopen` opens a resolved request again:
+
+```json
+{"op":"cr_reopen","title":"Refuse big discounts","reason":"a caller still breaks",
+ "by":{"person":"bob"}}
+```
+
+The resolution it had stays: a request keeps a **history**, a log of
+`resolved` and `reopened` steps (each with the reason, who and when) that is only
+appended to, and `status` shows it as `history` beside the current `resolution`.
+A reopened request takes work (`change_set` `for` it), decisions and assumptions
+again, and can be resolved anew. Reopening does not touch its parts or its
+parent: a parent resolved while this request was closed stays resolved.
+
+### Opening, and what `status` and the checks show
 
 ```json
 {"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
- "change":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}],
+ "situation":"discounts above 50% should never be given","issuer":"sales",
+ "targets":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}],
  "crux":{"kind":"ambiguity","importance":"normal",
   "recommended":{"choice":"reuse InvalidDiscount","reason":"no new type","confidence":85},
   "options":[{"choice":"reuse InvalidDiscount"},
-             {"choice":"new error","change":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}]}]}}
+             {"choice":"new error","targets":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}]}]}}
 ```
 
 ```json
 {"op":"cr_open","title":"Add rules and drop C2","intent":"change_behavior",
- "change":[{"context":"pricing"}],
- "remove":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}],
+ "targets":[{"context":"pricing"},{"clause":{"context":"pricing","contract":"discount","label":"C2"}}],
  "keep":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}]}
 ```
 
-`cr_open` answers with the expectations it recorded, so a wrong reference is
-seen at once: `{"kind":"keep","target":{"clause":{"context":"pricing","contract":"discount","label":"C1"}},"recorded":1}`.
-`status` lists a request whose Crux has no decision under `awaiting` (title, kind,
-options with what each expects, the recommendation with its confidence, and the
-importance), the requests whose `change` / `remove` have not been met
-under `unapplied` (`unchanged`, `gone`, `not_removed`, and `elsewhere`: those of
-them that did move, or go, but not in the work of the request), and those whose
-`keep` moved under `keep_moved`. The checks `cr.awaiting-decision` (a note),
-`cr.unapplied`, `cr.keep-moved` and `cr.out-of-frame` (warnings) report them. A
-database written before expectations, or before the Crux, Policy and Assumptions
-below, or before the work of a request was recorded, does not load; chidev is
-unreleased and there is no migration.
+A parent that only splits the ask, and a part with the targets (the shape of
+removing a feature):
+
+```json
+{"op":"cr_open","title":"Remove release","intent":"change_behavior","situation":"release is gone"}
+{"op":"cr_open","title":"Drop release","intent":"change_behavior","parent":"Remove release",
+ "targets":[{"clause":{"context":"core","contract":"stock","label":"C7"}}]}
+```
+
+`cr_open` answers with what it recorded, so a wrong reference is seen at once:
+`{"kind":"keep","target":{"clause":{"context":"pricing","contract":"discount","label":"C1"}},"recorded":1}`
+(`kind` is `target` or `keep`). `status` shows each request with its `situation`,
+`issuer`, `state`, `answer`, `resolution` and `history`, its `targets` with what
+the work did to each, its `keep` with whether each moved, its `work` and its
+`out_of_frame`. It lists a request whose Crux has no decision under `awaiting`
+(title, kind, options with what each names, the recommendation with its
+confidence, and the importance), and the unresolved requests one of whose `keep`
+moved under `keep_moved`. The checks:
+
+| check | level | says |
+|---|---|---|
+| `cr.awaiting-decision` | note | the Crux of an unresolved request has no decision |
+| `cr.keep-moved` | warning | an unresolved request keeps a target and it moved |
+| `cr.out-of-frame` | warning | the work for an unresolved request moved something it did not name |
+| `cr.resolved-without-work` | warning | resolved as `done`, yet no change set `for` it or its parts moved anything |
+| `cr.targets-untouched` | note | resolved as `done`, with work, yet a target it named was never touched by it or its parts |
+| `cr.intent-mismatch` | note | the intent and the targets disagree |
+
+`cr.unapplied` of earlier versions is gone: it judged the closing of a request by
+the revisions of its targets, which a resolution no longer does; `status` shows
+the same thing (`not touched yet`) per target, without a finding on every request
+that has just been opened. A database written before targets and resolutions (or
+before the Crux, Policy and Assumptions below, or before the work of a request was
+recorded) does not load; chidev is unreleased and there is no migration.
 
 The change a request asks for is made as a `change_set` `for` it (see "Change
 sets"): a change that touches several assets and holds only as a whole (a Clause
@@ -561,35 +632,35 @@ is one set, not a series of puts that has to be ordered around the citations.
 A `change_set` with `for` records its footprint for the request (what it moved, in
 the same commit). That ties the work to the request that asked for it:
 
-- A `change` or `remove` is met only by a move in the footprints recorded for the
-  request or for its parts, children and their children. A target that moved in a
-  set `for` another request, or in a set or a put or a retire without `for`, does
-  not meet it. The request stays `unapplied`, the target is listed under
-  `elsewhere`, and `cr_resolve` says so: ``not changed: stock C1; moved, but not by
-  a change set for this request: stock C1``. A `keep` is a protection against
-  anyone, so it is still judged by the revision alone.
-- A parent only aggregates. It need not expect anything: it is met by what its
-  parts did, and it is resolved when they are. When the parent does expect something
-  (a `change` of the Contract the parts work on), that is met by the work of any
-  part.
-- The targets a request expects to `change` or `remove` (its own and those of the
+- What the work did to a `target` is read from the footprints recorded for the
+  request or for its parts, children and their children (the requests that name
+  it as their `parent`, and theirs). A target is `revised` when a footprint moved
+  it, or something inside it, and it is still in the Project; `retired` when one
+  moved it and it is gone; `not touched yet` when none did. A move in a set `for`
+  another request, or in a set, a put or a retire without `for`, shows in no
+  request's targets. This is information for `status` and the checks; it decides
+  nothing about closing. A `keep` is a protection against anyone, so it is judged
+  by the revision alone.
+- A parent only aggregates. It need not name any target: the work of its parts is
+  its work, and it is closed when they are resolved. A parent resolved as done
+  with no work on it or on any part is `cr.resolved-without-work`.
+- The targets a request names to revise or retire (its own and those of the
   option its Crux chose) are its **frame**; a `keep` is not part of it. Naming a
-  container frames everything in it: `change` of a Contract frames its Clauses, of
-  a Context its assets and what is in them, of the Project everything. The work of
-  a request is to stay in its frame. A footprint that moved a target outside the
-  frame of its request, or outside the frame of a request it is a part of, is
-  reported as `cr.out-of-frame` (a warning; hooks `put` and `check`) for the request
-  the set was applied for, and `status` lists it as `out_of_frame` of that request
-  next to its `work` (each footprint's `store_revision` and the targets it moved).
-  The frame of a parent bounds its parts: a part that works outside it is out of
-  frame even where the part itself named the target. A parent with no frame bounds
-  nothing; a request with no frame has all its work out of frame. A container that
-  moved only because something inside it moved within the frame (the Contract that
-  took a Clause, the Context that took an asset) is not outside. A resolved request
-  is a record: it takes no more work and is not reported.
+  container frames everything in it: a Contract frames its Clauses, a Context its
+  assets and what is in them, the Project everything. The work of a request is to
+  stay in its frame, and **the frame is the request's own**: a parent's targets
+  neither widen nor bound its parts. A footprint that moved a target outside the
+  frame of the request it was applied for is reported as `cr.out-of-frame` (a
+  warning; hooks `put` and `check`) for that request, and `status` lists it as
+  `out_of_frame` of that request next to its `work` (each footprint's
+  `store_revision` and the targets it moved). A request with no targets has all its
+  work out of frame. A container that moved only because something inside it moved
+  within the frame (the Contract that took a Clause, the Context that took an asset)
+  is not outside. A resolved request is a record: it takes no more work (until it
+  is reopened) and is not reported for its frame.
 - A new Clause or Item is a move of its own: a frame that names only the other
-  Clauses of the Contract has it outside, so frame the Contract (`change`) when the
-  request adds to it.
+  Clauses of the Contract has it outside, so name the Contract when the request
+  adds to it.
 
 ### Crux, Policy and Assumption
 
@@ -671,23 +742,24 @@ without them; what a put drops is recorded as retired too.
   and what went with it, the asset's for a part a put dropped). `status.retired`
   lists them, in the order they were retired.
 - **Revisions.** The Project's revision moves when a Context is retired, a
-  Context's when one of its assets is, so a `change` of the Project or the Context
-  is met as for adding.
+  Context's when one of its assets is, so the Project or the Context named as a
+  target reads `revised` as for adding.
 - **Outside the Project, ids stay.** A Pin of a retired Interface stays and reads
-  `gone` (`pin.stale` does not report it: retiring is intentional). A `remove` expectation of a retired
-  target is met; a `change` of one reads `gone`. Measurements and findings keep
-  their ids. Wherever chidev names a target the live model does not have it names
-  it from the record with `(retired)` (`status`, errors, `unapplied`, findings and
+  `gone` (`pin.stale` does not report it: retiring is intentional). A target that
+  the work moved and that is retired reads `retired` in `status`. Measurements and
+  findings keep their ids. Wherever chidev names a target the live model does not
+  have it names it from the record with `(retired)` (`status`, errors, findings and
   `status.measurements`, whose `state` is then `retired`). The checks that judge
   Interfaces and Harnesses (`pin.unpinned`, `mutation.*`, `sim.*`, the uncited
   and no-harness checks) read the live model, so they do not judge a retired one.
 
 Retiring, like a put, does not need an open change request, but a retire operation
-belongs to none. The procedure retires as the work of a change request that
-expects the thing to go: open it with a `remove` for the Context or the asset,
-retire it in a `change_set` `for` the request (the Cases that cite first, or in the
-same set), and resolve it once the expectation is met. A retire operation on its own
-is not tied to a request, and a thing it takes out is not removed for any.
+belongs to none. The procedure retires as the work of a change request that asks
+for the thing to go: open it with the Context or the asset in `targets`, retire it
+in a `change_set` `for` the request (the Cases that cite first, or in the same
+set), and resolve it as done once it has. `status` reads the target `retired` from
+that work. A retire operation on its own is not tied to a request, and a thing it
+takes out shows in no request's targets.
 
 Retiring several things, or retiring together with a put, is one `change_set` with
 `retires` (see "Change sets"): the refusals above are judged on the state the set
@@ -707,7 +779,7 @@ It uses the same `subject` form as `finding_report`:
   {"rule":"cite.uncited-item","subject":{"item":{"context":"pricing","interface":"rounding","signature":"fn round()"}}},
   {"rule":"cite.uncited-clause","subject":{"clause":{"context":"pricing","contract":"totals","label":"C1"}}},
   {"rule":"judged.case-review","subject":{"case":{"context":"pricing","harness":"rounding-tests","name":"half rounds up"}}},
-  {"rule":"cr.unapplied","subject":{"change_request":"change rounding"}},
+  {"rule":"cr.keep-moved","subject":{"change_request":"change rounding"}},
   {"rule":"judged.project-review","subject":null}
 ]
 ```

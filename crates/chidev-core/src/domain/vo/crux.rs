@@ -40,8 +40,8 @@ impl CruxKind {
     }
 }
 
-/// One answer a Crux offers: the choice, the change it makes to the definitions (in words, and as what it expects
-/// of the targets: change, remove or keep; none when it expects nothing more), and what else it affects.
+/// One answer a Crux offers: the choice, the change it makes to the definitions (in words, and as the targets it
+/// names: to revise or retire, or to keep; none when it names nothing more), and what else it affects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CruxOption {
     choice: Choice,
@@ -51,8 +51,8 @@ pub struct CruxOption {
 }
 
 impl CruxOption {
-    /// An option. `expects` is what the option expects of targets once it is chosen, besides the expectations of
-    /// the change request, which hold whatever is chosen (one kind for each target).
+    /// An option. `expects` is what the option asks of targets once it is chosen, besides what the change request
+    /// asks, which holds whatever is chosen (one kind for each target).
     pub fn new(
         choice: Choice,
         change: Option<Prose>,
@@ -77,7 +77,7 @@ impl CruxOption {
         self.change.as_ref()
     }
 
-    /// What it expects of targets when it is chosen; empty: it expects no more than the change request does.
+    /// What it asks of targets when it is chosen; empty: it asks no more than the change request does.
     pub fn expects(&self) -> &BTreeMap<Target, ExpectKind> {
         &self.expects
     }

@@ -31,7 +31,7 @@ mod model_view;
 pub mod subject;
 pub use self::subject::SubjectInput;
 mod target;
-pub use self::target::{ExpectInput, OpenedExpect, TargetInput};
+pub use self::target::{OpenedExpect, TargetInput};
 pub mod ports;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,8 +56,8 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{
-    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, out_of_frame,
-    resolve, unapplied,
+    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, keep_progress,
+    out_of_frame, resolve, target_progress,
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
@@ -82,6 +82,7 @@ use crate::domain::vo::measure::MeasureError;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
+use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind, Transition};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 pub use crate::domain::vo::target::ExpectKind;
@@ -227,28 +228,9 @@ pub enum AppError {
     /// The code cannot be pinned.
     #[error(transparent)]
     Pin(#[from] PinError),
-    /// The change request cannot be opened, decided or resolved.
+    /// The change request cannot be opened, decided, resolved or reopened.
     #[error(transparent)]
     ChangeRequest(#[from] ChangeRequestError),
-    /// The targets have not followed the change request yet; they are named as `status` names them.
-    #[error("the change is not applied yet: {}", not_applied_words(.unchanged, .gone, .not_removed, .elsewhere))]
-    NotApplied {
-        /// The targets to change that no change set applied for the request (or a part of it) has moved, described.
-        unchanged: Vec<String>,
-        /// The targets to change that are gone, described.
-        gone: Vec<String>,
-        /// The targets to remove that no change set applied for the request (or a part of it) has taken out,
-        /// described.
-        not_removed: Vec<String>,
-        /// The targets among the first and the third that did move, or go, but not under this request, described.
-        elsewhere: Vec<String>,
-    },
-    /// Targets the change request expected to stay as they are have moved, so it cannot be resolved.
-    #[error("the change request expected these to stay as they are, but they moved: {}", .moved.join(", "))]
-    KeepMoved {
-        /// The targets that moved, described.
-        moved: Vec<String>,
-    },
     /// Change requests that are a part of this one are not resolved yet.
     #[error("these parts of the change request are not resolved: {}", .children.join(", "))]
     ChildrenNotResolved {
@@ -478,8 +460,10 @@ pub struct OptionInput {
     pub choice: String,
     /// The change it makes to the definitions the Crux is about (the exact new wording); none: it changes none.
     pub change: Option<String>,
-    /// What it expects of targets when it is chosen, apart from what the change request expects.
-    pub expects: Vec<ExpectInput>,
+    /// The targets it asks to be revised or retired when it is chosen, besides those of the change request.
+    pub targets: Vec<TargetInput>,
+    /// The targets it asks to keep as they are when it is chosen.
+    pub keep: Vec<TargetInput>,
     /// What else it affects.
     pub consequence: Option<String>,
 }
@@ -565,6 +549,22 @@ pub enum DecisionMakerInput {
     Person(String),
 }
 
+/// How a change request ended, as a person writes it. A reference is the title of another change request, which
+/// has to exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionInput {
+    /// What was asked is done.
+    Done,
+    /// It will not be done.
+    WontDo,
+    /// It is the same as the change request titled so.
+    Duplicate(String),
+    /// The change request titled so replaces it.
+    Superseded(String),
+    /// It was never a valid request.
+    Invalid,
+}
+
 /// One line of the decision Policy, as a person writes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyLineInput {
@@ -595,9 +595,11 @@ pub struct ChangeRequestInput {
     pub parent: Option<String>,
     /// Who raises it.
     pub issuer: Option<String>,
-    /// What it expects of targets: change, remove or keep, each target once.
-    pub expects: Vec<ExpectInput>,
-    /// The choice for a decision maker, besides the expectations; none: nothing to decide.
+    /// The targets it asks to be revised or retired, each target once. A parent need not name any.
+    pub targets: Vec<TargetInput>,
+    /// The targets it asks to keep as they are, each target once and none of them also a target.
+    pub keep: Vec<TargetInput>,
+    /// The choice for a decision maker, besides the targets; none: nothing to decide.
     pub crux: Option<CruxInput>,
     /// The interpretations settled from the repository and general knowledge while raising it.
     pub assumptions: Vec<AssumptionInput>,
@@ -700,11 +702,72 @@ pub struct AssumptionStatus {
     pub evidence: Vec<EvidenceStatus>,
 }
 
+/// How a change request ended, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionStatus {
+    /// `done`, `wont_do`, `duplicate`, `superseded` or `invalid`.
+    pub kind: &'static str,
+    /// The title of the change request a `duplicate` or a `superseded` points at.
+    pub reference: Option<String>,
+    /// Why.
+    pub reason: String,
+    /// `role` or `person`.
+    pub by_kind: &'static str,
+    /// The name of the role or the person.
+    pub by: String,
+    /// When, in milliseconds since the epoch.
+    pub at: u64,
+}
+
+/// A reopening of a change request, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReopeningStatus {
+    /// Why.
+    pub reason: String,
+    /// `role` or `person`.
+    pub by_kind: &'static str,
+    /// The name of the role or the person.
+    pub by: String,
+    /// When, in milliseconds since the epoch.
+    pub at: u64,
+}
+
+/// One step of the history of a change request, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransitionStatus {
+    /// It was resolved.
+    Resolved(ResolutionStatus),
+    /// It was opened again.
+    Reopened(ReopeningStatus),
+}
+
+/// A target a change request asks to be revised or retired, and what its work did to it, in the result of
+/// `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetStatus {
+    /// The target, described.
+    pub target: String,
+    /// `revised`, `retired` or `not touched yet`, read from the footprints of the work of the request and of its
+    /// parts.
+    pub progress: &'static str,
+}
+
+/// A target a change request asks to keep as it is, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeepStatus {
+    /// The target, described.
+    pub target: String,
+    /// Whether it is no longer at the revision recorded (or is gone), whoever moved it.
+    pub moved: bool,
+}
+
 /// Where one change request stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRequestStatus {
     /// Its title.
     pub title: String,
+    /// Why it was raised, in the words of whoever raised it.
+    pub situation: Option<String>,
     /// `change_behavior` or `keep_behavior`.
     pub intent: &'static str,
     /// The title of the change request it is a part of.
@@ -719,12 +782,20 @@ pub struct ChangeRequestStatus {
     pub state: &'static str,
     /// The answer to its Crux: the decision, what it rests on, who gave it and when.
     pub answer: Option<AnswerStatus>,
+    /// How it ended, when it is resolved.
+    pub resolution: Option<ResolutionStatus>,
+    /// Every resolution and reopening, in the order they happened.
+    pub history: Vec<TransitionStatus>,
     /// The interpretations it records, in order.
     pub assumptions: Vec<AssumptionStatus>,
+    /// The targets it asks to be revised or retired (its own, then those its decision named), each with what the
+    /// work of it and of its parts did to it.
+    pub targets: Vec<TargetStatus>,
+    /// The targets it asks to keep, each with whether it moved.
+    pub keep: Vec<KeepStatus>,
     /// What the change sets applied for it moved, in the order they were kept.
     pub work: Vec<WorkStatus>,
-    /// The targets its work moved outside its frame (or the frame of a request it is a part of), described; empty
-    /// for a resolved request.
+    /// The targets its work moved outside its own frame, described; empty for a resolved request.
     pub out_of_frame: Vec<String>,
 }
 
@@ -749,7 +820,7 @@ pub struct Opened {
 /// What an option of an undecided Crux expects of one target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwaitingExpect {
-    /// `change`, `remove` or `keep`.
+    /// `target` or `keep`.
     pub kind: &'static str,
     /// The target, described.
     pub target: String,
@@ -812,25 +883,7 @@ pub struct PolicyStatus {
     pub lines: Vec<PolicyLineStatus>,
 }
 
-/// An unresolved change request the targets have not followed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnappliedStatus {
-    /// The change request's title.
-    pub cr: String,
-    /// The decision on its Crux, in words.
-    pub decision: Option<String>,
-    /// The targets to change that the work of the request (or of a part of it) has not moved, described.
-    pub unchanged: Vec<String>,
-    /// The targets to change that are gone, described.
-    pub gone: Vec<String>,
-    /// The targets to remove that the work of the request has not taken out, described.
-    pub not_removed: Vec<String>,
-    /// The targets among `unchanged` and `not_removed` that moved, or went, but not under this request (a change
-    /// set applied for another request, or for none, did it), described.
-    pub elsewhere: Vec<String>,
-}
-
-/// An unresolved change request that expected targets to stay as they are, and they moved.
+/// An unresolved change request that keeps targets as they are, and they moved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeepMovedStatus {
     /// The change request's title.
@@ -863,8 +916,8 @@ pub struct Retirement {
     pub retired: Vec<RetiredStatus>,
 }
 
-/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, the change
-/// requests, and those not yet applied.
+/// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, and the change
+/// requests with what their work did to their targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     /// Everything the Project retired, in the order it was retired.
@@ -875,9 +928,7 @@ pub struct Status {
     pub stale_cites: Vec<StaleCiteStatus>,
     /// Every change request.
     pub change_requests: Vec<ChangeRequestStatus>,
-    /// The change requests not yet applied.
-    pub unapplied: Vec<UnappliedStatus>,
-    /// The change requests that expected a target to stay as it is, and it moved.
+    /// The change requests that keep a target as it is, and it moved.
     pub keep_moved: Vec<KeepMovedStatus>,
     /// The change requests whose Crux has no decision yet.
     pub awaiting: Vec<AwaitingStatus>,
@@ -900,6 +951,30 @@ fn decision_text(d: &Decision) -> String {
         Decision::Chosen(c) => c.choice().to_string(),
         Decision::Worded { wording, .. } => format!("in other words: {wording}"),
         Decision::Unspecified { .. } => "left unspecified".to_string(),
+    }
+}
+
+/// Who decides, as the domain holds it.
+fn maker_of(by: &DecisionMakerInput) -> Result<DecisionMaker, AppError> {
+    match by {
+        DecisionMakerInput::Role(name) => DecisionMaker::role(name),
+        DecisionMakerInput::Person(name) => DecisionMaker::person(name),
+    }
+    .map_err(input)
+}
+
+/// The status of a resolution; `title_of` names the change request it points at.
+fn resolution_status(
+    r: &Resolution,
+    title_of: &impl Fn(ChangeRequestId) -> String,
+) -> ResolutionStatus {
+    ResolutionStatus {
+        kind: r.kind().word(),
+        reference: r.kind().reference().map(title_of),
+        reason: r.reason().to_string(),
+        by_kind: r.by().word(),
+        by: r.by().name().to_string(),
+        at: r.at().millis(),
     }
 }
 
@@ -1341,16 +1416,22 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))?,
             ),
         };
-        let mut wanted: Vec<(Target, ExpectKind)> = Vec::with_capacity(c.expects.len());
-        for e in &c.expects {
-            let target = self.target_of(&p, &e.target).await?;
-            if wanted.iter().any(|(t, _)| *t == target) {
-                return Err(AppError::Input(format!(
-                    "{} is given twice; a target has one expectation",
-                    self.describe(&p, target).await?
-                )));
+        let mut wanted: Vec<(Target, ExpectKind)> =
+            Vec::with_capacity(c.targets.len() + c.keep.len());
+        for (kind, refs) in [
+            (ExpectKind::Target, &c.targets),
+            (ExpectKind::Keep, &c.keep),
+        ] {
+            for r in refs {
+                let target = self.target_of(&p, r).await?;
+                if wanted.iter().any(|(t, _)| *t == target) {
+                    return Err(AppError::Input(format!(
+                        "{} is given twice; a target is a target or kept, once",
+                        self.describe(&p, target).await?
+                    )));
+                }
+                wanted.push((target, kind));
             }
-            wanted.push((target, e.kind));
         }
         let crux = match &c.crux {
             None => None,
@@ -1358,16 +1439,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let mut options = Vec::with_capacity(q.options.len());
                 for o in &q.options {
                     let mut expects = BTreeMap::new();
-                    for e in &o.expects {
-                        let target = self.target_of(&p, &e.target).await?;
-                        let twice = expects.insert(target, e.kind).is_some();
-                        let clashes = wanted.iter().any(|(t, k)| *t == target && *k != e.kind);
-                        if twice || clashes {
-                            return Err(AppError::Input(format!(
-                                "{} is expected twice, in different ways, by the change request and the option `{}`",
-                                self.describe(&p, target).await?,
-                                o.choice
-                            )));
+                    for (kind, refs) in [
+                        (ExpectKind::Target, &o.targets),
+                        (ExpectKind::Keep, &o.keep),
+                    ] {
+                        for r in refs {
+                            let target = self.target_of(&p, r).await?;
+                            let twice = expects.insert(target, kind).is_some();
+                            let clashes = wanted.iter().any(|(t, k)| *t == target && *k != kind);
+                            if twice || clashes {
+                                return Err(AppError::Input(format!(
+                                    "{} is a target and kept, or given twice, by the change request and the option `{}`",
+                                    self.describe(&p, target).await?,
+                                    o.choice
+                                )));
+                            }
                         }
                     }
                     options.push(CruxOption::new(
@@ -1485,11 +1571,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 reason: Prose::try_from(reason.as_str()).map_err(input)?,
             },
         };
-        let by = match by {
-            DecisionMakerInput::Role(name) => DecisionMaker::role(name),
-            DecisionMakerInput::Person(name) => DecisionMaker::person(name),
-        }
-        .map_err(input)?;
+        let by = maker_of(by)?;
         let decision = match decision {
             DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
             DecisionInput::Worded { wording, reason } => Decision::Worded {
@@ -1557,28 +1639,45 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// Closes the record of the change request titled `title`, once the change is applied.
-    pub async fn resolve_change_request(&mut self, title: &str) -> Result<Checked<()>, AppError> {
+    /// Closes the record of the change request titled `title` with a resolution: how it ended (`how`), why
+    /// (`reason`), who says so (`by`), and when (from the clock). Only explicit states refuse it: the request
+    /// resolved already, its Crux not answered (to resolve it as done), a part of it not resolved, a `duplicate` or
+    /// `superseded` that points at a change request that does not exist (or at itself). The revisions of the
+    /// targets and the work recorded for the request are not consulted; the checks of the resolve hook say where
+    /// they disagree with the record.
+    pub async fn resolve_change_request(
+        &mut self,
+        title: &str,
+        how: &ResolutionInput,
+        reason: &str,
+        by: &DecisionMakerInput,
+    ) -> Result<Checked<()>, AppError> {
+        let now = self.clock.now();
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let mut cr = self.change_request_titled(title).await?;
         let mut crs = self.store.change_requests().await?;
-        if let Err(e) = resolve(&mut cr, &p, &crs) {
+        let titled = |t: &String| {
+            crs.iter()
+                .find(|c| c.title().as_str() == t.trim())
+                .map(|c| c.id())
+                .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))
+        };
+        let kind = match how {
+            ResolutionInput::Done => ResolutionKind::Done,
+            ResolutionInput::WontDo => ResolutionKind::WontDo,
+            ResolutionInput::Duplicate(t) => ResolutionKind::Duplicate { of: titled(t)? },
+            ResolutionInput::Superseded(t) => ResolutionKind::Superseded { by: titled(t)? },
+            ResolutionInput::Invalid => ResolutionKind::Invalid,
+        };
+        let resolution = Resolution::new(
+            kind,
+            Prose::try_from(reason).map_err(input)?,
+            maker_of(by)?,
+            now,
+        );
+        if let Err(e) = resolve(&mut cr, resolution, &crs) {
             return Err(match e {
-                ChangeRequestError::NotApplied {
-                    unchanged,
-                    gone,
-                    not_removed,
-                    elsewhere,
-                } => AppError::NotApplied {
-                    unchanged: self.describe_all(&p, &unchanged).await?,
-                    gone: self.describe_all(&p, &gone).await?,
-                    not_removed: self.describe_all(&p, &not_removed).await?,
-                    elsewhere: self.describe_all(&p, &elsewhere).await?,
-                },
-                ChangeRequestError::KeepMoved { moved } => AppError::KeepMoved {
-                    moved: self.describe_all(&p, &moved).await?,
-                },
                 ChangeRequestError::ChildrenNotResolved { children } => {
                     AppError::ChildrenNotResolved {
                         children: children
@@ -1606,6 +1705,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             value: (),
             findings: gate.found,
         })
+    }
+
+    /// Opens the resolved change request titled `title` again: why (`reason`), who says so (`by`), and when (from
+    /// the clock). The resolution it had stays in its history; it takes work, decisions and assumptions again and
+    /// can be resolved anew. Its parts and its parent are not touched.
+    pub async fn reopen_change_request(
+        &mut self,
+        title: &str,
+        reason: &str,
+        by: &DecisionMakerInput,
+    ) -> Result<(), AppError> {
+        let now = self.clock.now();
+        let at = self.store.revision().await?;
+        let mut cr = self.change_request_titled(title).await?;
+        cr.reopen(Reopening::new(
+            Prose::try_from(reason).map_err(input)?,
+            maker_of(by)?,
+            now,
+        ))?;
+        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+            .await?;
+        Ok(())
     }
 
     /// Runs every check on the state as it is: what the person would see if each check ran now, with what agents
@@ -1719,8 +1840,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .map(|c| c.title().to_string())
                 .unwrap_or_else(|| id.to_string())
         };
-        let decision_of =
-            |c: &ChangeRequest| c.crux().and_then(|q| q.decision()).map(decision_text);
         let out_of_frame = out_of_frame(&crs);
         let mut records = Vec::with_capacity(crs.len());
         for c in &crs {
@@ -1736,8 +1855,23 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Some(o) => self.describe_all(&p, &o.moved).await?,
                 None => Vec::new(),
             };
+            let mut targets = Vec::new();
+            for t in target_progress(c, &p, &crs) {
+                targets.push(TargetStatus {
+                    target: self.describe(&p, t.target).await?,
+                    progress: t.progress.word(),
+                });
+            }
+            let mut keep = Vec::new();
+            for k in keep_progress(c, &p) {
+                keep.push(KeepStatus {
+                    target: self.describe(&p, k.target).await?,
+                    moved: k.moved,
+                });
+            }
             records.push(ChangeRequestStatus {
                 title: c.title().to_string(),
+                situation: c.situation().map(|s| s.to_string()),
                 intent: c.intent().word(),
                 parent: c.parent().map(title_of),
                 issuer: c.issuer().map(|i| i.to_string()),
@@ -1745,23 +1879,27 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 supersedes: c.crux().and_then(Crux::supersedes).map(title_of),
                 state: c.state().word(),
                 answer: c.crux().and_then(Crux::answer).map(answer_status),
+                resolution: c.resolution().map(|r| resolution_status(r, &title_of)),
+                history: c
+                    .history()
+                    .iter()
+                    .map(|t| match t {
+                        Transition::Resolved(r) => {
+                            TransitionStatus::Resolved(resolution_status(r, &title_of))
+                        }
+                        Transition::Reopened(r) => TransitionStatus::Reopened(ReopeningStatus {
+                            reason: r.reason().to_string(),
+                            by_kind: r.by().word(),
+                            by: r.by().name().to_string(),
+                            at: r.at().millis(),
+                        }),
+                    })
+                    .collect(),
                 assumptions: c.assumptions().iter().map(assumption_status).collect(),
+                targets,
+                keep,
                 work,
                 out_of_frame: outside,
-            });
-        }
-        let mut open = Vec::new();
-        for u in unapplied(&crs, &p) {
-            let Some(cr) = crs.iter().find(|c| c.id() == u.cr) else {
-                continue;
-            };
-            open.push(UnappliedStatus {
-                cr: cr.title().to_string(),
-                decision: decision_of(cr),
-                unchanged: self.describe_all(&p, &u.unchanged).await?,
-                gone: self.describe_all(&p, &u.gone).await?,
-                not_removed: self.describe_all(&p, &u.not_removed).await?,
-                elsewhere: self.describe_all(&p, &u.elsewhere).await?,
             });
         }
         let mut moved = Vec::new();
@@ -1824,7 +1962,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             pins,
             stale_cites: stale,
             change_requests: records,
-            unapplied: open,
             keep_moved: moved,
             awaiting,
             policy,
@@ -2153,34 +2290,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     async fn describe(&self, p: &Project, target: Target) -> Result<String, AppError> {
         self.describe_in(p, target, &[]).await
     }
-}
-
-/// What a change request still lacks, in words: the targets as they were, then the ones gone, then the ones to
-/// remove that are still there, and the ones among them that moved or went but not under the request (a change set
-/// applied for another request, or for none, did it).
-fn not_applied_words(
-    unchanged: &[String],
-    gone: &[String],
-    not_removed: &[String],
-    elsewhere: &[String],
-) -> String {
-    let mut parts = Vec::with_capacity(4);
-    if !unchanged.is_empty() {
-        parts.push(format!("not changed: {}", unchanged.join(", ")));
-    }
-    if !gone.is_empty() {
-        parts.push(format!("gone: {}", gone.join(", ")));
-    }
-    if !not_removed.is_empty() {
-        parts.push(format!("not removed: {}", not_removed.join(", ")));
-    }
-    if !elsewhere.is_empty() {
-        parts.push(format!(
-            "moved, but not by a change set for this request: {}",
-            elsewhere.join(", ")
-        ));
-    }
-    parts.join("; ")
 }
 
 /// Refuses when the asset `target` (the `kind` named `name` of the Context `context`) was retired.

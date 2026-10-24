@@ -109,13 +109,36 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     );
     assert!(crs[1]["answer"]["at"].as_u64().expect("a time") > 0);
     assert_eq!(crs[0]["answer"], Value::Null);
-    assert_eq!(decided["unapplied"][0]["unchanged"][0], "rounding C1");
+    // the situation and the issuer given to cr_open are kept and shown
+    assert_eq!(crs[0]["issuer"], "customer support");
+    assert_eq!(
+        crs[0]["situation"],
+        "Customers say the totals favour the shop."
+    );
+    assert_eq!(
+        crs[1]["situation"],
+        "C1 rounds half up, which favours the shop."
+    );
+    // the part's target is not touched yet; the parent names none
+    assert_eq!(crs[0]["targets"], serde_json::json!([]));
+    assert_eq!(
+        crs[1]["targets"],
+        serde_json::json!([{ "target": "rounding C1", "progress": "not touched yet" }])
+    );
 
     // the clause changed (line 17), so both change requests resolve (lines 19, 20); then the interface changes
     // too: the pins and the citations are behind, and the change requests stay resolved
     let changed = at(&results, 22);
     assert_eq!(changed["change_requests"][0]["state"], "resolved");
     assert_eq!(changed["change_requests"][1]["state"], "resolved");
+    assert_eq!(
+        changed["change_requests"][1]["resolution"]["resolution"],
+        "done"
+    );
+    assert_eq!(
+        changed["change_requests"][1]["targets"][0]["progress"],
+        "revised"
+    );
     assert_eq!(
         pin_states(changed),
         states(&[("price", "stale"), ("print", "stale")])
@@ -129,7 +152,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
         serde_json::json!(["interface `price`"])
     );
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
-    assert_eq!(changed["unapplied"], serde_json::json!([]));
+    assert!(changed.get("unapplied").is_none());
     // the interface was revised, not replaced; its item kept its id across the signature change (`replaces`),
     // or line 21 would have been refused for orphaning the cases that cite it
     assert_eq!(at(&results, 21)["revision"], 2);
@@ -223,10 +246,10 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         // 4: the settled change (C1, a line) and the question about a detail (which error; C2 for a new one)
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Refuse big discounts\",\"intent\":\"change_behavior\",",
-            "\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}],",
+            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}],",
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
-            "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
+            "{\"choice\":\"new error\",\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
             "],\"recommended\":{\"choice\":\"reuse InvalidDiscount\",\"reason\":\"no new type\",\"confidence\":60},",
             "\"importance\":\"normal\"}}\n"
         )
@@ -238,38 +261,46 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "\"basis\":{\"arbitrary\":\"one error type is enough\"},\"by\":{\"person\":\"alice\"}}\n"
         )
         .to_string(),
-        // 8: decided, yet C1 never changed: it does not resolve, and says which definition
-        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
+        // 8: decided, yet C1 never changed: resolving looks at no revision, so it resolves, and the check says
+        // that nothing was applied for it
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"nothing to change after all\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
+        // 10: a resolved request takes no more work
         discount_set(
             "Refuse big discounts",
             "a discount above 50% is refused",
             "a refused discount is an InvalidDiscount",
         ),
-        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
-        // 12: a question whose second option asks C2 to change
+        // 11: opened again, it takes the work, and is resolved anew
+        "{\"op\":\"cr_reopen\",\"title\":\"Refuse big discounts\",\"reason\":\"the clause did need to change\",\"by\":{\"person\":\"bob\"}}\n".to_string(),
+        discount_set(
+            "Refuse big discounts",
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"C1 was changed\",\"by\":{\"person\":\"bob\"}}\n".to_string(),
+        // 14: a question whose second option names C2 as a target
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
-            "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
+            "{\"choice\":\"new error\",\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
             "]}}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
+        // 15: done needs the question answered
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
         concat!(
             "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"new error\",",
             "\"basis\":{\"arbitrary\":\"callers tell the errors apart\"},\"by\":{\"person\":\"alice\"}}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
-        discount_set(
-            "Name the error",
-            "a discount above 50% is refused",
-            "a refused discount is a DiscountTooLarge",
-        ),
-        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
+        // 18: C2 was never touched; resolved as done all the same, and the checks say so
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"callers are fine\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+        // 20: an unknown field of cr_open is refused, the old lists included
+        "{\"op\":\"cr_open\",\"title\":\"Old words\",\"intent\":\"change_behavior\",\"change\":[{\"project\":true}]}\n".to_string(),
     ]
     .concat();
     let (results, code, err) = exec_in(&dir, &ops);
@@ -279,14 +310,14 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [8, 13, 15], "{results:#?}");
+    assert_eq!(failed, [10, 15, 20], "{results:#?}");
 
     // cr_open echoes what it recorded, by name
     let opened = at(&results, 4);
     assert_eq!(
         opened["expects"],
         serde_json::json!([{
-            "kind": "change",
+            "kind": "target",
             "target": { "clause": { "context": "pricing", "contract": "discount", "label": "C1" } },
             "recorded": 1
         }])
@@ -302,7 +333,7 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "options": [
                 { "choice": "reuse InvalidDiscount", "wording": null, "expects": [], "consequence": null },
                 { "choice": "new error", "wording": null,
-                  "expects": [{ "kind": "change", "target": "discount C2" }], "consequence": null }
+                  "expects": [{ "kind": "target", "target": "discount C2" }], "consequence": null }
             ],
             "recommended": { "choice": "reuse InvalidDiscount", "reason": "no new type", "confidence": 60 },
             "importance": "normal"
@@ -312,7 +343,11 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         waiting["policy"],
         serde_json::json!({ "revision": 1, "lines": [] })
     );
-    assert_eq!(waiting["unapplied"][0]["unchanged"][0], "discount C1");
+    assert_eq!(
+        waiting["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "discount C1", "progress": "not touched yet" }])
+    );
+    assert!(waiting.get("unapplied").is_none());
     let finding = |r: &Value, rule: &str| -> Option<Value> {
         r["findings"]
             .as_array()
@@ -323,41 +358,97 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     };
     let note = finding(at(&results, 6), "cr.awaiting-decision").expect("awaiting is found");
     assert_eq!(note["level"], "note");
-    assert!(finding(at(&results, 6), "cr.unapplied").is_some());
+    // nothing judges the revisions any more: no check says the targets have not followed
+    assert!(finding(at(&results, 6), "cr.unapplied").is_none());
 
-    // decided and not resolved: the error names the definition, not its id
-    let refused = at(&results, 8)["error"].as_str().expect("error");
-    assert!(refused.contains("discount C1"), "{refused}");
-    assert!(
-        !refused.contains("ClauseId") && !refused.contains("Clause("),
-        "{refused}"
-    );
+    // decided, and C1 never changed: it resolves all the same, and the check says nothing was applied for it
+    assert_eq!(at(&results, 8)["ok"], true, "{results:#?}");
+    let unworked = finding(at(&results, 8), "cr.resolved-without-work").expect("found");
+    assert_eq!(unworked["level"], "warning");
     let decided = at(&results, 9);
     assert_eq!(decided["awaiting"], serde_json::json!([]));
-    assert_eq!(decided["unapplied"][0]["decision"], "reuse InvalidDiscount");
-    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+    let refuse = &decided["change_requests"][0];
+    assert_eq!(refuse["resolution"]["resolution"], "done");
+    assert_eq!(
+        refuse["resolution"]["reason"],
+        "nothing to change after all"
+    );
+    assert_eq!(
+        refuse["resolution"]["by"],
+        serde_json::json!({ "kind": "person", "name": "alice" })
+    );
+    assert_eq!(
+        refuse["targets"],
+        serde_json::json!([{ "target": "discount C1", "progress": "not touched yet" }])
+    );
+    // a resolved request takes no more work
+    let closed = at(&results, 10)["error"].as_str().expect("error");
+    assert!(closed.contains("resolved"), "{closed}");
 
-    // the second question: awaited, refused undecided, and after the choice of the second option C2 is required
-    assert_eq!(at(&results, 13)["ok"], false);
+    // reopened it takes the work, and is resolved anew: no finding this time, and the history keeps all three steps
+    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 12)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 13)["ok"], true, "{results:#?}");
+    assert!(finding(at(&results, 13), "cr.resolved-without-work").is_none());
+    assert!(finding(at(&results, 13), "cr.targets-untouched").is_none());
+
+    // the second question: done needs the answer; after the choice of the second option C2 is a target
+    assert_eq!(at(&results, 15)["ok"], false);
     assert!(
-        at(&results, 13)["error"]
+        at(&results, 15)["error"]
             .as_str()
             .expect("error")
             .contains("no decision")
     );
-    let asked = at(&results, 15)["error"].as_str().expect("error");
-    assert!(asked.contains("discount C2"), "{asked}");
-    assert_eq!(at(&results, 17)["ok"], true, "{results:#?}");
-    let last = at(&results, 18);
+    assert_eq!(at(&results, 16)["ok"], true, "{results:#?}");
+    let chosen = &at(&results, 17)["change_requests"][1];
+    assert_eq!(chosen["state"], "decided");
+    assert_eq!(
+        chosen["targets"],
+        serde_json::json!([{ "target": "discount C2", "progress": "not touched yet" }])
+    );
+    // resolved as done with C2 untouched and no work at all: a finding for the missing work
+    assert_eq!(at(&results, 18)["ok"], true, "{results:#?}");
+    assert!(finding(at(&results, 18), "cr.resolved-without-work").is_some());
+    let last = at(&results, 19);
     assert_eq!(last["awaiting"], serde_json::json!([]));
-    assert_eq!(last["unapplied"], serde_json::json!([]));
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
+    let history = last["change_requests"][0]["history"]
+        .as_array()
+        .expect("history");
+    assert_eq!(
+        history
+            .iter()
+            .map(|s| s["step"].clone())
+            .collect::<Vec<_>>(),
+        ["resolved", "reopened", "resolved"]
+    );
+    assert_eq!(history[0]["reason"], "nothing to change after all");
+    assert_eq!(history[1]["reason"], "the clause did need to change");
+    assert_eq!(
+        history[1]["by"],
+        serde_json::json!({ "kind": "person", "name": "bob" })
+    );
+    assert_eq!(history[2]["reason"], "C1 was changed");
+    assert_eq!(
+        last["change_requests"][0]["resolution"]["reason"],
+        "C1 was changed"
+    );
+    assert_eq!(
+        last["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "discount C1", "progress": "revised" }])
+    );
+    assert!(last.get("unapplied").is_none());
+
+    // a field cr_open does not know is refused, whatever it was once called
+    let old = at(&results, 20)["error"].as_str().expect("error");
+    assert!(old.contains("change"), "{old}");
 }
 
-/// The e2e case "remove release": the change set `for` the child request meets what it expects to remove, the
-/// parent is met by the work of its part, and a change set `for` an unrelated request that touches what another
-/// request frames moves a target outside the frame of the request it was made for, meets nothing of the other's.
+/// The e2e case "remove release": a parent without targets, a child with targets, one change set `for` the
+/// child; the child and then the parent are resolved as done, and a change set `for` an unrelated request that
+/// touches what another request frames moves a target outside the frame of the request it was made for.
 #[test]
 fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame() {
     use serde_json::json;
@@ -398,34 +489,45 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         json!({"op":"context_add","name":"core"}),
         // 3: the stock, in a change set for no request
         json!({"op":"change_set","puts":[stock("a unit is reserved", true), interface(true), harness(true)]}),
-        // 4: the parent frames the three assets and expects only that they change
+        // 4: the parent names no target: it is the request as the requester said it, and it is split
         json!({"op":"cr_open","title":"Remove release","intent":"change_behavior",
-            "change":[{"contract":{"context":"core","contract":"stock"}},
-                      {"interface":{"context":"core","interface":"stock"}},
-                      {"harness":{"context":"core","harness":"stock-tests"}}]}),
-        // 5: the part removes the three things that are release
+            "situation":"release is gone from the product","issuer":"product"}),
+        // 5: the part names the three things that are release
         json!({"op":"cr_open","title":"Drop release","intent":"change_behavior","parent":"Remove release",
-            "remove":[clause("C7"),
+            "targets":[clause("C7"),
                       {"item":{"context":"core","interface":"stock","signature":"fn release()"}},
                       {"case":{"context":"core","harness":"stock-tests","name":"release_frees"}}]}),
         // 6, 7: two requests that have nothing to do with it
-        json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior","change":[clause("C1")]}),
+        json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior","targets":[clause("C1")]}),
         json!({"op":"cr_open","title":"Unrelated","intent":"change_behavior",
-            "change":[{"harness":{"context":"core","harness":"stock-tests"}}]}),
+            "targets":[{"harness":{"context":"core","harness":"stock-tests"}}]}),
         // 8: the removal, one change set for the part
         json!({"op":"change_set","for":"Drop release",
             "puts":[stock("a unit is reserved", false), interface(false), harness(false)]}),
-        json!({"op":"cr_resolve","title":"Drop release"}),
-        json!({"op":"cr_resolve","title":"Remove release"}),
+        // 9, 10: the part is resolved as done, then the parent, which names nothing, once its part is
+        json!({"op":"cr_resolve","title":"Drop release","resolution":"done",
+            "reason":"release is gone from the stock","by":{"person":"alice"}}),
+        json!({"op":"cr_resolve","title":"Remove release","resolution":"done",
+            "reason":"its only part is done","by":{"person":"alice"}}),
         // 11: a change set for an unrelated request touches the clause that the first one reworded
         json!({"op":"change_set","for":"Unrelated","puts":[stock("a unit is reserved, once", false)]}),
-        // 12: C1 moved, but not for "Reword C1"
-        json!({"op":"cr_resolve","title":"Reword C1"}),
+        // 12: "Reword C1" is not done, and says why
+        json!({"op":"cr_resolve","title":"Reword C1","resolution":"wont_do",
+            "reason":"C1 was reworded under Unrelated","by":{"role":"orchestrator"}}),
+        // 13, 14, 15: it comes back, takes its own work, and is done
+        json!({"op":"cr_reopen","title":"Reword C1","reason":"that rewording was not the one asked for",
+            "by":{"person":"alice"}}),
         json!({"op":"change_set","for":"Reword C1","puts":[stock("a unit is reserved, at most once", false)]}),
-        json!({"op":"cr_resolve","title":"Reword C1"}),
-        // 15: a set for a request that is resolved, and for one that is not there
+        json!({"op":"cr_resolve","title":"Reword C1","resolution":"done",
+            "reason":"C1 says at most once","by":{"person":"alice"}}),
+        // 16, 17: a set for a request that is resolved, and for one that is not there
         json!({"op":"change_set","for":"Reword C1","puts":[stock("again", false)]}),
         json!({"op":"change_set","for":"No such request","puts":[stock("again", false)]}),
+        // 18, 19: a reference has to exist; "Unrelated" is replaced by "Reword C1"
+        json!({"op":"cr_resolve","title":"Unrelated","resolution":{"duplicate":"No such request"},
+            "reason":"the same","by":{"person":"alice"}}),
+        json!({"op":"cr_resolve","title":"Unrelated","resolution":{"superseded":"Reword C1"},
+            "reason":"Reword C1 carries the wording","by":{"person":"alice"}}),
         json!({"op":"status"}),
     ]
     .iter()
@@ -438,7 +540,7 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [12, 15, 16], "{results:#?}");
+    assert_eq!(failed, [16, 17, 18], "{results:#?}");
 
     let out_of_frame = |r: &Value| -> Vec<Value> {
         r["findings"]
@@ -449,7 +551,14 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
             .cloned()
             .collect()
     };
-    // the removal stays inside what the part and its parent framed, and meets what they expect
+    let finding = |r: &Value, rule: &str| -> bool {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|f| f["rule"] == rule)
+    };
+    // the removal stays inside what the part named; the part resolves, and so does its parent, which names nothing
     assert!(
         out_of_frame(at(&results, 8)).is_empty(),
         "{:#?}",
@@ -457,6 +566,10 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
     );
     assert_eq!(at(&results, 9)["ok"], true);
     assert_eq!(at(&results, 10)["ok"], true);
+    // the part did the work, so the parent that closed after it has no finding for the lack of any
+    assert!(!finding(at(&results, 9), "cr.resolved-without-work"));
+    assert!(!finding(at(&results, 10), "cr.resolved-without-work"));
+    assert!(!finding(at(&results, 10), "cr.targets-untouched"));
 
     // the set for the unrelated request is outside its frame (the harness), and says which request
     let outside = out_of_frame(at(&results, 11));
@@ -470,16 +583,15 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         "{outside:#?}"
     );
 
-    // the clause moved, but not under the request that expected it to change: the refusal says so
-    let refused = error_at(&results, 12);
-    assert!(
-        refused.contains("not changed: stock C1")
-            && refused.contains("moved, but not by a change set for this request: stock C1"),
-        "{refused}"
-    );
+    // the clause moved, but not under "Reword C1": it is not done, and the record says so, with no finding
+    // (a request that is not done is no claim of work)
+    assert_eq!(at(&results, 12)["ok"], true, "{results:#?}");
+    assert!(!finding(at(&results, 12), "cr.resolved-without-work"));
+    // opened again it takes its own work and is done; only the unrelated request is outside its frame
     assert_eq!(at(&results, 13)["ok"], true, "{results:#?}");
-    // (what was found stays found: only the unrelated request is outside its frame, not the one that reworded)
-    let still = out_of_frame(at(&results, 13));
+    assert_eq!(at(&results, 14)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 15)["ok"], true, "{results:#?}");
+    let still = out_of_frame(at(&results, 14));
     assert_eq!(still.len(), 1, "{still:#?}");
     assert!(
         still[0]["about"]
@@ -487,13 +599,14 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
             .expect("about")
             .contains("Unrelated")
     );
-    assert_eq!(at(&results, 14)["ok"], true, "{results:#?}");
-    // a resolved request takes no more work, and a request has to exist
-    assert!(error_at(&results, 15).contains("resolved"));
-    assert!(error_at(&results, 16).contains("No such request"));
+    // a resolved request takes no more work, a request has to exist, and so does the one a resolution points at
+    assert!(error_at(&results, 16).contains("resolved"));
+    assert!(error_at(&results, 17).contains("No such request"));
+    assert!(error_at(&results, 18).contains("No such request"));
+    assert_eq!(at(&results, 19)["ok"], true, "{results:#?}");
 
     // status: the footprints, and the move outside the frame, by name
-    let status = at(&results, 17);
+    let status = at(&results, 20);
     let cr = |title: &str| -> &Value {
         status["change_requests"]
             .as_array()
@@ -522,21 +635,63 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         assert!(moved.contains(&target), "{target} in {moved:?}");
     }
     assert_eq!(cr("Drop release")["out_of_frame"], json!([]));
-    assert_eq!(cr("Remove release")["work"], json!([]));
+    // each target of the part reads retired, from the footprint of its work
+    assert_eq!(
+        cr("Drop release")["targets"],
+        json!([
+            { "target": "stock C7 (retired)", "progress": "retired" },
+            { "target": "stock fn release() (retired)", "progress": "retired" },
+            { "target": "case stock-tests release_frees (retired)", "progress": "retired" }
+        ])
+    );
+    // the parent names nothing and did no work of its own; its situation and issuer are kept
+    let parent = cr("Remove release");
+    assert_eq!(parent["work"], json!([]));
+    assert_eq!(parent["targets"], json!([]));
+    assert_eq!(parent["situation"], "release is gone from the product");
+    assert_eq!(parent["issuer"], "product");
+    assert_eq!(parent["resolution"]["resolution"], "done");
+    assert_eq!(parent["resolution"]["reason"], "its only part is done");
     let unrelated = cr("Unrelated");
     assert_eq!(unrelated["work"].as_array().expect("work").len(), 1);
+    // it was resolved (superseded) since: a resolved request is a record and is not reported for its work
+    assert_eq!(unrelated["out_of_frame"], json!([]));
+    // the harness the unrelated request names was changed by the part, not by its own work: not touched yet
     assert_eq!(
-        unrelated["out_of_frame"],
-        json!(["contract stock", "stock C1"])
+        unrelated["targets"],
+        json!([{ "target": "harness stock-tests", "progress": "not touched yet" }])
     );
-    // the harness the unrelated request wants changed was changed by the part: it is still owed
-    let owed = status["unapplied"]
+    assert_eq!(unrelated["resolution"]["resolution"], "superseded");
+    assert_eq!(unrelated["resolution"]["of"], "Reword C1");
+    // "Reword C1": not done, opened again, done; the history keeps all three and the target reads revised
+    let reword = cr("Reword C1");
+    let steps: Vec<(&str, Option<&str>)> = reword["history"]
         .as_array()
-        .expect("unapplied")
+        .expect("history")
         .iter()
-        .find(|u| u["cr"] == "Unrelated")
-        .expect("Unrelated is behind");
-    assert_eq!(owed["elsewhere"], json!(["harness stock-tests"]));
+        .map(|s| (s["step"].as_str().expect("step"), s["resolution"].as_str()))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("resolved", Some("wont_do")),
+            ("reopened", None),
+            ("resolved", Some("done"))
+        ]
+    );
+    assert_eq!(
+        reword["history"][0]["reason"],
+        "C1 was reworded under Unrelated"
+    );
+    assert_eq!(
+        reword["history"][0]["by"],
+        json!({ "kind": "role", "name": "orchestrator" })
+    );
+    assert_eq!(
+        reword["targets"],
+        json!([{ "target": "stock C1", "progress": "revised" }])
+    );
+    assert!(status.get("unapplied").is_none());
 }
 
 fn policy_put(lines: &[(&str, &str)]) -> String {
@@ -770,53 +925,69 @@ fn a_context_is_added_and_a_clause_removed_through_change_requests() {
         // 4: adding a Contract is a change of the Context that holds it
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Add rules\",\"intent\":\"change_behavior\",",
-            "\"change\":[{\"context\":\"pricing\"}]}\n"
+            "\"targets\":[{\"context\":\"pricing\"}]}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Add rules\"}\n".to_string(),
-        // 6: made for the request, so it counts
+        // 5: no Contract was added yet: the Context is not touched, and status says so
+        "{\"op\":\"status\"}\n".to_string(),
+        // 6: made for the request, so it shows in its targets
         concat!(
             "{\"op\":\"change_set\",\"for\":\"Add rules\",\"puts\":[{\"put\":\"contract\",\"context\":\"pricing\",",
             "\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a rule holds\"}]}]}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Add rules\"}\n".to_string(),
-        // 8: removing a Clause, while the other stays as it is
+        "{\"op\":\"status\"}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Add rules\",\"resolution\":\"done\",\"reason\":\"the contract is added\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+        // 9: removing a Clause, while the other stays as it is
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Drop C2\",\"intent\":\"change_behavior\",",
-            "\"remove\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}],",
+            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}],",
             "\"keep\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
         "{\"op\":\"change_set\",\"for\":\"Drop C2\",\"puts\":[{\"put\":\"contract\",\"context\":\"pricing\",\"name\":\"discount\",\"title\":\"Discount\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a discount above 50% is refused\"}]}]}\n"
             .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\",\"resolution\":\"done\",\"reason\":\"C2 is gone\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
     ]
     .concat();
     let (results, code, err) = exec_in(&dir, &ops);
-    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
     let failed: Vec<u64> = results
         .iter()
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [5, 9], "{results:#?}");
+    assert_eq!(failed, Vec::<u64>::new(), "{results:#?}");
 
     assert_eq!(
         at(&results, 4)["expects"],
-        serde_json::json!([{ "kind": "change", "target": { "context": "pricing" }, "recorded": 2 }])
+        serde_json::json!([{ "kind": "target", "target": { "context": "pricing" }, "recorded": 2 }])
     );
-    // no Contract was added yet: the Context did not change
-    assert!(error_at(&results, 5).contains("not changed: context pricing"));
+    // no Contract was added yet: the Context is not touched; then it is revised
+    assert_eq!(
+        at(&results, 5)["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "context pricing", "progress": "not touched yet" }])
+    );
+    assert_eq!(
+        at(&results, 7)["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "context pricing", "progress": "revised" }])
+    );
 
-    // the Clause is still there: it says which one, by name
-    assert!(error_at(&results, 9).contains("not removed: discount C2"));
+    // the Clause went: it reads retired, and the kept one did not move
+    let dropped = &last_status(&results)["change_requests"][1];
+    assert_eq!(
+        dropped["targets"],
+        serde_json::json!([{ "target": "discount C2 (retired)", "progress": "retired" }])
+    );
+    assert_eq!(
+        dropped["keep"],
+        serde_json::json!([{ "target": "discount C1", "moved": false }])
+    );
     // (two Clauses are in the order of their ids, which are not known here)
-    let recorded = at(&results, 8)["expects"].as_array().expect("expects");
+    let recorded = at(&results, 9)["expects"].as_array().expect("expects");
     assert_eq!(recorded.len(), 2);
-    for (kind, label) in [("remove", "C2"), ("keep", "C1")] {
+    for (kind, label) in [("target", "C2"), ("keep", "C1")] {
         assert!(
             recorded.contains(&serde_json::json!({
                 "kind": kind,
@@ -830,8 +1001,16 @@ fn a_context_is_added_and_a_clause_removed_through_change_requests() {
     let last = at(&results, 12);
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
-    assert_eq!(last["unapplied"], serde_json::json!([]));
     assert_eq!(last["keep_moved"], serde_json::json!([]));
+}
+
+/// The last `status` of a run.
+fn last_status(results: &[Value]) -> &Value {
+    results
+        .iter()
+        .rev()
+        .find(|r| r["op"] == "status")
+        .expect("a status")
 }
 
 #[test]
@@ -850,16 +1029,17 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
             "\"keep\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
         )
         .to_string(),
-        // 6: the parent waits for its part
-        "{\"op\":\"cr_resolve\",\"title\":\"Umbrella\"}\n".to_string(),
+        // 6: the parent waits for its part, however it would end
+        "{\"op\":\"cr_resolve\",\"title\":\"Umbrella\",\"resolution\":\"wont_do\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
         discount_put(
             "a discount above 40% is refused",
             "a refused discount is an InvalidDiscount",
         ),
         "{\"op\":\"status\"}\n".to_string(),
         "{\"op\":\"check\"}\n".to_string(),
-        // 10: the clause it expected to keep moved: it cannot be resolved
-        "{\"op\":\"cr_resolve\",\"title\":\"Part\"}\n".to_string(),
+        // 10: the clause it keeps moved: resolving is a decision, not a reading of the clause, so it resolves
+        "{\"op\":\"cr_resolve\",\"title\":\"Part\",\"resolution\":\"done\",\"reason\":\"nothing else to do\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Umbrella\",\"resolution\":\"done\",\"reason\":\"its part is done\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
     ]
     .concat();
     let (results, code, err) = exec_in(&dir, &ops);
@@ -869,13 +1049,14 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [6, 10], "{results:#?}");
+    assert_eq!(failed, [6], "{results:#?}");
 
     let parent = error_at(&results, 6);
     assert!(
         parent.contains("not resolved") && parent.contains("Part"),
         "{parent}"
     );
+    // a part that is open keeps its parent from ending in any way, but no revision is asked of the parent
 
     assert_eq!(
         at(&results, 8)["keep_moved"],
@@ -891,11 +1072,22 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
         .expect("cr.keep-moved is found");
     assert_eq!(found["level"], "warning");
 
-    let kept = error_at(&results, 10);
-    assert!(
-        kept.contains("stay as they are") && kept.contains("discount C1"),
-        "{kept}"
+    // the keep is reported in status, with whether it moved, and does not refuse the resolution
+    assert_eq!(
+        at(&results, 8)["change_requests"][1]["keep"],
+        serde_json::json!([{ "target": "discount C1", "moved": true }])
     );
+    assert_eq!(at(&results, 10)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+    // no work was applied for either: the checks of the resolve hook say so
+    let unworked = at(&results, 10)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|f| f["rule"] == "cr.resolved-without-work")
+        .cloned()
+        .expect("found");
+    assert_eq!(unworked["level"], "warning");
 }
 
 #[test]
@@ -907,20 +1099,20 @@ fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
         "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a value is returned\"}]}\n",
         "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"signature\":\"fn value()\",\"lines\":[1,1]}]}\n",
         "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
-        // 6: one of each kind, in the three lists (the Context is kept; a Case is changed)
+        // 6: one of each kind, in the two lists (the Context is kept; a Case is a target)
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Everything\",\"intent\":\"change_behavior\",",
-            "\"change\":[{\"project\":true},{\"contract\":{\"context\":\"core\",\"contract\":\"rules\"}},",
-            "{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}},{\"case\":{\"context\":\"core\",\"harness\":\"tests\",\"name\":\"checks_value\"}}],",
-            "\"remove\":[{\"item\":{\"context\":\"core\",\"interface\":\"api\",\"signature\":\"fn value()\"}}],",
+            "\"targets\":[{\"project\":true},{\"contract\":{\"context\":\"core\",\"contract\":\"rules\"}},",
+            "{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}},{\"case\":{\"context\":\"core\",\"harness\":\"tests\",\"name\":\"checks_value\"}},",
+            "{\"item\":{\"context\":\"core\",\"interface\":\"api\",\"signature\":\"fn value()\"}}],",
             "\"keep\":[{\"context\":\"core\"},{\"harness\":{\"context\":\"core\",\"harness\":\"tests\"}},",
             "{\"clause\":{\"context\":\"core\",\"contract\":\"rules\",\"label\":\"C1\"}}]}\n"
         ),
         // 7: a reference of no kind, one that is not in the Project, and `false` for the Project
-        "{\"op\":\"cr_open\",\"title\":\"Nothing\",\"intent\":\"change_behavior\",\"change\":[{\"nothing\":true}]}\n",
-        "{\"op\":\"cr_open\",\"title\":\"Missing\",\"intent\":\"change_behavior\",\"remove\":[{\"harness\":{\"context\":\"core\",\"harness\":\"gone\"}}]}\n",
-        "{\"op\":\"cr_open\",\"title\":\"Twice\",\"intent\":\"change_behavior\",\"change\":[{\"context\":\"core\"}],\"keep\":[{\"context\":\"core\"}]}\n",
-        "{\"op\":\"cr_open\",\"title\":\"No project\",\"intent\":\"change_behavior\",\"change\":[{\"project\":false}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Nothing\",\"intent\":\"change_behavior\",\"targets\":[{\"nothing\":true}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Missing\",\"intent\":\"change_behavior\",\"targets\":[{\"harness\":{\"context\":\"core\",\"harness\":\"gone\"}}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Twice\",\"intent\":\"change_behavior\",\"targets\":[{\"context\":\"core\"}],\"keep\":[{\"context\":\"core\"}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"No project\",\"intent\":\"change_behavior\",\"targets\":[{\"project\":false}]}\n",
     ]
     .concat();
     let (results, code, err) = exec_in(&dir, &ops);
@@ -943,14 +1135,14 @@ fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
     assert_eq!(
         at(&results, 6)["expects"],
         serde_json::json!([
-            { "kind": "change", "target": { "project": true }, "recorded": 2 },
+            { "kind": "target", "target": { "project": true }, "recorded": 2 },
             { "kind": "keep", "target": { "context": "core" }, "recorded": 4 },
-            { "kind": "change", "target": { "contract": core(serde_json::json!({ "contract": "rules" })) }, "recorded": 1 },
-            { "kind": "change", "target": { "interface": core(serde_json::json!({ "interface": "api" })) }, "recorded": 1 },
+            { "kind": "target", "target": { "contract": core(serde_json::json!({ "contract": "rules" })) }, "recorded": 1 },
+            { "kind": "target", "target": { "interface": core(serde_json::json!({ "interface": "api" })) }, "recorded": 1 },
             { "kind": "keep", "target": { "harness": core(serde_json::json!({ "harness": "tests" })) }, "recorded": 1 },
             { "kind": "keep", "target": { "clause": core(serde_json::json!({ "contract": "rules", "label": "C1" })) }, "recorded": 1 },
-            { "kind": "remove", "target": { "item": core(serde_json::json!({ "interface": "api", "signature": "fn value()" })) }, "recorded": 1 },
-            { "kind": "change", "target": { "case": core(serde_json::json!({ "harness": "tests", "name": "checks_value" })) }, "recorded": 1 }
+            { "kind": "target", "target": { "item": core(serde_json::json!({ "interface": "api", "signature": "fn value()" })) }, "recorded": 1 },
+            { "kind": "target", "target": { "case": core(serde_json::json!({ "harness": "tests", "name": "checks_value" })) }, "recorded": 1 }
         ])
     );
     assert!(
@@ -1162,7 +1354,20 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 25);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 26);
+    assert_eq!(entry("cr.resolved-without-work")["level"], "warning");
+    assert_eq!(entry("cr.targets-untouched")["level"], "note");
+    assert_eq!(
+        entry("cr.resolved-without-work")["hooks"],
+        serde_json::json!(["resolve", "check"])
+    );
+    assert!(
+        listed["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .all(|c| c["id"] != "cr.unapplied")
+    );
     assert_eq!(entry("crux.policy-line-gone")["level"], "note");
     assert_eq!(
         entry("crux.policy-line-gone")["hooks"],
@@ -1280,7 +1485,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     assert_eq!(rule["when"], serde_json::json!(["should"]));
     assert_eq!(rule["hooks"], serde_json::json!(["put", "check"]));
     let model = &rules["model"];
-    assert_eq!(model["version"], 2);
+    assert_eq!(model["version"], 3);
     assert_eq!(model["store_revision"], 3);
     let contract = &model["contexts"][0]["contracts"][0];
     assert_eq!(contract["name"], "rounding");
@@ -1777,16 +1982,16 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
         "{\"op\":\"pin\",\"context\":\"core\",\"interface\":\"api\",\"code\":\"fn value() {}\"}\n",
         // 8: the request asks for the Interface to go
-        "{\"op\":\"cr_open\",\"title\":\"Drop api\",\"intent\":\"change_behavior\",\"remove\":[{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}}]}\n",
+        "{\"op\":\"cr_open\",\"title\":\"Drop api\",\"intent\":\"change_behavior\",\"targets\":[{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}}]}\n",
         // 9: a Case that stays cites the Clause: refused, naming the Case and the Clause
         "{\"op\":\"contract_retire\",\"context\":\"core\",\"contract\":\"rules\"}\n",
-        // 10: the Interface is not gone yet
-        "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
+        // 10: the Interface is not gone yet: its request reads it as not touched
+        "{\"op\":\"status\"}\n",
         // 11, 12: the Harness that cites goes first, then the Interface it cited
         "{\"op\":\"change_set\",\"for\":\"Drop api\",\"retires\":[{\"retire\":\"harness\",\"context\":\"core\",\"harness\":\"tests\"}]}\n",
         "{\"op\":\"change_set\",\"for\":\"Drop api\",\"retires\":[{\"retire\":\"interface\",\"context\":\"core\",\"interface\":\"api\"}]}\n",
-        // 13: a retired target meets a Remove expectation, once the retirement was made for the request
-        "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
+        // 13: the retirement was made for the request: its target reads retired, and it is resolved as done
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop api\",\"resolution\":\"done\",\"reason\":\"the interface is retired\",\"by\":{\"person\":\"alice\"}}\n",
         // 14, 15: nothing cites the Contract any more; nothing uses `scratch`
         "{\"op\":\"contract_retire\",\"context\":\"core\",\"contract\":\"rules\"}\n",
         "{\"op\":\"context_retire\",\"context\":\"scratch\"}\n",
@@ -1803,17 +2008,16 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [9, 10, 16], "{results:#?}");
+    assert_eq!(failed, [9, 16], "{results:#?}");
 
     let refused = error_at(&results, 9);
     assert!(
         refused.contains("tests checks_value") && refused.contains("rules C1"),
         "{refused}"
     );
-    assert!(
-        error_at(&results, 10).contains("not removed: interface api"),
-        "{}",
-        error_at(&results, 10)
+    assert_eq!(
+        at(&results, 10)["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "interface api", "progress": "not touched yet" }])
     );
     let reserved = error_at(&results, 16);
     assert!(
@@ -1858,7 +2062,10 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         serde_json::json!([{ "context": "core", "interface": "api (retired)", "state": "gone", "why": [] }])
     );
     assert_eq!(status["change_requests"][0]["state"], "resolved");
-    assert_eq!(status["unapplied"], serde_json::json!([]));
+    assert_eq!(
+        status["change_requests"][0]["targets"],
+        serde_json::json!([{ "target": "interface api (retired)", "progress": "retired" }])
+    );
     let kinds: Vec<&str> = status["retired"]
         .as_array()
         .expect("retired")
@@ -2071,8 +2278,8 @@ fn a_change_set_makes_what_its_harness_cites_and_retires_in_the_same_change() {
     assert_eq!(at(&results, 7)["ok"], true);
 }
 
-/// A change set adds a Context with its first assets, so a request that expects `change` of the Project is met by
-/// the set made `for` it, and not by a Context that a set for nothing added.
+/// A change set adds a Context with its first assets, so a request that names the Project as a target reads it
+/// revised by the set made `for` it, and not by a Context that a set for nothing added.
 #[test]
 fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_project() {
     use serde_json::json;
@@ -2083,11 +2290,11 @@ fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_projec
         &[
             json!({"op":"init"}),
             json!({"op":"cr_open","title":"Add billing","intent":"change_behavior",
-                "change":[{"project":true}]}),
+                "targets":[{"project":true}]}),
             // 3: a Context added by a set for nothing moves the Project, for no request
             json!({"op":"change_set","puts":[context("audit", vec![])]}),
-            // 4: so the request is not met
-            json!({"op":"cr_resolve","title":"Add billing"}),
+            // 4: so the request has no work yet, and its target reads not touched
+            json!({"op":"status"}),
             // 5: the set for the request adds a Context, another that it uses (listed after it), and puts into both
             json!({"op":"change_set","for":"Add billing","puts":[
                 context("billing", vec!["ledger"]),
@@ -2102,10 +2309,12 @@ fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_projec
                     "items":[{"context":"ledger","interface":"entries","signature":"fn post()"}],
                     "clauses":[{"contract":"invoice","label":"C1"}]}]}
             ]}),
-            // 6: now it is
-            json!({"op":"cr_resolve","title":"Add billing"}),
+            // 6: now it reads revised, and it is resolved as done
+            json!({"op":"cr_resolve","title":"Add billing","resolution":"done",
+                "reason":"billing is added","by":{"person":"alice"}}),
             // 7: a Context that exists is not added again
             json!({"op":"change_set","puts":[context("billing", vec![])]}),
+            json!({"op":"status"}),
         ],
     );
     assert_eq!(code, Some(1), "{err}\n{results:#?}");
@@ -2114,7 +2323,15 @@ fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_projec
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [4, 7], "{results:#?}");
+    assert_eq!(failed, [7], "{results:#?}");
+    assert_eq!(
+        at(&results, 4)["change_requests"][0]["targets"],
+        json!([{ "target": "project", "progress": "not touched yet" }])
+    );
+    assert_eq!(
+        at(&results, 8)["change_requests"][0]["targets"],
+        json!([{ "target": "project", "progress": "revised" }])
+    );
     let kinds: Vec<&str> = at(&results, 5)["puts"]
         .as_array()
         .expect("puts")

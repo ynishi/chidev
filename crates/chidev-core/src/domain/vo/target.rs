@@ -1,4 +1,5 @@
-//! What a citation or a change request points at, and what a change request expects of it.
+//! What a citation or a change request points at, and what a change request asks of it (to revise or retire it, or
+//! to keep it).
 
 use std::fmt;
 
@@ -69,14 +70,14 @@ impl Target {
     }
 }
 
-/// What a change request expects of a target.
+/// What a change request asks about a target. Both are the content of the request: neither is a condition of
+/// resolving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ExpectKind {
-    /// The target is to change: its revision goes past the one recorded (and it is still there). Adding something
-    /// is a change of what holds it.
-    Change,
-    /// The target is to go: it is no longer there.
-    Remove,
+    /// The target is what the request asks to be revised or retired: its work is meant to move it (or take it out).
+    /// Whether it did is read from the footprints of the work, not from the target's revision. Adding something is
+    /// a move of what holds it.
+    Target,
     /// The target is to stay as it is: its revision is still the one recorded.
     Keep,
 }
@@ -85,8 +86,7 @@ impl ExpectKind {
     /// The word for it.
     pub fn word(self) -> &'static str {
         match self {
-            ExpectKind::Change => "change",
-            ExpectKind::Remove => "remove",
+            ExpectKind::Target => "target",
             ExpectKind::Keep => "keep",
         }
     }
@@ -98,25 +98,22 @@ impl fmt::Display for ExpectKind {
     }
 }
 
-/// What a change request expects of one target, and the revision the target had when the expectation was recorded
-/// (when the change request was opened or, for an option of its Crux, when the option was chosen).
+/// What a change request asks about one target, and the revision the target had when it was recorded (when the
+/// change request was opened or, for an option of its Crux, when the option was chosen).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Expectation {
-    /// What is expected.
+    /// What is asked.
     pub kind: ExpectKind,
-    /// The revision the target had when this was recorded.
+    /// The revision the target had when this was recorded. A keep is judged against it; for a target it is the
+    /// record of where the work started from.
     pub recorded: Revision,
 }
 
 impl Expectation {
-    /// Whether `now`, the revision the target has now (`None`: it is gone), meets the expectation.
-    pub fn is_met_by(&self, now: Option<Revision>) -> bool {
-        match (self.kind, now) {
-            (ExpectKind::Change, Some(now)) => now > self.recorded,
-            (ExpectKind::Change, None) => false,
-            (ExpectKind::Remove, now) => now.is_none(),
-            (ExpectKind::Keep, now) => now == Some(self.recorded),
-        }
+    /// Whether this is a keep that `now`, the revision the target has now (`None`: it is gone), breaks. A target
+    /// to revise or retire is never broken by a revision.
+    pub fn keep_broken_by(&self, now: Option<Revision>) -> bool {
+        self.kind == ExpectKind::Keep && now != Some(self.recorded)
     }
 }
 
@@ -125,17 +122,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_kind_is_met_by_its_own_state_of_the_target() {
+    fn only_a_keep_is_broken_by_the_revision() {
         let r1 = Revision::first();
         let r2 = r1.next();
         let at = |kind| Expectation { kind, recorded: r1 };
-        assert!(!at(ExpectKind::Change).is_met_by(Some(r1)));
-        assert!(at(ExpectKind::Change).is_met_by(Some(r2)));
-        assert!(!at(ExpectKind::Change).is_met_by(None));
-        assert!(!at(ExpectKind::Remove).is_met_by(Some(r2)));
-        assert!(at(ExpectKind::Remove).is_met_by(None));
-        assert!(at(ExpectKind::Keep).is_met_by(Some(r1)));
-        assert!(!at(ExpectKind::Keep).is_met_by(Some(r2)));
-        assert!(!at(ExpectKind::Keep).is_met_by(None));
+        assert!(!at(ExpectKind::Keep).keep_broken_by(Some(r1)));
+        assert!(at(ExpectKind::Keep).keep_broken_by(Some(r2)));
+        assert!(at(ExpectKind::Keep).keep_broken_by(None));
+        for now in [Some(r1), Some(r2), None] {
+            assert!(!at(ExpectKind::Target).keep_broken_by(now));
+        }
     }
 }

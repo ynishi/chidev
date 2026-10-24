@@ -19,8 +19,9 @@ use crate::domain::vo::finding::{Subject, SubjectKind};
 
 /// The version of the view. It is its own: the stored documents have a schema of their own, and the two change
 /// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
-/// request's `lines` became `expects`, each with a kind.)
-pub const VIEW_VERSION: u32 = 2;
+/// request's `lines` became `expects`, each with a kind. Version 3: the kinds of an expectation are `target` and
+/// `keep`; `change` and `remove` are gone.)
+pub const VIEW_VERSION: u32 = 3;
 
 /// The model as an agent is shown it, read when the store stood at `store_revision`.
 #[derive(Debug, Clone, Serialize)]
@@ -127,13 +128,14 @@ pub struct ChangeRequestView {
     intent: &'static str,
     /// `open`, `decided` or `resolved`.
     state: &'static str,
-    /// What it expects of targets, each with the revision the target had when the request was opened.
+    /// What it asks of targets (to revise or retire, or to keep), each with the revision the target had when the
+    /// request was opened.
     expects: Vec<ExpectView>,
     /// The findings it deals with.
     addresses: Vec<AddressView>,
 }
 
-/// What a change request expects of a target.
+/// What a change request asks of a target.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpectView {
     /// The kind of the target: `project`, `context`, `contract`, `interface`, `harness`, `clause`, `item` or
@@ -141,7 +143,7 @@ pub struct ExpectView {
     target: &'static str,
     /// Its id; none for the Project.
     id: Option<String>,
-    /// `change`, `remove` or `keep`.
+    /// `target` (to be revised or retired) or `keep`.
     kind: &'static str,
     /// The revision the target had when the expectation was recorded.
     recorded: u64,

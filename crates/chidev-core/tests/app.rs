@@ -483,7 +483,8 @@ mod checks {
             intent: Intent::KeepBehavior,
             parent: None,
             issuer: None,
-            expects: Vec::new(),
+            targets: Vec::new(),
+            keep: Vec::new(),
             crux: None,
             assumptions: Vec::new(),
             addresses: vec![FindingInput {
@@ -509,9 +510,14 @@ mod checks {
             state(&app.check().await.unwrap()),
             Some(FindingState::Addressed)
         );
-        app.resolve_change_request("leave C1 unchecked")
-            .await
-            .unwrap();
+        app.resolve_change_request(
+            "leave C1 unchecked",
+            &chidev_core::app::ResolutionInput::Done,
+            "settled",
+            &chidev_core::app::DecisionMakerInput::Person("alice".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state(&app.check().await.unwrap()),
             Some(FindingState::Decided)
@@ -690,7 +696,7 @@ mod judged {
         assert_eq!(view.store_revision.0, now(&app).await);
         assert_eq!(view.model.store_revision(), view.store_revision.0);
         let json = serde_json::to_value(&view.model).unwrap();
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["version"], 3);
         let clauses = &json["contexts"][0]["contracts"][0]["clauses"];
         assert_eq!(json["contexts"][0]["contracts"][0]["name"], "stack");
         assert_eq!(clauses[0]["label"], "C1");
@@ -1024,7 +1030,8 @@ mod judged {
             intent: Intent::ChangeBehavior,
             parent: None,
             issuer: None,
-            expects: Vec::new(),
+            targets: Vec::new(),
+            keep: Vec::new(),
             crux: None,
             assumptions: Vec::new(),
             addresses: vec![FindingInput {

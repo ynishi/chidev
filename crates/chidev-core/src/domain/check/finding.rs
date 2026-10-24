@@ -131,8 +131,12 @@ mod tests {
     use crate::domain::check::descriptor::Executor;
     use crate::domain::check::level::Hook;
     use crate::domain::entity::change_request::ChangeRequestDraft;
+    use crate::domain::vo::answer::DecisionMaker;
     use crate::domain::vo::id::{ChangeRequestId, ClauseId, test_uuid};
     use crate::domain::vo::intent::Intent;
+    use crate::domain::vo::prose::Prose;
+    use crate::domain::vo::resolution::{Resolution, ResolutionKind};
+    use crate::domain::vo::timestamp::Timestamp;
     use crate::domain::vo::title::Title;
     use std::collections::BTreeMap;
 
@@ -171,7 +175,13 @@ mod tests {
             },
         );
         if resolved {
-            c.resolve().unwrap();
+            c.resolve(Resolution::new(
+                ResolutionKind::Done,
+                Prose::try_from("settled").unwrap(),
+                DecisionMaker::person("alice").unwrap(),
+                Timestamp::from_millis(1),
+            ))
+            .unwrap();
         }
         c
     }

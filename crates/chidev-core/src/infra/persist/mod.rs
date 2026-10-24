@@ -102,6 +102,7 @@ pub(crate) mod fixture {
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
+    use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind};
     use crate::domain::vo::revision::Revision;
     use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
@@ -247,18 +248,18 @@ pub(crate) mod fixture {
         )
     }
 
-    /// A change request without a Crux that expects something of a target of every kind, and one with a Crux, a
-    /// parent, an Assumption and a decision on a Policy line that asks a change.
+    /// A change request without a Crux that names a target or a keep of every kind, resolved, reopened and resolved
+    /// again, and one with a Crux, a parent, an Assumption and a decision on a Policy line that names a target.
     pub(crate) fn change_requests(p: &Project) -> Vec<ChangeRequest> {
         let targets = [
             Target::Item(ItemId::from_uuid(id(31))),
             Target::Clause(ClauseId::from_uuid(id(21))),
         ];
         let of_every_kind = [
-            (Target::Project, ExpectKind::Change),
+            (Target::Project, ExpectKind::Target),
             (
                 Target::Context(ContextId::from_uuid(id(11))),
-                ExpectKind::Change,
+                ExpectKind::Target,
             ),
             (
                 Target::Contract(ContractId::from_uuid(id(20))),
@@ -266,7 +267,7 @@ pub(crate) mod fixture {
             ),
             (
                 Target::Interface(InterfaceId::from_uuid(id(IFACE))),
-                ExpectKind::Change,
+                ExpectKind::Target,
             ),
             (
                 Target::Harness(HarnessId::from_uuid(id(40))),
@@ -274,10 +275,10 @@ pub(crate) mod fixture {
             ),
             (
                 Target::Clause(ClauseId::from_uuid(id(22))),
-                ExpectKind::Remove,
+                ExpectKind::Target,
             ),
-            (Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Change),
-            (Target::Case(CaseId::from_uuid(id(41))), ExpectKind::Change),
+            (Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Target),
+            (Target::Case(CaseId::from_uuid(id(41))), ExpectKind::Target),
         ];
         let mut first = ChangeRequest::open(
             ChangeRequestId::from_uuid(id(60)),
@@ -293,7 +294,32 @@ pub(crate) mod fixture {
                 addresses: Vec::new(),
             },
         );
-        first.resolve().unwrap();
+        let alice = || DecisionMaker::person("alice").unwrap();
+        first
+            .resolve(Resolution::new(
+                ResolutionKind::Done,
+                prose("it is done"),
+                alice(),
+                Timestamp::from_millis(1_700_000_000_001),
+            ))
+            .unwrap();
+        first
+            .reopen(Reopening::new(
+                prose("a caller still breaks"),
+                DecisionMaker::role("orchestrator").unwrap(),
+                Timestamp::from_millis(1_700_000_000_002),
+            ))
+            .unwrap();
+        first
+            .resolve(Resolution::new(
+                ResolutionKind::Superseded {
+                    by: ChangeRequestId::from_uuid(id(61)),
+                },
+                prose("the other one carries it"),
+                alice(),
+                Timestamp::from_millis(1_700_000_000_003),
+            ))
+            .unwrap();
         let crux = Crux::new(
             CruxKind::Ambiguity,
             vec![
@@ -307,8 +333,8 @@ pub(crate) mod fixture {
                     Choice::try_from("zero").unwrap(),
                     None,
                     BTreeMap::from([
-                        (targets[1], ExpectKind::Change),
-                        (Target::Item(ItemId::from_uuid(id(32))), ExpectKind::Remove),
+                        (targets[1], ExpectKind::Target),
+                        (Target::Item(ItemId::from_uuid(id(32))), ExpectKind::Target),
                     ]),
                     None,
                 ),
@@ -330,7 +356,7 @@ pub(crate) mod fixture {
                 intent: Intent::ChangeBehavior,
                 parent: Some(ChangeRequestId::from_uuid(id(60))),
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
-                expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Change))),
+                expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Target))),
                 crux: Some(crux),
                 assumptions: vec![assumption()],
                 addresses: vec![
@@ -375,7 +401,7 @@ pub(crate) mod fixture {
                     issuer: None,
                     expects: expectations_now(
                         p,
-                        [(Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Change)],
+                        [(Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Target)],
                     ),
                     crux: Some(
                         Crux::new(
@@ -749,6 +775,56 @@ mod tests {
         assert_eq!(first.expects().len(), 8);
         let text = encode_change_request(first).unwrap();
         assert_eq!(&decode_change_request(CURRENT, &text).unwrap(), first);
+    }
+
+    #[test]
+    fn the_history_of_a_change_request_keeps_every_resolution_and_reopening_in_order() {
+        let p = project();
+        let first = &change_requests(&p)[0];
+        let doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(first).unwrap()).unwrap();
+        let steps = doc["history"].as_array().unwrap();
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0]["resolved"]["kind"] == "done");
+        assert!(steps[1].get("reopened").is_some());
+        assert!(steps[2]["resolved"]["kind"]["superseded"]["by"].is_string());
+        let read = decode_change_request(CURRENT, &doc.to_string()).unwrap();
+        assert_eq!(read.history(), first.history());
+        assert_eq!(
+            read.resolution().map(|r| r.reason().as_str()),
+            Some("the other one carries it")
+        );
+        // A document of the layout before resolutions had a history (`resolved`) does not load.
+        let mut old = doc.clone();
+        old.as_object_mut().unwrap().remove("history");
+        old["resolved"] = serde_json::json!(true);
+        for why in ["history", "resolved"] {
+            assert!(matches!(
+                decode_change_request(CURRENT, &old.to_string()),
+                Err(StoreError::Corrupt(m)) if m.contains(why)
+            ));
+        }
+        // Steps out of order are refused by the domain.
+        let mut swapped = doc.clone();
+        swapped["history"].as_array_mut().unwrap().swap(0, 1);
+        assert!(matches!(
+            decode_change_request(CURRENT, &swapped.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
+        // A resolution as done of a request whose Crux has no answer is refused.
+        let mut unanswered: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
+        unanswered["crux"]["answer"] = serde_json::Value::Null;
+        unanswered["decided_expects"] = serde_json::json!([]);
+        unanswered["history"] = serde_json::json!([{ "resolved": {
+            "kind": "done", "reason": "r", "by": { "person": "alice" }, "at": 1 } }]);
+        assert!(matches!(
+            decode_change_request(CURRENT, &unanswered.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
+        // Not done, the question may stay open.
+        unanswered["history"][0]["resolved"]["kind"] = serde_json::json!("wont_do");
+        assert!(decode_change_request(CURRENT, &unanswered.to_string()).is_ok());
     }
 
     #[test]

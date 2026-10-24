@@ -10,7 +10,8 @@ use chidev_core::app::ports::external::{
 };
 use chidev_core::app::ports::{Changes, IdSource, Store, StoreRevision};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, Intent, ItemInput, ItemRef, Registry,
+    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, DecisionMakerInput, Intent,
+    ItemInput, ItemRef, Registry, ResolutionInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{Executor, Hook, Level, Origin};
@@ -668,7 +669,8 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
             intent: Intent::KeepBehavior,
             parent: None,
             issuer: None,
-            expects: vec![],
+            targets: vec![],
+            keep: vec![],
             crux: None,
             assumptions: vec![],
             addresses: vec![],
@@ -677,8 +679,11 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
         .unwrap();
     let revision = app.store().revision().await.unwrap();
     let requests_before = app.store().change_requests().await.unwrap();
+    let how = ResolutionInput::Done;
+    let by = DecisionMakerInput::Person("alice".to_string());
     assert!(matches!(
-        app.resolve_change_request("accept current behavior").await,
+        app.resolve_change_request("accept current behavior", &how, "settled", &by)
+            .await,
         Err(AppError::ExternalRefused { .. })
     ));
     assert_eq!(app.store().revision().await.unwrap(), revision);
@@ -694,7 +699,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert_eq!(candidate["id"], cr.id.to_string());
     assert_eq!(candidate["state"], "resolved");
 
-    app.resolve_change_request("accept current behavior")
+    app.resolve_change_request("accept current behavior", &how, "settled", &by)
         .await
         .unwrap();
     assert_eq!(

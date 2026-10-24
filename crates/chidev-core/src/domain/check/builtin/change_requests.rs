@@ -9,51 +9,89 @@ use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::change_request::ChangeRequestState;
 use crate::domain::service::change_request::{
-    awaiting_decision, keep_moved, out_of_frame, unapplied,
+    awaiting_decision, keep_moved, out_of_frame, resolved_without_work, targets_untouched,
 };
 use crate::domain::vo::answer::Basis;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::intent::Intent;
 use crate::domain::vo::target::{ExpectKind, Target};
 
-/// A change request the targets have not followed.
+/// A change request resolved as done with no work on it or on its parts.
 #[derive(Debug, Clone, Copy)]
-pub struct Unapplied;
+pub struct ResolvedWithoutWork;
 
-static UNAPPLIED: Descriptor = Descriptor {
-    id: RuleId::from_static("cr.unapplied"),
-    summary: Cow::Borrowed("an unresolved change request whose targets have not followed"),
+static RESOLVED_WITHOUT_WORK: Descriptor = Descriptor {
+    id: RuleId::from_static("cr.resolved-without-work"),
+    summary: Cow::Borrowed("a change request resolved as done that no change set was applied for"),
     help: Cow::Borrowed(
-        "The change was asked for, but a target it expects to change is still as it was or is gone, or a target \
-           it expects to remove is still there. A change counts for the request only when it was made by a change \
-           set applied for it (`for`), or for a part of it: a target that moved in a change set applied for \
-           another request, or for none, is still owed. Make the change as a change set for the request, then \
-           resolve it.",
+        "The change request was resolved as done, but no change set applied `for` it, or for a part of it, moved \
+           anything. The resolution stands (it is a decision, not a reading of the work); the record and the work \
+           disagree. If nothing needed to change, resolve it as `invalid` or `wont_do` with the reason; if the \
+           work was done under another request, say so in its resolution or reopen it.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
+    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
-impl Check for Unapplied {
+impl Check for ResolvedWithoutWork {
     fn descriptor(&self) -> &'static Descriptor {
-        &UNAPPLIED
+        &RESOLVED_WITHOUT_WORK
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        unapplied(view.change_requests, view.after)
+        resolved_without_work(view.change_requests)
+            .into_iter()
+            .map(|cr| {
+                Finding::new(
+                    &RESOLVED_WITHOUT_WORK,
+                    Some(Subject::ChangeRequest(cr)),
+                    "resolved as done, but no work was applied for it".to_string(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// A change request resolved as done that named a target its work never touched.
+#[derive(Debug, Clone, Copy)]
+pub struct TargetsUntouched;
+
+static TARGETS_UNTOUCHED: Descriptor = Descriptor {
+    id: RuleId::from_static("cr.targets-untouched"),
+    summary: Cow::Borrowed(
+        "a change request resolved as done, one of whose targets no work of it or of its parts touched",
+    ),
+    help: Cow::Borrowed(
+        "The change request asked for a target to be revised or retired and was resolved as done, but no change \
+           set applied for it, or for a part of it, moved that target or anything in it. It may be right (the \
+           target needed nothing), but the request and the work say different things: check the targets, or the \
+           resolution. A request with no work at all is `cr.resolved-without-work`, not this.",
+    ),
+    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
+    default_level: Level::Note,
+    mandatory: false,
+    params: std::borrow::Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for TargetsUntouched {
+    fn descriptor(&self) -> &'static Descriptor {
+        &TARGETS_UNTOUCHED
+    }
+
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        targets_untouched(view.change_requests, view.after)
             .into_iter()
             .map(|u| {
                 Finding::new(
-                    &UNAPPLIED,
+                    &TARGETS_UNTOUCHED,
                     Some(Subject::ChangeRequest(u.cr)),
                     format!(
-                        "{} target(s) not changed yet, {} gone, {} not removed yet",
-                        u.unchanged.len(),
-                        u.gone.len(),
-                        u.not_removed.len()
+                        "resolved as done, but {} target(s) were never touched by its work",
+                        u.untouched.len()
                     ),
                 )
             })
@@ -160,19 +198,19 @@ impl Check for PolicyLineGone {
     }
 }
 
-/// A change request that expects a target to stay as it is, one of which has moved.
+/// A change request that keeps a target as it is, one of which has moved.
 #[derive(Debug, Clone, Copy)]
 pub struct KeepMoved;
 
 static KEEP_MOVED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.keep-moved"),
     summary: Cow::Borrowed(
-        "an unresolved change request that expects a target to stay as it is, and the target moved",
+        "an unresolved change request that keeps a target as it is, and the target moved",
     ),
     help: Cow::Borrowed(
-        "The change request says a target stays as it is; the target changed (or went) anyway. It cannot be \
-           resolved while that holds. Either the change was meant (open a request that expects it) or the target \
-           should be put back.",
+        "The change request says a target stays as it is; the target changed (or went) anyway. Resolving it as \
+           done would record a contradiction. Either the change was meant (name the target in a request that asks \
+           for it) or the target should be put back.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
@@ -193,7 +231,7 @@ impl Check for KeepMoved {
                 Finding::new(
                     &KEEP_MOVED,
                     Some(Subject::ChangeRequest(k.cr)),
-                    format!("{} target(s) it expects to keep have moved", k.moved.len()),
+                    format!("{} target(s) it keeps have moved", k.moved.len()),
                 )
             })
             .collect()
@@ -207,14 +245,13 @@ pub struct OutOfFrame;
 static OUT_OF_FRAME: Descriptor = Descriptor {
     id: RuleId::from_static("cr.out-of-frame"),
     summary: Cow::Borrowed(
-        "an unresolved change request whose change sets moved a target outside the frame it declared",
+        "an unresolved change request whose change sets moved a target it did not name",
     ),
     help: Cow::Borrowed(
-        "The targets a change request expects to change or remove are its frame, and naming a container frames \
-           everything inside it. A change set applied for the request (or for a part of it) moved a target outside \
-           the frame of the request, or outside the frame of a request it is a part of. Either the change was \
-           meant (declare the target in `change` or `remove`, or apply the change set for the request it belongs \
-           to) or it should be taken back.",
+        "The targets a change request names are its frame, and naming a container frames everything inside it. \
+           A change set applied for the request moved a target outside that frame. The frame is the request's own: \
+           a parent's targets neither widen nor bound its parts. Either the change was meant (name the target in \
+           `targets`, or apply the change set for the request it belongs to) or it should be taken back.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Warning,
@@ -242,19 +279,18 @@ impl Check for OutOfFrame {
     }
 }
 
-/// A change request whose intent and expectations tell different things.
+/// A change request whose intent and targets tell different things.
 #[derive(Debug, Clone, Copy)]
 pub struct IntentMismatch;
 
 static INTENT_MISMATCH: Descriptor = Descriptor {
     id: RuleId::from_static("cr.intent-mismatch"),
-    summary: Cow::Borrowed(
-        "an unresolved change request whose intent and whose expectations disagree",
-    ),
+    summary: Cow::Borrowed("an unresolved change request whose intent and whose targets disagree"),
     help: Cow::Borrowed(
-        "A keep-behavior request expects a Clause to change or go, or a change-behavior request expects nothing \
-           to change or go (in itself or in any option of its question). It may be right (rewording a Clause \
-           keeps the behaviour), but one of the two is likely wrong: check the intent and the expectations.",
+        "A keep-behavior request names a Clause as a target to revise or retire, or a change-behavior request names \
+           no target at all (in itself or in any option of its question) and is not a parent of other requests. \
+           It may be right (rewording a Clause keeps the behaviour), but one of the two is likely wrong: check the \
+           intent and the targets.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Note,
@@ -274,16 +310,23 @@ impl Check for IntentMismatch {
             .iter()
             .filter(|c| c.state() != ChangeRequestState::Resolved)
             .filter_map(|c| {
-                let moves = |kind: ExpectKind| kind != ExpectKind::Keep;
+                let names = |kind: ExpectKind| kind == ExpectKind::Target;
+                // A parent only aggregates: it need not name a target.
+                let is_parent = view
+                    .change_requests
+                    .iter()
+                    .any(|p| p.parent() == Some(c.id()));
                 let message = match c.intent() {
                     Intent::KeepBehavior
                         if c.possible_kinds()
-                            .any(|(t, k)| matches!(t, Target::Clause(_)) && moves(k)) =>
+                            .any(|(t, k)| matches!(t, Target::Clause(_)) && names(k)) =>
                     {
-                        "it keeps the behaviour, yet expects a clause to change or go"
+                        "it keeps the behaviour, yet names a clause to revise or retire"
                     }
-                    Intent::ChangeBehavior if !c.possible_kinds().any(|(_, k)| moves(k)) => {
-                        "it changes the behaviour, yet expects nothing to change or go"
+                    Intent::ChangeBehavior
+                        if !is_parent && !c.possible_kinds().any(|(_, k)| names(k)) =>
+                    {
+                        "it changes the behaviour, yet names no target"
                     }
                     _ => return None,
                 };

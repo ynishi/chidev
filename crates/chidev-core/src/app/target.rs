@@ -54,19 +54,10 @@ pub enum TargetInput {
     },
 }
 
-/// What a change request expects of one target, as a person writes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpectInput {
-    /// Whether the target is to change, to go, or to stay.
-    pub kind: ExpectKind,
-    /// The target.
-    pub target: TargetInput,
-}
-
-/// An expectation a change request recorded when it was opened, in the names a person wrote it with.
+/// A target (or keep) a change request recorded when it was opened, in the names a person wrote it with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedExpect {
-    /// Whether the target is to change, to go, or to stay.
+    /// Whether the target is to be revised or retired (`target`), or kept as it is (`keep`).
     pub kind: ExpectKind,
     /// The target, by name.
     pub target: TargetInput,

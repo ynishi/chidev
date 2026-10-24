@@ -12,7 +12,8 @@ use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, BasisInput, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput,
     CruxKind, DecisionInput, DecisionMakerInput, FindingInput, Intent, ItemInput, ItemRef,
-    OptionInput, ReasonedInput, Registry, ReportInput, ReportedFinding, SubjectInput,
+    OptionInput, ReasonedInput, Registry, ReportInput, ReportedFinding, ResolutionInput,
+    SubjectInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{FindingState, Hook};
@@ -49,11 +50,27 @@ fn request(title: &str, addresses: Vec<FindingInput>) -> ChangeRequestInput {
         intent: Intent::KeepBehavior,
         parent: None,
         issuer: None,
-        expects: vec![],
+        targets: vec![],
+        keep: vec![],
         crux: None,
         assumptions: vec![],
         addresses,
     }
+}
+
+/// Resolves the change request titled `title` as done, by a person.
+async fn resolve_done<S: Store, G: IdSource, E: ExternalExecutor>(
+    app: &mut App<S, G, E>,
+    title: &str,
+) {
+    app.resolve_change_request(
+        title,
+        &ResolutionInput::Done,
+        "settled",
+        &DecisionMakerInput::Person("alice".to_string()),
+    )
+    .await
+    .unwrap();
 }
 
 fn item() -> ItemRef {
@@ -243,7 +260,7 @@ async fn every_subject_is_addressed_deduplicated_persisted_and_resolved() {
         Some(&saved)
     );
     assert_judged_states(&app, FindingState::Addressed).await;
-    app.resolve_change_request("review findings").await.unwrap();
+    resolve_done(&mut app, "review findings").await;
     assert_judged_states(&app, FindingState::Decided).await;
     // A further unresolved request takes precedence over an older resolved one.
     app.open_change_request(&request(
@@ -393,7 +410,8 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
         options: vec![OptionInput {
             choice: "keep".into(),
             change: None,
-            expects: vec![],
+            targets: vec![],
+            keep: vec![],
             consequence: None,
         }],
         recommended: None,
@@ -427,7 +445,7 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
         "a changed model independently stales the project judgment"
     );
     assert_eq!(project.state, FindingState::Open);
-    app.resolve_change_request("human review").await.unwrap();
+    resolve_done(&mut app, "human review").await;
     assert_eq!(
         app.check()
             .await
@@ -462,7 +480,7 @@ async fn builtin_context_findings_use_the_same_subject_reference() {
     .await
     .unwrap();
     assert_eq!(state(app.check().await.unwrap()), FindingState::Addressed);
-    app.resolve_change_request("keep empty").await.unwrap();
+    resolve_done(&mut app, "keep empty").await;
     assert_eq!(state(app.check().await.unwrap()), FindingState::Decided);
 }
 
@@ -525,7 +543,7 @@ async fn an_external_case_finding_is_addressed_without_changing_its_staleness() 
         !finding.stale,
         "the external rule did not read change requests"
     );
-    app.resolve_change_request("review test").await.unwrap();
+    resolve_done(&mut app, "review test").await;
     let finding = app.check().await.unwrap().pop().unwrap();
     assert_eq!(finding.state, FindingState::Decided);
     assert!(!finding.stale);

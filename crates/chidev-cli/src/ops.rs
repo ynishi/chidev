@@ -8,11 +8,12 @@ use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
     ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
-    DecisionInput, DecisionMakerInput, EvidenceInput, EvidenceStatus, ExpectInput, ExpectKind,
-    FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput,
-    ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone,
-    PutInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RetireInput,
-    RetiredStatus, Retirement, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
+    DecisionInput, DecisionMakerInput, EvidenceInput, EvidenceStatus, FindingInput, Found,
+    HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef, ModelView,
+    OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
+    ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, ResolutionInput,
+    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
+    SubjectInput, TargetInput, TransitionStatus,
 };
 use chidev_core::domain::check::{Hook, Level};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -69,8 +70,9 @@ enum Op {
     /// entry of `puts` is tagged with `put` (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) and
     /// has the fields of the operation of that name without `op`; each entry of `retires` is tagged with `retire`
     /// (`context`, `contract`, `interface`, `harness`). `for` is the title of the change request the work is
-    /// applied for: the targets the set moves are recorded as that request's work in the same commit, and only
-    /// such work meets what the request expects to change or remove. Without `for` the set belongs to no request.
+    /// applied for: the targets the set moves are recorded as that request's work in the same commit, and `status`
+    /// reads from such work whether the request's targets were revised or retired. Without `for` the set belongs
+    /// to no request.
     ChangeSet {
         #[serde(default, rename = "for")]
         for_change_request: Option<String>,
@@ -122,8 +124,24 @@ enum Op {
         #[serde(default)]
         evidence: Vec<EvidenceDto>,
     },
-    /// Closes the record of a change request whose change is applied.
-    CrResolve { title: String },
+    /// Closes the record of a change request with a resolution: `resolution` is `"done"`, `"wont_do"`,
+    /// `"invalid"`, `{"duplicate":"<title>"}` or `{"superseded":"<title>"}` (the title of a change request that
+    /// exists), with the `reason` and who resolves it (`by`). Refused only by explicit states: resolved already,
+    /// the Crux unanswered (for `"done"`), a part not resolved, a reference that does not exist. The targets and
+    /// the work are not consulted; checks report where they disagree.
+    CrResolve {
+        title: String,
+        resolution: ResolutionDto,
+        reason: String,
+        by: MakerDto,
+    },
+    /// Opens a resolved change request again, with the `reason` and who does it (`by`). The resolution stays in
+    /// its history.
+    CrReopen {
+        title: String,
+        reason: String,
+        by: MakerDto,
+    },
     /// Measures, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. `kind`
     /// `mutate` (with `interface`) runs the code the Pin of the Interface accepted against the Harnesses as the
     /// model holds them, once per mutant. `kind` `simulate` (with `harness`, a sim Harness) builds the program from
@@ -547,27 +565,51 @@ impl TryFrom<ReportDto> for ReportInput {
     }
 }
 
-/// The fields of `cr_open`, boxed: they are far larger than any other operation's.
+/// How a change request ended: a word, or a word that points at another change request by its title.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResolutionDto {
+    Done,
+    WontDo,
+    Invalid,
+    Duplicate(String),
+    Superseded(String),
+}
+
+impl From<ResolutionDto> for ResolutionInput {
+    fn from(r: ResolutionDto) -> ResolutionInput {
+        match r {
+            ResolutionDto::Done => ResolutionInput::Done,
+            ResolutionDto::WontDo => ResolutionInput::WontDo,
+            ResolutionDto::Invalid => ResolutionInput::Invalid,
+            ResolutionDto::Duplicate(t) => ResolutionInput::Duplicate(t),
+            ResolutionDto::Superseded(t) => ResolutionInput::Superseded(t),
+        }
+    }
+}
+
+/// The fields of `cr_open`, boxed: they are far larger than any other operation's. A field it does not know is
+/// refused, so a word it ignored would not be lost silently.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OpenDto {
     title: String,
+    /// Why it is needed, in the words of whoever raised it. Kept with the request and shown by `status`.
     #[serde(default)]
     situation: Option<String>,
     intent: IntentDto,
     #[serde(default)]
     parent: Option<String>,
+    /// Who raised it. Kept with the request and shown by `status`.
     #[serde(default)]
     issuer: Option<String>,
-    /// The targets it expects to change.
+    /// The targets it asks to be revised or retired. A parent need not name any.
     #[serde(default)]
-    change: Vec<RefDto>,
-    /// The targets it expects to go.
-    #[serde(default)]
-    remove: Vec<RefDto>,
-    /// The targets it expects to stay as they are.
+    targets: Vec<RefDto>,
+    /// The targets it asks to stay as they are.
     #[serde(default)]
     keep: Vec<RefDto>,
-    /// The choice for a decision maker, besides the expectations; none: nothing to decide.
+    /// The choice for a decision maker, besides the targets; none: nothing to decide.
     #[serde(default)]
     crux: Option<CruxDto>,
     /// The interpretations settled from the repository and general knowledge while raising it.
@@ -845,10 +887,10 @@ impl From<TargetInput> for TargetOut {
     }
 }
 
-/// An expectation a change request recorded, in the result of `cr_open`.
+/// A target (or keep) a change request recorded, in the result of `cr_open`.
 #[derive(Debug, Serialize)]
 struct OpenedExpectOut {
-    /// `change`, `remove` or `keep`.
+    /// `target` or `keep`.
     kind: &'static str,
     target: TargetOut,
     /// The revision the target had when the change request was opened.
@@ -937,10 +979,94 @@ struct AssumptionOut<'a> {
     evidence: Vec<EvidenceOut<'a>>,
 }
 
+/// How a change request ended, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct ResolutionOut<'a> {
+    /// `done`, `wont_do`, `duplicate`, `superseded` or `invalid`.
+    resolution: &'static str,
+    /// The title of the change request a `duplicate` or a `superseded` points at.
+    of: Option<&'a str>,
+    reason: &'a str,
+    by: MakerOut<'a>,
+    at: u64,
+}
+
+impl<'a> From<&'a ResolutionStatus> for ResolutionOut<'a> {
+    fn from(r: &'a ResolutionStatus) -> ResolutionOut<'a> {
+        ResolutionOut {
+            resolution: r.kind,
+            of: r.reference.as_deref(),
+            reason: &r.reason,
+            by: MakerOut {
+                kind: r.by_kind,
+                name: &r.by,
+            },
+            at: r.at,
+        }
+    }
+}
+
+/// One step of the history of a change request, in the result of `status`: `step` is `resolved` or `reopened`,
+/// and a resolved step has the `resolution` (and the `of` it points at).
+#[derive(Debug, Serialize)]
+struct HistoryOut<'a> {
+    step: &'static str,
+    resolution: Option<&'static str>,
+    of: Option<&'a str>,
+    reason: &'a str,
+    by: MakerOut<'a>,
+    at: u64,
+}
+
+impl<'a> From<&'a TransitionStatus> for HistoryOut<'a> {
+    fn from(t: &'a TransitionStatus) -> HistoryOut<'a> {
+        match t {
+            TransitionStatus::Resolved(r) => HistoryOut {
+                step: "resolved",
+                resolution: Some(r.kind),
+                of: r.reference.as_deref(),
+                reason: &r.reason,
+                by: MakerOut {
+                    kind: r.by_kind,
+                    name: &r.by,
+                },
+                at: r.at,
+            },
+            TransitionStatus::Reopened(r) => HistoryOut {
+                step: "reopened",
+                resolution: None,
+                of: None,
+                reason: &r.reason,
+                by: MakerOut {
+                    kind: r.by_kind,
+                    name: &r.by,
+                },
+                at: r.at,
+            },
+        }
+    }
+}
+
+/// A target a change request asks to be revised or retired, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct TargetProgressOut<'a> {
+    target: &'a str,
+    /// `revised`, `retired` or `not touched yet`.
+    progress: &'static str,
+}
+
+/// A target a change request asks to keep, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct KeepProgressOut<'a> {
+    target: &'a str,
+    moved: bool,
+}
+
 /// A change request in the result of `status`.
 #[derive(Debug, Serialize)]
 struct CrOut<'a> {
     title: &'a str,
+    situation: Option<&'a str>,
     intent: &'static str,
     parent: Option<&'a str>,
     issuer: Option<&'a str>,
@@ -948,7 +1074,11 @@ struct CrOut<'a> {
     supersedes: Option<&'a str>,
     state: &'static str,
     answer: Option<AnswerOut<'a>>,
+    resolution: Option<ResolutionOut<'a>>,
+    history: Vec<HistoryOut<'a>>,
     assumptions: Vec<AssumptionOut<'a>>,
+    targets: Vec<TargetProgressOut<'a>>,
+    keep: Vec<KeepProgressOut<'a>>,
     work: Vec<WorkOut<'a>>,
     out_of_frame: &'a [String],
 }
@@ -960,18 +1090,7 @@ struct WorkOut<'a> {
     moved: &'a [String],
 }
 
-/// A change request the definitions have not followed, in the result of `status`.
-#[derive(Debug, Serialize)]
-struct UnappliedOut<'a> {
-    cr: &'a str,
-    decision: Option<&'a str>,
-    unchanged: &'a [String],
-    gone: &'a [String],
-    not_removed: &'a [String],
-    elsewhere: &'a [String],
-}
-
-/// A change request that expected targets to stay as they are, and they moved, in the result of `status`.
+/// A change request that keeps targets as they are, and they moved, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct KeepMovedOut<'a> {
     cr: &'a str,
@@ -1120,7 +1239,6 @@ struct StatusOut<'a> {
     pins: Vec<PinOut<'a>>,
     stale_cites: Vec<StaleCiteOut<'a>>,
     change_requests: Vec<CrOut<'a>>,
-    unapplied: Vec<UnappliedOut<'a>>,
     keep_moved: Vec<KeepMovedOut<'a>>,
     awaiting: Vec<AwaitingOut<'a>>,
     policy: PolicyOut<'a>,
@@ -1356,19 +1474,16 @@ impl From<KindDto> for CruxKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OptionDto {
     choice: String,
-    /// The exact new wording the option makes of the definitions; none: it words none. (Called `change` before the
-    /// lists of references took that name.)
+    /// The exact new wording the option makes of the definitions; none: it words none.
     #[serde(default)]
     wording: Option<String>,
-    /// The targets that must change when it is chosen, besides what the change request expects.
+    /// The targets it asks to be revised or retired when it is chosen, besides those of the change request.
     #[serde(default)]
-    change: Vec<RefDto>,
-    /// The targets that must go when it is chosen.
-    #[serde(default)]
-    remove: Vec<RefDto>,
-    /// The targets that must stay as they are when it is chosen.
+    targets: Vec<RefDto>,
+    /// The targets it asks to stay as they are when it is chosen.
     #[serde(default)]
     keep: Vec<RefDto>,
     #[serde(default)]
@@ -1453,26 +1568,9 @@ impl TryFrom<RefDto> for TargetInput {
     }
 }
 
-/// The expectations the lists of references `change`, `remove` and `keep` write, in that order.
-fn expects_of(
-    change: Vec<RefDto>,
-    remove: Vec<RefDto>,
-    keep: Vec<RefDto>,
-) -> Result<Vec<ExpectInput>, AppError> {
-    let mut out = Vec::with_capacity(change.len() + remove.len() + keep.len());
-    for (kind, refs) in [
-        (ExpectKind::Change, change),
-        (ExpectKind::Remove, remove),
-        (ExpectKind::Keep, keep),
-    ] {
-        for r in refs {
-            out.push(ExpectInput {
-                kind,
-                target: TargetInput::try_from(r)?,
-            });
-        }
-    }
-    Ok(out)
+/// The targets a list of references names.
+fn targets_of(refs: Vec<RefDto>) -> Result<Vec<TargetInput>, AppError> {
+    refs.into_iter().map(TargetInput::try_from).collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1810,8 +1908,7 @@ where
                 intent,
                 parent,
                 issuer,
-                change,
-                remove,
+                targets,
                 keep,
                 crux,
                 assumptions,
@@ -1828,7 +1925,8 @@ where
                                 Ok(OptionInput {
                                     choice: o.choice,
                                     change: o.wording,
-                                    expects: expects_of(o.change, o.remove, o.keep)?,
+                                    targets: targets_of(o.targets)?,
+                                    keep: targets_of(o.keep)?,
                                     consequence: o.consequence,
                                 })
                             })
@@ -1845,7 +1943,8 @@ where
                 intent: intent.into(),
                 parent,
                 issuer,
-                expects: expects_of(change, remove, keep)?,
+                targets: targets_of(targets)?,
+                keep: targets_of(keep)?,
                 crux,
                 assumptions: assumptions.into_iter().map(AssumptionInput::from).collect(),
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
@@ -1915,9 +2014,21 @@ where
                 .await?;
             to_value(&DoneOut { op: "cr_decide" })?
         }
-        Op::CrResolve { title } => {
-            let done = app.resolve_change_request(&title).await?;
+        Op::CrResolve {
+            title,
+            resolution,
+            reason,
+            by,
+        } => {
+            let done = app
+                .resolve_change_request(&title, &resolution.into(), &reason, &by.into())
+                .await?;
             json!({ "op": "cr_resolve", "findings": findings_out(&done.findings) })
+        }
+        Op::CrReopen { title, reason, by } => {
+            app.reopen_change_request(&title, &reason, &by.into())
+                .await?;
+            to_value(&DoneOut { op: "cr_reopen" })?
         }
         Op::Status => {
             let s = app.status().await?;
@@ -1957,12 +2068,31 @@ where
                     .iter()
                     .map(|c| CrOut {
                         title: &c.title,
+                        situation: c.situation.as_deref(),
                         intent: c.intent,
                         parent: c.parent.as_deref(),
                         issuer: c.issuer.as_deref(),
                         crux: c.crux,
                         supersedes: c.supersedes.as_deref(),
                         state: c.state,
+                        resolution: c.resolution.as_ref().map(ResolutionOut::from),
+                        history: c.history.iter().map(HistoryOut::from).collect(),
+                        targets: c
+                            .targets
+                            .iter()
+                            .map(|t| TargetProgressOut {
+                                target: &t.target,
+                                progress: t.progress,
+                            })
+                            .collect(),
+                        keep: c
+                            .keep
+                            .iter()
+                            .map(|k| KeepProgressOut {
+                                target: &k.target,
+                                moved: k.moved,
+                            })
+                            .collect(),
                         answer: c.answer.as_ref().map(|a| AnswerOut {
                             decision: &a.decision,
                             basis: match &a.basis {
@@ -2011,18 +2141,6 @@ where
                             })
                             .collect(),
                         out_of_frame: &c.out_of_frame,
-                    })
-                    .collect(),
-                unapplied: s
-                    .unapplied
-                    .iter()
-                    .map(|u| UnappliedOut {
-                        cr: &u.cr,
-                        decision: u.decision.as_deref(),
-                        unchanged: &u.unchanged,
-                        gone: &u.gone,
-                        not_removed: &u.not_removed,
-                        elsewhere: &u.elsewhere,
                     })
                     .collect(),
                 keep_moved: s

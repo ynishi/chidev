@@ -20,6 +20,7 @@ pub mod name;
 pub mod pin_basis;
 pub mod policy;
 pub mod prose;
+pub mod resolution;
 pub mod retired;
 pub mod revision;
 pub mod signature;

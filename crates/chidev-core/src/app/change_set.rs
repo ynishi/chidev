@@ -144,9 +144,9 @@ pub enum RetireInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeSetInput {
     /// The title of the change request this change set is applied for. The request must exist and not be resolved.
-    /// What the set moves is recorded as work of that request, in the same commit: only that work (and the work of
-    /// the parts of the request) meets what the request expects to change or remove, and it is judged against the
-    /// request's frame. None: the set belongs to no request, meets none, and is judged by revision for the `keep`
+    /// What the set moves is recorded as work of that request, in the same commit: it is what `status` reads to say
+    /// whether the request's targets were revised or retired, and it is judged against the request's own frame.
+    /// None: the set belongs to no request, shows in the targets of none, and is judged by revision for the `keep`
     /// of any request alone.
     pub change_request: Option<String>,
     /// What is put.

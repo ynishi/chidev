@@ -7,9 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, ChangeRequestState, Crux,
-};
+use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
@@ -37,6 +35,7 @@ use crate::domain::vo::name::ContextName;
 use crate::domain::vo::pin_basis::PinBasis;
 use crate::domain::vo::policy::{Policy, PolicyLine, PolicyLineId};
 use crate::domain::vo::prose::Prose;
+use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind, Transition};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
@@ -621,7 +620,119 @@ pub(crate) struct ChangeRequestDoc {
     addresses: Vec<AddressDoc>,
     /// What the change sets applied for it moved, in the order they were kept.
     work: Vec<FootprintDoc>,
-    resolved: bool,
+    /// Every resolution and reopening, in the order they happened; resolved when the last is a resolution.
+    history: Vec<TransitionDoc>,
+}
+
+/// One step of the history of a change request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransitionDoc {
+    Resolved(ResolutionDoc),
+    Reopened(ReopeningDoc),
+}
+
+/// How a change request ended, and why, by whom and when (milliseconds since the epoch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolutionDoc {
+    kind: ResolutionKindDoc,
+    reason: String,
+    by: MakerDoc,
+    at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResolutionKindDoc {
+    Done,
+    WontDo,
+    Duplicate { of: String },
+    Superseded { by: String },
+    Invalid,
+}
+
+/// Why a change request was opened again, by whom and when.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReopeningDoc {
+    reason: String,
+    by: MakerDoc,
+    at: u64,
+}
+
+fn maker_doc(by: &DecisionMaker) -> MakerDoc {
+    match by {
+        DecisionMaker::Role(n) => MakerDoc::Role(n.to_string()),
+        DecisionMaker::Person(n) => MakerDoc::Person(n.to_string()),
+    }
+}
+
+fn maker_of(by: &MakerDoc) -> Result<DecisionMaker, Bad> {
+    match by {
+        MakerDoc::Role(n) => DecisionMaker::role(n),
+        MakerDoc::Person(n) => DecisionMaker::person(n),
+    }
+    .map_err(bad)
+}
+
+impl From<&Transition> for TransitionDoc {
+    fn from(t: &Transition) -> TransitionDoc {
+        match t {
+            Transition::Resolved(r) => TransitionDoc::Resolved(ResolutionDoc {
+                kind: match r.kind() {
+                    ResolutionKind::Done => ResolutionKindDoc::Done,
+                    ResolutionKind::WontDo => ResolutionKindDoc::WontDo,
+                    ResolutionKind::Duplicate { of } => ResolutionKindDoc::Duplicate {
+                        of: of.as_uuid().to_string(),
+                    },
+                    ResolutionKind::Superseded { by } => ResolutionKindDoc::Superseded {
+                        by: by.as_uuid().to_string(),
+                    },
+                    ResolutionKind::Invalid => ResolutionKindDoc::Invalid,
+                },
+                reason: r.reason().to_string(),
+                by: maker_doc(r.by()),
+                at: r.at().millis(),
+            }),
+            Transition::Reopened(r) => TransitionDoc::Reopened(ReopeningDoc {
+                reason: r.reason().to_string(),
+                by: maker_doc(r.by()),
+                at: r.at().millis(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<&TransitionDoc> for Transition {
+    type Error = Bad;
+
+    fn try_from(d: &TransitionDoc) -> Result<Transition, Bad> {
+        let id = |s: &str| Ok::<_, Bad>(ChangeRequestId::from_uuid(uuid(s)?));
+        Ok(match d {
+            TransitionDoc::Resolved(r) => Transition::Resolved(Resolution::new(
+                match &r.kind {
+                    ResolutionKindDoc::Done => ResolutionKind::Done,
+                    ResolutionKindDoc::WontDo => ResolutionKind::WontDo,
+                    ResolutionKindDoc::Duplicate { of } => {
+                        ResolutionKind::Duplicate { of: id(of)? }
+                    }
+                    ResolutionKindDoc::Superseded { by } => {
+                        ResolutionKind::Superseded { by: id(by)? }
+                    }
+                    ResolutionKindDoc::Invalid => ResolutionKind::Invalid,
+                },
+                Prose::try_from(r.reason.as_str()).map_err(bad)?,
+                maker_of(&r.by)?,
+                Timestamp::from_millis(r.at),
+            )),
+            TransitionDoc::Reopened(r) => Transition::Reopened(Reopening::new(
+                Prose::try_from(r.reason.as_str()).map_err(bad)?,
+                maker_of(&r.by)?,
+                Timestamp::from_millis(r.at),
+            )),
+        })
+    }
 }
 
 /// A target, as a container of a move is kept.
@@ -790,16 +901,14 @@ enum TargetDoc {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExpectKindDoc {
-    Change,
-    Remove,
+    Target,
     Keep,
 }
 
 impl From<ExpectKind> for ExpectKindDoc {
     fn from(k: ExpectKind) -> ExpectKindDoc {
         match k {
-            ExpectKind::Change => ExpectKindDoc::Change,
-            ExpectKind::Remove => ExpectKindDoc::Remove,
+            ExpectKind::Target => ExpectKindDoc::Target,
             ExpectKind::Keep => ExpectKindDoc::Keep,
         }
     }
@@ -808,14 +917,14 @@ impl From<ExpectKind> for ExpectKindDoc {
 impl From<ExpectKindDoc> for ExpectKind {
     fn from(k: ExpectKindDoc) -> ExpectKind {
         match k {
-            ExpectKindDoc::Change => ExpectKind::Change,
-            ExpectKindDoc::Remove => ExpectKind::Remove,
+            ExpectKindDoc::Target => ExpectKind::Target,
             ExpectKindDoc::Keep => ExpectKind::Keep,
         }
     }
 }
 
-/// What a change request expects of a target, and the revision the target had when it was recorded.
+/// What a change request asks of a target (to revise or retire it, or to keep it), and the revision the target had
+/// when it was recorded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExpectDoc {
     target: TargetDoc,
@@ -1232,7 +1341,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             assumptions: c.assumptions().iter().map(AssumptionDoc::from).collect(),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             work: c.work().iter().map(FootprintDoc::from).collect(),
-            resolved: c.state() == ChangeRequestState::Resolved,
+            history: c.history().iter().map(TransitionDoc::from).collect(),
         }
     }
 }
@@ -1332,7 +1441,10 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .iter()
                 .map(Footprint::try_from)
                 .collect::<Result<_, _>>()?,
-            d.resolved,
+            d.history
+                .iter()
+                .map(Transition::try_from)
+                .collect::<Result<_, _>>()?,
         )
         .map_err(bad)
     }

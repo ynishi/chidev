@@ -1,5 +1,5 @@
 //! The checks that come with the code. Each is one struct with a `static` descriptor and reads the model through
-//! the domain services that already decide it (`stale_cites`, `staleness`, `unapplied`), so the rule is written
+//! the domain services that already decide it (`stale_cites`, `staleness`, `keep_moved`), so the rule is written
 //! once. What must never be kept the Project already refuses (its invariants), and a check is for what may be kept
 //! but should not be left. The one builtin that is mandatory is `sim.nondeterministic`: a simulation that cannot be
 //! repeated finds nothing anyone can reproduce, so no policy turns it down.
@@ -15,7 +15,8 @@ use super::Check;
 use super::level::Hook;
 
 pub use self::change_requests::{
-    AwaitingDecision, IntentMismatch, KeepMoved, OutOfFrame, PolicyLineGone, Unapplied,
+    AwaitingDecision, IntentMismatch, KeepMoved, OutOfFrame, PolicyLineGone, ResolvedWithoutWork,
+    TargetsUntouched,
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
@@ -36,10 +37,11 @@ pub fn all() -> &'static [&'static dyn Check] {
         &UncitedItem,
         &NoInterface,
         &NoHarness,
-        &Unapplied,
         &AwaitingDecision,
         &KeepMoved,
         &OutOfFrame,
+        &ResolvedWithoutWork,
+        &TargetsUntouched,
         &IntentMismatch,
         &PolicyLineGone,
         &MeasureFailed,
@@ -291,6 +293,7 @@ mod tests {
                     | "context.no-harness"
                     | "cr.awaiting-decision"
                     | "cr.intent-mismatch"
+                    | "cr.targets-untouched"
                     | "crux.policy-line-gone"
                     | "mutation.unmeasured"
                     | "mutation.survived"
@@ -316,6 +319,7 @@ mod tests {
 
     use crate::domain::vo::finding::Subject;
     use crate::domain::vo::intent::Intent;
+    use crate::domain::vo::resolution::{Resolution, ResolutionKind};
     use crate::domain::vo::target::{ExpectKind, Target};
 
     fn subjects(found: &[crate::domain::check::Finding]) -> Vec<Option<Subject>> {
@@ -399,25 +403,91 @@ mod tests {
         assert!(matches!(found[0].subject(), Some(Subject::Case(_))));
     }
 
+    /// Resolves `c` as done by a person, against the change requests `all`.
+    fn resolve_as(
+        c: &mut crate::domain::entity::change_request::ChangeRequest,
+        kind: ResolutionKind,
+        all: &[crate::domain::entity::change_request::ChangeRequest],
+    ) {
+        use crate::domain::service::change_request::resolve;
+        use crate::domain::vo::answer::DecisionMaker;
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::timestamp::Timestamp;
+        resolve(
+            c,
+            Resolution::new(
+                kind,
+                Prose::try_from("settled").unwrap(),
+                DecisionMaker::person("alice").unwrap(),
+                Timestamp::from_millis(3),
+            ),
+            all,
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn a_change_request_the_targets_have_not_followed_is_found() {
+    fn a_request_resolved_as_done_with_no_work_is_found_and_one_with_work_is_not() {
         let mut p = project();
-        let c = cr(
-            &p,
-            1,
-            Intent::ChangeBehavior,
-            None,
-            &[(Target::Clause(clause(30)), ExpectKind::Change)],
-        );
-        let mut crs = [c];
-        assert_eq!(run(&Unapplied, &p, &[], &crs).len(), 1);
-        // A change made for no request does not follow it.
-        put_contract(&mut p, "a half rounds to odd");
-        assert_eq!(run(&Unapplied, &p, &[], &crs).len(), 1);
-        applied_for(&mut crs[0], &mut p, |p| {
-            put_contract(p, "a half rounds to even");
+        let target = [(Target::Clause(clause(30)), ExpectKind::Target)];
+        let mut bare = cr(&p, 1, Intent::ChangeBehavior, None, &target);
+        let mut worked = cr(&p, 2, Intent::ChangeBehavior, None, &target);
+        let mut dropped = cr(&p, 3, Intent::ChangeBehavior, None, &target);
+        let open = cr(&p, 4, Intent::ChangeBehavior, None, &target);
+        applied_for(&mut worked, &mut p, |p| {
+            put_contract(p, "a half rounds to even")
         });
-        assert!(run(&Unapplied, &p, &[], &crs).is_empty());
+        resolve_as(&mut bare, ResolutionKind::Done, &[]);
+        resolve_as(&mut worked, ResolutionKind::Done, &[]);
+        resolve_as(&mut dropped, ResolutionKind::WontDo, &[]);
+        let crs = [bare.clone(), worked, dropped, open];
+        let found = run(&ResolvedWithoutWork, &p, &[], &crs);
+        // The one resolved as done with no work; not the one with work, the one not done, or the one open.
+        assert_eq!(subjects(&found), [Some(Subject::ChangeRequest(bare.id()))]);
+        assert_eq!(found[0].level(), crate::domain::check::Level::Warning);
+    }
+
+    #[test]
+    fn a_request_resolved_as_done_with_a_target_its_work_never_touched_is_noted() {
+        let mut p = project();
+        let both = [
+            (Target::Clause(clause(30)), ExpectKind::Target),
+            (Target::Item(item(10)), ExpectKind::Target),
+        ];
+        let mut c = cr(&p, 1, Intent::ChangeBehavior, None, &both);
+        applied_for(&mut c, &mut p, |p| put_contract(p, "a half rounds to even"));
+        // Open: nothing yet, and the item is still untouched; resolve does not ask.
+        assert!(run(&TargetsUntouched, &p, &[], &[c.clone()]).is_empty());
+        resolve_as(&mut c, ResolutionKind::Done, &[]);
+        let found = run(&TargetsUntouched, &p, &[], &[c.clone()]);
+        assert_eq!(subjects(&found), [Some(Subject::ChangeRequest(c.id()))]);
+        assert_eq!(found[0].level(), crate::domain::check::Level::Note);
+        assert!(run(&ResolvedWithoutWork, &p, &[], &[c]).is_empty());
+    }
+
+    #[test]
+    fn a_parent_resolved_as_done_counts_the_work_of_its_parts() {
+        let mut p = project();
+        let mut parent = cr(&p, 1, Intent::ChangeBehavior, None, &[]);
+        let mut part = cr(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            Some(1),
+            &[(Target::Clause(clause(30)), ExpectKind::Target)],
+        );
+        applied_for(&mut part, &mut p, |p| {
+            put_contract(p, "a half rounds to even")
+        });
+        // A parent that names no target is not a mismatch of intent while its part does.
+        assert!(run(&IntentMismatch, &p, &[], &[parent.clone(), part.clone()]).is_empty());
+        let all = [parent.clone(), part.clone()];
+        resolve_as(&mut part, ResolutionKind::Done, &all);
+        let all = [parent.clone(), part.clone()];
+        resolve_as(&mut parent, ResolutionKind::Done, &all);
+        let crs = [parent, part];
+        assert!(run(&ResolvedWithoutWork, &p, &[], &crs).is_empty());
+        assert!(run(&TargetsUntouched, &p, &[], &crs).is_empty());
     }
 
     /// `change` is made to `p` as a change set applied for `c`.
@@ -443,7 +513,7 @@ mod tests {
             1,
             Intent::ChangeBehavior,
             None,
-            &[(Target::Clause(clause(30)), ExpectKind::Change)],
+            &[(Target::Clause(clause(30)), ExpectKind::Target)],
         );
         applied_for(&mut c, &mut p, |p| put_contract(p, "a half rounds to even"));
         let mut crs = [c];
@@ -628,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_request_is_found_when_a_target_it_expects_to_keep_moves() {
+    fn a_change_request_is_found_when_a_target_it_keeps_moves() {
         let mut p = project();
         let keep = |p: &crate::domain::entity::project::Project, n| {
             cr(
@@ -645,15 +715,15 @@ mod tests {
             2,
             Intent::ChangeBehavior,
             None,
-            &[(Target::Clause(clause(30)), ExpectKind::Change)],
+            &[(Target::Clause(clause(30)), ExpectKind::Target)],
         );
         let mut done = keep(&p, 3);
-        done.resolve().unwrap();
+        resolve_as(&mut done, ResolutionKind::Done, &[]);
         let crs = [waiting.clone(), change, done];
         assert!(run(&KeepMoved, &p, &[], &crs).is_empty());
         put_contract(&mut p, "a half rounds to even");
         let found = run(&KeepMoved, &p, &[], &crs);
-        // Only the unresolved one that expected to keep: not the one that asked for a change, not the record.
+        // Only the unresolved one that keeps: not the one that names the clause as a target, not the record.
         assert_eq!(
             subjects(&found),
             [Some(Subject::ChangeRequest(waiting.id()))]
@@ -672,19 +742,21 @@ mod tests {
             None,
             &[
                 (Target::Clause(clause(30)), ExpectKind::Keep),
-                (Target::Item(item(10)), ExpectKind::Change),
+                (Target::Item(item(10)), ExpectKind::Target),
             ],
         );
         let mut c = c;
         applied_for(&mut c, &mut p, |p| put_interface(p, "fn a(x: u8)"));
+        resolve_as(&mut c, ResolutionKind::Done, &[]);
         let crs = [c];
         assert!(run(&KeepMoved, &p, &[], &crs).is_empty());
         assert!(run(&IntentMismatch, &p, &[], &crs).is_empty());
-        assert!(run(&Unapplied, &p, &[], &crs).is_empty());
+        assert!(run(&ResolvedWithoutWork, &p, &[], &crs).is_empty());
+        assert!(run(&TargetsUntouched, &p, &[], &crs).is_empty());
     }
 
     #[test]
-    fn intent_and_expectations_that_disagree_are_noted() {
+    fn intent_and_targets_that_disagree_are_noted() {
         use std::collections::BTreeMap;
 
         use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
@@ -693,21 +765,21 @@ mod tests {
         use crate::domain::vo::id::{ChangeRequestId, test_uuid};
         use crate::domain::vo::title::Title;
         let p = project();
-        let clause_change = [(Target::Clause(clause(30)), ExpectKind::Change)];
+        let clause_change = [(Target::Clause(clause(30)), ExpectKind::Target)];
         let keeps_but_changes_a_clause = cr(&p, 1, Intent::KeepBehavior, None, &clause_change);
         let keeps_but_removes_a_clause = cr(
             &p,
             2,
             Intent::KeepBehavior,
             None,
-            &[(Target::Clause(clause(31)), ExpectKind::Remove)],
+            &[(Target::Clause(clause(31)), ExpectKind::Target)],
         );
         let keeps_and_changes_an_item = cr(
             &p,
             3,
             Intent::KeepBehavior,
             None,
-            &[(Target::Item(item(10)), ExpectKind::Change)],
+            &[(Target::Item(item(10)), ExpectKind::Target)],
         );
         let changes_nothing = cr(
             &p,
@@ -717,13 +789,13 @@ mod tests {
             &[(Target::Clause(clause(30)), ExpectKind::Keep)],
         );
         let changes_a_clause = cr(&p, 5, Intent::ChangeBehavior, None, &clause_change);
-        // Nothing is expected in itself, but an option expects a removal.
+        // Nothing is named in itself, but an option names a target.
         let crux = Crux::new(
             CruxKind::Conflict,
             vec![CruxOption::new(
                 Choice::try_from("drop").unwrap(),
                 None,
-                BTreeMap::from([(Target::Clause(clause(31)), ExpectKind::Remove)]),
+                BTreeMap::from([(Target::Clause(clause(31)), ExpectKind::Target)]),
                 None,
             )],
             None,
@@ -746,7 +818,7 @@ mod tests {
             },
         );
         let mut resolved = cr(&p, 7, Intent::KeepBehavior, None, &clause_change);
-        resolved.resolve().unwrap();
+        resolve_as(&mut resolved, ResolutionKind::Done, &[]);
         let crs = [
             keeps_but_changes_a_clause.clone(),
             keeps_but_removes_a_clause.clone(),
