@@ -10,6 +10,17 @@ and this project adheres to
 
 ### Added
 
+- String-literal mutants in the bundled Rust provider: the operator class `str`
+  gives each string literal in a function body two mutants, the text emptied
+  (`{...}` placeholders kept, so a format string still builds) and `*` appended
+  inside the quotes; the keys are `<fn>/str-empty/<n>/..` and `<fn>/str-marker/<n>/..`.
+  Raw strings are mutated; byte and C strings, strings in attributes and in the
+  arguments of compile-time macros (`include_str!`, `env!`, `concat!`, ...) are not.
+  The new optional request field `operators` and the new optional `[measure]
+  operators` setting select the classes (default: all, `str` included); the setting
+  is part of the settings digest, so changing it makes earlier runs stale. Protocol
+  version 1 is kept: the field is optional. A project that has measured before will
+  see new `str` mutants, and survivors among them, the next time it measures.
 - `interface_put`, `harness_put` and `pin`, and the `interface` and `harness`
   entries of a `change_set`, can take their text from a file: `source_file` in
   place of `source`, and `code_file` (of `pin`) in place of `code`. Exactly one of
