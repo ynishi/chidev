@@ -64,7 +64,9 @@ belong):
 - `status` lists the Pins and whether they hold, the citations behind their
   targets, the change requests, what was retired and the findings of every check.
 
-A put or a retire does not need an open change request. A change that touches
+A put or a retire does not need an open change request, but it belongs to none: it
+does not meet what any change request expects to change or remove (only a
+`change_set` `for` the request does, see "Change requests"). A change that touches
 several assets and holds only as a whole is one `change_set` (next section).
 
 ## Change sets
@@ -91,12 +93,17 @@ checked once, on the state it ends in, and all of it is applied or none of it.
 ```
 
 - Each entry of `puts` has the fields of the operation of that name without `op`,
-  and a `put` that says which: `contract`, `interface`, `harness`, `uses`
+  and a `put` that says which: `context`, `contract`, `interface`, `harness`, `uses`
   (`context`, `uses`) or `base_on_contract` (`context`). Each entry of `retires`
   has the fields of the retire operation and a `retire`: `context`, `contract`,
   `interface` or `harness`.
+- `{"put":"context","name":"billing","uses":["ledger"]}` adds a Context, as
+  `context_add` does (`uses` is optional; the Project goes to its next revision).
+  It is applied first, so the same set can put the Context's first Contract,
+  Interface or Harness, and a Harness can cite into it. It may use a Context the same
+  set adds, whatever order they are listed in. A name that is taken is refused.
 - The order the entries are listed in does not matter. They are applied in the
-  order the rules need: the uses of the Contexts, the Contracts and Interfaces,
+  order the rules need: the Contexts added, the uses of the Contexts, the Contracts and Interfaces,
   the basis, the Harnesses, then the retirements. A Case can cite a Clause or an
   Item that the same change set makes or revises, and the citation records the
   revision it has there; a Case that cites what the set removes fails the set.
@@ -116,7 +123,19 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   `revision`, in the order listed; a `uses` or `base_on_contract` has only the
   Context), `retired` and `findings`. A put or a retire alone is a change set of
   one and answers as it did.
-- The set is not tied to a change request (`for: <cr>` is a separate design).
+- `for` is the title of a change request: `{"op":"change_set","for":"Remove release",
+  "puts":[..],"retires":[..]}`. The work on a change request is applied as a
+  change set `for` it. The request has to exist and not be resolved. The set records
+  its footprint for the request in the same commit: the targets it moved, that is
+  every target whose revision differs between the Project before and after (made,
+  revised or gone: a Clause, an Item or a Case a put dropped, a thing retired, and
+  the Contract, Interface, Harness, Context or Project whose revision moved because
+  something in it was added or removed), each with the containers it was in. The
+  answer is the same; `findings` includes `cr.out-of-frame` when the set left the
+  frame (see "Change requests"). A set without `for`, a put or a retire alone,
+  belongs to no request: it records nothing, meets no `change` or `remove`, and is
+  judged by revision only for the `keep` of requests. There is no way to add a
+  Context in a set, so a Context added by `context_add` meets no expectation.
 
 ## External checks
 
@@ -473,15 +492,20 @@ A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
 `{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
 the request opens, and a target has one expectation.
 
-- `change`: the revision of the target goes past the one recorded at `cr_open`.
-  Adding something is a change of what holds it: a Clause, `change` its Contract;
-  a Contract, Interface or Harness, `change` its Context; a Context, `change`
-  the Project. A Context's revision moves when one of its assets is added or
-  removed, or its `uses` or basis change, not when an asset's content does; the
-  Project's moves when a Context is added or removed.
-- `remove`: the target is no longer there (a Context takes its assets with it).
-- `keep`: the revision of the target is still the one recorded. A request cannot
-  be resolved once a target it keeps has moved.
+- `change`: the revision of the target goes past the one recorded at `cr_open`,
+  and the target moved in the work of the request or of a part of it (see
+  "Attribution" below). Adding something is a change of what holds it: a Clause,
+  `change` its Contract; a Contract, Interface or Harness, `change` its Context; a
+  Context, `change` the Project. A Context's revision moves when one of its assets
+  is added or removed, or its `uses` or basis change, not when an asset's content
+  does; the Project's moves when a Context is added or removed. `change` of the
+  Project is met by a change set `for` the request that adds a Context
+  (`{"put":"context",..}`); a Context added by `context_add` or by a set for no
+  request does not meet it.
+- `remove`: the target is no longer there (a Context takes its assets with it), and
+  it went in the work of the request or of a part of it.
+- `keep`: the revision of the target is still the one recorded, whoever moved it.
+  A request cannot be resolved once a target it keeps has moved.
 - Each option of the Crux takes the same `change` / `remove` / `keep` lists
   (and `wording`, the exact new text of the definitions, which was `change`
   before the lists took that name). `cr_decide` records the revision each of
@@ -495,7 +519,8 @@ the request opens, and a target has one expectation.
   request's own and the chosen option's), no `keep` moved, and every request
   whose `parent` it is resolved. When it refuses it names what is missing, by
   name (`rounding C1`): what has not changed, what is gone, what is not removed
-  yet, what moved, or which parts are open.
+  yet, what moved, or which parts are open, and which of the targets moved but
+  not in the work of the request.
 
 ```json
 {"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
@@ -507,8 +532,8 @@ the request opens, and a target has one expectation.
 ```
 
 ```json
-{"op":"cr_open","title":"Add billing and drop C2","intent":"change_behavior",
- "change":[{"project":true}],
+{"op":"cr_open","title":"Add rules and drop C2","intent":"change_behavior",
+ "change":[{"context":"pricing"}],
  "remove":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}],
  "keep":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}]}
 ```
@@ -518,21 +543,53 @@ seen at once: `{"kind":"keep","target":{"clause":{"context":"pricing","contract"
 `status` lists a request whose Crux has no decision under `awaiting` (title, kind,
 options with what each expects, the recommendation with its confidence, and the
 importance), the requests whose `change` / `remove` have not been met
-under `unapplied` (`unchanged`, `gone`, `not_removed`), and those whose `keep`
-moved under `keep_moved`. The checks `cr.awaiting-decision` (a note),
-`cr.unapplied` and `cr.keep-moved` (warnings) report them. A "change" is judged
-by the revision alone, so another request's change satisfies it too, and a change
-to a container is met by any change inside it that moves it; tying a change to
-the request that made it is left for later. A database written before
-expectations, or before the Crux, Policy and Assumptions below, does not load;
-chidev is unreleased and there is no migration.
+under `unapplied` (`unchanged`, `gone`, `not_removed`, and `elsewhere`: those of
+them that did move, or go, but not in the work of the request), and those whose
+`keep` moved under `keep_moved`. The checks `cr.awaiting-decision` (a note),
+`cr.unapplied`, `cr.keep-moved` and `cr.out-of-frame` (warnings) report them. A
+database written before expectations, or before the Crux, Policy and Assumptions
+below, or before the work of a request was recorded, does not load; chidev is
+unreleased and there is no migration.
 
-The change a request asks for is made by puts and retirements, and a change that
-touches several assets and holds only as a whole (a Clause removed, the Cases that
-cited it gone from their Harness, an Item removed with it) is one `change_set`
-(see "Change sets"), not a series of puts that has to be ordered around the
-citations; the request is met when the revisions it expects have moved, however
-they were made.
+The change a request asks for is made as a `change_set` `for` it (see "Change
+sets"): a change that touches several assets and holds only as a whole (a Clause
+removed, the Cases that cited it gone from their Harness, an Item removed with it)
+is one set, not a series of puts that has to be ordered around the citations.
+
+### Attribution and frame
+
+A `change_set` with `for` records its footprint for the request (what it moved, in
+the same commit). That ties the work to the request that asked for it:
+
+- A `change` or `remove` is met only by a move in the footprints recorded for the
+  request or for its parts, children and their children. A target that moved in a
+  set `for` another request, or in a set or a put or a retire without `for`, does
+  not meet it. The request stays `unapplied`, the target is listed under
+  `elsewhere`, and `cr_resolve` says so: ``not changed: stock C1; moved, but not by
+  a change set for this request: stock C1``. A `keep` is a protection against
+  anyone, so it is still judged by the revision alone.
+- A parent only aggregates. It need not expect anything: it is met by what its
+  parts did, and it is resolved when they are. When the parent does expect something
+  (a `change` of the Contract the parts work on), that is met by the work of any
+  part.
+- The targets a request expects to `change` or `remove` (its own and those of the
+  option its Crux chose) are its **frame**; a `keep` is not part of it. Naming a
+  container frames everything in it: `change` of a Contract frames its Clauses, of
+  a Context its assets and what is in them, of the Project everything. The work of
+  a request is to stay in its frame. A footprint that moved a target outside the
+  frame of its request, or outside the frame of a request it is a part of, is
+  reported as `cr.out-of-frame` (a warning; hooks `put` and `check`) for the request
+  the set was applied for, and `status` lists it as `out_of_frame` of that request
+  next to its `work` (each footprint's `store_revision` and the targets it moved).
+  The frame of a parent bounds its parts: a part that works outside it is out of
+  frame even where the part itself named the target. A parent with no frame bounds
+  nothing; a request with no frame has all its work out of frame. A container that
+  moved only because something inside it moved within the frame (the Contract that
+  took a Clause, the Context that took an asset) is not outside. A resolved request
+  is a record: it takes no more work and is not reported.
+- A new Clause or Item is a move of its own: a frame that names only the other
+  Clauses of the Contract has it outside, so frame the Contract (`change`) when the
+  request adds to it.
 
 ### Crux, Policy and Assumption
 
@@ -625,17 +682,18 @@ without them; what a put drops is recorded as retired too.
   Interfaces and Harnesses (`pin.unpinned`, `mutation.*`, `sim.*`, the uncited
   and no-harness checks) read the live model, so they do not judge a retired one.
 
-Retiring, like a put, does not need an open change request. The procedure retires
-as the work of a change request that expects the thing to go: open it with a
-`remove` for the Context or the asset, retire (the Cases that cite first), and
-resolve it once the expectation is met. The retire operation is not tied to the
-request (`for: <cr>` is a separate design).
+Retiring, like a put, does not need an open change request, but a retire operation
+belongs to none. The procedure retires as the work of a change request that
+expects the thing to go: open it with a `remove` for the Context or the asset,
+retire it in a `change_set` `for` the request (the Cases that cite first, or in the
+same set), and resolve it once the expectation is met. A retire operation on its own
+is not tied to a request, and a thing it takes out is not removed for any.
 
 Retiring several things, or retiring together with a put, is one `change_set` with
 `retires` (see "Change sets"): the refusals above are judged on the state the set
 ends in, so a Harness can be put without the Cases that cite an Item and the
 Interface retired in the same set. Retire operations on their own are change sets
-of one.
+of one, without `for`.
 
 ## Change-request addresses
 

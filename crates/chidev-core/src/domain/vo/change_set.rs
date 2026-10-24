@@ -9,6 +9,7 @@ use super::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId,
 use super::line_range::LineRange;
 use super::source::Source;
 use super::title::Title;
+use crate::domain::entity::context::Context;
 use crate::domain::entity::interface::ItemFound;
 
 /// A Case to put, as a Harness is written: what it cites is given by id alone. The revision a citation is
@@ -71,6 +72,9 @@ impl CaseDraft {
 /// Something a change set puts: a setting of a Context, or the whole new state of an asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetPut {
+    /// A Context is added (the Project goes to its next revision). It is applied first, so the same change set can
+    /// put assets in it and have them cite into it.
+    Context(Context),
     /// The Contexts a Context uses.
     Uses {
         /// The Context.

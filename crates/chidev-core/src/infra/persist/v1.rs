@@ -25,6 +25,7 @@ use crate::domain::vo::confidence::Confidence;
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+use crate::domain::vo::footprint::{Footprint, Move};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
@@ -618,7 +619,78 @@ pub(crate) struct ChangeRequestDoc {
     assumptions: Vec<AssumptionDoc>,
     /// The findings it deals with.
     addresses: Vec<AddressDoc>,
+    /// What the change sets applied for it moved, in the order they were kept.
+    work: Vec<FootprintDoc>,
     resolved: bool,
+}
+
+/// A target, as a container of a move is kept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TargetRefDoc {
+    target: TargetDoc,
+    id: Option<String>,
+}
+
+/// A target a change set moved, with the containers it was in (the outermost first).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MoveDoc {
+    target: TargetDoc,
+    id: Option<String>,
+    within: Vec<TargetRefDoc>,
+}
+
+/// What one change set applied for a change request moved, and the store revision it was kept at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FootprintDoc {
+    store_revision: u64,
+    moves: Vec<MoveDoc>,
+}
+
+impl From<&Footprint> for FootprintDoc {
+    fn from(f: &Footprint) -> FootprintDoc {
+        FootprintDoc {
+            store_revision: f.store_revision(),
+            moves: f
+                .moves()
+                .iter()
+                .map(|m| {
+                    let (target, id) = target_doc(&m.target());
+                    MoveDoc {
+                        target,
+                        id,
+                        within: m
+                            .within()
+                            .iter()
+                            .map(|t| {
+                                let (target, id) = target_doc(t);
+                                TargetRefDoc { target, id }
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&FootprintDoc> for Footprint {
+    type Error = Bad;
+
+    fn try_from(d: &FootprintDoc) -> Result<Footprint, Bad> {
+        let moves = d
+            .moves
+            .iter()
+            .map(|m| {
+                let within = m
+                    .within
+                    .iter()
+                    .map(|t| target_of(&t.target, &t.id))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, Bad>(Move::new(target_of(&m.target, &m.id)?, within))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Footprint::new(d.store_revision, moves))
+    }
 }
 
 /// A finding a change request addresses: the rule, and what it is about.
@@ -1159,6 +1231,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             decided_expects: expect_docs(c.decided_expects()),
             assumptions: c.assumptions().iter().map(AssumptionDoc::from).collect(),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
+            work: c.work().iter().map(FootprintDoc::from).collect(),
             resolved: c.state() == ChangeRequestState::Resolved,
         }
     }
@@ -1255,6 +1328,10 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
             draft,
             answer,
             decided_expects,
+            d.work
+                .iter()
+                .map(Footprint::try_from)
+                .collect::<Result<_, _>>()?,
             d.resolved,
         )
         .map_err(bad)

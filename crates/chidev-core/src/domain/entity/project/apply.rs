@@ -27,8 +27,8 @@ impl Project {
     /// put without the Cases that cite a Clause that the same change removes, and a Harness can cite a Clause or an
     /// Item that the same change makes.
     ///
-    /// The entries are applied in the order the rules need, whatever order they are listed in: the uses of the
-    /// Contexts; the Contracts and Interfaces; the basis of the Contexts that are based on their Contracts; the
+    /// The entries are applied in the order the rules need, whatever order they are listed in: the Contexts
+    /// added (the Project goes one revision up for each); the uses of the Contexts; the Contracts and Interfaces; the basis of the Contexts that are based on their Contracts; the
     /// Harnesses (a citation is recorded at the revision its target has by then); the retirements. The Clauses, Items
     /// and Cases that a put drops from an asset are recorded as retired, as they are by a put alone. Each asset
     /// moves by one revision at most, because it is named once: a change set that names a thing twice is refused.
@@ -42,6 +42,10 @@ impl Project {
             return Err(refused(repeated));
         }
         let ChangeSet { mut puts, retires } = set;
+        let added = puts
+            .iter()
+            .filter(|p| matches!(p, AssetPut::Context(_)))
+            .count();
         puts.sort_by_key(stage);
         let mut problems = Vec::new();
         let mut next = self.contexts.clone();
@@ -60,6 +64,9 @@ impl Project {
             .collect();
 
         let mut revision = self.revision;
+        for _ in 0..added {
+            revision = revision.next();
+        }
         let mut records = Vec::new();
         let mut gone = Vec::new();
         for retire in retires {
@@ -118,10 +125,11 @@ fn refused(problems: Vec<ProjectError>) -> ProjectError {
 /// When a put is applied: settings first, then the definitions, then the Harnesses that cite them.
 fn stage(put: &AssetPut) -> u8 {
     match put {
-        AssetPut::Uses { .. } => 0,
-        AssetPut::Contract { .. } | AssetPut::Interface { .. } => 1,
-        AssetPut::BaseOnContract { .. } => 2,
-        AssetPut::Harness { .. } => 3,
+        AssetPut::Context(_) => 0,
+        AssetPut::Uses { .. } => 1,
+        AssetPut::Contract { .. } | AssetPut::Interface { .. } => 2,
+        AssetPut::BaseOnContract { .. } => 3,
+        AssetPut::Harness { .. } => 4,
     }
 }
 
@@ -131,6 +139,14 @@ fn put_one(
     put: AssetPut,
 ) -> (ContextId, Result<(), ProjectError>) {
     match put {
+        AssetPut::Context(context) => {
+            let id = context.id();
+            if next.contains_key(&id) {
+                return (id, Err(ProjectError::DuplicateId(id)));
+            }
+            next.insert(id, context);
+            (id, Ok(()))
+        }
         AssetPut::Uses { context, uses } => (context, edit(next, context, |c| c.set_uses(uses))),
         AssetPut::BaseOnContract { context } => {
             (context, edit(next, context, Context::base_on_contract))
@@ -280,6 +296,7 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
         .collect();
     for put in &set.puts {
         match put {
+            AssetPut::Context(c) => note("context", "context", c.id().as_uuid()),
             AssetPut::Uses { context, .. } => note("uses", "context", context.as_uuid()),
             AssetPut::BaseOnContract { context } => note("base", "context", context.as_uuid()),
             AssetPut::Contract { id, .. } => note("contract", "contract", id.as_uuid()),
@@ -287,6 +304,7 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
             AssetPut::Harness { id, .. } => note("harness", "harness", id.as_uuid()),
         }
         let context = match put {
+            AssetPut::Context(c) => c.id(),
             AssetPut::Uses { context, .. }
             | AssetPut::BaseOnContract { context }
             | AssetPut::Contract { context, .. }

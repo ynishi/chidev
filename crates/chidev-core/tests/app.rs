@@ -155,6 +155,7 @@ fn cases(words: &[&str]) -> Vec<CaseInput> {
 /// The change set that removes Clause C7 and Item `release` and puts the Harness without the Case that cites them.
 fn removal() -> ChangeSetInput {
     ChangeSetInput {
+        change_request: None,
         puts: vec![
             PutInput::Contract(ContractPut {
                 context: "core".to_string(),
@@ -269,6 +270,71 @@ async fn a_retirement_and_a_put_are_one_change_set() {
         matches!(again, Err(AppError::AssetRetired { .. })),
         "{again:?}"
     );
+}
+
+#[tokio::test]
+async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
+    let mut app = app("context-put").await;
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    let project = app.store().project().await.unwrap().unwrap();
+    let set = ChangeSetInput {
+        change_request: None,
+        puts: vec![
+            // listed before the Context it uses
+            PutInput::Context {
+                name: "billing".to_string(),
+                uses: vec!["ledger".to_string(), "core".to_string()],
+            },
+            PutInput::Contract(ContractPut {
+                context: "ledger".to_string(),
+                name: "entries".to_string(),
+                title: "Entries".to_string(),
+                clauses: clauses(&["C1"]),
+            }),
+            PutInput::Interface(InterfacePut {
+                context: "billing".to_string(),
+                name: "invoice".to_string(),
+                source: "fn total()\n".to_string(),
+                items: vec![item("fn total()", 1)],
+            }),
+            PutInput::Context {
+                name: "ledger".to_string(),
+                uses: Vec::new(),
+            },
+        ],
+        retires: Vec::new(),
+    };
+    let done = app.apply_change_set(&set).await.unwrap();
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind).collect();
+    assert_eq!(kinds, ["context", "contract", "interface", "context"]);
+    let after = app.store().project().await.unwrap().unwrap();
+    assert_eq!(after.revision().number(), project.revision().number() + 2);
+    assert_eq!(after.contexts().count(), 3);
+    let billing = after
+        .contexts()
+        .find(|c| c.name().to_string() == "billing")
+        .unwrap();
+    assert_eq!(billing.uses().len(), 2);
+    assert_eq!(billing.interfaces().count(), 1);
+    let ledger = after
+        .contexts()
+        .find(|c| c.name().to_string() == "ledger")
+        .unwrap();
+    assert_eq!(ledger.contracts().count(), 1);
+
+    // a name that is taken is refused, and nothing is kept
+    let before = app.store().revision().await.unwrap();
+    let again = ChangeSetInput {
+        change_request: None,
+        puts: vec![PutInput::Context {
+            name: "ledger".to_string(),
+            uses: Vec::new(),
+        }],
+        retires: Vec::new(),
+    };
+    assert!(app.apply_change_set(&again).await.is_err());
+    assert_eq!(app.store().revision().await.unwrap(), before);
 }
 
 #[tokio::test]

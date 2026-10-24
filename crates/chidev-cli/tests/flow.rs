@@ -198,6 +198,18 @@ fn discount_put(c1: &str, c2: &str) -> String {
     )
 }
 
+/// The same contract put as a change set applied for the change request titled `cr`.
+fn discount_set(cr: &str, c1: &str, c2: &str) -> String {
+    format!(
+        concat!(
+            "{{\"op\":\"change_set\",\"for\":\"{}\",\"puts\":[{{\"put\":\"contract\",\"context\":\"pricing\",",
+            "\"name\":\"discount\",\"title\":\"Discount\",",
+            "\"clauses\":[{{\"label\":\"C1\",\"text\":\"{}\"}},{{\"label\":\"C2\",\"text\":\"{}\"}}]}}]}}\n"
+        ),
+        cr, c1, c2
+    )
+}
+
 #[test]
 fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied() {
     let dir = fresh_dir("obligation");
@@ -229,7 +241,8 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         // 8: decided, yet C1 never changed: it does not resolve, and says which definition
         "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
-        discount_put(
+        discount_set(
+            "Refuse big discounts",
             "a discount above 50% is refused",
             "a refused discount is an InvalidDiscount",
         ),
@@ -250,7 +263,8 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         )
         .to_string(),
         "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
-        discount_put(
+        discount_set(
+            "Name the error",
             "a discount above 50% is refused",
             "a refused discount is a DiscountTooLarge",
         ),
@@ -339,6 +353,190 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(last["unapplied"], serde_json::json!([]));
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
+}
+
+/// The e2e case "remove release": the change set `for` the child request meets what it expects to remove, the
+/// parent is met by the work of its part, and a change set `for` an unrelated request that touches what another
+/// request frames moves a target outside the frame of the request it was made for, meets nothing of the other's.
+#[test]
+fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame() {
+    use serde_json::json;
+    let dir = fresh_dir("attribution");
+    let clause =
+        |label: &str| json!({"clause":{"context":"core","contract":"stock","label":label}});
+    let stock = |c1: &str, with_release: bool| {
+        let mut clauses = vec![json!({"label":"C1","text":c1})];
+        if with_release {
+            clauses.push(json!({"label":"C7","text":"a unit is released"}));
+        }
+        json!({"put":"contract","context":"core","name":"stock","title":"Stock","clauses":clauses})
+    };
+    let interface = |with_release: bool| {
+        let mut items = vec![json!({"signature":"fn reserve()","lines":[1,1]})];
+        let mut source = "fn reserve()\n";
+        if with_release {
+            items.push(json!({"signature":"fn release()","lines":[2,2]}));
+            source = "fn reserve()\nfn release()\n";
+        }
+        json!({"put":"interface","context":"core","name":"stock","source":source,"items":items})
+    };
+    let harness = |with_release: bool| {
+        let mut cases = vec![json!({"name":"reserve_refuses","lines":[1,1],
+            "items":[{"interface":"stock","signature":"fn reserve()"}],
+            "clauses":[{"contract":"stock","label":"C1"}]})];
+        let mut source = "fn reserve_refuses() {}\n";
+        if with_release {
+            cases.push(json!({"name":"release_frees","lines":[2,2],
+                "items":[{"interface":"stock","signature":"fn release()"}],
+                "clauses":[{"contract":"stock","label":"C7"}]}));
+            source = "fn reserve_refuses() {}\nfn release_frees() {}\n";
+        }
+        json!({"put":"harness","context":"core","name":"stock-tests","source":source,"cases":cases})
+    };
+    let ops: String = [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        // 3: the stock, in a change set for no request
+        json!({"op":"change_set","puts":[stock("a unit is reserved", true), interface(true), harness(true)]}),
+        // 4: the parent frames the three assets and expects only that they change
+        json!({"op":"cr_open","title":"Remove release","intent":"change_behavior",
+            "change":[{"contract":{"context":"core","contract":"stock"}},
+                      {"interface":{"context":"core","interface":"stock"}},
+                      {"harness":{"context":"core","harness":"stock-tests"}}]}),
+        // 5: the part removes the three things that are release
+        json!({"op":"cr_open","title":"Drop release","intent":"change_behavior","parent":"Remove release",
+            "remove":[clause("C7"),
+                      {"item":{"context":"core","interface":"stock","signature":"fn release()"}},
+                      {"case":{"context":"core","harness":"stock-tests","name":"release_frees"}}]}),
+        // 6, 7: two requests that have nothing to do with it
+        json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior","change":[clause("C1")]}),
+        json!({"op":"cr_open","title":"Unrelated","intent":"change_behavior",
+            "change":[{"harness":{"context":"core","harness":"stock-tests"}}]}),
+        // 8: the removal, one change set for the part
+        json!({"op":"change_set","for":"Drop release",
+            "puts":[stock("a unit is reserved", false), interface(false), harness(false)]}),
+        json!({"op":"cr_resolve","title":"Drop release"}),
+        json!({"op":"cr_resolve","title":"Remove release"}),
+        // 11: a change set for an unrelated request touches the clause that the first one reworded
+        json!({"op":"change_set","for":"Unrelated","puts":[stock("a unit is reserved, once", false)]}),
+        // 12: C1 moved, but not for "Reword C1"
+        json!({"op":"cr_resolve","title":"Reword C1"}),
+        json!({"op":"change_set","for":"Reword C1","puts":[stock("a unit is reserved, at most once", false)]}),
+        json!({"op":"cr_resolve","title":"Reword C1"}),
+        // 15: a set for a request that is resolved, and for one that is not there
+        json!({"op":"change_set","for":"Reword C1","puts":[stock("again", false)]}),
+        json!({"op":"change_set","for":"No such request","puts":[stock("again", false)]}),
+        json!({"op":"status"}),
+    ]
+    .iter()
+    .map(|op| format!("{op}\n"))
+    .collect();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [12, 15, 16], "{results:#?}");
+
+    let out_of_frame = |r: &Value| -> Vec<Value> {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["rule"] == "cr.out-of-frame")
+            .cloned()
+            .collect()
+    };
+    // the removal stays inside what the part and its parent framed, and meets what they expect
+    assert!(
+        out_of_frame(at(&results, 8)).is_empty(),
+        "{:#?}",
+        at(&results, 8)
+    );
+    assert_eq!(at(&results, 9)["ok"], true);
+    assert_eq!(at(&results, 10)["ok"], true);
+
+    // the set for the unrelated request is outside its frame (the harness), and says which request
+    let outside = out_of_frame(at(&results, 11));
+    assert_eq!(outside.len(), 1, "{:#?}", at(&results, 11));
+    assert_eq!(outside[0]["level"], "warning");
+    assert!(
+        outside[0]["about"]
+            .as_str()
+            .expect("about")
+            .contains("Unrelated"),
+        "{outside:#?}"
+    );
+
+    // the clause moved, but not under the request that expected it to change: the refusal says so
+    let refused = error_at(&results, 12);
+    assert!(
+        refused.contains("not changed: stock C1")
+            && refused.contains("moved, but not by a change set for this request: stock C1"),
+        "{refused}"
+    );
+    assert_eq!(at(&results, 13)["ok"], true, "{results:#?}");
+    // (what was found stays found: only the unrelated request is outside its frame, not the one that reworded)
+    let still = out_of_frame(at(&results, 13));
+    assert_eq!(still.len(), 1, "{still:#?}");
+    assert!(
+        still[0]["about"]
+            .as_str()
+            .expect("about")
+            .contains("Unrelated")
+    );
+    assert_eq!(at(&results, 14)["ok"], true, "{results:#?}");
+    // a resolved request takes no more work, and a request has to exist
+    assert!(error_at(&results, 15).contains("resolved"));
+    assert!(error_at(&results, 16).contains("No such request"));
+
+    // status: the footprints, and the move outside the frame, by name
+    let status = at(&results, 17);
+    let cr = |title: &str| -> &Value {
+        status["change_requests"]
+            .as_array()
+            .expect("change requests")
+            .iter()
+            .find(|c| c["title"] == title)
+            .unwrap_or_else(|| panic!("no change request {title}"))
+    };
+    let work = cr("Drop release")["work"].as_array().expect("work");
+    assert_eq!(work.len(), 1);
+    assert!(work[0]["store_revision"].as_u64().expect("revision") > 0);
+    let moved: Vec<&str> = work[0]["moved"]
+        .as_array()
+        .expect("moved")
+        .iter()
+        .map(|m| m.as_str().expect("a target"))
+        .collect();
+    for target in [
+        "stock C7 (retired)",
+        "stock fn release() (retired)",
+        "case stock-tests release_frees (retired)",
+        "contract stock",
+        "interface stock",
+        "harness stock-tests",
+    ] {
+        assert!(moved.contains(&target), "{target} in {moved:?}");
+    }
+    assert_eq!(cr("Drop release")["out_of_frame"], json!([]));
+    assert_eq!(cr("Remove release")["work"], json!([]));
+    let unrelated = cr("Unrelated");
+    assert_eq!(unrelated["work"].as_array().expect("work").len(), 1);
+    assert_eq!(
+        unrelated["out_of_frame"],
+        json!(["contract stock", "stock C1"])
+    );
+    // the harness the unrelated request wants changed was changed by the part: it is still owed
+    let owed = status["unapplied"]
+        .as_array()
+        .expect("unapplied")
+        .iter()
+        .find(|u| u["cr"] == "Unrelated")
+        .expect("Unrelated is behind");
+    assert_eq!(owed["elsewhere"], json!(["harness stock-tests"]));
 }
 
 fn policy_put(lines: &[(&str, &str)]) -> String {
@@ -569,15 +767,20 @@ fn a_context_is_added_and_a_clause_removed_through_change_requests() {
             "a discount above 50% is refused",
             "a refused discount is an InvalidDiscount",
         ),
-        // 4: adding a Context is a change of the Project
+        // 4: adding a Contract is a change of the Context that holds it
         concat!(
-            "{\"op\":\"cr_open\",\"title\":\"Add billing\",\"intent\":\"change_behavior\",",
-            "\"change\":[{\"project\":true}]}\n"
+            "{\"op\":\"cr_open\",\"title\":\"Add rules\",\"intent\":\"change_behavior\",",
+            "\"change\":[{\"context\":\"pricing\"}]}\n"
         )
         .to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Add billing\"}\n".to_string(),
-        "{\"op\":\"context_add\",\"name\":\"billing\"}\n".to_string(),
-        "{\"op\":\"cr_resolve\",\"title\":\"Add billing\"}\n".to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Add rules\"}\n".to_string(),
+        // 6: made for the request, so it counts
+        concat!(
+            "{\"op\":\"change_set\",\"for\":\"Add rules\",\"puts\":[{\"put\":\"contract\",\"context\":\"pricing\",",
+            "\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a rule holds\"}]}]}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Add rules\"}\n".to_string(),
         // 8: removing a Clause, while the other stays as it is
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Drop C2\",\"intent\":\"change_behavior\",",
@@ -586,7 +789,7 @@ fn a_context_is_added_and_a_clause_removed_through_change_requests() {
         )
         .to_string(),
         "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
-        "{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"discount\",\"title\":\"Discount\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a discount above 50% is refused\"}]}\n"
+        "{\"op\":\"change_set\",\"for\":\"Drop C2\",\"puts\":[{\"put\":\"contract\",\"context\":\"pricing\",\"name\":\"discount\",\"title\":\"Discount\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a discount above 50% is refused\"}]}]}\n"
             .to_string(),
         "{\"op\":\"cr_resolve\",\"title\":\"Drop C2\"}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
@@ -603,10 +806,10 @@ fn a_context_is_added_and_a_clause_removed_through_change_requests() {
 
     assert_eq!(
         at(&results, 4)["expects"],
-        serde_json::json!([{ "kind": "change", "target": { "project": true }, "recorded": 2 }])
+        serde_json::json!([{ "kind": "change", "target": { "context": "pricing" }, "recorded": 2 }])
     );
-    // no Context was added yet: the Project did not change
-    assert!(error_at(&results, 5).contains("not changed: project"));
+    // no Contract was added yet: the Context did not change
+    assert!(error_at(&results, 5).contains("not changed: context pricing"));
 
     // the Clause is still there: it says which one, by name
     assert!(error_at(&results, 9).contains("not removed: discount C2"));
@@ -959,7 +1162,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 24);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 25);
     assert_eq!(entry("crux.policy-line-gone")["level"], "note");
     assert_eq!(
         entry("crux.policy-line-gone")["hooks"],
@@ -1580,9 +1783,9 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         // 10: the Interface is not gone yet
         "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
         // 11, 12: the Harness that cites goes first, then the Interface it cited
-        "{\"op\":\"harness_retire\",\"context\":\"core\",\"harness\":\"tests\"}\n",
-        "{\"op\":\"interface_retire\",\"context\":\"core\",\"interface\":\"api\"}\n",
-        // 13: a retired target meets a Remove expectation
+        "{\"op\":\"change_set\",\"for\":\"Drop api\",\"retires\":[{\"retire\":\"harness\",\"context\":\"core\",\"harness\":\"tests\"}]}\n",
+        "{\"op\":\"change_set\",\"for\":\"Drop api\",\"retires\":[{\"retire\":\"interface\",\"context\":\"core\",\"interface\":\"api\"}]}\n",
+        // 13: a retired target meets a Remove expectation, once the retirement was made for the request
         "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
         // 14, 15: nothing cites the Contract any more; nothing uses `scratch`
         "{\"op\":\"contract_retire\",\"context\":\"core\",\"contract\":\"rules\"}\n",
@@ -1866,4 +2069,61 @@ fn a_change_set_makes_what_its_harness_cites_and_retires_in_the_same_change() {
     assert!(error_at(&results, 5).contains("names the contract `stock` twice"));
     assert!(error_at(&results, 6).contains("nothing to put or retire"));
     assert_eq!(at(&results, 7)["ok"], true);
+}
+
+/// A change set adds a Context with its first assets, so a request that expects `change` of the Project is met by
+/// the set made `for` it, and not by a Context that a set for nothing added.
+#[test]
+fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_project() {
+    use serde_json::json;
+    let dir = fresh_dir("context-put");
+    let context = |name: &str, uses: Vec<&str>| json!({"put":"context","name":name,"uses":uses});
+    let (results, code, err) = run_values(
+        &dir,
+        &[
+            json!({"op":"init"}),
+            json!({"op":"cr_open","title":"Add billing","intent":"change_behavior",
+                "change":[{"project":true}]}),
+            // 3: a Context added by a set for nothing moves the Project, for no request
+            json!({"op":"change_set","puts":[context("audit", vec![])]}),
+            // 4: so the request is not met
+            json!({"op":"cr_resolve","title":"Add billing"}),
+            // 5: the set for the request adds a Context, another that it uses (listed after it), and puts into both
+            json!({"op":"change_set","for":"Add billing","puts":[
+                context("billing", vec!["ledger"]),
+                context("ledger", vec![]),
+                {"put":"contract","context":"billing","name":"invoice","title":"Invoice",
+                 "clauses":[{"label":"C1","text":"an invoice has a total"}]},
+                {"put":"interface","context":"ledger","name":"entries","source":"fn post()\n",
+                 "items":[{"signature":"fn post()","lines":[1,1]}]},
+                {"put":"harness","context":"billing","name":"invoice-tests",
+                 "source":"fn totals() {}\n",
+                 "cases":[{"name":"totals","lines":[1,1],
+                    "items":[{"context":"ledger","interface":"entries","signature":"fn post()"}],
+                    "clauses":[{"contract":"invoice","label":"C1"}]}]}
+            ]}),
+            // 6: now it is
+            json!({"op":"cr_resolve","title":"Add billing"}),
+            // 7: a Context that exists is not added again
+            json!({"op":"change_set","puts":[context("billing", vec![])]}),
+        ],
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [4, 7], "{results:#?}");
+    let kinds: Vec<&str> = at(&results, 5)["puts"]
+        .as_array()
+        .expect("puts")
+        .iter()
+        .map(|p| p["put"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        ["context", "context", "contract", "interface", "harness"]
+    );
+    assert_eq!(at(&results, 6)["ok"], true, "{:#?}", at(&results, 6));
 }

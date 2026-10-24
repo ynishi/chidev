@@ -56,7 +56,8 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{
-    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, resolve, unapplied,
+    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, out_of_frame,
+    resolve, unapplied,
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
@@ -230,14 +231,17 @@ pub enum AppError {
     #[error(transparent)]
     ChangeRequest(#[from] ChangeRequestError),
     /// The targets have not followed the change request yet; they are named as `status` names them.
-    #[error("the change is not applied yet: {}", not_applied_words(.unchanged, .gone, .not_removed))]
+    #[error("the change is not applied yet: {}", not_applied_words(.unchanged, .gone, .not_removed, .elsewhere))]
     NotApplied {
-        /// The targets to change that are still as they were, described.
+        /// The targets to change that no change set applied for the request (or a part of it) has moved, described.
         unchanged: Vec<String>,
         /// The targets to change that are gone, described.
         gone: Vec<String>,
-        /// The targets to remove that are still there, described.
+        /// The targets to remove that no change set applied for the request (or a part of it) has taken out,
+        /// described.
         not_removed: Vec<String>,
+        /// The targets among the first and the third that did move, or go, but not under this request, described.
+        elsewhere: Vec<String>,
     },
     /// Targets the change request expected to stay as they are have moved, so it cannot be resolved.
     #[error("the change request expected these to stay as they are, but they moved: {}", .moved.join(", "))]
@@ -717,6 +721,20 @@ pub struct ChangeRequestStatus {
     pub answer: Option<AnswerStatus>,
     /// The interpretations it records, in order.
     pub assumptions: Vec<AssumptionStatus>,
+    /// What the change sets applied for it moved, in the order they were kept.
+    pub work: Vec<WorkStatus>,
+    /// The targets its work moved outside its frame (or the frame of a request it is a part of), described; empty
+    /// for a resolved request.
+    pub out_of_frame: Vec<String>,
+}
+
+/// What one change set applied for a change request moved (its footprint), in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkStatus {
+    /// The revision of the store the change set was kept at.
+    pub store_revision: u64,
+    /// The targets it moved (made, revised, or gone), described.
+    pub moved: Vec<String>,
 }
 
 /// A change request as it was opened.
@@ -801,12 +819,15 @@ pub struct UnappliedStatus {
     pub cr: String,
     /// The decision on its Crux, in words.
     pub decision: Option<String>,
-    /// The targets to change that have not changed since, described.
+    /// The targets to change that the work of the request (or of a part of it) has not moved, described.
     pub unchanged: Vec<String>,
     /// The targets to change that are gone, described.
     pub gone: Vec<String>,
-    /// The targets to remove that are still there, described.
+    /// The targets to remove that the work of the request has not taken out, described.
     pub not_removed: Vec<String>,
+    /// The targets among `unchanged` and `not_removed` that moved, or went, but not under this request (a change
+    /// set applied for another request, or for none, did it), described.
+    pub elsewhere: Vec<String>,
 }
 
 /// An unresolved change request that expected targets to stay as they are, and they moved.
@@ -1548,10 +1569,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     unchanged,
                     gone,
                     not_removed,
+                    elsewhere,
                 } => AppError::NotApplied {
                     unchanged: self.describe_all(&p, &unchanged).await?,
                     gone: self.describe_all(&p, &gone).await?,
                     not_removed: self.describe_all(&p, &not_removed).await?,
+                    elsewhere: self.describe_all(&p, &elsewhere).await?,
                 },
                 ChangeRequestError::KeepMoved { moved } => AppError::KeepMoved {
                     moved: self.describe_all(&p, &moved).await?,
@@ -1698,9 +1721,22 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         let decision_of =
             |c: &ChangeRequest| c.crux().and_then(|q| q.decision()).map(decision_text);
-        let records = crs
-            .iter()
-            .map(|c| ChangeRequestStatus {
+        let out_of_frame = out_of_frame(&crs);
+        let mut records = Vec::with_capacity(crs.len());
+        for c in &crs {
+            let mut work = Vec::with_capacity(c.work().len());
+            for f in c.work() {
+                let targets: Vec<Target> = f.targets().collect();
+                work.push(WorkStatus {
+                    store_revision: f.store_revision(),
+                    moved: self.describe_all(&p, &targets).await?,
+                });
+            }
+            let outside = match out_of_frame.iter().find(|o| o.cr == c.id()) {
+                Some(o) => self.describe_all(&p, &o.moved).await?,
+                None => Vec::new(),
+            };
+            records.push(ChangeRequestStatus {
                 title: c.title().to_string(),
                 intent: c.intent().word(),
                 parent: c.parent().map(title_of),
@@ -1710,10 +1746,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 state: c.state().word(),
                 answer: c.crux().and_then(Crux::answer).map(answer_status),
                 assumptions: c.assumptions().iter().map(assumption_status).collect(),
-            })
-            .collect();
+                work,
+                out_of_frame: outside,
+            });
+        }
         let mut open = Vec::new();
-        for u in unapplied(crs.iter(), &p) {
+        for u in unapplied(&crs, &p) {
             let Some(cr) = crs.iter().find(|c| c.id() == u.cr) else {
                 continue;
             };
@@ -1723,10 +1761,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 unchanged: self.describe_all(&p, &u.unchanged).await?,
                 gone: self.describe_all(&p, &u.gone).await?,
                 not_removed: self.describe_all(&p, &u.not_removed).await?,
+                elsewhere: self.describe_all(&p, &u.elsewhere).await?,
             });
         }
         let mut moved = Vec::new();
-        for k in keep_moved(crs.iter(), &p) {
+        for k in keep_moved(&crs, &p) {
             let Some(cr) = crs.iter().find(|c| c.id() == k.cr) else {
                 continue;
             };
@@ -2117,9 +2156,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 }
 
 /// What a change request still lacks, in words: the targets as they were, then the ones gone, then the ones to
-/// remove that are still there.
-fn not_applied_words(unchanged: &[String], gone: &[String], not_removed: &[String]) -> String {
-    let mut parts = Vec::with_capacity(3);
+/// remove that are still there, and the ones among them that moved or went but not under the request (a change set
+/// applied for another request, or for none, did it).
+fn not_applied_words(
+    unchanged: &[String],
+    gone: &[String],
+    not_removed: &[String],
+    elsewhere: &[String],
+) -> String {
+    let mut parts = Vec::with_capacity(4);
     if !unchanged.is_empty() {
         parts.push(format!("not changed: {}", unchanged.join(", ")));
     }
@@ -2128,6 +2173,12 @@ fn not_applied_words(unchanged: &[String], gone: &[String], not_removed: &[Strin
     }
     if !not_removed.is_empty() {
         parts.push(format!("not removed: {}", not_removed.join(", ")));
+    }
+    if !elsewhere.is_empty() {
+        parts.push(format!(
+            "moved, but not by a change set for this request: {}",
+            elsewhere.join(", ")
+        ));
     }
     parts.join("; ")
 }

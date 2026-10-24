@@ -12,19 +12,24 @@ use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, AssetName, Changes, IdSource, Store};
 use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Put, RetiredStatus, Retirement,
-    context_id, context_ids, input, refuse_retired,
+    context_id, context_ids, input, refuse_retired, view,
 };
 use crate::domain::check::Hook;
+use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
+use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
+use crate::domain::service::footprint::moves_between;
 use crate::domain::vo::case::CaseName;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+use crate::domain::vo::footprint::Footprint;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
 use crate::domain::vo::line_range::LineRange;
+use crate::domain::vo::name::ContextName;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
@@ -80,6 +85,13 @@ pub struct HarnessPut {
 /// One thing a change set puts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutInput {
+    /// A Context is added. The other puts of the set can name it, and it may use the Contexts the set adds.
+    Context {
+        /// Its name.
+        name: String,
+        /// The Contexts it uses, by name.
+        uses: Vec<String>,
+    },
     /// The Contexts a Context uses, by name.
     Uses {
         /// The Context.
@@ -131,6 +143,12 @@ pub enum RetireInput {
 /// A change set as a person writes it: the assets to put, and the things to retire, by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeSetInput {
+    /// The title of the change request this change set is applied for. The request must exist and not be resolved.
+    /// What the set moves is recorded as work of that request, in the same commit: only that work (and the work of
+    /// the parts of the request) meets what the request expects to change or remove, and it is judged against the
+    /// request's frame. None: the set belongs to no request, meets none, and is judged by revision for the `keep`
+    /// of any request alone.
+    pub change_request: Option<String>,
     /// What is put.
     pub puts: Vec<PutInput>,
     /// What is retired.
@@ -140,7 +158,7 @@ pub struct ChangeSetInput {
 /// What one put of a change set came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutDone {
-    /// `uses`, `base_on_contract`, `contract`, `interface` or `harness`.
+    /// `context`, `uses`, `base_on_contract`, `contract`, `interface` or `harness`.
     pub kind: &'static str,
     /// The Context's name.
     pub context: String,
@@ -186,6 +204,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// the names of the assets made. When it is refused nothing is kept, and the error names every problem found
     /// (a Case that cites what it cannot reach is named with its Harness, and what it cites with the Contract or
     /// Interface that has it).
+    ///
+    /// A set applied `for` a change request records what it moved (the targets whose revision differs between the
+    /// Project before and after, with the containers they were in) as work of that request, in the same commit; the
+    /// request must exist and not be resolved. The checks of the put hook see the request with that work, so a move
+    /// outside its frame is found by the set that makes it.
     pub async fn apply_change_set(
         &mut self,
         set: &ChangeSetInput,
@@ -194,10 +217,77 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             return Err(input("the change set has nothing to put or retire"));
         }
         let at = self.store.revision().await?;
+        let mut applied_for = match &set.change_request {
+            Some(title) => {
+                let cr = self.change_request_titled(title).await?;
+                if cr.state() == ChangeRequestState::Resolved {
+                    return Err(AppError::ChangeRequest(ChangeRequestError::AlreadyResolved));
+                }
+                Some(cr)
+            }
+            None => None,
+        };
         let p = self.project().await?;
         let mut plan = Plan::default();
         let mut problems = Vec::new();
         let mut puts = Vec::new();
+
+        // The Contexts the set adds first: the other puts name them, so they are resolved against `named`, the
+        // Project with them in (`p` stays the Project before, for what the set moved).
+        let mut named = p.clone();
+        let mut fresh = Vec::new();
+        for put in &set.puts {
+            if let PutInput::Context { name, .. } = put {
+                fresh.push((name.as_str(), ContextId::from_uuid(self.ids.next_uuid())));
+            }
+        }
+        let mut waiting = Vec::new();
+        for put in &set.puts {
+            let PutInput::Context { name, uses } = put else {
+                continue;
+            };
+            let id = fresh.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+            let built = ContextName::try_from(name.as_str())
+                .map_err(input)
+                .and_then(|n| {
+                    let uses = uses
+                        .iter()
+                        .map(|u| match fresh.iter().find(|(n, _)| n == u) {
+                            Some((_, id)) => Ok(*id),
+                            None => context_id(&p, u),
+                        })
+                        .collect::<Result<BTreeSet<_>, _>>()?;
+                    let id = id.ok_or_else(|| input("the Context has no id"))?;
+                    Context::new(id, n, uses).map_err(|e| AppError::from(ProjectError::from(e)))
+                });
+            match built {
+                Ok(c) => waiting.push(c),
+                Err(e) => problems.push(e),
+            }
+        }
+        // A Context may use another one the set adds, whatever order they are listed in.
+        loop {
+            let before = waiting.len();
+            let mut left = Vec::new();
+            for c in waiting {
+                if named.add_context(c.clone()).is_ok() {
+                    puts.push(AssetPut::Context(c));
+                } else {
+                    left.push(c);
+                }
+            }
+            waiting = left;
+            if waiting.is_empty() || waiting.len() == before {
+                break;
+            }
+        }
+        for c in waiting {
+            if let Err(e) = named.add_context(c) {
+                problems.push(e.into());
+            }
+        }
+        let p_before = p;
+        let p = named;
 
         // The definitions first: a Case that cites one finds the ids and labels of the change set's own.
         for put in &set.puts {
@@ -210,7 +300,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     let done = self.interface_put(&p, &mut plan, i).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
-                PutInput::Uses { .. } | PutInput::BaseOnContract { .. } | PutInput::Harness(_) => {}
+                PutInput::Context { .. }
+                | PutInput::Uses { .. }
+                | PutInput::BaseOnContract { .. }
+                | PutInput::Harness(_) => {}
             }
         }
         for put in &set.puts {
@@ -230,7 +323,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     Ok(context) => puts.push(AssetPut::BaseOnContract { context }),
                     Err(e) => problems.push(e),
                 },
-                PutInput::Contract(_) | PutInput::Interface(_) => {}
+                PutInput::Context { .. } | PutInput::Contract(_) | PutInput::Interface(_) => {}
             }
         }
         let mut retires = Vec::new();
@@ -244,13 +337,33 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             return Err(one_or_many(problems));
         }
 
-        let mut after = p.clone();
+        let mut after = p_before.clone();
         if let Err(e) = after.apply(ChangeSet::new(puts, retires)) {
             return Err(self.set_error(&p, &plan, e).await?);
         }
-        let gate = self
-            .gate(Hook::Put, at, Some(&p), &after, &plan.names)
-            .await?;
+        if let Some(cr) = &mut applied_for {
+            let moves = moves_between(&p_before, &after);
+            cr.record_work(Footprint::new(at.0 + 1, moves))?;
+        }
+        let gate = match &applied_for {
+            Some(cr) => {
+                let pins = self.store.pins().await?;
+                let mut crs = self.store.change_requests().await?;
+                crs.retain(|c| c.id() != cr.id());
+                crs.push(cr.clone());
+                self.gate_with(
+                    Hook::Put,
+                    at,
+                    &view(Some(&p_before), &after, &pins, &crs),
+                    &plan.names,
+                )
+                .await?
+            }
+            None => {
+                self.gate(Hook::Put, at, Some(&p_before), &after, &plan.names)
+                    .await?
+            }
+        };
         let mut retired = Vec::new();
         for r in after.retired().iter().skip(p.retired().len()) {
             retired.push(self.retired_status(r, &plan.names).await?);
@@ -262,6 +375,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .collect();
         let changes = Changes {
             project: Some(after),
+            change_requests: applied_for.into_iter().collect(),
             names: plan.names,
             invocations: gate.invocations,
             external: gate.external,
@@ -283,6 +397,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         put: PutInput,
     ) -> Result<Checked<ChangeSetDone>, AppError> {
         self.apply_change_set(&ChangeSetInput {
+            change_request: None,
             puts: vec![put],
             retires: Vec::new(),
         })
@@ -296,6 +411,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Retirement>, AppError> {
         let done = self
             .apply_change_set(&ChangeSetInput {
+                change_request: None,
                 puts: Vec::new(),
                 retires: vec![retire],
             })
@@ -823,6 +939,19 @@ fn target_of(kind: AssetKind, id: Uuid) -> Target {
 /// What a put came to, from the plan and the Project after the change (`before` resolves the Context's name).
 fn put_done(put: &PutInput, before: &Project, plan: &Plan, after: &Project) -> PutDone {
     let (kind, context, asset_kind, name) = match put {
+        PutInput::Context { name, .. } => {
+            let found = context_id(after, name)
+                .ok()
+                .and_then(|id| after.context(id))
+                .map(|c| (c.id().as_uuid(), c.revision()));
+            return PutDone {
+                kind: "context",
+                context: name.clone(),
+                name: None,
+                id: found.map(|(id, _)| id),
+                revision: found.map(|(_, r)| r),
+            };
+        }
         PutInput::Uses { context, .. } => ("uses", context, None, None),
         PutInput::BaseOnContract { context } => ("base_on_contract", context, None, None),
         PutInput::Contract(c) => (

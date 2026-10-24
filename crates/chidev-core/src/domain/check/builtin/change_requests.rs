@@ -8,7 +8,9 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::change_request::ChangeRequestState;
-use crate::domain::service::change_request::{awaiting_decision, keep_moved, unapplied};
+use crate::domain::service::change_request::{
+    awaiting_decision, keep_moved, out_of_frame, unapplied,
+};
 use crate::domain::vo::answer::Basis;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::intent::Intent;
@@ -23,7 +25,10 @@ static UNAPPLIED: Descriptor = Descriptor {
     summary: Cow::Borrowed("an unresolved change request whose targets have not followed"),
     help: Cow::Borrowed(
         "The change was asked for, but a target it expects to change is still as it was or is gone, or a target \
-           it expects to remove is still there. Make the change, then resolve the change request.",
+           it expects to remove is still there. A change counts for the request only when it was made by a change \
+           set applied for it (`for`), or for a part of it: a target that moved in a change set applied for \
+           another request, or for none, is still owed. Make the change as a change set for the request, then \
+           resolve it.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
@@ -38,7 +43,7 @@ impl Check for Unapplied {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        unapplied(view.change_requests.iter(), view.after)
+        unapplied(view.change_requests, view.after)
             .into_iter()
             .map(|u| {
                 Finding::new(
@@ -182,13 +187,55 @@ impl Check for KeepMoved {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        keep_moved(view.change_requests.iter(), view.after)
+        keep_moved(view.change_requests, view.after)
             .into_iter()
             .map(|k| {
                 Finding::new(
                     &KEEP_MOVED,
                     Some(Subject::ChangeRequest(k.cr)),
                     format!("{} target(s) it expects to keep have moved", k.moved.len()),
+                )
+            })
+            .collect()
+    }
+}
+
+/// A change request whose work moved targets outside its frame.
+#[derive(Debug, Clone, Copy)]
+pub struct OutOfFrame;
+
+static OUT_OF_FRAME: Descriptor = Descriptor {
+    id: RuleId::from_static("cr.out-of-frame"),
+    summary: Cow::Borrowed(
+        "an unresolved change request whose change sets moved a target outside the frame it declared",
+    ),
+    help: Cow::Borrowed(
+        "The targets a change request expects to change or remove are its frame, and naming a container frames \
+           everything inside it. A change set applied for the request (or for a part of it) moved a target outside \
+           the frame of the request, or outside the frame of a request it is a part of. Either the change was \
+           meant (declare the target in `change` or `remove`, or apply the change set for the request it belongs \
+           to) or it should be taken back.",
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    default_level: Level::Warning,
+    mandatory: false,
+    params: std::borrow::Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for OutOfFrame {
+    fn descriptor(&self) -> &'static Descriptor {
+        &OUT_OF_FRAME
+    }
+
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        out_of_frame(view.change_requests)
+            .into_iter()
+            .map(|o| {
+                Finding::new(
+                    &OUT_OF_FRAME,
+                    Some(Subject::ChangeRequest(o.cr)),
+                    format!("{} target(s) moved outside its frame", o.moved.len()),
                 )
             })
             .collect()

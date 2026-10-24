@@ -68,8 +68,12 @@ enum Op {
     /// a Clause the same change makes. All of it is applied, or none (and the error names every problem). Each
     /// entry of `puts` is tagged with `put` (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) and
     /// has the fields of the operation of that name without `op`; each entry of `retires` is tagged with `retire`
-    /// (`context`, `contract`, `interface`, `harness`).
+    /// (`context`, `contract`, `interface`, `harness`). `for` is the title of the change request the work is
+    /// applied for: the targets the set moves are recorded as that request's work in the same commit, and only
+    /// such work meets what the request expects to change or remove. Without `for` the set belongs to no request.
     ChangeSet {
+        #[serde(default, rename = "for")]
+        for_change_request: Option<String>,
         #[serde(default)]
         puts: Vec<PutDto>,
         #[serde(default)]
@@ -157,6 +161,12 @@ enum Op {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "put", rename_all = "snake_case", deny_unknown_fields)]
 enum PutDto {
+    /// As `context_add`.
+    Context {
+        name: String,
+        #[serde(default)]
+        uses: Vec<String>,
+    },
     /// As `context_uses`.
     Uses { context: String, uses: Vec<String> },
     /// As `base_on_contract`.
@@ -207,6 +217,7 @@ impl TryFrom<PutDto> for PutInput {
 
     fn try_from(d: PutDto) -> Result<PutInput, AppError> {
         Ok(match d {
+            PutDto::Context { name, uses } => PutInput::Context { name, uses },
             PutDto::Uses { context, uses } => PutInput::Uses { context, uses },
             PutDto::BaseOnContract { context } => PutInput::BaseOnContract { context },
             PutDto::Contract {
@@ -938,6 +949,15 @@ struct CrOut<'a> {
     state: &'static str,
     answer: Option<AnswerOut<'a>>,
     assumptions: Vec<AssumptionOut<'a>>,
+    work: Vec<WorkOut<'a>>,
+    out_of_frame: &'a [String],
+}
+
+/// What one change set applied for a change request moved, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct WorkOut<'a> {
+    store_revision: u64,
+    moved: &'a [String],
 }
 
 /// A change request the definitions have not followed, in the result of `status`.
@@ -948,6 +968,7 @@ struct UnappliedOut<'a> {
     unchanged: &'a [String],
     gone: &'a [String],
     not_removed: &'a [String],
+    elsewhere: &'a [String],
 }
 
 /// A change request that expected targets to stay as they are, and they moved, in the result of `status`.
@@ -1702,8 +1723,13 @@ where
             app.base_on_contract(&context).await?;
             json!({ "op": "base_on_contract" })
         }
-        Op::ChangeSet { puts, retires } => {
+        Op::ChangeSet {
+            for_change_request,
+            puts,
+            retires,
+        } => {
             let set = ChangeSetInput {
+                change_request: for_change_request,
                 puts: puts
                     .into_iter()
                     .map(PutInput::try_from)
@@ -1976,6 +2002,15 @@ where
                                     .collect(),
                             })
                             .collect(),
+                        work: c
+                            .work
+                            .iter()
+                            .map(|w| WorkOut {
+                                store_revision: w.store_revision,
+                                moved: &w.moved,
+                            })
+                            .collect(),
+                        out_of_frame: &c.out_of_frame,
                     })
                     .collect(),
                 unapplied: s
@@ -1987,6 +2022,7 @@ where
                         unchanged: &u.unchanged,
                         gone: &u.gone,
                         not_removed: &u.not_removed,
+                        elsewhere: &u.elsewhere,
                     })
                     .collect(),
                 keep_moved: s

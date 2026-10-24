@@ -14,7 +14,7 @@
 {"op":"cr_open","title":"How is a half cent rounded?","intent":"change_behavior","parent":"Fair totals","issuer":"designer","situation":"C1 rounds half up, which favours the shop.","change":[{"clause":{"context":"pricing","contract":"rounding","label":"C1"}}],"crux":{"kind":"ambiguity","options":[{"choice":"half up"},{"choice":"half to even","wording":"C1: a total is rounded half to even to whole cents","consequence":"the rounding cases and the receipt change"}],"recommended":{"choice":"half to even","reason":"no bias over many totals","confidence":70}}}
 {"op":"cr_decide","title":"How is a half cent rounded?","choice":"half to even","reason":"fair to the customer over many totals","basis":{"arbitrary":"the shop accepts the cost of fairness"},"by":{"person":"alice"}}
 {"op":"status"}
-{"op":"contract_put","context":"pricing","name":"rounding","title":"Rounding of a total","clauses":[{"label":"C1","text":"a total is rounded half to even to whole cents"},{"label":"C2","text":"a total of no lines is zero"}]}
+{"op":"change_set","for":"How is a half cent rounded?","puts":[{"put":"contract","context":"pricing","name":"rounding","title":"Rounding of a total","clauses":[{"label":"C1","text":"a total is rounded half to even to whole cents"},{"label":"C2","text":"a total of no lines is zero"}]}]}
 {"op":"cr_open","title":"Check the empty total","intent":"keep_behavior","situation":"C2 is new and no case cites it yet.","addresses":[{"rule":"cite.uncited-clause","clause":{"context":"pricing","contract":"rounding","label":"C2"}}]}
 {"op":"cr_resolve","title":"How is a half cent rounded?"}
 {"op":"cr_resolve","title":"Fair totals"}

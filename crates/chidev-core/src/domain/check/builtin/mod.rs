@@ -15,7 +15,7 @@ use super::Check;
 use super::level::Hook;
 
 pub use self::change_requests::{
-    AwaitingDecision, IntentMismatch, KeepMoved, PolicyLineGone, Unapplied,
+    AwaitingDecision, IntentMismatch, KeepMoved, OutOfFrame, PolicyLineGone, Unapplied,
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
@@ -39,6 +39,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &Unapplied,
         &AwaitingDecision,
         &KeepMoved,
+        &OutOfFrame,
         &IntentMismatch,
         &PolicyLineGone,
         &MeasureFailed,
@@ -408,10 +409,52 @@ mod tests {
             None,
             &[(Target::Clause(clause(30)), ExpectKind::Change)],
         );
-        let crs = [c];
+        let mut crs = [c];
         assert_eq!(run(&Unapplied, &p, &[], &crs).len(), 1);
-        put_contract(&mut p, "a half rounds to even");
+        // A change made for no request does not follow it.
+        put_contract(&mut p, "a half rounds to odd");
+        assert_eq!(run(&Unapplied, &p, &[], &crs).len(), 1);
+        applied_for(&mut crs[0], &mut p, |p| {
+            put_contract(p, "a half rounds to even");
+        });
         assert!(run(&Unapplied, &p, &[], &crs).is_empty());
+    }
+
+    /// `change` is made to `p` as a change set applied for `c`.
+    fn applied_for(
+        c: &mut crate::domain::entity::change_request::ChangeRequest,
+        p: &mut crate::domain::entity::project::Project,
+        change: impl FnOnce(&mut crate::domain::entity::project::Project),
+    ) {
+        use crate::domain::service::footprint::moves_between;
+        use crate::domain::vo::footprint::Footprint;
+
+        let before = p.clone();
+        change(p);
+        c.record_work(Footprint::new(2, moves_between(&before, p)))
+            .unwrap();
+    }
+
+    #[test]
+    fn work_outside_the_frame_of_a_change_request_is_found() {
+        let mut p = project();
+        let mut c = cr(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            None,
+            &[(Target::Clause(clause(30)), ExpectKind::Change)],
+        );
+        applied_for(&mut c, &mut p, |p| put_contract(p, "a half rounds to even"));
+        let mut crs = [c];
+        assert!(run(&OutOfFrame, &p, &[], &crs).is_empty());
+        applied_for(&mut crs[0], &mut p, |p| put_interface(p, "fn a(x: u8)"));
+        let found = run(&OutOfFrame, &p, &[], &crs);
+        assert_eq!(
+            subjects(&found),
+            [Some(Subject::ChangeRequest(crs[0].id()))]
+        );
+        assert_eq!(found[0].level(), crate::domain::check::Level::Warning);
     }
 
     #[test]
@@ -632,8 +675,9 @@ mod tests {
                 (Target::Item(item(10)), ExpectKind::Change),
             ],
         );
+        let mut c = c;
+        applied_for(&mut c, &mut p, |p| put_interface(p, "fn a(x: u8)"));
         let crs = [c];
-        put_interface(&mut p, "fn a(x: u8)");
         assert!(run(&KeepMoved, &p, &[], &crs).is_empty());
         assert!(run(&IntentMismatch, &p, &[], &crs).is_empty());
         assert!(run(&Unapplied, &p, &[], &crs).is_empty());

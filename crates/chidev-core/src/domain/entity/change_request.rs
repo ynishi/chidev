@@ -13,6 +13,7 @@ use crate::domain::vo::assumption::Assumption;
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Recommended};
 use crate::domain::vo::finding::FindingRef;
+use crate::domain::vo::footprint::Footprint;
 use crate::domain::vo::id::ChangeRequestId;
 use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::policy::PolicyLineId;
@@ -67,19 +68,24 @@ pub enum ChangeRequestError {
         /// The revision the Policy has.
         now: Revision,
     },
-    /// The targets have not followed yet: `unchanged` were to change and are still as they were, `gone` were to
-    /// change and are no more, `not_removed` were to go and are still there.
+    /// The targets have not followed yet: `unchanged` were to change and no change set applied for the request (or
+    /// a part of it) moved them, `gone` were to change and are no more, `not_removed` were to go and no change set
+    /// applied for it took them out. `elsewhere` are those of the first and the third that did move, or go, but
+    /// not under this request.
     #[error(
         "the change is not applied yet: {} unchanged, {} gone, {} not removed",
         .unchanged.len(), .gone.len(), .not_removed.len()
     )]
     NotApplied {
-        /// The targets to change that are still at the revision they were recorded at, in order.
+        /// The targets to change that this request's work has not moved, in order.
         unchanged: Vec<Target>,
         /// The targets to change that no asset of the Project has any more, in order.
         gone: Vec<Target>,
-        /// The targets to remove that are still in the Project, in order.
+        /// The targets to remove that this request's work has not taken out, in order.
         not_removed: Vec<Target>,
+        /// The targets among `unchanged` and `not_removed` whose revision moved, or that are gone, without a change
+        /// set applied for this request (or a part of it) having moved them, in order.
+        elsewhere: Vec<Target>,
     },
     /// Targets the change request expected to stay as they are have changed: it cannot close a contradiction.
     #[error("{} target(s) it expected to keep have moved", .moved.len())]
@@ -299,6 +305,8 @@ pub struct ChangeRequest {
     decided_expects: BTreeMap<Target, Expectation>,
     assumptions: Vec<Assumption>,
     addresses: Vec<FindingRef>,
+    /// What the change sets applied for it moved, in the order they were kept.
+    work: Vec<Footprint>,
     resolved: bool,
 }
 
@@ -321,6 +329,7 @@ impl ChangeRequest {
             decided_expects: BTreeMap::new(),
             assumptions: draft.assumptions,
             addresses: distinct(draft.addresses),
+            work: Vec::new(),
             resolved: false,
         }
     }
@@ -334,6 +343,7 @@ impl ChangeRequest {
         draft: ChangeRequestDraft,
         answer: Option<Answer>,
         decided_expects: BTreeMap<Target, Expectation>,
+        work: Vec<Footprint>,
         resolved: bool,
     ) -> Result<ChangeRequest, ChangeRequestError> {
         let crux = match draft.crux {
@@ -371,6 +381,7 @@ impl ChangeRequest {
             decided_expects,
             assumptions: draft.assumptions,
             addresses: distinct(draft.addresses),
+            work,
             resolved,
         })
     }
@@ -445,6 +456,22 @@ impl ChangeRequest {
     /// decided once it is resolved (see `Finding::state_in`).
     pub fn addresses(&self) -> &[FindingRef] {
         &self.addresses
+    }
+
+    /// What the change sets applied for it moved, in the order they were kept. Its `change` and `remove`
+    /// expectations are met by these (and those of its parts), not by any move of the target.
+    pub fn work(&self) -> &[Footprint] {
+        &self.work
+    }
+
+    /// Records what a change set applied for it moved. A resolved change request is a closed record and takes no
+    /// more work.
+    pub fn record_work(&mut self, footprint: Footprint) -> Result<(), ChangeRequestError> {
+        if self.resolved {
+            return Err(ChangeRequestError::AlreadyResolved);
+        }
+        self.work.push(footprint);
+        Ok(())
     }
 
     /// Its Crux, when it has a choice for a decision maker.
@@ -877,7 +904,7 @@ mod tests {
         let q = || Some(crux(CruxKind::Ambiguity).unwrap());
         // No decision, or a decision whose option asks nothing: the expectation is unasked.
         assert_eq!(
-            ChangeRequest::restore(id(1), draft(q()), None, recorded.clone(), false),
+            ChangeRequest::restore(id(1), draft(q()), None, recorded.clone(), Vec::new(), false),
             Err(ChangeRequestError::UnaskedExpectation(detail()))
         );
         assert_eq!(
@@ -886,6 +913,7 @@ mod tests {
                 draft(q()),
                 Some(chosen("up")),
                 recorded.clone(),
+                Vec::new(),
                 false
             ),
             Err(ChangeRequestError::UnaskedExpectation(detail()))
@@ -899,15 +927,29 @@ mod tests {
             },
         )]);
         assert_eq!(
-            ChangeRequest::restore(id(1), draft(q()), Some(chosen("to even")), removal, false),
+            ChangeRequest::restore(
+                id(1),
+                draft(q()),
+                Some(chosen("to even")),
+                removal,
+                Vec::new(),
+                false
+            ),
             Err(ChangeRequestError::UnaskedExpectation(detail()))
         );
         assert!(
-            ChangeRequest::restore(id(1), draft(q()), Some(chosen("to even")), recorded, true)
-                .is_ok()
+            ChangeRequest::restore(
+                id(1),
+                draft(q()),
+                Some(chosen("to even")),
+                recorded,
+                Vec::new(),
+                true
+            )
+            .is_ok()
         );
         assert_eq!(
-            ChangeRequest::restore(id(1), draft(q()), None, BTreeMap::new(), true),
+            ChangeRequest::restore(id(1), draft(q()), None, BTreeMap::new(), Vec::new(), true),
             Err(ChangeRequestError::Undecided)
         );
         assert_eq!(
@@ -916,6 +958,7 @@ mod tests {
                 draft(None),
                 Some(chosen("up")),
                 BTreeMap::new(),
+                Vec::new(),
                 false
             ),
             Err(ChangeRequestError::NoCrux)
@@ -927,6 +970,7 @@ mod tests {
                 draft(q()),
                 Some(chosen("down")),
                 BTreeMap::new(),
+                Vec::new(),
                 false
             ),
             Err(ChangeRequestError::NotAnOption(choice("down")))

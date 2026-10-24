@@ -560,6 +560,40 @@ mod tests {
     }
 
     #[test]
+    fn the_work_of_a_change_request_comes_back_with_what_moved_and_where_it_was() {
+        use crate::domain::vo::footprint::{Footprint, Move};
+        use crate::domain::vo::id::{ContextId, ContractId};
+        use crate::domain::vo::target::Target;
+
+        let p = project();
+        let mut cr = change_requests(&p)
+            .into_iter()
+            .find(|c| {
+                c.state() != crate::domain::entity::change_request::ChangeRequestState::Resolved
+            })
+            .unwrap();
+        let context = Target::Context(ContextId::from_uuid(id(1)));
+        let contract = Target::Contract(ContractId::from_uuid(id(2)));
+        cr.record_work(Footprint::new(
+            7,
+            vec![
+                Move::new(Target::Project, Vec::new()),
+                Move::new(contract, vec![Target::Project, context]),
+            ],
+        ))
+        .unwrap();
+        cr.record_work(Footprint::new(9, Vec::new())).unwrap();
+        let text = encode_change_request(&cr).unwrap();
+        let read = decode_change_request(CURRENT, &text).unwrap();
+        assert_eq!(read.work(), cr.work());
+        assert_eq!(read, cr);
+        // a document without it is of before it existed and does not load
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc.as_object_mut().unwrap().remove("work");
+        assert!(decode_change_request(CURRENT, &doc.to_string()).is_err());
+    }
+
+    #[test]
     fn an_answer_comes_back_with_its_basis_its_maker_and_its_time() {
         use crate::domain::vo::answer::Basis;
         use crate::domain::vo::crux::Importance;
