@@ -17,9 +17,10 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::context::Context;
-use crate::domain::entity::harness::{Case, CaseNameFault, Harness, SimShapeProblem};
+use crate::domain::entity::harness::{Case, Harness, SimShapeProblem};
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::project::Project;
+use crate::domain::rule::rule;
 use crate::domain::service::measure::{Standing, latest_sim, sim_standing};
 use crate::domain::service::sim::{sim_harnesses, sweep};
 use crate::domain::vo::clause::ClauseLabel;
@@ -86,11 +87,9 @@ static SIM_SHAPE_KEPT: Descriptor = Descriptor {
         "a sim harness kept in a shape the protocol does not run, which a put of it would be refused for",
     ),
     help: Cow::Borrowed(
-        "A put of a sim harness is refused unless it is one `sweep` case and `regress-<name>` cases that cite \
-           clauses of the contracts of its context, builds an interface, and is the only sim harness of its context \
-           (the rules are `sim.*`; `explain` gives each). This one was kept before that was so, and a change that \
-           does not put it goes through. It cannot be simulated. Put it again in the shape the rules ask for; a \
-           context with two sim harnesses is mended by putting one in the same change set that retires the other.",
+        "A put of a sim harness that breaks one of the `sim.*` invariants is refused; the finding names the one it \
+           breaks, and `explain` gives its help. This one was kept before that was so, and a change that does not \
+           put it goes through. It cannot be simulated. Put it again in the shape the invariant asks for.",
     ),
     hooks: Cow::Borrowed(&[Hook::Check]),
     default_level: Level::Error,
@@ -116,49 +115,28 @@ impl Check for SimShapeKept {
                     if seen.contains(&problem) {
                         continue;
                     }
-                    let (subject, message) = match &problem {
-                        SimShapeProblem::OnePerContext { .. } => (
-                            Subject::Context(context.id()),
-                            "the context has more than one sim harness; it has at most one",
-                        ),
-                        SimShapeProblem::SweepOnce { extra: None, .. } => (
-                            Subject::Context(context.id()),
-                            "a sim harness has no case named `sweep`; it has exactly one",
-                        ),
+                    let subject = match &problem {
+                        SimShapeProblem::OnePerContext { .. }
+                        | SimShapeProblem::SweepOnce { extra: None, .. }
+                        | SimShapeProblem::BuildsNone { .. } => Subject::Context(context.id()),
                         SimShapeProblem::SweepOnce {
                             extra: Some(case), ..
-                        } => (
-                            Subject::Case(*case),
-                            "a sim harness has one case named `sweep`; this is another",
-                        ),
-                        SimShapeProblem::CaseName { case, fault, .. } => (
-                            Subject::Case(*case),
-                            match fault {
-                                CaseNameFault::NeitherSweepNorRegress => {
-                                    "the case is neither `sweep` nor `regress-<name>`"
-                                }
-                                CaseNameFault::RegressNamedTwice => {
-                                    "the regress name of the case is another case's"
-                                }
-                            },
-                        ),
-                        SimShapeProblem::CaseCitesNone { case, .. } => (
-                            Subject::Case(*case),
-                            "the case cites no clause; a sim case cites the clauses it checks",
-                        ),
+                        }
+                        | SimShapeProblem::CaseName { case, .. }
+                        | SimShapeProblem::CaseCitesNone { case, .. } => Subject::Case(*case),
                         SimShapeProblem::ClauseForeign { clause, .. } => {
                             if !foreign.insert(*clause) {
                                 continue;
                             }
-                            (
-                                Subject::Clause(*clause),
-                                "a case of a sim harness cites this clause, which is in no contract of the harness's context",
-                            )
+                            Subject::Clause(*clause)
                         }
-                        SimShapeProblem::BuildsNone { .. } => (
-                            Subject::Context(context.id()),
-                            "a sim harness builds no interface, so it has no program to drive",
-                        ),
+                    };
+                    // The words are the invariant's own: the rule the kept shape breaks, by id and summary.
+                    let violation = problem.violation();
+                    let broken = violation.rule();
+                    let message = match rule(broken.as_str()) {
+                        Some(r) => format!("kept against `{broken}`: {}", r.summary),
+                        None => format!("kept against `{broken}`"),
                     };
                     seen.push(problem);
                     out.push(Finding::new(&SIM_SHAPE_KEPT, Some(subject), message));
@@ -724,6 +702,20 @@ mod tests {
             ]
         );
         assert!(all.iter().all(|f| f.level() == Level::Error));
+        // the words are the broken invariant's, by id and summary
+        assert_eq!(
+            all.iter().map(Finding::message).collect::<Vec<_>>(),
+            [
+                format!(
+                    "kept against `sim.sweep-once`: {}",
+                    rule("sim.sweep-once").unwrap().summary
+                ),
+                format!(
+                    "kept against `sim.case-name`: {}",
+                    rule("sim.case-name").unwrap().summary
+                ),
+            ]
+        );
         // and a well-formed one is quiet
         assert!(found(&SimShapeKept, &sim_project(), &[], &none()).is_empty());
     }

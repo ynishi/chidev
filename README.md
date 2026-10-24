@@ -506,10 +506,8 @@ it is the run's directory (its parent).
 #### Rules
 
 A put of a sim Harness is refused unless it has the shape above (the `sim.*` rules
-that are invariants; `{"op":"rules"}` lists them and `{"op":"explain"}` gives each):
-exactly one `sweep`, Cases that are `sweep` or `regress-<name>` and cite Clauses of
-the Contracts of its own Context, at least one Interface built, and no other sim
-Harness in the Context. To replace the sim Harness of a Context, put the new one and
+that are invariants; `{"op":"rules"}` lists them and `{"op":"explain"}` gives each).
+To replace the sim Harness of a Context, put the new one and
 retire the old one in the same change set. The shape is asked of the Harness a put
 names, so a store that holds a sim Harness from before the rule is read as it is, and
 only a put of that Harness is refused; `sim.shape-kept` reports it.
