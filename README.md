@@ -54,9 +54,11 @@ belong):
   item has its `signature`, the first and last `lines` it is on (from 1) and,
   when its signature changed, `replaces` (the signature it had) to keep its id.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
-  a new Harness) or `sim`. A Case cites one Item at least and any Clauses; `context`
-  in a citation (default: the Case's own) reaches a Context that one uses. A citation
-  records the revision its target has when the Harness is put.
+  a new Harness) or `sim`. A Case of tests cites one Item at least and any Clauses;
+  a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
+  whose pinned code it runs (see "Simulation"). `context` in a citation (default:
+  the Case's own) reaches a Context that one uses. A citation records the revision
+  its target has when the Harness is put.
 - `pin` records that the code was accepted: it needs a Case that cites an Item of the
   Interface, and it goes stale when what it stands on changes.
 - `status` lists the Pins and whether they hold, the citations behind their
@@ -98,6 +100,9 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   the basis, the Harnesses, then the retirements. A Case can cite a Clause or an
   Item that the same change set makes or revises, and the citation records the
   revision it has there; a Case that cites what the set removes fails the set.
+  A sim Harness entry (`"kind":"sim"`) may carry `builds`, the names of Interfaces
+  of its Context, which may be ones the same set makes; one that is not in the
+  Context, or that the set retires while the sim still builds it, fails the set.
 - What a put drops (a Clause, an Item, a Case) is recorded as retired, as it is
   for a put alone; the answer's `retired` lists it, then what was retired.
 - Each asset moves by one revision at most: a thing is named once in a set, and
@@ -286,33 +291,48 @@ output.
 A Harness has a kind: `tests` (the default; what every Harness has been) or `sim`.
 
 ```text
-{"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","source":"...","cases":[
-  {"name":"sweep","lines":[1,1],"items":[...],"clauses":[{"contract":"account","label":"C1"},{"contract":"account","label":"C2"}]},
-  {"name":"regress-overdraw","lines":[2,2],"items":[...],"clauses":[{"contract":"account","label":"C2"}]}]}
+{"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],"source":"...","cases":[
+  {"name":"sweep","lines":[1,1],"clauses":[{"contract":"account","label":"C1"},{"contract":"account","label":"C2"},{"contract":"audit","label":"C1"}]},
+  {"name":"regress-overdraw","lines":[2,2],"clauses":[{"contract":"account","label":"C2"}]}]}
 ```
 
 A sim Harness has exactly one Case named `sweep` and any number named
 `regress-<name>` (`a-z`, `0-9`, `-`). The `sweep` stands for the seeded runs and
 cites every Clause the script checks; each `regress-<name>` stands for a fixed
-schedule the script keeps. Every Case cites Items (so the Harness enters the Pin's
-basis as any Harness does) and Clauses of this Context's Contracts. Without
-`kind`, a new Harness is of tests and an existing one keeps its kind; changing the
-kind is a new revision. A Context has at most one sim Harness, and the sweep cites
-each label once (the script names a Clause by its label).
+schedule the script keeps. A sim Case cites **Clauses only**, of any number of the
+Contracts of this Context (the example takes on `account` and `audit`, which both
+have a `C1`); it cites no Item, and a Case that does is refused. Without `kind`, a
+new Harness is of tests and an existing one keeps its kind; changing the kind is a
+new revision. A Context has at most one sim Harness.
+
+`builds` names the Interfaces of the Context whose pinned code the program is built
+from. It is not a citation: it asks no Item of the Interface, a name the Context has
+no Interface of is refused (also in a `change_set`, where the Interface may be one
+the same change set makes), and an Interface cannot be retired while a sim Harness
+builds it. Only a sim Harness has `builds` (a Harness of tests with it is refused),
+a sim Harness builds at least one Interface (`sim.shape` says so otherwise), and a
+put states the whole list, as it states the code. Because a sim cites no Item, it is
+on no Pin's basis: putting or changing the sim never makes the Pin of an Interface
+stale. The Pin of an Interface still needs a tests Harness whose Case cites one of
+its Items (code nothing checked is not accepted). The other way round, the
+simulation stands on the Pin: the Harness (its script, Cases and `builds`), the
+Contracts it cites a Clause of, and each built Interface with the digest of its
+pinned code are its basis, so a change to any of them makes the latest simulation
+stale (`sim.stale`).
 
 ```text
 {"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"}
 ```
 
 It copies the project under `.chidev/measure/<run>/` as a mutation run does,
-writes the code the Pins of the Interfaces the Harness's Cases cite accepted and
+writes the code the Pins of the Interfaces the Harness builds accepted and
 the script (the Harness's source as the model holds it) over the copy, and runs
 `build`. A program that does not build is a failed run (`no_build`) and the script
 is not run. Then it starts the script once per case, `seed-0` to `seed-<seeds-1>`
 and every regress case, and then runs `seed-0` and up to `sample` of the cases that
 had findings once more, in a second, fresh copy.
 
-#### Protocol `chidev-sim 1`
+#### Protocol `chidev-sim 2`
 
 ```text
 <interpreter...> <script> <case> --out <dir> -- <program argv...>
@@ -325,12 +345,21 @@ copy. The script drives the program (standard input and output, arguments), writ
 program did under them), and prints, one per line:
 
 ```text
-FINDING <case> step <k> <ClauseLabel>: <text>
-UNREACHED <ClauseLabel>: <text>
+FINDING <case> step <k> <contract>:<label>: <text>
+UNREACHED <contract>:<label>: <text>
 UNDECIDED <text>
 sim: findings=<n>
 ```
 
+- A Clause is named `<contract>:<label>`: the Contract's name as chidev knows it
+  (no white space; the name is read up to the first white space, the label is
+  after its last `:`) and the Clause's label (`C<n>`) in it. Labels are unique only
+  within a Contract, so a name without the Contract (`C1`, as `chidev-sim 1`
+  wrote it) is refused. The script declares nothing else; the version is the
+  protocol this document describes. chidev resolves each name to the Clause's id,
+  among the Clauses the `sweep` Case cites, when it records the run: **the record
+  holds Clause ids, not names or labels**, and the rules read ids, so a label
+  renumbered later does not move an old finding.
 - `FINDING`: after step *k* (from 1) of this case a promise of the Clause did not
   hold. The case must be the one the script was started for.
 - `UNREACHED`: this case never reached the situation the Clause needs. A Clause is
@@ -338,8 +367,10 @@ sim: findings=<n>
 - `UNDECIDED`: the script could not decide something; counted, never a failure.
 - `sim: findings=<n>` is the last line and `n` is the number of `FINDING` lines.
 
-Exit 0 or 1 (1 when there are findings) means the report is read. A label the
-sweep Case does not cite, a line of none of these forms, a missing or repeated
+Exit 0 or 1 (1 when there are findings) means the report is read. A name of a
+Contract the sweep Case cites no Clause of, or of a Clause of a Contract it cites
+that the sweep does not, a name that is not `<contract>:<label>`, a line of none of
+these forms, a missing or repeated
 summary, a summary that disagrees with the lines, a normal case that wrote no
 `schedule` and `trace`, or a report over 1 MiB is a protocol failure of the whole
 run; the cases run so far are kept. Another exit code, or a case past `timeout`,
@@ -366,7 +397,7 @@ budget = 600     # seconds, the whole run, second runs included (default 600, at
 
 [[measure.layout]]
 context = "ledger"
-interface = "bank"          # the code of each cited Interface is written here
+interface = "bank"          # the code of each built Interface is written here
 path = "bank.py"
 
 [[measure.layout]]
@@ -375,8 +406,8 @@ harness = "bank-sim"        # the script
 path = "sim.py"
 ```
 
-Every Interface a sim Case cites needs a layout entry and a Pin (`pin` keeps the
-code text); the script needs one. `build` runs with `baseline_timeout`. The
+Every Interface a sim Harness builds needs a layout entry and a Pin (`pin` keeps
+the code text); the script needs one. `build` runs with `baseline_timeout`. The
 settings digest covers the whole `[measure]` table and the interpreter's
 executable. Note that `{work}` in `program` is the root of the copy, while in `env`
 it is the run's directory (its parent).
@@ -385,10 +416,10 @@ it is the run's directory (its parent).
 
 | rule | default | finds |
 |---|---|---|
-| `sim.shape` | error | a sim Harness without exactly one `sweep`, with a Case that is neither `sweep` nor `regress-<name>`, that cites no Clause or a Clause of another Context, a repeated label in the sweep, or two sim Harnesses in a Context (hook `put`, and `check`) |
-| `sim.uncited-clause` | warning | a Clause of a Context that has a sim Harness which no sim Case cites |
+| `sim.shape` | error | a sim Harness without exactly one `sweep`, with a Case that is neither `sweep` nor `regress-<name>`, that cites no Clause or a Clause of another Context, that builds no Interface, or two sim Harnesses in a Context (hook `put`, and `check`). One label in two Contracts of the sweep is fine |
+| `sim.uncited-clause` | warning | a Clause that no sim Case cites, of a Contract a sim Harness takes on (cites at least one Clause of); a Contract the sim cites nothing of is left to the tests and not reported |
 | `sim.unrun` | warning | a sim Harness never simulated |
-| `sim.stale` | warning | the script, a Contract or Interface its Cases cite, the code pinned for the program, or the settings moved after the run |
+| `sim.stale` | warning | the script, a Case or the `builds` of the Harness, a Contract it cites a Clause of, a built Interface, the code pinned for it, or the settings moved after the run |
 | `sim.finding` | error | one per Clause with findings, about the Clause, with the first case and step |
 | `sim.unreached` | error | one per Clause no seed reached, about the Clause |
 | `sim.nondeterministic` | error, **mandatory** | a case that gave another schedule or trace the second time, about the Case; no policy lowers it |
@@ -406,7 +437,9 @@ reads the program's code, its tests or its history, so that it checks the promis
 and not the implementation. Therefore:
 
 - cite in the `sweep` Case every Clause the script checks, and print a `FINDING`
-  only with the label of a Clause it cites;
+  or `UNREACHED` only with the name `<contract>:<label>` of a Clause it cites
+  (the Contract is part of the name, because two Contracts may both have a `C1`);
+  a script may check the Clauses of several Contracts of the Context;
 - check each Clause literally, with an expected value computed from the Clause's
   sentence by the script's own model, never from the program's answers;
 - use only the seed for randomness (`random.Random(seed)`, not the clock, the

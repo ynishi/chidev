@@ -1,10 +1,12 @@
 //! The Harness: the cases that check a Context, as code, each citing what it checks.
 
+use std::collections::BTreeSet;
+
 use thiserror::Error;
 
-use crate::domain::vo::case::{CaseCites, CaseContentError, CaseName};
+use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::harness_kind::HarnessKind;
-use crate::domain::vo::id::{CaseId, HarnessId};
+use crate::domain::vo::id::{CaseId, HarnessId, InterfaceId};
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
@@ -66,19 +68,37 @@ pub enum HarnessError {
         /// How many lines the code has.
         total: usize,
     },
-    /// What a Case cites cannot be recorded.
-    #[error(transparent)]
-    Cites(#[from] CaseContentError),
+    /// A Case of a Harness of tests cites no Item; a test checks something the Interface shows.
+    #[error("the case {0} of a harness of tests cites no item")]
+    NoItem(CaseId),
+    /// A Case of a sim Harness cites an Item. A simulation checks Clauses; the Interfaces whose pinned code it
+    /// builds are the ones the Harness names in `builds`, not ones its Cases cite.
+    #[error(
+        "the case {0} of a sim harness cites an item; a sim case cites clauses only (name the interfaces to build in `builds`)"
+    )]
+    SimCitesItem(CaseId),
+    /// A Harness of tests names Interfaces to build; only a sim Harness builds the program it drives.
+    #[error(
+        "a harness of tests has no `builds`; only a sim harness builds the interfaces it drives"
+    )]
+    BuildsOfTests,
 }
 
 /// The cases that check a Context. The code is the content (it is what runs); the Cases are the tests in it,
 /// found by the caller, who knows the language, with what each cites. Whether what a Case cites exists is a rule
 /// of the Context that owns the Harness, not of the Harness.
+///
+/// A Harness of tests cites Items (every Case at least one) and Clauses, and the Pin of an Interface stands on the
+/// Harnesses whose Cases cite its Items. A sim Harness is a script that drives a program: its Cases cite Clauses
+/// only (they are the names the protocol runs the script under, and the Clauses the script checks), and the
+/// program is built from the pinned code of the Interfaces in `builds`. Naming an Interface to build is not citing
+/// it: it puts the Harness on no Pin's basis and asks no Item of it. Only a sim Harness has `builds`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Harness {
     id: HarnessId,
     revision: Revision,
     kind: HarnessKind,
+    builds: BTreeSet<InterfaceId>,
     source: Source,
     cases: Vec<Case>,
 }
@@ -86,9 +106,18 @@ pub struct Harness {
 /// A Case as the caller found it: its id, its name, its lines and what it cites.
 pub type CaseFound = (CaseId, CaseName, LineRange, CaseCites);
 
-/// The ids of `cases` are each given once, and every Case's lines are inside `source`.
-fn check(source: &Source, cases: &[CaseFound]) -> Result<(), HarnessError> {
-    for (k, (id, _, lines, _)) in cases.iter().enumerate() {
+/// The ids of `cases` are each given once, every Case's lines are inside `source`, and `kind` takes the Cases and
+/// `builds` as given: a Case of tests cites an Item, a Case of a sim none, and only a sim builds.
+fn check(
+    kind: HarnessKind,
+    builds: &BTreeSet<InterfaceId>,
+    source: &Source,
+    cases: &[CaseFound],
+) -> Result<(), HarnessError> {
+    if kind == HarnessKind::Tests && !builds.is_empty() {
+        return Err(HarnessError::BuildsOfTests);
+    }
+    for (k, (id, _, lines, cites)) in cases.iter().enumerate() {
         if cases[..k].iter().any(|(i, ..)| i == id) {
             return Err(HarnessError::DuplicateId(*id));
         }
@@ -100,33 +129,44 @@ fn check(source: &Source, cases: &[CaseFound]) -> Result<(), HarnessError> {
                 total: source.line_count(),
             });
         }
+        match kind {
+            HarnessKind::Tests if cites.items().is_empty() => {
+                return Err(HarnessError::NoItem(*id));
+            }
+            HarnessKind::Sim if !cites.items().is_empty() => {
+                return Err(HarnessError::SimCitesItem(*id));
+            }
+            HarnessKind::Tests | HarnessKind::Sim => {}
+        }
     }
     Ok(())
 }
 
 impl Harness {
-    /// A new Harness at its first revision, with its Cases in the order given, each at its first revision.
+    /// A new Harness of tests at its first revision, with its Cases in the order given, each at its first revision.
     /// The ids are the caller's: the domain makes none.
     pub fn new(
         id: HarnessId,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
-        Harness::of_kind(HarnessKind::Tests, id, source, cases)
+        Harness::of_kind(HarnessKind::Tests, id, BTreeSet::new(), source, cases)
     }
 
-    /// A new Harness of `kind`, as [`Harness::new`] makes a Harness of tests.
+    /// A new Harness of `kind` that builds `builds`, as [`Harness::new`] makes a Harness of tests.
     pub fn of_kind(
         kind: HarnessKind,
         id: HarnessId,
+        builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
-        check(&source, &cases)?;
+        check(kind, &builds, &source, &cases)?;
         Ok(Harness {
             id,
             revision: Revision::first(),
             kind,
+            builds,
             source,
             cases: cases
                 .into_iter()
@@ -146,6 +186,7 @@ impl Harness {
         id: HarnessId,
         kind: HarnessKind,
         revision: Revision,
+        builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<(CaseId, Revision, CaseName, LineRange, CaseCites)>,
     ) -> Result<Harness, HarnessError> {
@@ -153,11 +194,12 @@ impl Harness {
             .iter()
             .map(|(i, _, n, l, c)| (*i, n.clone(), *l, c.clone()))
             .collect();
-        check(&source, &found)?;
+        check(kind, &builds, &source, &found)?;
         Ok(Harness {
             id,
             revision,
             kind,
+            builds,
             source,
             cases: cases
                 .into_iter()
@@ -187,6 +229,12 @@ impl Harness {
         self.kind
     }
 
+    /// The Interfaces whose pinned code a sim Harness builds into the program it drives, in the order of their
+    /// ids. A Harness of tests builds none.
+    pub fn builds(&self) -> &BTreeSet<InterfaceId> {
+        &self.builds
+    }
+
     /// Its code.
     pub fn source(&self) -> &Source {
         &self.source
@@ -206,20 +254,21 @@ impl Harness {
     /// of its lines and its citations are the same (wherever it now is) and goes to the next one when any differs;
     /// a new id starts at the first; an id left out is gone. The Harness goes to its next revision when the code or
     /// its Cases (which, in what order, named what, citing what) differ, and stays when nothing does. Content that
-    /// breaks a rule changes nothing.
+    /// breaks a rule changes nothing. The kind and the Interfaces it builds stay.
     pub fn revise(&mut self, source: Source, cases: Vec<CaseFound>) -> Result<(), HarnessError> {
-        self.revise_as(self.kind, source, cases)
+        self.revise_as(self.kind, self.builds.clone(), source, cases)
     }
 
-    /// As [`Harness::revise`], and the Harness becomes one of `kind`. A change of kind is a change of the Harness:
-    /// its revision goes up.
+    /// As [`Harness::revise`], and the Harness becomes one of `kind` that builds `builds`. A change of kind or of
+    /// what it builds is a change of the Harness: its revision goes up.
     pub fn revise_as(
         &mut self,
         kind: HarnessKind,
+        builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), HarnessError> {
-        check(&source, &cases)?;
+        check(kind, &builds, &source, &cases)?;
         let revised: Vec<Case> = cases
             .into_iter()
             .map(|(id, name, lines, cites)| {
@@ -245,6 +294,7 @@ impl Harness {
             .collect();
         let same = source == self.source
             && kind == self.kind
+            && builds == self.builds
             && revised.len() == self.cases.len()
             && revised.iter().zip(&self.cases).all(|(new, old)| {
                 new.id == old.id && new.name == old.name && new.cites == old.cites
@@ -253,6 +303,7 @@ impl Harness {
             self.revision = self.revision.next();
         }
         self.kind = kind;
+        self.builds = builds;
         self.source = source;
         self.cases = revised;
         Ok(())
@@ -485,9 +536,17 @@ mod tests {
         // revising without a kind keeps the kind and, with nothing else changed, the revision
         h.revise(src(CODE), cases(&h)).unwrap();
         assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Tests, 1));
-        h.revise_as(HarnessKind::Sim, src(CODE), cases(&h)).unwrap();
+        // a Case of tests cites an Item, so it is not a Case of a sim: the Cases are given again for the sim
+        let clauses = |h: &Harness| -> Vec<CaseFound> {
+            cases(h)
+                .into_iter()
+                .map(|(id, name, lines, _)| (id, name, lines, sim_cites()))
+                .collect()
+        };
+        h.revise_as(HarnessKind::Sim, BTreeSet::new(), src(CODE), clauses(&h))
+            .unwrap();
         assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
-        assert_eq!(revisions(&h), [1, 1]);
+        assert_eq!(revisions(&h), [2, 2]);
         // and the kind stays through a revise that names none
         h.revise(src(CODE), cases(&h)).unwrap();
         assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
@@ -495,11 +554,113 @@ mod tests {
         let sim = Harness::of_kind(
             HarnessKind::Sim,
             HarnessId::from_uuid(test_uuid(101)),
+            BTreeSet::new(),
             src(CODE),
             cases(&h),
         )
         .unwrap();
         assert_eq!(sim.kind(), HarnessKind::Sim);
+    }
+
+    /// Citations of a Case of a sim: one Clause, no Item.
+    fn sim_cites() -> CaseCites {
+        CaseCites::of(
+            BTreeMap::new(),
+            BTreeMap::from([(ClauseId::from_uuid(test_uuid(60)), Revision::first())]),
+        )
+    }
+
+    fn iid(n: u128) -> InterfaceId {
+        InterfaceId::from_uuid(test_uuid(n))
+    }
+
+    fn sim_case(n: u128) -> CaseFound {
+        (cid(n), name("sweep"), at(1, 1), sim_cites())
+    }
+
+    #[test]
+    fn a_case_of_tests_cites_an_item_and_a_case_of_a_sim_none() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let bare = (
+            cid(1),
+            name("a"),
+            at(1, 1),
+            CaseCites::of(BTreeMap::new(), BTreeMap::new()),
+        );
+        assert_eq!(
+            Harness::new(id, src(CODE), vec![bare]),
+            Err(HarnessError::NoItem(cid(1)))
+        );
+        let with_item = (cid(2), name("a"), at(1, 1), cites(50, Revision::first()));
+        assert_eq!(
+            Harness::of_kind(
+                HarnessKind::Sim,
+                id,
+                BTreeSet::new(),
+                src(CODE),
+                vec![with_item]
+            ),
+            Err(HarnessError::SimCitesItem(cid(2)))
+        );
+        let sim = Harness::of_kind(
+            HarnessKind::Sim,
+            id,
+            BTreeSet::new(),
+            src(CODE),
+            vec![sim_case(3)],
+        )
+        .unwrap();
+        assert!(sim.case(cid(3)).unwrap().cites().items().is_empty());
+    }
+
+    #[test]
+    fn only_a_sim_builds_and_what_it_builds_is_part_of_its_content() {
+        let id = HarnessId::from_uuid(test_uuid(100));
+        let one = BTreeSet::from([iid(7)]);
+        assert_eq!(
+            Harness::of_kind(
+                HarnessKind::Tests,
+                id,
+                one.clone(),
+                src(CODE),
+                vec![(cid(1), name("a"), at(1, 1), cites(50, Revision::first()))]
+            ),
+            Err(HarnessError::BuildsOfTests)
+        );
+        let mut sim = Harness::of_kind(
+            HarnessKind::Sim,
+            id,
+            one.clone(),
+            src(CODE),
+            vec![sim_case(3)],
+        )
+        .unwrap();
+        assert_eq!(sim.builds(), &one);
+        // the same content again changes nothing; another set of Interfaces is a new revision of the Harness
+        // and of no Case
+        sim.revise_as(HarnessKind::Sim, one.clone(), src(CODE), vec![sim_case(3)])
+            .unwrap();
+        assert_eq!(sim.revision().number(), 1);
+        let two = BTreeSet::from([iid(7), iid(8)]);
+        sim.revise_as(HarnessKind::Sim, two.clone(), src(CODE), vec![sim_case(3)])
+            .unwrap();
+        assert_eq!((sim.revision().number(), sim.builds()), (2, &two));
+        assert_eq!(revisions(&sim), [1]);
+        // a plain revise keeps what it builds
+        sim.revise(src(CODE), vec![sim_case(3)]).unwrap();
+        assert_eq!((sim.revision().number(), sim.builds()), (2, &two));
+        // and turning it into tests with builds left is refused, changing nothing
+        let before = sim.clone();
+        assert_eq!(
+            sim.revise_as(
+                HarnessKind::Tests,
+                two,
+                src(CODE),
+                vec![(cid(3), name("a"), at(1, 1), cites(50, Revision::first()))]
+            ),
+            Err(HarnessError::BuildsOfTests)
+        );
+        assert_eq!(sim, before);
     }
 
     #[test]

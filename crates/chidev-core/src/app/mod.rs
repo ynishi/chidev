@@ -187,6 +187,18 @@ pub enum AppError {
         /// What is cited, described (`stock C7`, `stock fn release()`).
         target: String,
     },
+    /// A sim Harness builds an Interface that is gone or that its Context cannot reach.
+    #[error(
+        "the {harness} (context `{context}`) builds the interface {interface}, which it cannot reach; put the harness again without it, or keep the interface"
+    )]
+    BuildNotReached {
+        /// The sim Harness, described (`harness sim`).
+        harness: String,
+        /// The Context that owns the Harness.
+        context: String,
+        /// The Interface it builds, described.
+        interface: String,
+    },
     /// A change set names one thing twice.
     #[error("the change set names the {what} `{name}` twice")]
     NamedTwice {
@@ -403,7 +415,7 @@ pub struct CaseInput {
     pub name: String,
     /// The first and last line it is on, from 1.
     pub lines: (usize, usize),
-    /// The Items it checks (one at least).
+    /// The Items it checks: one at least for a Case of tests, none for a Case of a sim.
     pub items: Vec<ItemRef>,
     /// The Clauses it checks.
     pub clauses: Vec<ClauseRef>,
@@ -1122,17 +1134,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
-        self.put_harness_of(context, name, None, source, cases)
+        self.put_harness_of(context, name, None, &[], source, cases)
             .await
     }
 
     /// As [`App::put_harness`], and the Harness is of `kind`: `tests`, or `sim` for a simulation script run by
-    /// `simulate`. Without a kind a new Harness is of tests and an existing one keeps its kind.
+    /// `simulate`. Without a kind a new Harness is of tests and an existing one keeps its kind. `builds` names the
+    /// Interfaces of the Context whose pinned code a sim Harness builds into the program (none for tests); a name
+    /// the Context has no Interface of is refused.
     pub async fn put_harness_of(
         &mut self,
         context: &str,
         name: &str,
         kind: Option<HarnessKind>,
+        builds: &[String],
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
@@ -1140,6 +1155,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             context: context.to_string(),
             name: name.to_string(),
             kind,
+            builds: builds.to_vec(),
             source: source.to_string(),
             cases: cases.to_vec(),
         });

@@ -1,5 +1,5 @@
 //! Checks on the simulations: whether a sim Harness has the shape the protocol runs, whether every Clause of the
-//! Context is named by it, and what the latest simulation found. They read what a run left in the store and run
+//! Contracts it takes on is named by it, and what the latest simulation found. They read what a run left in the store and run
 //! nothing: a simulation takes as long as its program, so `measure` runs it and these only judge its record.
 //!
 //! A simulation that no longer describes the model (the script, a Contract or an Interface it cites, or the code
@@ -19,8 +19,10 @@ use crate::domain::check::{Check, Finding};
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::{Case, Harness};
 use crate::domain::entity::measurement::Measurement;
+use crate::domain::entity::project::Project;
 use crate::domain::service::measure::{Standing, latest_sim, sim_standing};
-use crate::domain::service::sim::{ShapeAbout, labels_of, shape, sim_harnesses, sweep};
+use crate::domain::service::sim::{ShapeAbout, shape, sim_harnesses, sweep};
+use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::ClauseId;
 use crate::domain::vo::sim::{CaseRole, Reproduction, SimCase, role_of};
@@ -64,6 +66,15 @@ fn sims<'a>(view: &'a CheckView<'a>) -> impl Iterator<Item = (&'a Context, Sim<'
     })
 }
 
+/// The label of the Clause `id` in the model; none when no Contract has it.
+fn label_of(project: &Project, id: ClauseId) -> Option<ClauseLabel> {
+    project
+        .contexts()
+        .find_map(|c| c.contract_of(id))
+        .and_then(|k| k.clause(id))
+        .map(|c| c.content().label())
+}
+
 /// A sim Harness is not the shape the protocol runs.
 #[derive(Debug, Clone, Copy)]
 pub struct SimShape;
@@ -74,10 +85,12 @@ static SIM_SHAPE: Descriptor = Descriptor {
         "a sim harness that is not one `sweep` case and `regress-<name>` cases citing clauses",
     ),
     help: Cow::Borrowed(
-        "A sim harness is run case by case under the protocol chidev-sim 1: the one case named `sweep` stands for \
-           the seeded runs and cites every clause the script checks, each `regress-<name>` case stands for a fixed \
-           schedule, and each cites the clauses it checks. A context has at most one. Rename or add the cases, \
-           cite the clauses, and put the harness again.",
+        "A sim harness is run case by case under the protocol chidev-sim 2: the one case named `sweep` stands for \
+           the seeded runs and cites every clause the script checks (of any of the context's contracts; the script \
+           names a clause `<contract>:<label>`), each `regress-<name>` case stands for a fixed schedule, and each \
+           cites the clauses it checks and no item. The harness names in `builds` the interfaces whose pinned code \
+           the program is built from. A context has at most one. Rename or add the cases, cite the clauses, name \
+           the interfaces to build, and put the harness again.",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Error,
@@ -106,17 +119,20 @@ impl Check for SimShape {
     }
 }
 
-/// A Clause of a Context that has a sim Harness, which no sim Case cites.
+/// A Clause of a Contract that a sim Harness takes on (cites a Clause of), which no sim Case cites.
 #[derive(Debug, Clone, Copy)]
 pub struct SimUncitedClause;
 
 static SIM_UNCITED_CLAUSE: Descriptor = Descriptor {
     id: RuleId::from_static("sim.uncited-clause"),
-    summary: Cow::Borrowed("a clause of a context with a sim harness that no sim case cites"),
+    summary: Cow::Borrowed(
+        "a clause of a contract a sim harness takes on (cites a clause of) that no sim case cites",
+    ),
     help: Cow::Borrowed(
-        "The simulation of this context never checks this clause. Have the script check it and cite it in the \
-           sweep case, or open a change request that addresses the finding if the clause is not for a simulation \
-           to check.",
+        "The simulation takes this contract on (the sweep cites a clause of it) but never checks this clause. \
+           Have the script check it and cite it in the sweep case, or open a change request that addresses the \
+           finding if the clause is not for a simulation to check. A contract the sweep cites no clause of is \
+           left to the tests, and is not reported.",
     ),
     hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Warning,
@@ -137,16 +153,19 @@ impl Check for SimUncitedClause {
                 .flat_map(|h| h.cases())
                 .flat_map(|k| k.cites().clauses().keys().copied())
                 .collect();
-            if sim_harnesses(c).next().is_none() {
-                continue;
-            }
-            for clause in c.contracts().flat_map(|k| k.clauses()) {
-                if !cited.contains(&clause.id()) {
-                    out.push(Finding::new(
-                        &SIM_UNCITED_CLAUSE,
-                        Some(Subject::Clause(clause.id())),
-                        format!("no sim case cites clause {}", clause.content().label()),
-                    ));
+            // Only a Contract the sim cites at least one Clause of is its to cover; the others are for the tests.
+            for contract in c
+                .contracts()
+                .filter(|k| k.clauses().iter().any(|cl| cited.contains(&cl.id())))
+            {
+                for clause in contract.clauses() {
+                    if !cited.contains(&clause.id()) {
+                        out.push(Finding::new(
+                            &SIM_UNCITED_CLAUSE,
+                            Some(Subject::Clause(clause.id())),
+                            format!("no sim case cites clause {}", clause.content().label()),
+                        ));
+                    }
                 }
             }
         }
@@ -199,7 +218,8 @@ static SIM_STALE: Descriptor = Descriptor {
     id: RuleId::from_static("sim.stale"),
     summary: Cow::Borrowed("a simulation that no longer describes the sim harness and the program"),
     help: Cow::Borrowed(
-        "The script, a contract or interface its cases cite, the code pinned for the program, or the measure \
+        "The script, the cases or `builds` of the harness, a contract it cites a clause of, a built interface, \
+           the code pinned for the program, or the measure \
            settings changed after the run. Its result says nothing of the program as it is now. Run the simulate \
            measure again.",
     ),
@@ -265,17 +285,17 @@ impl Check for SimFinding {
                 continue;
             }
             let Some(outcome) = m.sim() else { continue };
-            let labels = labels_of(view.after, s.sweep);
             for f in outcome.found() {
-                let Some(clause) = labels.get(&f.label) else {
+                // The record holds the Clause's id; a Clause the model has not any more is not reported.
+                let Some(label) = label_of(view.after, f.clause) else {
                     continue;
                 };
                 out.push(Finding::new(
                     &SIM_FINDING,
-                    Some(Subject::Clause(*clause)),
+                    Some(Subject::Clause(f.clause)),
                     format!(
-                        "clause {} broke in {} case(s); first {} step {}: {}",
-                        f.label, f.cases, f.first_case, f.first_step, f.first_text
+                        "clause {label} broke in {} case(s); first {} step {}: {}",
+                        f.cases, f.first_case, f.first_step, f.first_text
                     ),
                 ));
             }
@@ -316,17 +336,16 @@ impl Check for SimUnreached {
                 continue;
             }
             let Some(outcome) = m.sim() else { continue };
-            let labels = labels_of(view.after, s.sweep);
             for u in outcome.unreached() {
-                let Some(clause) = labels.get(&u.label) else {
+                let Some(label) = label_of(view.after, u.clause) else {
                     continue;
                 };
                 out.push(Finding::new(
                     &SIM_UNREACHED,
-                    Some(Subject::Clause(*clause)),
+                    Some(Subject::Clause(u.clause)),
                     format!(
-                        "no seed reached the situation clause {} needs: {}",
-                        u.label, u.text
+                        "no seed reached the situation clause {label} needs: {}",
+                        u.text
                     ),
                 ));
             }
@@ -466,13 +485,12 @@ mod tests {
     use super::super::fixture::*;
     use super::*;
     use crate::domain::entity::measurement::fixture::sim_draft;
-    use crate::domain::entity::project::Project;
     use crate::domain::service::sim::basis_of;
     use crate::domain::vo::case::{CaseCites, CaseName};
-    use crate::domain::vo::clause::ClauseLabel;
+    use crate::domain::vo::clause::{ClauseContent, ClauseText};
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::harness_kind::HarnessKind;
-    use crate::domain::vo::id::{CaseId, HarnessId, test_uuid};
+    use crate::domain::vo::id::{CaseId, ContractId, HarnessId, test_uuid};
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::measure::{FailureKind, MeasureFailure};
     use crate::domain::vo::revision::Revision;
@@ -480,6 +498,7 @@ mod tests {
         CaseExit, CaseFinding, CaseRun, CaseUnreached, Rerun, SimOutcome,
     };
     use crate::domain::vo::source::Source;
+    use crate::domain::vo::title::Title;
 
     fn hid() -> HarnessId {
         HarnessId::from_uuid(test_uuid(500))
@@ -493,24 +512,26 @@ mod tests {
         CaseId::from_uuid(test_uuid(51))
     }
 
+    /// The citations of a Case of a sim: these Clauses and no Item.
     fn cites(clauses: &[u128]) -> CaseCites {
-        CaseCites::new(
-            BTreeMap::from([(item(10), Revision::first())]),
+        CaseCites::of(
+            BTreeMap::new(),
             clauses
                 .iter()
                 .map(|c| (clause(*c), Revision::first()))
                 .collect(),
         )
-        .unwrap()
     }
 
-    /// Puts the sim Harness: a sweep citing C1 and C2 and a regress case citing C2, with this script.
+    /// Puts the sim Harness, which builds Interface 100: a sweep citing C1 and C2 and a regress case citing C2,
+    /// with this script.
     fn put_sim(p: &mut Project, script: &str) {
         let at = |n| LineRange::new(n, n).unwrap();
         p.put_harness_as(
             ctx(),
             hid(),
             Some(HarnessKind::Sim),
+            BTreeSet::from([iface()]),
             Source::new(format!("{script}\nx\n")),
             vec![
                 (
@@ -536,10 +557,6 @@ mod tests {
         p
     }
 
-    fn label(n: u32) -> ClauseLabel {
-        ClauseLabel::try_from(format!("C{n}").as_str()).unwrap()
-    }
-
     fn run_of(case: SimCase) -> CaseRun {
         CaseRun {
             case,
@@ -552,10 +569,11 @@ mod tests {
         }
     }
 
-    fn broke(mut r: CaseRun, step: u32, c: u32, text: &str) -> CaseRun {
+    /// The run with a finding of the Clause with this id (30 is C1 and 31 is C2 of the Contract of the fixture).
+    fn broke(mut r: CaseRun, step: u32, c: u128, text: &str) -> CaseRun {
         r.findings.push(CaseFinding {
             step,
-            label: label(c),
+            clause: clause(c),
             text: text.to_string(),
         });
         r
@@ -621,6 +639,7 @@ mod tests {
             ctx(),
             hid(),
             Some(HarnessKind::Sim),
+            BTreeSet::from([iface()]),
             Source::new("x\n".into()),
             vec![(
                 sweep_id(),
@@ -644,6 +663,156 @@ mod tests {
         assert!(found(&SimShape, &sim_project(), &[], &none()).is_empty());
     }
 
+    /// Adds a second Contract to `core`, whose Clauses 32 and 33 are C1 and C2 again.
+    fn put_second_contract(p: &mut Project) {
+        let c = |n: u128, l: &str, t: &str| {
+            (
+                clause(n),
+                ClauseContent::new(
+                    ClauseLabel::try_from(l).unwrap(),
+                    ClauseText::try_from(t).unwrap(),
+                ),
+            )
+        };
+        p.put_contract(
+            ctx(),
+            ContractId::from_uuid(test_uuid(301)),
+            Title::try_from("U").unwrap(),
+            vec![c(32, "C1", "a line is whole"), c(33, "C2", "a flag is off")],
+        )
+        .unwrap();
+    }
+
+    /// Puts a sim whose sweep cites these Clauses, with the script `script`.
+    fn put_sim_citing(p: &mut Project, script: &str, clauses: &[u128]) {
+        p.put_harness_as(
+            ctx(),
+            hid(),
+            Some(HarnessKind::Sim),
+            BTreeSet::from([iface()]),
+            Source::new(format!("{script}\n")),
+            vec![(
+                sweep_id(),
+                CaseName::try_from("sweep").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+                cites(clauses),
+            )],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_sim_taking_on_two_contracts_reports_each_finding_on_the_clause_of_its_own_contract() {
+        // both Contracts have a C1 (30 and 32): the sweep cites all four Clauses, which is a sound shape
+        let mut p = project();
+        put_second_contract(&mut p);
+        put_sim_citing(&mut p, "script", &[30, 31, 32, 33]);
+        assert!(found(&SimShape, &p, &[], &none()).is_empty());
+        assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
+        let outcome = SimOutcome {
+            cases: vec![
+                run_of(SimCase::Seed(0)),
+                broke(run_of(SimCase::Seed(1)), 4, 32, "the second contract's C1"),
+            ],
+            reruns: Vec::new(),
+        };
+        let run = simulated(&p, 1, outcome);
+        let all = found(&SimFinding, &p, std::slice::from_ref(&run), &none());
+        // the finding is on Clause 32, not on 30, though both are labelled C1
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].subject(), Some(Subject::Clause(clause(32))));
+        assert!(all[0].message().starts_with("clause C1 broke in 1 case(s)"));
+        // and the second Contract's C2 unreached lands on 33
+        let missed = SimOutcome {
+            cases: vec![CaseRun {
+                unreached: vec![CaseUnreached {
+                    clause: clause(33),
+                    text: "no flag".into(),
+                }],
+                ..run_of(SimCase::Seed(0))
+            }],
+            reruns: Vec::new(),
+        };
+        let run = simulated(&p, 2, missed);
+        let all = found(&SimUnreached, &p, std::slice::from_ref(&run), &none());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].subject(), Some(Subject::Clause(clause(33))));
+    }
+
+    #[test]
+    fn uncited_clauses_are_reported_only_in_contracts_the_sim_cites_something_of() {
+        let mut p = project();
+        put_second_contract(&mut p);
+        // the sim takes on the first Contract only: the second one's four-way silence is the tests' business
+        put_sim_citing(&mut p, "script", &[30]);
+        let all = found(&SimUncitedClause, &p, &[], &none());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].subject(), Some(Subject::Clause(clause(31))));
+        // citing one Clause of the second takes the whole Contract on
+        put_sim_citing(&mut p, "script", &[30, 31, 32]);
+        let all = found(&SimUncitedClause, &p, &[], &none());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].subject(), Some(Subject::Clause(clause(33))));
+        // no Clause cited at all: nothing is taken on
+        put_sim_citing(&mut p, "script", &[]);
+        assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
+    }
+
+    #[test]
+    fn a_simulation_is_stale_when_a_contract_it_takes_on_or_an_interface_it_builds_moves_not_for_one_it_does_not()
+     {
+        let mut p = project();
+        put_second_contract(&mut p);
+        put_sim_citing(&mut p, "script", &[30, 32]);
+        let run = simulated(&p, 1, SimOutcome::default());
+        let runs = std::slice::from_ref(&run);
+        assert!(found(&SimStale, &p, runs, &none()).is_empty());
+        // the second Contract changes: the sim cites a Clause of it
+        let mut q = p.clone();
+        q.put_contract(
+            ctx(),
+            ContractId::from_uuid(test_uuid(301)),
+            Title::try_from("U").unwrap(),
+            vec![(
+                clause(32),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C1").unwrap(),
+                    ClauseText::try_from("a line is whole, still").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+        assert_eq!(found(&SimStale, &q, runs, &none()).len(), 1);
+        // a Contract it does not cite a Clause of moves: the simulation stands
+        let mut r = p.clone();
+        r.put_contract(
+            ctx(),
+            ContractId::from_uuid(test_uuid(302)),
+            Title::try_from("V").unwrap(),
+            vec![(
+                clause(34),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C1").unwrap(),
+                    ClauseText::try_from("unrelated").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+        assert!(found(&SimStale, &r, runs, &none()).is_empty());
+        // the Pin of the built Interface: pinning it (tests check it) moves the sim, as the code it ran is new
+        let pins = [pin(&p)];
+        let view = CheckView {
+            before: None,
+            after: &p,
+            pins: &pins,
+            change_requests: &[],
+            measurements: runs,
+            measure_settings: &BTreeMap::new(),
+            sim_settings: &none(),
+        };
+        assert_eq!(SimStale.run(&view, &Params::default()).len(), 1);
+    }
+
     #[test]
     fn a_clause_no_sim_case_cites_is_found_only_where_there_is_a_sim_harness() {
         let mut p = project();
@@ -654,6 +823,7 @@ mod tests {
             ctx(),
             hid(),
             Some(HarnessKind::Sim),
+            BTreeSet::from([iface()]),
             Source::new("x\n".into()),
             vec![(
                 sweep_id(),
@@ -734,13 +904,13 @@ mod tests {
             cases: vec![
                 run_of(SimCase::Seed(0)),
                 broke(
-                    broke(run_of(SimCase::Seed(1)), 7, 2, "capacity 0 accepted"),
+                    broke(run_of(SimCase::Seed(1)), 7, 31, "capacity 0 accepted"),
                     9,
-                    2,
+                    31,
                     "again",
                 ),
-                broke(run_of(SimCase::Seed(2)), 3, 2, "later"),
-                broke(run_of(SimCase::Seed(3)), 5, 1, "other clause"),
+                broke(run_of(SimCase::Seed(2)), 3, 31, "later"),
+                broke(run_of(SimCase::Seed(3)), 5, 30, "other clause"),
             ],
             reruns: Vec::new(),
         };
@@ -766,7 +936,7 @@ mod tests {
         let p = sim_project();
         let miss = |mut r: CaseRun| {
             r.unreached.push(CaseUnreached {
-                label: label(2),
+                clause: clause(31),
                 text: "capacity below 1".into(),
             });
             r
@@ -851,7 +1021,7 @@ mod tests {
             hid(),
             basis_of(&p, hid(), &[]).unwrap(),
             SimOutcome {
-                cases: vec![broke(run_of(SimCase::Seed(0)), 1, 1, "x")],
+                cases: vec![broke(run_of(SimCase::Seed(0)), 1, 30, "x")],
                 reruns: Vec::new(),
             },
         );
@@ -907,7 +1077,7 @@ mod tests {
             &p,
             1,
             SimOutcome {
-                cases: vec![broke(run_of(SimCase::Seed(0)), 1, 1, "x")],
+                cases: vec![broke(run_of(SimCase::Seed(0)), 1, 30, "x")],
                 reruns: Vec::new(),
             },
         );

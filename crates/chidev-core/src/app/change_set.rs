@@ -66,10 +66,14 @@ pub struct HarnessPut {
     pub name: String,
     /// Its kind; none: the kind it has, or tests for a new one.
     pub kind: Option<HarnessKind>,
+    /// The Interfaces of its Context, by name, whose pinned code a sim Harness builds into the program it drives
+    /// (one that the same change set makes is fine). It is not a citation: it asks no Item of them and puts the
+    /// Harness on no Pin's basis. A Harness of tests builds none. A put states all of it, as it states the code.
+    pub builds: Vec<String>,
     /// Its code.
     pub source: String,
     /// Its Cases. What they cite is named as in a put of the Harness alone, and may be a Clause or an Item that
-    /// the same change set makes.
+    /// the same change set makes. A Case of tests cites an Item at least; a Case of a sim cites Clauses only.
     pub cases: Vec<CaseInput>,
 }
 
@@ -463,6 +467,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let draft = self.case_draft(p, plan, (ctx, old), h, c, problems).await;
             cases.extend(draft);
         }
+        let mut builds = BTreeSet::new();
+        for name in &h.builds {
+            match self.build_interface(plan, ctx, &h.context, name).await {
+                Ok(interface) => {
+                    builds.insert(interface);
+                }
+                Err(e) => problems.push(e),
+            }
+        }
         if problems.len() > before {
             return None;
         }
@@ -470,9 +483,26 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             context: ctx,
             id,
             kind: h.kind,
+            builds,
             source: Source::new(h.source.clone()),
             cases,
         })
+    }
+
+    /// The id of the Interface `name` of the Context `ctx` that a sim Harness builds: one the change set puts, or
+    /// the Project's.
+    async fn build_interface(
+        &self,
+        plan: &Plan,
+        ctx: ContextId,
+        context: &str,
+        name: &str,
+    ) -> Result<InterfaceId, AppError> {
+        let id = match plan.ids.get(&(ctx, AssetKind::Interface, name.to_string())) {
+            Some(id) => *id,
+            None => self.asset(ctx, context, AssetKind::Interface, name).await?,
+        };
+        Ok(InterfaceId::from_uuid(id))
     }
 
     /// A Case to put in the Harness `h`, which is in the Context `scope.0` and is `scope.1` there now.
@@ -524,13 +554,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         plan.words
             .insert(Target::Case(id), format!("case {} {}", h.name, c.name));
-        match CaseDraft::new(id, name, lines, items, clauses) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                problems.push(input(e));
-                None
-            }
-        }
+        Some(CaseDraft::new(id, name, lines, items, clauses))
     }
 
     /// The id of the Item `r` cites, among the Interfaces the change set puts and the Project's.
@@ -709,6 +733,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 context: context_name(context),
                 kind: "clause",
                 target: self.said(before, plan, Target::Clause(clause)).await?,
+            },
+            ProjectError::BuildNotReached {
+                context,
+                harness,
+                interface,
+            } => AppError::BuildNotReached {
+                harness: self.said(before, plan, Target::Harness(harness)).await?,
+                context: context_name(context),
+                interface: self
+                    .said(before, plan, Target::Interface(interface))
+                    .await?,
             },
             ProjectError::RetireCited { cited, cases } => {
                 let mut said_cited = Vec::with_capacity(cited.len());

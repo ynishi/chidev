@@ -13,9 +13,10 @@
 //! reports what it observed: the failure, the commands' evidence and the mutants it got through. Only a
 //! configuration that cannot measure this Interface at all is an error, and then nothing was run.
 //!
-//! A simulation (`sim.rs`, which holds the protocol `chidev-sim 1`) is run in the same kind of copy: the pinned code of the Interfaces the sim Harness cites
-//! and the script are written over it, the build command runs, and the script is started once per case under the
-//! protocol `chidev-sim 1`. The sampled cases are then run a second time in a second, fresh copy.
+//! A simulation (`sim.rs`, which holds the protocol `chidev-sim 2`) is run in the same kind of copy: the pinned code
+//! of the Interfaces the sim Harness builds and the script are written over it, the build command runs, and the
+//! script is started once per case under the protocol `chidev-sim 2`. The sampled cases are then run a second time
+//! in a second, fresh copy.
 
 mod config;
 mod provider;

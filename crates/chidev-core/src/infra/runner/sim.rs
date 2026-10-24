@@ -1,7 +1,8 @@
-//! Running a sim Harness: the protocol `chidev-sim 1`, language-independent.
+//! Running a sim Harness: the protocol `chidev-sim 2`, language-independent.
 //!
-//! chidev copies the project (as a mutation run does), writes the code the Pins of the cited Interfaces accepted and
-//! the script over the copy, and runs the project's build command. It then starts the script once per case:
+//! chidev copies the project (as a mutation run does), writes the code the Pins of the Interfaces the Harness builds
+//! accepted and the script over the copy, and runs the project's build command. It then starts the script once per
+//! case:
 //!
 //! ```text
 //! <interpreter...> <script> <case> --out <dir> -- <program argv...>
@@ -14,13 +15,19 @@
 //! script does not report them. On standard output the script prints, one per line:
 //!
 //! ```text
-//! FINDING <case> step <k> <ClauseLabel>: <text>   a promise of the Clause did not hold after step k (k from 1)
-//! UNREACHED <ClauseLabel>: <text>                 this case never reached the situation the Clause needs
-//! UNDECIDED <text>                                the script could not decide something (counted, never failed)
-//! sim: findings=<n>                               last line; n is the number of FINDING lines
+//! FINDING <case> step <k> <contract>:<label>: <text>   a promise of the Clause did not hold after step k (k from 1)
+//! UNREACHED <contract>:<label>: <text>                 this case never reached the situation the Clause needs
+//! UNDECIDED <text>                                     the script could not decide something (counted, never failed)
+//! sim: findings=<n>                                    last line; n is the number of FINDING lines
 //! ```
 //!
-//! Exit 0 or 1 (1 when there are findings) means the report is to be read. A label the sweep Case does not cite, a
+//! A Clause is named `<contract>:<label>`: the Contract's name (as chidev knows it, without white space) and the
+//! label (`C<n>`) of the Clause in it. Labels are unique only within a Contract, so a sim Harness that checks
+//! Clauses of several Contracts names each by its Contract. chidev resolves each name to the Clause's id when it
+//! records the run, against the Clauses the sweep Case cites; the record holds ids, not names.
+//!
+//! Exit 0 or 1 (1 when there are findings) means the report is to be read. A name of a Contract the sweep Case
+//! cites nothing of, or of a Clause of one that it does not cite, a name that is not `<contract>:<label>`, a
 //! `FINDING` for another case, a line of none of these forms, a missing or repeated summary, a summary that
 //! disagrees with the lines, or a normal case that wrote no `schedule` and `trace` is a protocol failure of the run.
 //! Any other exit code, or a script that runs past the time allowed for a case, is recorded for that case and the
@@ -37,11 +44,12 @@ use super::super::process::{self, Capture, Over, Pipe};
 use super::config::{SimConfig, WORK_DIR};
 use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, config_error, io, millis, provider};
 use crate::app::ports::measure::{InterfaceText, RunnerError, SimulateReport, SimulateRequest};
-use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::id::ClauseId;
 use crate::domain::vo::measure::{FailureKind, MeasureFailure, StepEvidence};
 use crate::domain::vo::sim::{
-    CaseExit, CaseFinding, CaseRun, CaseUnreached, Rerun, SimCase, reproduction, rerun_cases,
+    CaseExit, CaseFinding, CaseRun, CaseUnreached, CitedClause, ClauseName, Rerun, SimCase,
+    reproduction, rerun_cases, resolve,
 };
 
 /// The longest report a script may print.
@@ -65,31 +73,30 @@ fn shown(line: &str) -> String {
     }
 }
 
-/// `<Label>: <text>`, the label one that the sweep cites.
-fn labelled<'a>(rest: &'a str, labels: &[ClauseLabel]) -> Result<(ClauseLabel, &'a str), String> {
-    let (label, text) = rest
-        .split_once(':')
-        .ok_or_else(|| "no `<ClauseLabel>: <text>`".to_string())?;
-    let parsed = ClauseLabel::try_from(label.trim())
-        .map_err(|_| format!("`{}` is not a clause label (`C<n>`)", label.trim()))?;
-    if !labels.contains(&parsed) {
-        return Err(format!("the sweep case does not cite clause {parsed}"));
-    }
+/// `<contract>:<label>: <text>`: the name of a Clause the sweep cites, resolved to the Clause's id, and the text.
+/// The name is the first word and ends in a colon; a Contract's name has no white space.
+fn named<'a>(rest: &'a str, cited: &[CitedClause]) -> Result<(ClauseId, &'a str), String> {
+    let shape = || "no `<contract>:<label>: <text>`".to_string();
+    let (word, text) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let name = word.strip_suffix(':').ok_or_else(shape)?;
+    let name = ClauseName::try_from(name)
+        .map_err(|_| format!("`{name}` is not a clause name (`<contract>:C<n>`)"))?;
+    let id = resolve(cited, &name).map_err(|e| e.to_string())?;
     let text = text.trim();
     if text.is_empty() {
-        return Err("the text after the label is empty".to_string());
+        return Err("the text after the clause name is empty".to_string());
     }
-    Ok((parsed, text))
+    Ok((id, text))
 }
 
-/// `<case> step <k> <ClauseLabel>: <text>` of a `FINDING` line.
-fn finding_of(rest: &str, case: &SimCase, labels: &[ClauseLabel]) -> Result<CaseFinding, String> {
-    let (named, after) = rest
+/// `<case> step <k> <contract>:<label>: <text>` of a `FINDING` line.
+fn finding_of(rest: &str, case: &SimCase, cited: &[CitedClause]) -> Result<CaseFinding, String> {
+    let (named_case, after) = rest
         .split_once(' ')
-        .ok_or_else(|| "no `<case> step <k> <ClauseLabel>: <text>`".to_string())?;
-    if named != case.to_string() {
+        .ok_or_else(|| "no `<case> step <k> <contract>:<label>: <text>`".to_string())?;
+    if named_case != case.to_string() {
         return Err(format!(
-            "the finding is of `{named}`, and this run is of `{case}`"
+            "the finding is of `{named_case}`, and this run is of `{case}`"
         ));
     }
     let after = after
@@ -103,20 +110,22 @@ fn finding_of(rest: &str, case: &SimCase, labels: &[ClauseLabel]) -> Result<Case
         .ok()
         .filter(|k| *k >= 1)
         .ok_or_else(|| format!("`{step}` is not a step (a number from 1)"))?;
-    let (label, text) = labelled(after, labels)?;
+    let (clause, text) = named(after, cited)?;
     Ok(CaseFinding {
         step,
-        label,
+        clause,
         text: text.to_string(),
     })
 }
 
-/// Reads the report of the script run for `case`. `labels` are the Clauses the sweep cites. Any line that is not
-/// one of the forms, a label not cited, a finding of another case, no summary or two, a summary that is not the
-/// last line, and a summary that counts other than the lines it follows are errors; the message says which line.
+/// Reads the report of the script run for `case`. `cited` are the Clauses the sweep cites, by the names a script
+/// writes them; each name in the report is resolved to the Clause's id. Any line that is not one of the forms, a
+/// name of a contract or a clause the sweep does not cite, a finding of another case, no summary or two, a summary
+/// that is not the last line, and a summary that counts other than the lines it follows are errors; the message
+/// says which line.
 pub(super) fn parse_report(
     case: &SimCase,
-    labels: &[ClauseLabel],
+    cited: &[CitedClause],
     text: &str,
 ) -> Result<Reported, String> {
     let mut out = Reported::default();
@@ -135,11 +144,11 @@ pub(super) fn parse_report(
         }
         if let Some(rest) = line.strip_prefix("FINDING ") {
             out.findings
-                .push(finding_of(rest, case, labels).map_err(bad)?);
+                .push(finding_of(rest, case, cited).map_err(bad)?);
         } else if let Some(rest) = line.strip_prefix("UNREACHED ") {
-            let (label, text) = labelled(rest, labels).map_err(bad)?;
+            let (clause, text) = named(rest, cited).map_err(bad)?;
             out.unreached.push(CaseUnreached {
-                label,
+                clause,
                 text: text.to_string(),
             });
         } else if let Some(rest) = line.strip_prefix("UNDECIDED ") {
@@ -154,7 +163,7 @@ pub(super) fn parse_report(
                 .map_err(|_| bad(format!("`{}` is not a count", rest.trim())))?;
             summary = Some((at, count));
         } else {
-            return Err(bad("none of the forms of chidev-sim 1".to_string()));
+            return Err(bad("none of the forms of chidev-sim 2".to_string()));
         }
     }
     match summary {
@@ -440,7 +449,7 @@ impl Job<'_> {
             Some(_) => Reported::default(),
             None => parse_report(
                 case,
-                &plan.request.labels,
+                &plan.request.clauses,
                 &String::from_utf8_lossy(&capture.stdout),
             )
             .map_err(protocol)?,
@@ -533,17 +542,23 @@ async fn digest_of(path: &Path) -> Result<Option<Digest>, process::Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::vo::clause::ClauseLabel;
+    use crate::domain::vo::id::test_uuid;
     use crate::domain::vo::sim::RegressName;
 
-    fn labels() -> Vec<ClauseLabel> {
-        ["C1", "C4"]
+    /// The Clauses the sweep cites: stock:C1 (11), stock:C4 (14) and cli:C1 (21) (C1 is in both Contracts).
+    fn cited() -> Vec<CitedClause> {
+        [("stock", "C1", 11), ("stock", "C4", 14), ("cli", "C1", 21)]
             .iter()
-            .map(|l| ClauseLabel::try_from(*l).unwrap())
+            .map(|(contract, label, id)| CitedClause {
+                name: ClauseName::new(contract, ClauseLabel::try_from(*label).unwrap()).unwrap(),
+                id: clause(*id),
+            })
             .collect()
     }
 
-    fn label(n: &str) -> ClauseLabel {
-        ClauseLabel::try_from(n).unwrap()
+    fn clause(n: u128) -> ClauseId {
+        ClauseId::from_uuid(test_uuid(n))
     }
 
     fn seed(n: u32) -> SimCase {
@@ -552,24 +567,24 @@ mod tests {
 
     #[test]
     fn a_report_of_every_form_is_read_line_by_line() {
-        let text = "FINDING seed-3 step 7 C4: capacity 0 accepted\n\
-                    FINDING seed-3 step 9 C1: a load: over the limit fits\n\
-                    UNREACHED C4: capacity below 1\n\
+        let text = "FINDING seed-3 step 7 stock:C4: capacity 0 accepted\n\
+                    FINDING seed-3 step 9 stock:C1: a load: over the limit fits\n\
+                    UNREACHED stock:C4: capacity below 1\n\
                     UNDECIDED more than 1000 outcomes\n\
                     \n\
                     sim: findings=2\n";
-        let r = parse_report(&seed(3), &labels(), text).unwrap();
+        let r = parse_report(&seed(3), &cited(), text).unwrap();
         assert_eq!(
             r.findings,
             [
                 CaseFinding {
                     step: 7,
-                    label: label("C4"),
+                    clause: clause(14),
                     text: "capacity 0 accepted".into()
                 },
                 CaseFinding {
                     step: 9,
-                    label: label("C1"),
+                    clause: clause(11),
                     text: "a load: over the limit fits".into()
                 },
             ]
@@ -577,7 +592,7 @@ mod tests {
         assert_eq!(
             r.unreached,
             [CaseUnreached {
-                label: label("C4"),
+                clause: clause(14),
                 text: "capacity below 1".into()
             }]
         );
@@ -586,14 +601,15 @@ mod tests {
         let regress = SimCase::Regress(RegressName::try_from("lease-lost").unwrap());
         let ok = parse_report(
             &regress,
-            &labels(),
-            "FINDING regress-lease-lost step 1 C1: x\nsim: findings=1\n",
+            &cited(),
+            "FINDING regress-lease-lost step 1 cli:C1: x\nsim: findings=1\n",
         )
         .unwrap();
         assert_eq!(ok.findings.len(), 1);
+        assert_eq!(ok.findings[0].clause, clause(21));
         // a clean report is just the summary
         assert_eq!(
-            parse_report(&seed(0), &labels(), "sim: findings=0\n").unwrap(),
+            parse_report(&seed(0), &cited(), "sim: findings=0\n").unwrap(),
             Reported::default()
         );
     }
@@ -602,84 +618,125 @@ mod tests {
     fn a_line_that_is_none_of_the_forms_is_refused_with_its_number() {
         for (text, expect) in [
             ("hello\nsim: findings=0\n", "line 1 `hello`"),
-            ("sim-protocol: chidev-sim 1\nsim: findings=0\n", "line 1"),
+            ("sim-protocol: chidev-sim 2\nsim: findings=0\n", "line 1"),
             ("FINDING seed-3\nsim: findings=0\n", "no `<case> step"),
             (
-                "FINDING seed-3 step 0 C1: x\nsim: findings=1\n",
+                "FINDING seed-3 step 0 stock:C1: x\nsim: findings=1\n",
                 "not a step",
             ),
             (
-                "FINDING seed-3 step x C1: x\nsim: findings=1\n",
+                "FINDING seed-3 step x stock:C1: x\nsim: findings=1\n",
                 "not a step",
             ),
             (
-                "FINDING seed-3 step 2 C1 x\nsim: findings=1\n",
-                "no `<ClauseLabel>: <text>`",
-            ),
-            ("FINDING seed-3 step 2 C1:\nsim: findings=1\n", "empty"),
-            (
-                "FINDING seed-3 step 2 c1: x\nsim: findings=1\n",
-                "not a clause label",
+                "FINDING seed-3 step 2 stock:C1 x\nsim: findings=1\n",
+                "no `<contract>:<label>: <text>`",
             ),
             (
-                "FINDING seed-4 step 2 C1: x\nsim: findings=1\n",
+                "FINDING seed-3 step 2 stock:C1:\nsim: findings=1\n",
+                "empty",
+            ),
+            (
+                "FINDING seed-3 step 2 stock:c1: x\nsim: findings=1\n",
+                "`stock:c1` is not a clause name",
+            ),
+            (
+                "FINDING seed-4 step 2 stock:C1: x\nsim: findings=1\n",
                 "`seed-4`, and this run is of `seed-3`",
             ),
             (
-                "UNREACHED C1\nsim: findings=0\n",
-                "no `<ClauseLabel>: <text>`",
+                "UNREACHED stock:C1\nsim: findings=0\n",
+                "no `<contract>:<label>: <text>`",
             ),
             ("UNDECIDED\nsim: findings=0\n", "none of the forms"),
             ("UNDECIDED  \nsim: findings=0\n", "none of the forms"),
             ("sim: findings=x\n", "not a count"),
             ("sim: findings=-1\n", "not a count"),
         ] {
-            let error = parse_report(&seed(3), &labels(), text).unwrap_err();
+            let error = parse_report(&seed(3), &cited(), text).unwrap_err();
             assert!(error.contains(expect), "{text:?} gave {error}");
         }
     }
 
     #[test]
-    fn a_label_the_sweep_does_not_cite_is_refused() {
+    fn a_clause_the_sweep_does_not_cite_is_refused() {
         for text in [
-            "FINDING seed-3 step 2 C9: x\nsim: findings=1\n",
-            "UNREACHED C9: x\nsim: findings=0\n",
+            "FINDING seed-3 step 2 stock:C9: x\nsim: findings=1\n",
+            "UNREACHED stock:C9: x\nsim: findings=0\n",
+            // C4 is stock's; cli's sweep citations are C1 only
+            "UNREACHED cli:C4: x\nsim: findings=0\n",
         ] {
-            let error = parse_report(&seed(3), &labels(), text).unwrap_err();
-            assert!(error.contains("does not cite clause C9"), "{error}");
+            let error = parse_report(&seed(3), &cited(), text).unwrap_err();
+            assert!(error.contains("does not cite clause"), "{error}");
         }
     }
 
     #[test]
+    fn a_contract_the_sweep_cites_nothing_of_is_refused_naming_the_ones_it_does() {
+        for text in [
+            "FINDING seed-3 step 2 fuel:C1: x\nsim: findings=1\n",
+            "UNREACHED fuel:C1: x\nsim: findings=0\n",
+        ] {
+            let error = parse_report(&seed(3), &cited(), text).unwrap_err();
+            assert!(
+                error.contains("no contract `fuel`") && error.contains("cli, stock"),
+                "{error}"
+            );
+        }
+        // a name without a contract is no name at all
+        let bare = parse_report(
+            &seed(3),
+            &cited(),
+            "FINDING seed-3 step 2 C1: x\nsim: findings=1\n",
+        )
+        .unwrap_err();
+        assert!(bare.contains("`C1` is not a clause name"), "{bare}");
+    }
+
+    #[test]
+    fn one_label_in_two_contracts_is_two_clauses() {
+        let r = parse_report(
+            &seed(0),
+            &cited(),
+            "FINDING seed-0 step 1 stock:C1: a\nFINDING seed-0 step 2 cli:C1: b\nUNREACHED cli:C1: c\nsim: findings=2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            r.findings.iter().map(|f| f.clause).collect::<Vec<_>>(),
+            [clause(11), clause(21)]
+        );
+        assert_eq!(r.unreached[0].clause, clause(21));
+    }
+
+    #[test]
     fn the_summary_is_there_once_last_and_right() {
-        let miss = parse_report(&seed(0), &labels(), "UNDECIDED x\n").unwrap_err();
+        let miss = parse_report(&seed(0), &cited(), "UNDECIDED x\n").unwrap_err();
         assert!(miss.contains("no `sim: findings=<n>`"), "{miss}");
-        let empty = parse_report(&seed(0), &labels(), "\n\n").unwrap_err();
+        let empty = parse_report(&seed(0), &cited(), "\n\n").unwrap_err();
         assert!(empty.contains("empty"), "{empty}");
         let twice =
-            parse_report(&seed(0), &labels(), "sim: findings=0\nsim: findings=0\n").unwrap_err();
+            parse_report(&seed(0), &cited(), "sim: findings=0\nsim: findings=0\n").unwrap_err();
         assert!(twice.contains("after the `sim:` summary"), "{twice}");
-        let after =
-            parse_report(&seed(0), &labels(), "sim: findings=0\nUNDECIDED x\n").unwrap_err();
+        let after = parse_report(&seed(0), &cited(), "sim: findings=0\nUNDECIDED x\n").unwrap_err();
         assert!(after.contains("line 2"), "{after}");
         let wrong = parse_report(
             &seed(0),
-            &labels(),
-            "FINDING seed-0 step 1 C1: x\nsim: findings=2\n",
+            &cited(),
+            "FINDING seed-0 step 1 stock:C1: x\nsim: findings=2\n",
         )
         .unwrap_err();
         assert!(
             wrong.contains("findings=2") && wrong.contains("has 1"),
             "{wrong}"
         );
-        let none = parse_report(&seed(0), &labels(), "sim: findings=1\n").unwrap_err();
+        let none = parse_report(&seed(0), &cited(), "sim: findings=1\n").unwrap_err();
         assert!(none.contains("has 0"), "{none}");
     }
 
     #[test]
     fn a_long_line_is_cut_in_the_message() {
         let line = "x".repeat(500);
-        let error = parse_report(&seed(0), &labels(), &line).unwrap_err();
+        let error = parse_report(&seed(0), &cited(), &line).unwrap_err();
         assert!(error.len() < 300, "{}", error.len());
         assert!(error.contains("..."));
     }

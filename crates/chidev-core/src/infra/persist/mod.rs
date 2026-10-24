@@ -484,8 +484,11 @@ mod tests {
 
     #[test]
     fn the_kind_of_a_harness_comes_back_and_a_document_without_one_is_a_harness_of_tests() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use crate::domain::vo::case::CaseCites;
         use crate::domain::vo::harness_kind::HarnessKind;
-        use crate::domain::vo::id::HarnessId;
+        use crate::domain::vo::id::{HarnessId, InterfaceId};
         use crate::domain::vo::source::Source;
         let mut p = project();
         let text = encode_project(&p).unwrap();
@@ -497,33 +500,44 @@ mod tests {
             .find(|c| c.harness(harness).is_some())
             .map(|c| c.id())
             .unwrap();
+        // a Case of a sim cites Clauses and no Item
         let given = || {
             let c = p.context(top).and_then(|c| c.harness(harness)).unwrap();
             c.cases()
                 .iter()
-                .map(|k| (k.id(), k.name().clone(), k.lines(), k.cites().clone()))
+                .map(|k| {
+                    (
+                        k.id(),
+                        k.name().clone(),
+                        k.lines(),
+                        CaseCites::of(BTreeMap::new(), k.cites().clauses().clone()),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let cases = given();
+        let iface = InterfaceId::from_uuid(id(IFACE));
         p.put_harness_as(
             top,
             harness,
             Some(HarnessKind::Sim),
+            BTreeSet::from([iface]),
             Source::new("#[test]\nfn push_then_pop() {}\n".to_string()),
             cases,
         )
         .unwrap();
         let text = encode_project(&p).unwrap();
         assert!(text.contains("\"kind\":\"sim\""), "{text}");
+        // what it builds is written, by id, and comes back
+        assert!(
+            text.contains(&format!("\"builds\":[\"{}\"]", iface.as_uuid())),
+            "{text}"
+        );
         let back = decode_project(CURRENT, &text).unwrap();
         assert_eq!(back, p);
-        assert_eq!(
-            back.context(top)
-                .and_then(|c| c.harness(harness))
-                .unwrap()
-                .kind(),
-            HarnessKind::Sim
-        );
+        let back_harness = back.context(top).and_then(|c| c.harness(harness)).unwrap();
+        assert_eq!(back_harness.kind(), HarnessKind::Sim);
+        assert_eq!(back_harness.builds(), &BTreeSet::from([iface]));
         // a kind nobody knows is corrupt, not quietly tests
         let odd = text.replace("\"kind\":\"sim\"", "\"kind\":\"fuzz\"");
         assert!(decode_project(CURRENT, &odd).is_err());

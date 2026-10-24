@@ -9,9 +9,8 @@ use std::pin::Pin;
 
 use thiserror::Error;
 
-use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::measure::{MeasureFailure, MutantResult, StepEvidence};
-use crate::domain::vo::sim::{CaseRun, RegressName, Rerun};
+use crate::domain::vo::sim::{CaseRun, CitedClause, RegressName, Rerun};
 
 /// A future that is boxed so that the port can be used as a trait object: the use case holds one runner for the
 /// life of the program, chosen by the program that starts it.
@@ -74,10 +73,11 @@ pub struct SimulateRequest {
     pub harness: String,
     /// The script, as the model holds it now.
     pub script: String,
-    /// The code the Pins accepted for the Interfaces the Harness's Cases cite.
+    /// The code the Pins accepted for the Interfaces the Harness builds.
     pub interfaces: Vec<InterfaceText>,
-    /// The labels of the Clauses the sweep Case cites: a report that names another is a protocol failure.
-    pub labels: Vec<ClauseLabel>,
+    /// The Clauses the sweep Case cites, each by the name a script writes it (`<contract>:<label>`) and its id: a
+    /// report that names another is a protocol failure, and a name in the report is resolved to the id here.
+    pub clauses: Vec<CitedClause>,
     /// The regress cases of the Harness, in the order they are to be run.
     pub regress: Vec<RegressName>,
 }

@@ -1,10 +1,10 @@
 //! Measuring: the operations that run a measure and keep what it observed, and the reading of what is kept. A
 //! mutation run takes the code a Pin accepted and tests it against changes of itself; a simulation builds the
-//! program from the code of the Pins a sim Harness cites and drives it with the script. A measure takes minutes and
+//! program from the code of the Pins of the Interfaces a sim Harness builds and drives it with the script. A measure takes minutes and
 //! makes facts, so it is an operation of its own and never a hook; the checks (`measure.failed`, `mutation.*`,
 //! `sim.*`) only judge the record it leaves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
@@ -15,14 +15,12 @@ use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
 use crate::domain::service::measure::{Standing, sim_standing, standing};
 use crate::domain::service::pin::current_basis;
-use crate::domain::service::sim::{
-    basis_of, cited_interfaces, labels_of, regress_names, shape, sim_harnesses, sweep,
-};
+use crate::domain::service::sim::{basis_of, cited_in, regress_names, shape, sim_harnesses, sweep};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::harness_kind::HarnessKind;
-use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
+use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{MeasureKind, MeasureStamp, MeasureSubject};
-use crate::domain::vo::sim::{SimOutcome, SimStamp};
+use crate::domain::vo::sim::{CitedClause, ClauseName, SimOutcome, SimStamp};
 use crate::domain::vo::target::Target;
 
 /// How many times a commit that lost a race with another writer is tried again. A measurement stands on a stamp, not
@@ -57,8 +55,8 @@ pub struct MutantLine {
 pub struct FindingLine {
     /// The step of the trace.
     pub step: u32,
-    /// The Clause's label.
-    pub label: String,
+    /// The Clause, as a script names it: `<contract>:<label>`; its id when the model has not the Clause any more.
+    pub clause: String,
     /// What did not hold.
     pub text: String,
 }
@@ -66,8 +64,8 @@ pub struct FindingLine {
 /// A Clause a case did not reach, in words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreachedLine {
-    /// The Clause's label.
-    pub label: String,
+    /// The Clause, as a script names it: `<contract>:<label>`; its id when the model has not the Clause any more.
+    pub clause: String,
     /// The situation that was needed.
     pub text: String,
 }
@@ -327,16 +325,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             evidence: report.evidence,
         })?;
         self.keep_measurement(&measurement).await?;
-        Ok(self.measured_words(&measurement))
+        self.measured_words(&measurement).await
     }
 
     /// Simulates the sim Harness `harness` of the Context `context` and keeps what the run observed. The program
-    /// is built from the code the Pins of the Interfaces its Cases cite accepted, as they were pinned, and the
+    /// is built from the code the Pins of the Interfaces the Harness builds accepted, as they were pinned, and the
     /// script is the model's as it is now; the working tree's own copies are not read, and no file of the project
-    /// is changed. A run that could not finish (the program does not build, the script broke the protocol, the
-    /// time ran out) is kept as a failed measurement; a Harness that is not a well-formed sim Harness, an
-    /// Interface it cites that is not pinned, or a configuration that cannot simulate it is an error and keeps
-    /// nothing.
+    /// is changed. The Clauses the script reports are named `<contract>:<label>` and resolved to the Clauses the
+    /// sweep cites; the record keeps their ids. A run that could not finish (the program does not build, the script
+    /// broke the protocol, the time ran out) is kept as a failed measurement; a Harness that is not a well-formed
+    /// sim Harness, an Interface it builds that is not pinned, or a configuration that cannot simulate it is an
+    /// error and keeps nothing.
     pub async fn simulate(
         &mut self,
         context: &str,
@@ -371,9 +370,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let sweep_case = sweep(h).ok_or_else(|| {
             AppError::Input(format!("the sim harness `{harness}` has no `sweep` case"))
         })?;
-        let labels: Vec<_> = labels_of(&p, sweep_case).keys().copied().collect();
+        let mut clauses = Vec::new();
+        for c in cited_in(&p, sweep_case) {
+            let contract = self.name_of(c.contract.as_uuid()).await?;
+            let name = ClauseName::new(&contract, c.label).map_err(|_| {
+                AppError::Input(format!(
+                    "the contract `{contract}` cannot be named in a report: its name has white space or is empty"
+                ))
+            })?;
+            clauses.push(CitedClause { name, id: c.clause });
+        }
         let mut interfaces = Vec::new();
-        for iface in cited_interfaces(&p, h) {
+        for iface in h.builds().iter().copied() {
             let name = self.name_of(iface.as_uuid()).await?;
             let pin = self
                 .store
@@ -407,7 +415,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             harness: harness.to_string(),
             script: h.source().as_str().to_string(),
             interfaces,
-            labels,
+            clauses,
             regress: regress_names(h),
         };
         let report = self.runner.simulate(&request).await?;
@@ -427,7 +435,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             evidence: report.evidence,
         })?;
         self.keep_measurement(&measurement).await?;
-        Ok(self.measured_words(&measurement))
+        self.measured_words(&measurement).await
     }
 
     /// Keeps `measurement` alone, trying again when another writer got in between.
@@ -451,10 +459,46 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(self.store.commit(at, changes).await?)
     }
 
-    fn measured_words(&self, m: &Measurement) -> MeasureDone {
+    /// `<contract>:<label>` for each Clause the simulation `outcome` names, from the model as it is now. A Clause
+    /// the model has not any more (or whose Contract has no name) is shown by its id.
+    async fn clause_names(
+        &self,
+        outcome: Option<&SimOutcome>,
+    ) -> Result<BTreeMap<ClauseId, String>, AppError> {
+        let mut wanted = BTreeSet::new();
+        for run in outcome.map(|o| o.cases.as_slice()).unwrap_or_default() {
+            wanted.extend(run.findings.iter().map(|f| f.clause));
+            wanted.extend(run.unreached.iter().map(|u| u.clause));
+        }
+        let mut names = BTreeMap::new();
+        if wanted.is_empty() {
+            return Ok(names);
+        }
+        let p = self.project().await?;
+        for id in wanted {
+            let Some(contract) = p.contexts().find_map(|c| c.contract_of(id)) else {
+                continue;
+            };
+            let Some(clause) = contract.clause(id) else {
+                continue;
+            };
+            let contract = self.name_of(contract.id().as_uuid()).await?;
+            names.insert(id, format!("{contract}:{}", clause.content().label()));
+        }
+        Ok(names)
+    }
+
+    async fn measured_words(&self, m: &Measurement) -> Result<MeasureDone, AppError> {
         let digest = |d: Option<Digest>| d.map(|d| d.to_string());
         let sim = m.sim();
-        MeasureDone {
+        let names = self.clause_names(sim).await?;
+        let named = |id: ClauseId| {
+            names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| id.as_uuid().to_string())
+        };
+        Ok(MeasureDone {
             id: m.id().to_string(),
             kind: m.kind().word(),
             stamp: m.stamp().fingerprint().to_string(),
@@ -484,7 +528,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                                 .iter()
                                 .map(|f| FindingLine {
                                     step: f.step,
-                                    label: f.label.to_string(),
+                                    clause: named(f.clause),
                                     text: f.text.clone(),
                                 })
                                 .collect(),
@@ -492,7 +536,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                                 .unreached
                                 .iter()
                                 .map(|u| UnreachedLine {
-                                    label: u.label.to_string(),
+                                    clause: named(u.clause),
                                     text: u.text.clone(),
                                 })
                                 .collect(),
@@ -524,7 +568,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     duration_ms: e.duration_ms,
                 })
                 .collect(),
-        }
+        })
     }
 
     /// Where the latest measurement of each Interface and each sim Harness stands, in the order of the Contexts.

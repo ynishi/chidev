@@ -172,6 +172,7 @@ fn removal() -> ChangeSetInput {
                 context: "core".to_string(),
                 name: "stock-tests".to_string(),
                 kind: None,
+                builds: Vec::new(),
                 source: "fn reserve_refuses() {}\n".to_string(),
                 cases: cases(&["reserve"]),
             }),

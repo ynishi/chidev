@@ -1,10 +1,12 @@
 //! The blind simulation end to end, through the `chidev` binary, for a program that is not Rust: a bank account in
 //! Python 3 (standard library only) and a sim script that drives it as a black box under the protocol
-//! `chidev-sim 1`. Nothing in the project is compiled; the build command only byte-compiles the program.
+//! `chidev-sim 2`. Nothing in the project is compiled; the build command only byte-compiles the program.
 //!
-//! The program pays out up to 10 from an empty account, which clause C2 forbids, so the sim finds C2 broken in the
-//! seeds that withdraw from an empty account and in the regress case that does. A second script that reads the
-//! clock is not repeatable: its second runs give another schedule and `sim.nondeterministic` (mandatory) says so.
+//! The program pays out up to 10 from an empty account, which clause C2 forbids, so the sim finds `account:C2`
+//! broken in the seeds that withdraw from an empty account and in the regress case that does. A second script that
+//! reads the clock is not repeatable: its second runs give another schedule and `sim.nondeterministic` (mandatory)
+//! says so. The sim Harness cites Clauses only and names the Interface it builds in `builds`; a tests Harness is
+//! what lets the Interface be pinned. A third test has one sim cover two Contracts that both have a `C1`.
 //!
 //! It starts a few dozen Python processes and takes a couple of seconds.
 
@@ -24,8 +26,9 @@ fn fresh_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// `chidev exec` with `dir` as the project's root, on a store inside it.
-fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
+/// `chidev exec` with `dir` as the project's root, on a store inside it: the result line of each operation, and
+/// what the program wrote to its standard error. A refused operation is a result with `"ok": false`.
+fn run_ops(dir: &Path, ops: &[Value]) -> (Vec<Value>, String) {
     let file = dir.join("ops.jsonl");
     let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
     std::fs::write(&file, text).expect("a file");
@@ -43,6 +46,12 @@ fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
         .lines()
         .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
         .collect();
+    (lines, stderr)
+}
+
+/// As [`run_ops`], and every operation succeeded.
+fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
+    let (lines, stderr) = run_ops(dir, ops);
     assert!(
         lines.iter().all(|r| r["ok"] == true),
         "{lines:#?}\nstderr: {stderr}"
@@ -88,8 +97,9 @@ path = "sim.py"
     dir
 }
 
-/// The ops that put the model: a Contract of two Clauses, the Interface of the program, and the sim Harness whose
-/// script is `script`, with a sweep citing both Clauses and a regress case citing C2.
+/// The ops that put the model: a Contract of two Clauses, the Interface of the program, a tests Harness that cites
+/// its Items (which is what lets the Interface be pinned), and the sim Harness whose script is `script`, with a
+/// sweep citing both Clauses and a regress case citing C2. The sim cites no Item; it builds the Interface.
 fn model(script: &str) -> Vec<Value> {
     let deposit = json!({"interface":"bank","signature":"deposit N"});
     let withdraw = json!({"interface":"bank","signature":"withdraw N"});
@@ -104,23 +114,18 @@ fn model(script: &str) -> Vec<Value> {
                "items":[{"signature":"deposit N","lines":[1,1]},
                         {"signature":"withdraw N","lines":[2,2]},
                         {"signature":"balance","lines":[3,3]}]}),
-        harness_put(script, &[deposit, withdraw, balance]),
+        json!({"op":"harness_put","context":"ledger","name":"bank-tests","source":"tests\n","cases":[
+            {"name":"bank_basics","lines":[1,1],"items":[deposit, withdraw, balance]}]}),
+        harness_put(script),
     ]
 }
 
-fn harness_put(script: &str, items: &[Value]) -> Value {
-    json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","source":script,"cases":[
-        {"name":"sweep","lines":[1,1],"items":items,
+fn harness_put(script: &str) -> Value {
+    json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],"source":script,"cases":[
+        {"name":"sweep","lines":[1,1],
          "clauses":[{"contract":"account","label":"C1"},{"contract":"account","label":"C2"}]},
-        {"name":"regress-overdraw","lines":[2,2],"items":[{"interface":"bank","signature":"withdraw N"}],
+        {"name":"regress-overdraw","lines":[2,2],
          "clauses":[{"contract":"account","label":"C2"}]}]})
-}
-
-fn all_items() -> Vec<Value> {
-    ["deposit N", "withdraw N", "balance"]
-        .iter()
-        .map(|s| json!({"interface":"bank","signature":s}))
-        .collect()
 }
 
 fn findings<'a>(result: &'a Value, rule: &str) -> Vec<&'a Value> {
@@ -142,7 +147,7 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
     setup.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
     let put = exec(&dir, &setup);
     // the sim Harness is well formed: nothing on `sim.shape`
-    assert!(findings(&put[4], "sim.shape").is_empty(), "{:#?}", put[4]);
+    assert!(findings(&put[5], "sim.shape").is_empty(), "{:#?}", put[5]);
 
     // Before a simulation: the Harness was never run.
     let before = exec(&dir, &[json!({"op":"check"})]);
@@ -172,7 +177,7 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
         .iter()
         .find(|c| c["case"] == "regress-overdraw")
         .expect("the regress case");
-    assert_eq!(regress["findings"][0]["clause"], "C2");
+    assert_eq!(regress["findings"][0]["clause"], "account:C2");
     assert_eq!(regress["findings"][0]["step"], 1);
     // seed-0 and up to three cases with findings were run again, and are repeatable
     let reruns = m["reruns"].as_array().expect("reruns");
@@ -204,6 +209,7 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
     assert_eq!(broken[0]["level"], "error");
     let about = broken[0]["about"].as_str().expect("about");
     assert_eq!(about, "account C2");
+    assert_eq!(broken[0]["rule"], "sim.finding");
     let message = broken[0]["message"].as_str().expect("message");
     assert!(message.starts_with("clause C2 broke in "), "{message}");
     assert!(message.contains("step"), "{message}");
@@ -222,7 +228,7 @@ fn a_program_that_breaks_a_clause_is_found_and_a_script_that_reads_the_clock_is_
     // A script that reads the clock: another schedule on every run. The Harness changed, so the first
     // simulation is stale; simulated again, the second runs give other schedules.
     let clock = SIM.replace("CLOCK = False", "CLOCK = True");
-    exec(&dir, &[harness_put(&clock, &all_items())]);
+    exec(&dir, &[harness_put(&clock)]);
     let moved = exec(&dir, &[json!({"op":"check"})]);
     assert_eq!(findings(&moved[0], "sim.stale").len(), 1, "{moved:#?}");
     assert!(findings(&moved[0], "sim.finding").is_empty());
@@ -273,10 +279,10 @@ fn a_sim_harness_that_is_not_one_sweep_and_regress_cases_is_a_shape_error_and_is
     ops.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
     exec(&dir, &ops);
     // a case that is neither `sweep` nor `regress-<name>`, and no clause cited by the sweep's twin
-    let bad = json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","source":SIM,"cases":[
-        {"name":"sweep","lines":[1,1],"items":[{"interface":"bank","signature":"deposit N"}],
+    let bad = json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],"source":SIM,"cases":[
+        {"name":"sweep","lines":[1,1],
          "clauses":[{"contract":"account","label":"C1"}]},
-        {"name":"a_test","lines":[2,2],"items":[{"interface":"bank","signature":"balance"}],"clauses":[]}]});
+        {"name":"a_test","lines":[2,2],"clauses":[]}]});
     let put = exec(&dir, &[bad]);
     let shape = findings(&put[0], "sim.shape");
     assert_eq!(shape.len(), 1, "{:#?}", put[0]);
@@ -310,4 +316,163 @@ fn write_ops(dir: &Path, ops: &[Value]) -> PathBuf {
     let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
     std::fs::write(&file, text).expect("a file");
     file
+}
+
+/// A script that does not drive the program at all: on every case it finds `audit:C1` broken and says that
+/// `account:C1` never came up. `account` and `audit` both have a Clause labelled C1.
+const TWO_CONTRACTS: &str = r#"import sys
+case, flag, out, dash = sys.argv[1:5]
+open(out + "/schedule", "w").write(case)
+open(out + "/trace", "w").write("-")
+print("FINDING %s step 1 audit:C1: the audit log is missing" % case)
+print("UNREACHED account:C1: no deposit")
+print("sim: findings=1")
+sys.exit(1)
+"#;
+
+/// The sim Harness `bank-sim` over `account` (C1, C2) and `audit` (C1), whose sweep cites `clauses`.
+fn two_contract_sim(clauses: &[(&str, &str)]) -> Value {
+    let cited: Vec<Value> = clauses
+        .iter()
+        .map(|(contract, label)| json!({"contract":contract,"label":label}))
+        .collect();
+    json!({"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],
+           "source":TWO_CONTRACTS,"cases":[{"name":"sweep","lines":[1,1],"clauses":cited}]})
+}
+
+#[test]
+fn one_sim_over_two_contracts_with_a_label_in_common_puts_each_finding_on_its_own_clause() {
+    let dir = project("sim-e2e-two");
+    let mut ops = vec![json!({"op":"init"})];
+    ops.extend(model(TWO_CONTRACTS));
+    ops.push(
+        json!({"op":"contract_put","context":"ledger","name":"audit","title":"Audit",
+                    "clauses":[{"label":"C1","text":"every withdrawal is logged"}]}),
+    );
+    ops.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));
+    exec(&dir, &ops);
+
+    // The sim takes on `account` only: `audit` is left to the tests, and nothing is said of its Clause. Then it
+    // takes on both, citing the two C1 (a label two Clauses have is fine now that a script names the Contract).
+    let narrow = exec(&dir, &[json!({"op":"check"})]);
+    assert!(
+        findings(&narrow[0], "sim.uncited-clause").is_empty(),
+        "{narrow:#?}"
+    );
+    let put = exec(
+        &dir,
+        &[two_contract_sim(&[
+            ("account", "C1"),
+            ("account", "C2"),
+            ("audit", "C1"),
+        ])],
+    );
+    assert!(findings(&put[0], "sim.shape").is_empty(), "{put:#?}");
+    // and with only one Clause of `audit` cited and one of `account`, `account`'s C2 is the silence reported
+    let partial = exec(
+        &dir,
+        &[
+            two_contract_sim(&[("account", "C1"), ("audit", "C1")]),
+            json!({"op":"check"}),
+        ],
+    );
+    let uncited = findings(&partial[1], "sim.uncited-clause");
+    assert_eq!(uncited.len(), 1, "{partial:#?}");
+    assert_eq!(uncited[0]["about"], "account C2");
+    exec(
+        &dir,
+        &[two_contract_sim(&[
+            ("account", "C1"),
+            ("account", "C2"),
+            ("audit", "C1"),
+        ])],
+    );
+
+    let measured = exec(
+        &dir,
+        &[json!({"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"})],
+    );
+    let m = &measured[0];
+    assert_eq!(m["outcome"], "ok", "{m:#?}");
+    // the report named the Clauses by Contract, and the record holds them so
+    let first = &m["cases"][0];
+    assert_eq!(first["findings"][0]["clause"], "audit:C1");
+    assert_eq!(first["unreached"][0]["clause"], "account:C1");
+
+    let after = exec(&dir, &[json!({"op":"check"}), json!({"op":"status"})]);
+    let broken = findings(&after[0], "sim.finding");
+    assert_eq!(broken.len(), 1, "{:#?}", after[0]);
+    assert_eq!(broken[0]["about"], "audit C1");
+    let missed = findings(&after[0], "sim.unreached");
+    assert_eq!(missed.len(), 1, "{:#?}", after[0]);
+    assert_eq!(missed[0]["about"], "account C1");
+    assert!(findings(&after[0], "sim.uncited-clause").is_empty());
+    assert!(findings(&after[0], "sim.stale").is_empty());
+
+    // The Pin of the Interface the sim builds does not stand on the sim: putting the sim again moves the sim's
+    // stamp but leaves the Pin fresh. Pinning other code makes the simulation stale, as the program it ran is gone.
+    let pin_state = |status: &Value| {
+        status["pins"]
+            .as_array()
+            .expect("pins")
+            .iter()
+            .find(|p| p["interface"] == "bank")
+            .map(|p| p["state"].clone())
+            .expect("the pin of bank")
+    };
+    assert_eq!(pin_state(&after[1]), "fresh", "{:#?}", after[1]);
+    exec(
+        &dir,
+        &[two_contract_sim(&[("account", "C1"), ("audit", "C1")])],
+    );
+    let moved = exec(&dir, &[json!({"op":"check"}), json!({"op":"status"})]);
+    assert_eq!(findings(&moved[0], "sim.stale").len(), 1, "{moved:#?}");
+    assert_eq!(pin_state(&moved[1]), "fresh", "{:#?}", moved[1]);
+    exec(
+        &dir,
+        &[
+            two_contract_sim(&[("account", "C1"), ("account", "C2"), ("audit", "C1")]),
+            json!({"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"}),
+            json!({"op":"pin","context":"ledger","interface":"bank","code":format!("{BANK}\n# other\n")}),
+        ],
+    );
+    let repinned = exec(&dir, &[json!({"op":"check"})]);
+    assert_eq!(
+        findings(&repinned[0], "sim.stale").len(),
+        1,
+        "{repinned:#?}"
+    );
+}
+
+#[test]
+fn a_sim_harness_builds_only_interfaces_the_context_has_and_a_tests_harness_builds_none() {
+    let dir = project("sim-e2e-builds");
+    let mut ops = vec![json!({"op":"init"})];
+    ops.extend(model(SIM));
+    exec(&dir, &ops);
+    let mut ghost = harness_put(SIM);
+    ghost["builds"] = json!(["bank", "ghost"]);
+    let mut tests = json!({"op":"harness_put","context":"ledger","name":"bank-tests","builds":["bank"],
+        "source":"tests\n","cases":[{"name":"bank_basics","lines":[1,1],
+        "items":[{"interface":"bank","signature":"balance"}]}]});
+    tests["kind"] = json!("tests");
+    let (refused, _) = run_ops(&dir, &[ghost, tests]);
+    assert_eq!(refused[0]["ok"], false, "{refused:#?}");
+    assert!(refused[0].to_string().contains("ghost"), "{refused:#?}");
+    assert_eq!(refused[1]["ok"], false, "{refused:#?}");
+    assert!(refused[1].to_string().contains("builds"), "{refused:#?}");
+    // a sim Case cites no Item
+    let mut cites_item = harness_put(SIM);
+    cites_item["cases"][0]["items"] = json!([{"interface":"bank","signature":"balance"}]);
+    let (refused, _) = run_ops(&dir, &[cites_item]);
+    assert_eq!(refused[0]["ok"], false, "{refused:#?}");
+    assert!(
+        refused[0].to_string().contains("cites an item"),
+        "{refused:#?}"
+    );
+    // and builds as a change set entry is read the same way
+    let set = json!({"op":"change_set","puts":[
+        {"put":"harness","context":"ledger","name":"bank-sim","kind":"sim","builds":["bank"],"source":SIM,
+         "cases":[{"name":"sweep","lines":[1,1],"clauses":[{"contract":"account","label":"C1"}]}]}]});
+    exec(&dir, &[set]);
 }

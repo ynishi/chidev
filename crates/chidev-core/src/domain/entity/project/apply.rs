@@ -10,7 +10,7 @@ use super::{
     harness_records, interface_records, refuse_cited,
 };
 use crate::domain::entity::context::{Context, ContextError};
-use crate::domain::entity::harness::{CaseFound, HarnessError};
+use crate::domain::entity::harness::CaseFound;
 use crate::domain::vo::case::CaseCites;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
 use crate::domain::vo::id::{ClauseId, ContextId, ItemId};
@@ -157,15 +157,14 @@ fn put_one(
             context,
             id,
             kind,
+            builds,
             source,
             cases,
         } => {
-            let found: Result<Vec<CaseFound>, ProjectError> =
-                cases.into_iter().map(|d| found_of(next, d)).collect();
-            let done = match found {
-                Ok(found) => edit(next, context, |c| c.put_harness(id, kind, source, found)),
-                Err(e) => Err(e),
-            };
+            let found: Vec<CaseFound> = cases.into_iter().map(|d| found_of(next, d)).collect();
+            let done = edit(next, context, |c| {
+                c.put_harness(id, kind, builds, source, found)
+            });
             (context, done)
         }
     }
@@ -186,10 +185,7 @@ fn edit(
 
 /// The Case as the Harness takes it, each citation at the revision its target has in `contexts` now. A target that
 /// is nowhere gets the first revision; the check of the citations finds it unreached.
-fn found_of(
-    contexts: &BTreeMap<ContextId, Context>,
-    draft: CaseDraft,
-) -> Result<CaseFound, ProjectError> {
+fn found_of(contexts: &BTreeMap<ContextId, Context>, draft: CaseDraft) -> CaseFound {
     let item = |id: &ItemId| {
         contexts
             .values()
@@ -202,12 +198,11 @@ fn found_of(
             .find_map(|c| c.contract_of(*id)?.clause(*id))
             .map_or_else(Revision::first, |cl| cl.revision())
     };
-    let cites = CaseCites::new(
+    let cites = CaseCites::of(
         draft.items().iter().map(|i| (*i, item(i))).collect(),
         draft.clauses().iter().map(|k| (*k, clause(k))).collect(),
-    )
-    .map_err(|e| ProjectError::Context(ContextError::Harness(HarnessError::Cites(e))))?;
-    Ok((draft.id(), draft.name().clone(), draft.lines(), cites))
+    );
+    (draft.id(), draft.name().clone(), draft.lines(), cites)
 }
 
 /// Retires one thing out of `next`: the records of it and of its parts, and the Context when it is one. A Context
@@ -333,6 +328,7 @@ mod tests {
     use super::*;
     use crate::domain::vo::case::CaseName;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+    use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
@@ -399,7 +395,6 @@ mod tests {
             items.iter().map(|i| item(*i)).collect(),
             clauses.iter().map(|k| clause(*k)).collect(),
         )
-        .unwrap()
     }
 
     fn contract(ids: &[(u128, &str)]) -> AssetPut {
@@ -425,8 +420,21 @@ mod tests {
             context: ctx(),
             id: harness_id(),
             kind: None,
+            builds: BTreeSet::new(),
             source: Source::new("fn t() {}\n".to_string()),
             cases,
+        }
+    }
+
+    /// A sim Harness `sim` that builds `builds`, its sweep citing the Clauses `clauses`.
+    fn sim(builds: &[InterfaceId], clauses: &[u128]) -> AssetPut {
+        AssetPut::Harness {
+            context: ctx(),
+            id: HarnessId::from_uuid(test_uuid(106)),
+            kind: Some(HarnessKind::Sim),
+            builds: builds.iter().copied().collect(),
+            source: Source::new("fn s() {}\n".to_string()),
+            cases: vec![draft(70, &[], clauses)],
         }
     }
 
@@ -649,6 +657,7 @@ mod tests {
             context: ctx(),
             id: HarnessId::from_uuid(test_uuid(105)),
             kind: None,
+            builds: BTreeSet::new(),
             source: Source::new("fn n() {}\n".to_string()),
             cases: vec![draft(60, &[10], &[40])],
         };
@@ -666,6 +675,100 @@ mod tests {
         assert_eq!(cites.clauses().get(&clause(40)), Some(&Revision::first()));
         // two assets added to the Context
         assert_eq!(p.context(ctx()).unwrap().revision().number(), 6);
+    }
+
+    #[test]
+    fn a_sim_harness_builds_an_interface_the_same_change_makes_and_loses_one_the_change_retires() {
+        let mut p = project();
+        // a sim cites a Clause and builds the Interface; it cites no Item, so no Case of it is on any Pin's basis
+        p.apply(ChangeSet::new(
+            vec![sim(&[interface_id()], &[20])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let h = p
+            .context(ctx())
+            .unwrap()
+            .harness(HarnessId::from_uuid(test_uuid(106)))
+            .unwrap();
+        assert_eq!(h.kind(), HarnessKind::Sim);
+        assert_eq!(h.builds(), &BTreeSet::from([interface_id()]));
+        assert!(h.cases()[0].cites().items().is_empty());
+
+        // an Interface the Project does not have is refused, named
+        let ghost = InterfaceId::from_uuid(test_uuid(900));
+        let mut q = project();
+        let err = q
+            .apply(ChangeSet::new(vec![sim(&[ghost], &[20])], Vec::new()))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ProjectError::BuildNotReached {
+                context: ctx(),
+                harness: HarnessId::from_uuid(test_uuid(106)),
+                interface: ghost
+            }
+        );
+
+        // an Interface made in the same change is reached, whatever the order
+        let mut r = Project::new(ProjectId::from_uuid(test_uuid(1000)));
+        r.add_context(
+            Context::new(
+                ctx(),
+                ContextName::try_from("core").unwrap(),
+                BTreeSet::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        r.apply(ChangeSet::new(
+            vec![
+                sim(&[interface_id()], &[20]),
+                interface(&[(10, "fn a()")]),
+                contract(&[(20, "C1")]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+
+        // retiring the Interface while the sim builds it is refused, and nothing changes; retiring both is not
+        let before = p.clone();
+        let retire = AssetRetire::Interface {
+            context: ctx(),
+            id: interface_id(),
+        };
+        let err = p
+            .apply(ChangeSet::new(
+                Vec::new(),
+                vec![
+                    retire.clone(),
+                    AssetRetire::Harness {
+                        context: ctx(),
+                        id: harness_id(),
+                    },
+                ],
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProjectError::BuildNotReached { .. }),
+            "{err:?}"
+        );
+        assert_eq!(p, before);
+        p.apply(ChangeSet::new(
+            Vec::new(),
+            vec![
+                retire,
+                AssetRetire::Harness {
+                    context: ctx(),
+                    id: harness_id(),
+                },
+                AssetRetire::Harness {
+                    context: ctx(),
+                    id: HarnessId::from_uuid(test_uuid(106)),
+                },
+            ],
+        ))
+        .unwrap();
     }
 
     #[test]

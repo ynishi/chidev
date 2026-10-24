@@ -339,23 +339,25 @@ impl Context {
     }
 
     /// Makes the Harness with this id, or revises it when the Context has it. `kind` is the kind it is to have;
-    /// without one a new Harness is of tests and an existing one keeps its kind.
+    /// without one a new Harness is of tests and an existing one keeps its kind. `builds` is the whole set of
+    /// Interfaces it builds (a put states the Harness as a whole, as it states its code and its Cases).
     pub(super) fn put_harness(
         &mut self,
         id: HarnessId,
         kind: Option<HarnessKind>,
+        builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ContextError> {
         match self.harnesses.get_mut(&id) {
             Some(h) => {
                 let kind = kind.unwrap_or(h.kind());
-                h.revise_as(kind, source, cases)?
+                h.revise_as(kind, builds, source, cases)?
             }
             None => {
                 let kind = kind.unwrap_or_default();
                 self.harnesses
-                    .insert(id, Harness::of_kind(kind, id, source, cases)?);
+                    .insert(id, Harness::of_kind(kind, id, builds, source, cases)?);
                 self.revision = self.revision.next();
             }
         }

@@ -50,12 +50,16 @@ enum Op {
         items: Vec<ItemDto>,
     },
     /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
-    /// keeps its kind when none is given.
+    /// keeps its kind when none is given. `builds` (a sim only) names the Interfaces of the Context whose pinned
+    /// code the program is built from; a put states all of it. A Case of tests cites an Item at least, a Case of a
+    /// sim cites Clauses only.
     HarnessPut {
         context: String,
         name: String,
         #[serde(default)]
         kind: Option<String>,
+        #[serde(default)]
+        builds: Vec<String>,
         source: String,
         cases: Vec<CaseDto>,
     },
@@ -177,6 +181,8 @@ enum PutDto {
         name: String,
         #[serde(default)]
         kind: Option<String>,
+        #[serde(default)]
+        builds: Vec<String>,
         source: String,
         cases: Vec<CaseDto>,
     },
@@ -229,12 +235,14 @@ impl TryFrom<PutDto> for PutInput {
                 context,
                 name,
                 kind,
+                builds,
                 source,
                 cases,
             } => PutInput::Harness(HarnessPut {
                 context,
                 name,
                 kind: harness_kind(kind.as_deref())?,
+                builds,
                 source,
                 cases: case_inputs(cases),
             }),
@@ -1645,7 +1653,7 @@ where
                             .iter()
                             .map(|f| CaseFindingOut {
                                 step: f.step,
-                                clause: &f.label,
+                                clause: &f.clause,
                                 text: &f.text,
                             })
                             .collect(),
@@ -1653,7 +1661,7 @@ where
                             .unreached
                             .iter()
                             .map(|u| UnreachedOut {
-                                clause: &u.label,
+                                clause: &u.clause,
                                 text: &u.text,
                             })
                             .collect(),
@@ -1734,13 +1742,14 @@ where
             context,
             name,
             kind,
+            builds,
             source,
             cases,
         } => {
             let kind = harness_kind(kind.as_deref())?;
             let cases = case_inputs(cases);
             let done = app
-                .put_harness_of(&context, &name, kind, &source, &cases)
+                .put_harness_of(&context, &name, kind, &builds, &source, &cases)
                 .await?;
             json!({ "op": "harness_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }

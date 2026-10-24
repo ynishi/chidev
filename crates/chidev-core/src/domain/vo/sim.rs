@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use super::clause::ClauseLabel;
 use super::digest::Digest;
-use super::id::{ContractId, InterfaceId};
+use super::id::{ClauseId, ContractId, InterfaceId};
 use super::revision::Revision;
 
 /// The name a sim Harness gives its one Case that stands for the seeded sweep.
@@ -33,6 +33,101 @@ pub enum SimError {
     /// A stamp has no settings.
     #[error("a stamp names the settings the run was made with")]
     BlankSettings,
+    /// A text is not `<contract>:<label>`.
+    #[error(
+        "`{0}` is not a clause name (`<contract>:C<n>`, the contract's name without white space)"
+    )]
+    BadClauseName(String),
+    /// No Clause of any Contract the sweep cites has this contract's name.
+    #[error("no contract `{contract}` among those the sweep cites ({})", .cited.join(", "))]
+    UnknownContract {
+        /// The name the script gave.
+        contract: String,
+        /// The names of the Contracts the sweep cites a Clause of, in order.
+        cited: Vec<String>,
+    },
+    /// The Contract is one the sweep cites, but not this Clause of it.
+    #[error("the sweep case does not cite clause {0}")]
+    UncitedClause(ClauseName),
+}
+
+/// A Clause as a script names it: the Contract's name and the Clause's label, `<contract>:<label>` (`stock:C3`).
+/// A label is unique only within its Contract, so the Contract is part of the name; the script's name is resolved
+/// to the Clause's id when a run is recorded and the record keeps the id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClauseName {
+    contract: String,
+    label: ClauseLabel,
+}
+
+impl ClauseName {
+    /// The name of the Clause `label` of the Contract named `contract`. The Contract's name has no white space
+    /// (a line of the report ends the name at the first white space) and is not empty.
+    pub fn new(contract: &str, label: ClauseLabel) -> Result<ClauseName, SimError> {
+        if contract.is_empty() || contract.chars().any(char::is_whitespace) {
+            return Err(SimError::BadClauseName(format!("{contract}:{label}")));
+        }
+        Ok(ClauseName {
+            contract: contract.to_string(),
+            label,
+        })
+    }
+
+    /// The Contract's name.
+    pub fn contract(&self) -> &str {
+        &self.contract
+    }
+
+    /// The Clause's label.
+    pub fn label(&self) -> ClauseLabel {
+        self.label
+    }
+}
+
+impl TryFrom<&str> for ClauseName {
+    type Error = SimError;
+
+    /// Reads `<contract>:<label>`; the label is what follows the last `:`.
+    fn try_from(text: &str) -> Result<ClauseName, SimError> {
+        let bad = || SimError::BadClauseName(text.to_string());
+        let (contract, label) = text.rsplit_once(':').ok_or_else(bad)?;
+        let label = ClauseLabel::try_from(label).map_err(|_| bad())?;
+        ClauseName::new(contract, label).map_err(|_| bad())
+    }
+}
+
+impl fmt::Display for ClauseName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.contract, self.label)
+    }
+}
+
+/// A Clause the sweep cites, by the name a script writes it as and the id the record keeps it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitedClause {
+    /// The name in the script's report.
+    pub name: ClauseName,
+    /// The Clause.
+    pub id: ClauseId,
+}
+
+/// The Clause `name` names among `cited`, the Clauses the sweep cites. The script may name only those: a name
+/// of a Contract the sweep cites nothing of, and a Clause of a Contract it cites that the sweep does not, are told
+/// apart in the error.
+pub fn resolve(cited: &[CitedClause], name: &ClauseName) -> Result<ClauseId, SimError> {
+    if let Some(found) = cited.iter().find(|c| c.name == *name) {
+        return Ok(found.id);
+    }
+    if cited.iter().any(|c| c.name.contract == name.contract) {
+        return Err(SimError::UncitedClause(name.clone()));
+    }
+    let mut known: Vec<String> = cited.iter().map(|c| c.name.contract.clone()).collect();
+    known.sort();
+    known.dedup();
+    Err(SimError::UnknownContract {
+        contract: name.contract.clone(),
+        cited: known,
+    })
 }
 
 /// The name of a regress case: a fixed schedule the script keeps (a past finding, a situation hard to reach by
@@ -137,13 +232,14 @@ pub fn role_of(name: &str) -> Option<CaseRole> {
         .map(CaseRole::Regress)
 }
 
-/// A promise the program broke in a run, as the script said it: after which step, of which Clause, and how.
+/// A promise the program broke in a run, as the script said it: after which step, of which Clause, and how. The
+/// Clause is kept by its id, resolved from the name the script gave when the run was recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseFinding {
     /// The step of the trace (from 1) after which the Clause did not hold.
     pub step: u32,
     /// The Clause that did not hold.
-    pub label: ClauseLabel,
+    pub clause: ClauseId,
     /// What did not hold, in the script's words.
     pub text: String,
 }
@@ -152,7 +248,7 @@ pub struct CaseFinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseUnreached {
     /// The Clause.
-    pub label: ClauseLabel,
+    pub clause: ClauseId,
     /// The situation that was needed, in the script's words.
     pub text: String,
 }
@@ -291,7 +387,7 @@ pub fn rerun_cases(runs: &[CaseRun], sample: usize) -> Vec<SimCase> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundClause {
     /// The Clause.
-    pub label: ClauseLabel,
+    pub clause: ClauseId,
     /// How many cases broke it.
     pub cases: usize,
     /// The first case that did.
@@ -312,15 +408,15 @@ pub struct SimOutcome {
 }
 
 impl SimOutcome {
-    /// The Clauses with a finding, in the order of their labels.
+    /// The Clauses with a finding, in the order of their ids.
     pub fn found(&self) -> Vec<FoundClause> {
-        let mut by_label: BTreeMap<ClauseLabel, FoundClause> = BTreeMap::new();
+        let mut by_clause: BTreeMap<ClauseId, FoundClause> = BTreeMap::new();
         for run in &self.cases {
             let mut seen = BTreeSet::new();
             for f in &run.findings {
-                let new_in_case = seen.insert(f.label);
-                let entry = by_label.entry(f.label).or_insert_with(|| FoundClause {
-                    label: f.label,
+                let new_in_case = seen.insert(f.clause);
+                let entry = by_clause.entry(f.clause).or_insert_with(|| FoundClause {
+                    clause: f.clause,
                     cases: 0,
                     first_case: run.case.clone(),
                     first_step: f.step,
@@ -331,7 +427,7 @@ impl SimOutcome {
                 }
             }
         }
-        by_label.into_values().collect()
+        by_clause.into_values().collect()
     }
 
     /// The Clauses no seed reached: every seed that ended normally said so, and at least one did. A regress case
@@ -350,7 +446,7 @@ impl SimOutcome {
             .iter()
             .filter(|u| {
                 rest.iter()
-                    .all(|r| r.unreached.iter().any(|x| x.label == u.label))
+                    .all(|r| r.unreached.iter().any(|x| x.clause == u.clause))
             })
             .cloned()
             .collect()
@@ -369,15 +465,17 @@ impl SimOutcome {
     }
 }
 
-/// What a simulation stands on, as the model gives it: the sim Harness, the Contracts its Cases cite, and the
-/// Interfaces whose Items they cite, each with the code of its Pin (none when it has none).
+/// What a simulation stands on, as the model gives it: the sim Harness, the Contracts its Cases cite a Clause of
+/// (any number, of one Context or of those it uses), and the Interfaces it builds, each with the code of its Pin
+/// (none when it has none). An Interface the Harness builds is in the basis though no Case cites it: the program
+/// the script ran against was made of its pinned code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimBasis {
     /// The revision of the sim Harness.
     pub harness: Revision,
     /// The revision of each Contract with a Clause a Case cites.
     pub contracts: BTreeMap<ContractId, Revision>,
-    /// The revision of each Interface with an Item a Case cites, and the digest of the code pinned for it.
+    /// The revision of each Interface the Harness builds, and the digest of the code pinned for it.
     pub interfaces: BTreeMap<InterfaceId, (Revision, Option<Digest>)>,
 }
 
@@ -442,6 +540,10 @@ mod tests {
         ClauseLabel::try_from(format!("C{n}").as_str()).unwrap()
     }
 
+    fn clause(n: u32) -> ClauseId {
+        ClauseId::from_uuid(test_uuid(u128::from(n)))
+    }
+
     fn name(s: &str) -> RegressName {
         RegressName::try_from(s).unwrap()
     }
@@ -461,7 +563,7 @@ mod tests {
     fn found(mut r: CaseRun, step: u32, c: u32, text: &str) -> CaseRun {
         r.findings.push(CaseFinding {
             step,
-            label: label(c),
+            clause: clause(c),
             text: text.to_string(),
         });
         r
@@ -595,8 +697,8 @@ mod tests {
         };
         let found = outcome.found();
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0].label, label(2));
-        assert_eq!(found[1].label, label(4));
+        assert_eq!(found[0].clause, clause(2));
+        assert_eq!(found[1].clause, clause(4));
         assert_eq!(found[1].cases, 2);
         assert_eq!(
             (
@@ -612,7 +714,7 @@ mod tests {
     fn a_clause_is_unreached_only_when_every_normal_seed_missed_it() {
         let miss = |mut r: CaseRun, c: u32| {
             r.unreached.push(CaseUnreached {
-                label: label(c),
+                clause: clause(c),
                 text: format!("needs {c}"),
             });
             r
@@ -632,9 +734,90 @@ mod tests {
         };
         let unreached = outcome.unreached();
         assert_eq!(unreached.len(), 1);
-        assert_eq!(unreached[0].label, label(5));
+        assert_eq!(unreached[0].clause, clause(5));
         assert_eq!(unreached[0].text, "needs 5");
         assert!(SimOutcome::default().unreached().is_empty());
+    }
+
+    #[test]
+    fn two_clauses_of_one_label_in_two_contracts_are_two_findings() {
+        // the same label C1 of two Contracts is two Clauses (ids 1 and 2), and a finding stays on the one it was
+        // resolved to
+        let outcome = SimOutcome {
+            cases: vec![
+                found(run(SimCase::Seed(0)), 1, 1, "stock"),
+                found(
+                    found(run(SimCase::Seed(1)), 2, 2, "cli"),
+                    3,
+                    1,
+                    "stock again",
+                ),
+            ],
+            reruns: Vec::new(),
+        };
+        let found = outcome.found();
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].clause, found[0].cases), (clause(1), 2));
+        assert_eq!((found[1].clause, found[1].cases), (clause(2), 1));
+    }
+
+    fn cited() -> Vec<CitedClause> {
+        let c = |contract: &str, l: u32, id: u32| CitedClause {
+            name: ClauseName::new(contract, label(l)).unwrap(),
+            id: clause(id),
+        };
+        vec![c("stock", 1, 10), c("stock", 3, 11), c("cli", 1, 20)]
+    }
+
+    #[test]
+    fn a_clause_is_named_by_its_contract_and_label() {
+        let name = ClauseName::try_from("stock:C3").unwrap();
+        assert_eq!((name.contract(), name.label()), ("stock", label(3)));
+        assert_eq!(name.to_string(), "stock:C3");
+        // a contract name may itself have a colon: the label is after the last one
+        let odd = ClauseName::try_from("a:b:C1").unwrap();
+        assert_eq!((odd.contract(), odd.to_string()), ("a:b", "a:b:C1".into()));
+        for bad in [
+            "",
+            "C1",
+            ":C1",
+            "stock:",
+            "stock:c1",
+            "stock:C01",
+            "st ock:C1",
+            "stock :C1",
+            "stock:C1 ",
+        ] {
+            assert!(ClauseName::try_from(bad).is_err(), "{bad:?}");
+        }
+        assert!(ClauseName::new("", label(1)).is_err());
+    }
+
+    #[test]
+    fn a_name_resolves_among_the_clauses_the_sweep_cites_and_nowhere_else() {
+        let cited = cited();
+        let at = |s: &str| resolve(&cited, &ClauseName::try_from(s).unwrap());
+        // C1 is in both Contracts and each name is its own Clause
+        assert_eq!(at("stock:C1"), Ok(clause(10)));
+        assert_eq!(at("cli:C1"), Ok(clause(20)));
+        assert_eq!(at("stock:C3"), Ok(clause(11)));
+        // a Contract the sweep cites a Clause of, but not this Clause
+        let uncited = at("cli:C3").unwrap_err();
+        assert_eq!(
+            uncited,
+            SimError::UncitedClause(ClauseName::try_from("cli:C3").unwrap())
+        );
+        assert!(uncited.to_string().contains("does not cite clause cli:C3"));
+        // a Contract the sweep cites nothing of (or none at all)
+        let unknown = at("fuel:C1").unwrap_err();
+        assert_eq!(
+            unknown,
+            SimError::UnknownContract {
+                contract: "fuel".into(),
+                cited: vec!["cli".into(), "stock".into()]
+            }
+        );
+        assert!(unknown.to_string().contains("no contract `fuel`"));
     }
 
     fn basis(harness: Revision, pin: Option<&[u8]>) -> SimBasis {

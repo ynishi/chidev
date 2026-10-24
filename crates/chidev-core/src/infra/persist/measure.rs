@@ -10,9 +10,8 @@ use uuid::Uuid;
 
 use crate::domain::entity::measurement::{Measurement, MeasurementDraft};
 use crate::domain::repository::StoreError;
-use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId, MeasurementId};
+use crate::domain::vo::id::{ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantKey,
     MutantOutcome, MutantResult, Operator, Site, Stamp, StepEvidence,
@@ -132,14 +131,16 @@ struct DetailDoc {
 #[serde(deny_unknown_fields)]
 struct FindingDoc {
     step: u32,
-    label: String,
+    /// The id of the Clause, resolved when the run was recorded.
+    clause: String,
     text: String,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnreachedDoc {
-    label: String,
+    /// The id of the Clause, resolved when the run was recorded.
+    clause: String,
     text: String,
 }
 
@@ -211,8 +212,10 @@ fn digest_of(text: &str) -> Result<Digest, StoreError> {
     Digest::restore(text).ok_or_else(|| corrupt(format!("`{text}` is not a digest")))
 }
 
-fn label_of(text: &str) -> Result<ClauseLabel, StoreError> {
-    ClauseLabel::try_from(text).map_err(corrupt)
+fn clause_of(text: &str) -> Result<ClauseId, StoreError> {
+    Uuid::parse_str(text)
+        .map(ClauseId::from_uuid)
+        .map_err(|_| corrupt(format!("`{text}` is not a clause id")))
 }
 
 /// The stamp document and the summary document of a run.
@@ -348,7 +351,7 @@ pub(crate) fn encode(m: &Measurement) -> Result<(RunRow, Vec<ItemRow>), StoreErr
                     .iter()
                     .map(|f| FindingDoc {
                         step: f.step,
-                        label: f.label.to_string(),
+                        clause: f.clause.as_uuid().to_string(),
                         text: f.text.clone(),
                     })
                     .collect(),
@@ -356,7 +359,7 @@ pub(crate) fn encode(m: &Measurement) -> Result<(RunRow, Vec<ItemRow>), StoreErr
                     .unreached
                     .iter()
                     .map(|u| UnreachedDoc {
-                        label: u.label.to_string(),
+                        clause: u.clause.as_uuid().to_string(),
                         text: u.text.clone(),
                     })
                     .collect(),
@@ -413,7 +416,7 @@ fn sim_of(summary: &SimSummaryDoc, items: &[ItemRow]) -> Result<SimOutcome, Stor
                     .map(|f| {
                         Ok(CaseFinding {
                             step: f.step,
-                            label: label_of(&f.label)?,
+                            clause: clause_of(&f.clause)?,
                             text: f.text,
                         })
                     })
@@ -423,7 +426,7 @@ fn sim_of(summary: &SimSummaryDoc, items: &[ItemRow]) -> Result<SimOutcome, Stor
                     .into_iter()
                     .map(|u| {
                         Ok(CaseUnreached {
-                            label: label_of(&u.label)?,
+                            clause: clause_of(&u.clause)?,
                             text: u.text,
                         })
                     })
@@ -558,16 +561,16 @@ mod tests {
     use crate::domain::vo::id::test_uuid;
 
     fn sim_measurement() -> Measurement {
-        let case = |n: u32, label: u32| CaseRun {
+        let case = |n: u32, clause: u128| CaseRun {
             case: SimCase::Seed(n),
             exit: CaseExit::Normal,
             findings: vec![CaseFinding {
                 step: 3,
-                label: ClauseLabel::try_from(format!("C{label}").as_str()).unwrap(),
+                clause: ClauseId::from_uuid(test_uuid(clause)),
                 text: "capacity 0 accepted: \"x\"".into(),
             }],
             unreached: vec![CaseUnreached {
-                label: ClauseLabel::try_from("C9").unwrap(),
+                clause: ClauseId::from_uuid(test_uuid(9)),
                 text: "needs a full queue".into(),
             }],
             undecided: vec!["more than 1000 outcomes".into()],
@@ -640,10 +643,12 @@ mod tests {
         assert!(bad_case(|i| i.key = "seed-03".into()).is_err());
         assert!(bad_case(|i| i.outcome = "lost".into()).is_err());
         assert!(bad_case(|i| i.detail = "{".into()).is_err());
-        assert!(
-            bad_case(|i| i.detail = i.detail.replace("\"label\":\"C4\"", "\"label\":\"X\""))
-                .is_err()
-        );
+        // a clause is kept by its id: a label is not one
+        let id = ClauseId::from_uuid(test_uuid(4)).as_uuid().to_string();
+        let mut labelled = items.clone();
+        labelled[0].detail = labelled[0].detail.replace(&id, "C4");
+        assert_ne!(labelled[0].detail, items[0].detail);
+        assert!(decode(&run, &labelled).is_err());
         let mut stamp = run.clone();
         stamp.inputs =
             "{\"harness\":0,\"contracts\":[],\"interfaces\":[],\"settings\":\"s\"}".into();

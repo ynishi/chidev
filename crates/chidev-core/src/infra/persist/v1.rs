@@ -269,6 +269,9 @@ struct HarnessDoc {
     /// The kind's word; left out for a Harness of tests, which is what every document written before kinds says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+    /// The ids of the Interfaces a sim Harness builds; left out for a Harness that builds none (tests).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    builds: Vec<String>,
     source: String,
     cases: Vec<CaseDoc>,
 }
@@ -365,6 +368,7 @@ impl From<&Harness> for HarnessDoc {
                 HarnessKind::Tests => None,
                 other => Some(other.word().to_string()),
             },
+            builds: h.builds().iter().map(|i| i.as_uuid().to_string()).collect(),
             source: h.source().as_str().to_string(),
             cases: h
                 .cases()
@@ -500,11 +504,10 @@ impl TryFrom<HarnessDoc> for Harness {
     fn try_from(d: HarnessDoc) -> Result<Harness, Bad> {
         let mut cases = Vec::with_capacity(d.cases.len());
         for c in &d.cases {
-            let cites = CaseCites::new(
+            let cites = CaseCites::of(
                 unrevs(&c.items, ItemId::from_uuid)?,
                 unrevs(&c.clauses, ClauseId::from_uuid)?,
-            )
-            .map_err(bad)?;
+            );
             cases.push((
                 CaseId::from_uuid(uuid(&c.id)?),
                 revision(c.revision)?,
@@ -518,10 +521,16 @@ impl TryFrom<HarnessDoc> for Harness {
             Some(word) => HarnessKind::from_word(word)
                 .ok_or_else(|| bad(format!("a harness of kind `{word}`")))?,
         };
+        let builds = d
+            .builds
+            .iter()
+            .map(|i| uuid(i).map(InterfaceId::from_uuid))
+            .collect::<Result<BTreeSet<_>, Bad>>()?;
         Harness::restore(
             HarnessId::from_uuid(uuid(&d.id)?),
             kind,
             revision(d.revision)?,
+            builds,
             Source::new(d.source),
             cases,
         )

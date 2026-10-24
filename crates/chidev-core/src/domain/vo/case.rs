@@ -49,10 +49,12 @@ impl fmt::Display for CaseName {
     }
 }
 
-/// What a Case cites, each with the revision it was written against: one Item or more (a Case checks something
-/// the Interface shows) and any number of Clauses (none when the Context has no Contract). Each target is there
-/// once, in the order of its id. A target whose revision has moved past the one recorded is one the Case has not
-/// been brought up to.
+/// What a Case cites, each with the revision it was written against: Items and Clauses. A Case of a Harness of
+/// tests cites one Item or more (it checks something the Interface shows) and any number of Clauses (none when the
+/// Context has no Contract); a Case of a sim Harness cites Clauses only (the program it drives is named by the
+/// Harness, not cited). Which of the two a Case is allowed is a rule of its Harness, not of the citations. Each
+/// target is there once, in the order of its id. A target whose revision has moved past the one recorded is one
+/// the Case has not been brought up to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CaseCites {
     items: BTreeMap<ItemId, Revision>,
@@ -60,7 +62,7 @@ pub struct CaseCites {
 }
 
 impl CaseCites {
-    /// The citations of a Case; refused when it cites no Item.
+    /// The citations of a Case that checks code; refused when it cites no Item.
     pub fn new(
         items: BTreeMap<ItemId, Revision>,
         clauses: BTreeMap<ClauseId, Revision>,
@@ -68,7 +70,16 @@ impl CaseCites {
         if items.is_empty() {
             return Err(CaseContentError::NoItem);
         }
-        Ok(CaseCites { items, clauses })
+        Ok(CaseCites::of(items, clauses))
+    }
+
+    /// The citations as given, with no Item if there is none. Whether the Harness the Case is in takes a Case
+    /// with or without Items is the Harness's rule.
+    pub fn of(
+        items: BTreeMap<ItemId, Revision>,
+        clauses: BTreeMap<ClauseId, Revision>,
+    ) -> CaseCites {
+        CaseCites { items, clauses }
     }
 
     /// The Items it cites, with the revision each was cited at.

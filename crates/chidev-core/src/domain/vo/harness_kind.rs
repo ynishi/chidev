@@ -9,7 +9,7 @@ pub enum HarnessKind {
     #[default]
     Tests,
     /// A simulation script: one `sweep` Case and any number of `regress-<name>` Cases, run by chidev's `simulate`
-    /// measure under the protocol `chidev-sim 1`.
+    /// measure under the protocol `chidev-sim 2`.
     Sim,
 }
 

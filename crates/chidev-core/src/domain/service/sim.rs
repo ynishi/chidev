@@ -3,8 +3,10 @@
 //!
 //! A sim Harness is one script. Its Cases are not tests in the script's code: they are the names the protocol
 //! runs it under. The one `sweep` Case stands for the seeded runs (`seed-0`, `seed-1`, ...) and cites every Clause
-//! the script checks, so a label in the script's report can be traced to a Clause; each `regress-<name>` Case
-//! stands for a fixed schedule the script keeps.
+//! the script checks, of any number of the Contracts of the Context, so a Clause named in the script's report
+//! (`<contract>:<label>`) can be traced to a Clause; each `regress-<name>` Case stands for a fixed schedule the
+//! script keeps. The Harness cites Clauses only; the program the script drives is built from the pinned code of
+//! the Interfaces it `builds`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +16,7 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::harness_kind::HarnessKind;
-use crate::domain::vo::id::{CaseId, ClauseId, ContextId, HarnessId, InterfaceId};
+use crate::domain::vo::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId};
 use crate::domain::vo::sim::{CaseRole, RegressName, SimBasis, role_of};
 
 /// What a problem of shape is about.
@@ -61,27 +63,43 @@ pub fn regress_names(harness: &Harness) -> Vec<RegressName> {
     names
 }
 
-/// The Clauses `case` cites, by the label the script writes them as. A Clause of another Context's Contract
-/// counts as well as one of `context`'s; two Clauses with one label keep the first (the shape check refuses
-/// that).
-pub fn labels_of(project: &Project, case: &Case) -> BTreeMap<ClauseLabel, ClauseId> {
-    let mut out = BTreeMap::new();
-    for id in case.cites().clauses().keys() {
-        if let Some(clause) = project
-            .contexts()
-            .find_map(|c| c.contract_of(*id))
-            .and_then(|k| k.clause(*id))
-        {
-            out.entry(clause.content().label()).or_insert(*id);
-        }
-    }
-    out
+/// A Clause a Case cites, with the Contract it is in and its label there. A label is unique only within its
+/// Contract, so a script names the Clause by the Contract too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CitedIn {
+    /// The Contract the Clause is in.
+    pub contract: ContractId,
+    /// Its label in that Contract.
+    pub label: ClauseLabel,
+    /// The Clause.
+    pub clause: ClauseId,
+}
+
+/// The Clauses `case` cites that the Project has, with their Contracts, in the order of their ids. Clauses of
+/// several Contracts may share a label; they are different Clauses.
+pub fn cited_in(project: &Project, case: &Case) -> Vec<CitedIn> {
+    case.cites()
+        .clauses()
+        .keys()
+        .filter_map(|id| {
+            let contract = project.contexts().find_map(|c| c.contract_of(*id))?;
+            let clause = contract.clause(*id)?;
+            Some(CitedIn {
+                contract: contract.id(),
+                label: clause.content().label(),
+                clause: *id,
+            })
+        })
+        .collect()
 }
 
 /// Every way the sim Harnesses of `context` are not the shape the protocol runs: more than one sim Harness, no
 /// `sweep` Case or two, a Case that is neither `sweep` nor `regress-<name>` or whose name another has, a Case
-/// that cites no Clause or a Clause of no Contract of the Context, and a sweep that cites two Clauses with one
-/// label (the script could not say which). A Context with no sim Harness has none.
+/// that cites no Clause, a Clause of no Contract of the Context or an Item, and a sim Harness that builds no
+/// Interface (and so has no program). A Context with no sim Harness has none.
+///
+/// Two Clauses of the sweep may have one label if they are in different Contracts: the script names a Clause by
+/// its Contract and label.
 pub fn shape(context: &Context) -> Vec<ShapeProblem> {
     let mut out = Vec::new();
     let harnesses: Vec<&Harness> = sim_harnesses(context).collect();
@@ -158,47 +176,20 @@ pub fn shape(context: &Context) -> Vec<ShapeProblem> {
                 }
             }
         }
-        if let Some(s) = sweeps.first() {
-            let mut labels: BTreeMap<ClauseLabel, ClauseId> = BTreeMap::new();
-            for id in s.cites().clauses().keys() {
-                let label = context
-                    .contract_of(*id)
-                    .and_then(|k| k.clause(*id))
-                    .map(|c| c.content().label());
-                if let Some(label) = label
-                    && labels.insert(label, *id).is_some()
-                {
-                    out.push(ShapeProblem {
-                        about: ShapeAbout::Case(s.id()),
-                        message: format!(
-                            "the sweep cites two clauses labelled {label}; the script names a clause by its label, so each label is cited once"
-                        ),
-                    });
-                }
-            }
+        if h.builds().is_empty() {
+            out.push(ShapeProblem {
+                about: about_context,
+                message: "a sim harness builds no interface; name the interfaces whose pinned code the program is built from in `builds`".to_string(),
+            });
         }
     }
     out
 }
 
-/// The Interfaces whose Items the Cases of `harness` cite, in the order of their ids.
-pub fn cited_interfaces(project: &Project, harness: &Harness) -> BTreeSet<InterfaceId> {
-    harness
-        .cases()
-        .iter()
-        .flat_map(|c| c.cites().items().keys())
-        .filter_map(|item| {
-            project
-                .contexts()
-                .find_map(|c| c.interface_of(*item))
-                .map(|i| i.id())
-        })
-        .collect()
-}
-
-/// What a simulation of the sim Harness `harness` stands on now: its revision, the Contracts its Cases cite, the
-/// Interfaces whose Items they cite, each with the digest of the code pinned for it in `pins`. `None` when no sim
-/// Harness has this id.
+/// What a simulation of the sim Harness `harness` stands on now: its revision, the Contracts its Cases cite a
+/// Clause of, the Interfaces it builds, each with the digest of the code pinned for it in `pins`. `None` when no
+/// sim Harness has this id. The Interfaces are the ones it names in `builds`, not ones its Cases cite (a sim Case
+/// cites no Item), so the simulation stands on the Pin of each without the Pin standing on the simulation.
 pub fn basis_of(project: &Project, harness: HarnessId, pins: &[Pin]) -> Option<SimBasis> {
     let h = project
         .contexts()
@@ -211,7 +202,8 @@ pub fn basis_of(project: &Project, harness: HarnessId, pins: &[Pin]) -> Option<S
         }
     }
     let mut interfaces = BTreeMap::new();
-    for id in cited_interfaces(project, h) {
+    for id in h.builds() {
+        let id = *id;
         if let Some(i) = project.contexts().find_map(|c| c.interface(id)) {
             let pin = pins.iter().find(|p| p.interface() == id).map(Pin::code);
             interfaces.insert(id, (i.revision(), pin));
@@ -233,7 +225,7 @@ mod tests {
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseText};
     use crate::domain::vo::digest::Digest;
-    use crate::domain::vo::id::{ContractId, ItemId, PinId, ProjectId, test_uuid};
+    use crate::domain::vo::id::{ContractId, InterfaceId, ItemId, PinId, ProjectId, test_uuid};
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::revision::Revision;
@@ -291,28 +283,47 @@ mod tests {
         p
     }
 
-    /// A Case named `name` citing Item 10 and these Clauses.
+    fn iface() -> InterfaceId {
+        InterfaceId::from_uuid(test_uuid(100))
+    }
+
+    /// A Case named `name` of a sim: it cites these Clauses and no Item.
     fn case(n: u128, name: &str, clauses: &[u128]) -> crate::domain::entity::harness::CaseFound {
+        (
+            CaseId::from_uuid(test_uuid(n)),
+            CaseName::try_from(name).unwrap(),
+            LineRange::new(1, 1).unwrap(),
+            CaseCites::of(
+                BTreeMap::new(),
+                clauses
+                    .iter()
+                    .map(|k| (clause(*k), Revision::first()))
+                    .collect(),
+            ),
+        )
+    }
+
+    /// A Case of tests citing Item 10 and no Clause.
+    fn test_case(n: u128, name: &str) -> crate::domain::entity::harness::CaseFound {
         (
             CaseId::from_uuid(test_uuid(n)),
             CaseName::try_from(name).unwrap(),
             LineRange::new(1, 1).unwrap(),
             CaseCites::new(
                 BTreeMap::from([(ItemId::from_uuid(test_uuid(10)), Revision::first())]),
-                clauses
-                    .iter()
-                    .map(|k| (clause(*k), Revision::first()))
-                    .collect(),
+                BTreeMap::new(),
             )
             .unwrap(),
         )
     }
 
+    /// A sim Harness that builds Interface 100.
     fn put_sim(p: &mut Project, id: u128, cases: Vec<crate::domain::entity::harness::CaseFound>) {
         p.put_harness_as(
             ctx(),
             HarnessId::from_uuid(test_uuid(id)),
             Some(HarnessKind::Sim),
+            BTreeSet::from([iface()]),
             Source::new("script\n".to_string()),
             cases,
         )
@@ -335,7 +346,7 @@ mod tests {
             ctx(),
             HarnessId::from_uuid(test_uuid(400)),
             Source::new("t\n".into()),
-            vec![case(40, "anything", &[])],
+            vec![test_case(40, "anything")],
         )
         .unwrap();
         assert!(problems(&p).is_empty());
@@ -367,11 +378,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["lease-lost"]
         );
-        let labels = labels_of(&p, sweep(h).unwrap());
-        assert_eq!(labels.len(), 2);
+        let cited = cited_in(&p, sweep(h).unwrap());
+        assert_eq!(cited.len(), 2);
         assert_eq!(
-            labels.get(&ClauseLabel::try_from("C2").unwrap()),
-            Some(&clause(31))
+            cited
+                .iter()
+                .find(|c| c.label == ClauseLabel::try_from("C2").unwrap())
+                .map(|c| (c.clause, c.contract)),
+            Some((clause(31), ContractId::from_uuid(test_uuid(300))))
         );
     }
 
@@ -418,11 +432,40 @@ mod tests {
                 ctx(),
                 HarnessId::from_uuid(test_uuid(500)),
                 Some(HarnessKind::Sim),
+                BTreeSet::from([iface()]),
                 Source::new("s\n".into()),
                 vec![case(50, "sweep", &[99])]
             )
             .is_err()
         );
+
+        // a sim that builds nothing has no program to drive
+        let mut p = project();
+        p.put_harness_as(
+            ctx(),
+            HarnessId::from_uuid(test_uuid(500)),
+            Some(HarnessKind::Sim),
+            BTreeSet::new(),
+            Source::new("s\n".into()),
+            vec![case(50, "sweep", &[30])],
+        )
+        .unwrap();
+        let found = problems(&p);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("builds no interface"));
+
+        // an Interface it builds must be one the Context reaches
+        let err = p
+            .put_harness_as(
+                ctx(),
+                HarnessId::from_uuid(test_uuid(500)),
+                Some(HarnessKind::Sim),
+                BTreeSet::from([InterfaceId::from_uuid(test_uuid(999))]),
+                Source::new("s\n".into()),
+                vec![case(50, "sweep", &[30])],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("builds the interface"), "{err}");
     }
 
     #[test]
@@ -478,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn two_sim_harnesses_and_two_clauses_with_one_label_in_the_sweep_are_problems() {
+    fn two_sim_harnesses_are_a_problem_and_one_label_in_two_contracts_is_not() {
         let mut p = project();
         put_sim(&mut p, 500, vec![case(50, "sweep", &[30])]);
         put_sim(&mut p, 501, vec![case(60, "sweep", &[31])]);
@@ -486,7 +529,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert!(found[0].contains("2 sim harnesses"));
 
-        // a second Contract whose clause is also C1
+        // a second Contract whose clause is also C1: one sweep cites both, and each is named by its Contract
         let mut p = project();
         p.put_contract(
             ctx(),
@@ -502,9 +545,22 @@ mod tests {
         )
         .unwrap();
         put_sim(&mut p, 500, vec![case(50, "sweep", &[30, 32])]);
-        let found = problems(&p);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("two clauses labelled C1"));
+        assert!(problems(&p).is_empty());
+        let h = p
+            .context(ctx())
+            .unwrap()
+            .harness(HarnessId::from_uuid(test_uuid(500)))
+            .unwrap();
+        let cited = cited_in(&p, sweep(h).unwrap());
+        let c1 = ClauseLabel::try_from("C1").unwrap();
+        let in_contract = |c: &CitedIn| c.contract.as_uuid();
+        assert_eq!(cited.len(), 2);
+        assert!(cited.iter().all(|c| c.label == c1));
+        assert_ne!(in_contract(&cited[0]), in_contract(&cited[1]));
+        assert_eq!(
+            cited.iter().map(|c| c.clause).collect::<Vec<_>>(),
+            [clause(30), clause(32)]
+        );
     }
 
     #[test]
@@ -522,20 +578,41 @@ mod tests {
             ctx(),
             HarnessId::from_uuid(test_uuid(400)),
             Source::new("t\n".into()),
-            vec![case(40, "t", &[])],
+            vec![test_case(40, "t")],
         )
         .unwrap();
         assert!(basis_of(&q, HarnessId::from_uuid(test_uuid(400)), &[]).is_none());
 
-        // the Pin of the cited Interface is in it, by its code
+        // pinning needs a Case of tests that cites the Interface; the sim Harness cites no Item, so it is none
+        assert!(
+            record(
+                &p,
+                iface(),
+                PinId::from_uuid(test_uuid(50)),
+                Digest::of(b"code")
+            )
+            .is_err()
+        );
+        p.put_harness(
+            ctx(),
+            HarnessId::from_uuid(test_uuid(400)),
+            Source::new("t\n".into()),
+            vec![test_case(40, "t")],
+        )
+        .unwrap();
         let pin = record(
             &p,
-            InterfaceId::from_uuid(test_uuid(100)),
+            iface(),
             PinId::from_uuid(test_uuid(50)),
             Digest::of(b"code"),
+        )
+        .unwrap();
+        // the Pin of the built Interface is in the basis, by its code; the Pin does not stand on the sim Harness
+        assert!(
+            !pin.basis()
+                .harnesses()
+                .contains_key(&HarnessId::from_uuid(test_uuid(500)))
         );
-        // pinning needs a Case of tests that cites the Interface, which the sim Harness is
-        let pin = pin.unwrap();
         let with_pin = basis_of(&p, harness, std::slice::from_ref(&pin)).unwrap();
         assert_ne!(none, with_pin);
         assert_eq!(
@@ -574,15 +651,60 @@ mod tests {
     }
 
     #[test]
-    fn the_interfaces_a_sim_harness_cites_are_found_by_its_items() {
+    fn what_a_sim_builds_is_in_its_basis_and_what_it_stops_building_is_not() {
+        let mut p = project();
+        // a second Interface, which the sim comes to build
+        p.put_interface(
+            ctx(),
+            InterfaceId::from_uuid(test_uuid(101)),
+            Source::new("fn b()\n".to_string()),
+            vec![(
+                ItemId::from_uuid(test_uuid(11)),
+                Signature::try_from("fn b()").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+            )],
+        )
+        .unwrap();
+        put_sim(&mut p, 500, vec![case(50, "sweep", &[30])]);
+        let harness = HarnessId::from_uuid(test_uuid(500));
+        let one = basis_of(&p, harness, &[]).unwrap();
+        assert_eq!(
+            one.interfaces.keys().copied().collect::<Vec<_>>(),
+            [iface()]
+        );
+        p.put_harness_as(
+            ctx(),
+            harness,
+            None,
+            BTreeSet::from([iface(), InterfaceId::from_uuid(test_uuid(101))]),
+            Source::new("script\n".to_string()),
+            vec![case(50, "sweep", &[30])],
+        )
+        .unwrap();
+        let two = basis_of(&p, harness, &[]).unwrap();
+        assert_eq!(two.interfaces.len(), 2);
+        // naming another Interface to build is a revision of the Harness, so the simulation is stale
+        assert_ne!(one.harness, two.harness);
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn a_revision_of_an_interface_the_sim_builds_moves_its_basis_though_no_case_cites_it() {
         let mut p = project();
         put_sim(&mut p, 500, vec![case(50, "sweep", &[30])]);
-        let h = p
-            .context(ctx())
-            .unwrap()
-            .harness(HarnessId::from_uuid(test_uuid(500)))
-            .unwrap();
-        let cited: Vec<_> = cited_interfaces(&p, h).into_iter().collect();
-        assert_eq!(cited, [InterfaceId::from_uuid(test_uuid(100))]);
+        let harness = HarnessId::from_uuid(test_uuid(500));
+        let before = basis_of(&p, harness, &[]).unwrap();
+        p.put_interface(
+            ctx(),
+            iface(),
+            Source::new("fn a(x: u8)\n".to_string()),
+            vec![(
+                ItemId::from_uuid(test_uuid(10)),
+                Signature::try_from("fn a(x: u8)").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+            )],
+        )
+        .unwrap();
+        assert_ne!(basis_of(&p, harness, &[]).unwrap(), before);
     }
 }

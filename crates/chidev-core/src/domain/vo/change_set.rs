@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use super::case::{CaseContentError, CaseName};
+use super::case::CaseName;
 use super::clause::ClauseContent;
 use super::harness_kind::HarnessKind;
 use super::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId};
@@ -24,24 +24,22 @@ pub struct CaseDraft {
 }
 
 impl CaseDraft {
-    /// A Case citing `items` (one at least) and `clauses`.
+    /// A Case citing `items` and `clauses`. Whether the Harness takes a Case with these (a Case of tests cites an
+    /// Item, a Case of a sim none) is the Harness's rule, found when the change set is applied.
     pub fn new(
         id: CaseId,
         name: CaseName,
         lines: LineRange,
         items: BTreeSet<ItemId>,
         clauses: BTreeSet<ClauseId>,
-    ) -> Result<CaseDraft, CaseContentError> {
-        if items.is_empty() {
-            return Err(CaseContentError::NoItem);
-        }
-        Ok(CaseDraft {
+    ) -> CaseDraft {
+        CaseDraft {
             id,
             name,
             lines,
             items,
             clauses,
-        })
+        }
     }
 
     /// Its id.
@@ -115,6 +113,8 @@ pub enum AssetPut {
         id: HarnessId,
         /// Its kind; none: the kind it has, or tests for a new one.
         kind: Option<HarnessKind>,
+        /// The Interfaces whose pinned code a sim Harness builds (none for tests).
+        builds: BTreeSet<InterfaceId>,
         /// Its code.
         source: Source,
         /// Its Cases.

@@ -1,13 +1,14 @@
 """A simulation of the bank account, written from the contract and the interface only (blind): it never reads the
 program's code.
 
-Contract:
+Contract `account`:
   C1  a deposit adds its amount to the balance
   C2  a withdrawal of more than the balance is refused and leaves the balance as it was
 
-Protocol chidev-sim 1:  sim.py <case> --out <dir> -- <program argv...>
+Protocol chidev-sim 2:  sim.py <case> --out <dir> -- <program argv...>
 The case is `seed-<n>` or `regress-<name>`. The script draws everything from the seed (nothing from the clock or
-the environment), writes `schedule` and `trace` into <dir>, and prints the report.
+the environment), writes `schedule` and `trace` into <dir>, and prints the report. A clause is named
+`<contract>:<label>` (`account:C2`): labels are unique only within a contract.
 """
 import json
 import random
@@ -16,6 +17,7 @@ import sys
 import time
 
 CLOCK = False  # a script that reads the clock is not repeatable
+CONTRACT = "account"
 
 
 def schedule_of(case):
@@ -58,7 +60,7 @@ def main():
         if cmd == "deposit":
             model += n
             expected = "ok %d" % model
-            label = "C1"
+            label = CONTRACT + ":C1"
         elif cmd == "withdraw":
             if n > model:
                 overdrawn = True
@@ -66,7 +68,7 @@ def main():
             else:
                 model -= n
                 expected = "ok %d" % model
-            label = "C2"
+            label = CONTRACT + ":C2"
         else:
             expected = "balance %d" % model
             label = None
@@ -75,12 +77,12 @@ def main():
                 findings.append("FINDING %s step %d %s: %s %d gave `%s`, the clause wants `%s`" % (case, k, label, cmd, n, answer, expected))
             break
     if len(answers) < len(steps) and not findings:
-        findings.append("FINDING %s step %d C1: the program stopped answering" % (case, len(answers) + 1))
+        findings.append("FINDING %s step %d %s:C1: the program stopped answering" % (case, len(answers) + 1, CONTRACT))
 
     for line in findings:
         print(line)
     if not overdrawn:
-        print("UNREACHED C2: no withdrawal of more than the balance")
+        print("UNREACHED %s:C2: no withdrawal of more than the balance" % CONTRACT)
     print("sim: findings=%d" % len(findings))
     sys.exit(1 if findings else 0)
 

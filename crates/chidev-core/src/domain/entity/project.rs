@@ -97,6 +97,18 @@ pub enum ProjectError {
         /// The Clause cited.
         clause: ClauseId,
     },
+    /// A sim Harness builds an Interface that is neither in its Context nor in a Context it uses.
+    #[error(
+        "the sim harness {harness} of the context {context} builds the interface {interface}, which it cannot reach; put the harness again without it, or keep the interface"
+    )]
+    BuildNotReached {
+        /// The Context that owns the Harness.
+        context: ContextId,
+        /// The Harness.
+        harness: HarnessId,
+        /// The Interface it builds.
+        interface: InterfaceId,
+    },
     /// A change set names one thing twice (puts it twice, or puts and retires it): which end state it wants is not
     /// said.
     #[error("the change set names the {what} {id} twice")]
@@ -121,9 +133,10 @@ pub enum ProjectError {
 
 /// The Contexts of one repository. Every change is made on a copy and kept only when the Project still holds:
 /// names are unique, every Context it uses is in the Project, `uses` forms no ring, every id of an asset or a
-/// definition is given once in the whole Project, and every Case cites only Items and Clauses its Context owns or
-/// uses. A change to one Context can break a citation in another (an Item removed from an Interface that another
-/// Context's Case cites), so the whole Project is checked each time.
+/// definition is given once in the whole Project, every Case cites only Items and Clauses its Context owns or
+/// uses, and a sim Harness builds only Interfaces its Context owns or uses. A change to one Context can break a
+/// citation in another (an Item removed from an Interface that another Context's Case cites), so the whole Project
+/// is checked each time.
 ///
 /// A change that touches several assets and is coherent only as a whole is one [`ChangeSet`](crate::domain::vo::change_set::ChangeSet), applied by
 /// [`Project::apply`]: the rules are checked once, on the state it ends in, not after each asset. A put or a retirement
@@ -384,19 +397,21 @@ impl Project {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ProjectError> {
-        self.put_harness_as(context, id, None, source, cases)
+        self.put_harness_as(context, id, None, BTreeSet::new(), source, cases)
     }
 
-    /// Makes or revises a Harness of a Context as one of `kind` (none: the kind it has, or tests for a new one).
+    /// Makes or revises a Harness of a Context as one of `kind` (none: the kind it has, or tests for a new one),
+    /// which builds `builds` (a sim Harness; the Interfaces must be ones the Context owns or uses).
     pub fn put_harness_as(
         &mut self,
         context: ContextId,
         id: HarnessId,
         kind: Option<HarnessKind>,
+        builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.put_harness(id, kind, source, cases))
+        self.change(context, |c| c.put_harness(id, kind, builds, source, cases))
     }
 
     /// Applies `f` to a copy of the Context and keeps the result when the Project still holds. A Clause, an Item or
@@ -685,6 +700,20 @@ fn cite_problems(
             .collect();
         let has_item = |item: &ItemId| reach.iter().any(|c| c.interface_of(*item).is_some());
         let has_clause = |clause: &ClauseId| reach.iter().any(|c| c.contract_of(*clause).is_some());
+        // An Interface a sim Harness builds is not cited, so a retirement does not report it: it is never skipped.
+        for harness in context.harnesses() {
+            for interface in harness
+                .builds()
+                .iter()
+                .filter(|i| !reach.iter().any(|c| c.interface(**i).is_some()))
+            {
+                out.push(ProjectError::BuildNotReached {
+                    context: context.id(),
+                    harness: harness.id(),
+                    interface: *interface,
+                });
+            }
+        }
         for case in context.harnesses().flat_map(|h| h.cases()) {
             for item in case.cites().items().keys().filter(|i| !has_item(i)) {
                 if !skip.contains(&Target::Item(*item)) {

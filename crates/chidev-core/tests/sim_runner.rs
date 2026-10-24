@@ -1,4 +1,4 @@
-//! The runner of simulations against a shell script as "interpreter" and as "program": the protocol `chidev-sim 1`
+//! The runner of simulations against a shell script as "interpreter" and as "program": the protocol `chidev-sim 2`
 //! is the same for any language, so these use `sh`, which every unix has. Every run directory is under the test
 //! target directory, and the runner's own are under the project's `.chidev/measure`.
 #![cfg(unix)]
@@ -10,8 +10,9 @@ use std::time::Instant;
 use chidev_core::app::ports::measure::{InterfaceText, Runner, SimulateReport, SimulateRequest};
 use chidev_core::domain::vo::clause::ClauseLabel;
 use chidev_core::domain::vo::digest::Digest;
+use chidev_core::domain::vo::id::ClauseId;
 use chidev_core::domain::vo::measure::FailureKind;
-use chidev_core::domain::vo::sim::RegressName;
+use chidev_core::domain::vo::sim::{CitedClause, ClauseName, RegressName};
 use chidev_core::infra::runner::{ProcessRunner, load};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -79,14 +80,14 @@ impl Drop for Project {
 }
 
 /// The arguments of the script are `<case> --out <dir> -- <program...>`: `$1` is the case and `$3` the directory.
-/// It writes a schedule and a trace from the case, and finds C1 in `seed-1`.
+/// It writes a schedule and a trace from the case, and finds `stock:C1` in `seed-1`.
 const GOOD: &str = r#"
 case=$1
 out=$3
 printf 'schedule of %s\n' "$case" > "$out/schedule"
 printf 'trace of %s\n' "$case" > "$out/trace"
 if [ "$case" = seed-1 ]; then
-  echo "FINDING seed-1 step 4 C1: promise broken"
+  echo "FINDING seed-1 step 4 stock:C1: promise broken"
   echo "sim: findings=1"
   exit 1
 fi
@@ -103,8 +104,16 @@ fn request(run: &str, script: &str) -> SimulateRequest {
             name: "prog".to_string(),
             code: "PINNED program text\n".to_string(),
         }],
-        labels: vec![ClauseLabel::try_from("C1").unwrap()],
+        // C1 is a Clause of both Contracts the sweep cites: `stock` (id 1) and `cli` (id 2)
+        clauses: vec![cited("stock", "C1", 1), cited("cli", "C1", 2)],
         regress: vec![RegressName::try_from("edge").unwrap()],
+    }
+}
+
+fn cited(contract: &str, label: &str, id: u128) -> CitedClause {
+    CitedClause {
+        name: ClauseName::new(contract, ClauseLabel::try_from(label).unwrap()).unwrap(),
+        id: ClauseId::from_uuid(uuid::Uuid::from_u128(id)),
     }
 }
 
@@ -144,6 +153,11 @@ async fn every_case_is_run_the_findings_are_read_and_the_sampled_cases_are_repea
     );
     assert_eq!(report.cases[1].findings[0].step, 4);
     assert_eq!(report.cases[1].findings[0].text, "promise broken");
+    // the name `stock:C1` was resolved to the Clause of `stock`, not to the `C1` of `cli`
+    assert_eq!(
+        report.cases[1].findings[0].clause,
+        ClauseId::from_uuid(uuid::Uuid::from_u128(1))
+    );
     // chidev took the digest of what the script wrote
     assert_eq!(
         report.cases[0].schedule,
@@ -235,8 +249,17 @@ async fn a_program_that_does_not_build_fails_the_run_before_any_case() {
 async fn a_report_that_breaks_the_protocol_fails_the_run() {
     for (script, expect) in [
         (
-            GOOD.replace("seed-1 step 4 C1", "seed-1 step 4 C7"),
-            "does not cite clause C7",
+            GOOD.replace("seed-1 step 4 stock:C1", "seed-1 step 4 stock:C7"),
+            "does not cite clause stock:C7",
+        ),
+        (
+            GOOD.replace("seed-1 step 4 stock:C1", "seed-1 step 4 fuel:C1"),
+            "no contract `fuel` among those the sweep cites (cli, stock)",
+        ),
+        (
+            // a name with no contract is the old protocol's: refused, not guessed at
+            GOOD.replace("seed-1 step 4 stock:C1", "seed-1 step 4 C1"),
+            "`C1` is not a clause name",
         ),
         (
             GOOD.replace("echo \"sim: findings=0\"", "echo hi"),

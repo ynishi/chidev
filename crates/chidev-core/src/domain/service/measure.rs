@@ -1,6 +1,7 @@
 //! Telling whether a measurement still describes the Project: a mutation run stands on the code of a Pin and on
 //! what that Pin stands on (the Interface, the Harnesses that check it, the Contracts they cite), a simulation on
-//! the sim Harness, the Contracts and Interfaces its Cases cite and the code pinned for them; both on the settings
+//! the sim Harness, the Contracts its Cases cite a Clause of and the Interfaces it builds with the code pinned for
+//! them; both on the settings
 //! they were run with. The Project moves on; this reads how far.
 
 use crate::domain::entity::measurement::Measurement;
