@@ -10,6 +10,29 @@ and this project adheres to
 
 ### Added
 
+- Resolution of a change request is an explicit decision with a record, and a
+  resolved request can be reopened. `{"op":"cr_resolve","title":..,
+  "resolution":"done"|"wont_do"|"invalid"|{"duplicate":"<title>"}|
+  {"superseded":"<title>"},"reason":..,"by":{"person"|"role":..}}` records how the
+  request ended, why, by whom and when (from the clock). Only explicit states refuse
+  it: the request resolved already, `done` while the Crux has no answer, a
+  `duplicate` or `superseded` that points at itself or at a request that does not
+  exist, and a part (a request whose `parent` it is) not resolved. The revisions of
+  the targets and the work recorded are not consulted any more. `{"op":"cr_reopen",
+  "title":..,"reason":..,"by":..}` opens it again; the request keeps a history, a
+  log of `resolved` and `reopened` steps that is only appended to (stored as
+  `history` in its document, layout 1), and takes work, decisions and assumptions
+  again. `status.change_requests` has `resolution` and `history` for each request.
+- `status.change_requests` shows `situation` (kept with the request; it was stored
+  but not shown), and for each request its `targets` with what its work did to each
+  (`revised`, `retired` or `not touched yet`, read from the footprints of the request
+  and its parts) and its `keep` with whether each moved.
+- The checks `cr.resolved-without-work` (warning; hooks `resolve`, `check`: resolved
+  as done, yet no change set applied for it or its parts moved anything) and
+  `cr.targets-untouched` (note; hooks `resolve`, `check`: resolved as done, with
+  work, yet a target it named was never touched by it or its parts). `check_list`
+  has 26 checks.
+
 - Mutation testing of the pinned code, end to end for Rust. `{"op":"measure",
   "kind":"mutate","context":..,"interface":..}` copies the project to
   `.chidev/measure/<run>/`, writes the code the Pin accepted and the Harness sources
@@ -131,6 +154,17 @@ and this project adheres to
 
 ### Changed
 
+- `change` and `remove` of `cr_open` (and of the options of a Crux) are replaced
+  by `targets` (what the request asks to have revised or retired) and `keep`.
+  Neither list gates resolving a request; they are its content. `cr_open` refuses a
+  field it does not know (it silently ignored them before), `situation` and
+  `issuer` included in what it keeps. A parent may have no targets and is resolved
+  once its parts are. The frame of a request (the targets it names; a container
+  frames everything in it) is its own: the frame of a parent no longer bounds its
+  parts. The kinds of an expectation in the results of `cr_open`, `status.awaiting`
+  and the model view are `target` and `keep`; the model view is version 3. Stored
+  change requests have `history` instead of `resolved` and `target`/`keep` kinds;
+  a database written before does not load (layout 1, no migration).
 - The sim protocol is `chidev-sim 2` and a sim Harness covers several Contracts.
   A script names a Clause `<contract>:<label>` (`FINDING <case> step <k>
   <contract>:<label>: <text>`, `UNREACHED <contract>:<label>: <text>`; the Contract's
@@ -282,6 +316,12 @@ and this project adheres to
 
 ### Removed
 
+- The check `cr.unapplied`, `status.unapplied` and the refusals of `cr_resolve`
+  that read revisions (`not changed`, `not removed`, `gone`, targets that moved
+  but not under the request, a moved `keep`): a resolution is a decision, and the
+  record of how the targets fared is `status.change_requests[].targets` and the
+  checks above. The ancestor frame (a parent's frame bounding its parts) is gone
+  too.
 - The checks `cr.keep-behavior-changed` (replaced by `cr.keep-moved`, which
   reads the expectations, not the intent) and `cr.parent-resolved-early` (a
   parent can no longer be resolved while a part is open, so there is nothing for
