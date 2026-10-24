@@ -6,6 +6,7 @@ use super::ports::{AssetKind, AssetName, IdSource, Store};
 use super::{App, AppError, ClauseRef, ItemRef, context_id};
 use crate::domain::entity::project::Project;
 use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
+use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::{ExpectKind, Target};
 
@@ -86,7 +87,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .await?,
                 );
                 if p.context(ctx).and_then(|c| c.contract(id)).is_none() {
-                    return Err(unknown(context, AssetKind::Contract, contract));
+                    return Err(missing(
+                        p,
+                        Target::Contract(id),
+                        context,
+                        AssetKind::Contract,
+                        contract,
+                    ));
                 }
                 Target::Contract(id)
             }
@@ -97,7 +104,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .await?,
                 );
                 if p.context(ctx).and_then(|c| c.interface(id)).is_none() {
-                    return Err(unknown(context, AssetKind::Interface, interface));
+                    return Err(missing(
+                        p,
+                        Target::Interface(id),
+                        context,
+                        AssetKind::Interface,
+                        interface,
+                    ));
                 }
                 Target::Interface(id)
             }
@@ -108,7 +121,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .await?,
                 );
                 if p.context(ctx).and_then(|c| c.harness(id)).is_none() {
-                    return Err(unknown(context, AssetKind::Harness, harness));
+                    return Err(missing(
+                        p,
+                        Target::Harness(id),
+                        context,
+                        AssetKind::Harness,
+                        harness,
+                    ));
                 }
                 Target::Harness(id)
             }
@@ -215,6 +234,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         target: Target,
         pending: &[AssetName],
     ) -> Result<String, AppError> {
+        if let Some(r) = p.retired_of(target) {
+            return self.retired_words(r, pending).await;
+        }
         Ok(match target {
             Target::Project => "project".to_string(),
             Target::Context(id) => match p.context(id) {
@@ -278,6 +300,29 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
+    /// A retired target in words, as a live one is worded and marked `(retired)`: the kind and name of a Context or
+    /// an asset, the asset's name and the label, signature or name for a part.
+    async fn retired_words(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
+        let target = r.target();
+        Ok(match (r.holder(), r.label(), target.as_uuid()) {
+            (Some(holder), Some(label), _) => {
+                let asset = self.name_in(holder, pending).await?;
+                match target {
+                    Target::Case(_) => format!("case {asset} {label} (retired)"),
+                    _ => format!("{asset} {label} (retired)"),
+                }
+            }
+            (_, _, Some(id)) if !matches!(target, Target::Context(_)) => {
+                format!(
+                    "{} {} (retired)",
+                    target.word(),
+                    self.name_in(id, pending).await?
+                )
+            }
+            _ => format!("{} {} (retired)", target.word(), r.context()),
+        })
+    }
+
     /// An asset in words: its kind and name, and `(gone)` when the Project does not have it any more.
     async fn asset_words(
         &self,
@@ -295,7 +340,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 }
 
-fn unknown(context: &str, kind: AssetKind, name: &str) -> AppError {
+/// Why the asset `target` named `name` cannot be pointed at: it was retired, or the Context never had it.
+fn missing(p: &Project, target: Target, context: &str, kind: AssetKind, name: &str) -> AppError {
+    if p.retired_of(target).is_some() {
+        return AppError::AssetRetired {
+            context: context.to_string(),
+            kind: kind.word(),
+            name: name.to_string(),
+        };
+    }
     AppError::UnknownAsset {
         context: context.to_string(),
         kind: kind.word(),

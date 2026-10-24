@@ -447,6 +447,51 @@ Interfaces, Harness implementation, code), not only to the specification.
   Assumptions only grow, and a resolved request takes none. `status` lists them
   with each request, beside its answer (decision, basis, who and when).
 
+## Retiring
+
+A spec asset is not deleted, it is retired: it leaves the live model, and the
+Project keeps a record so that older Pins, change requests and measurements can
+still be read. Four operations, one per thing that holds others:
+`{"op":"context_retire","context":..}`,
+`{"op":"contract_retire","context":..,"contract":..}`,
+`{"op":"interface_retire","context":..,"interface":..}` and
+`{"op":"harness_retire","context":..,"harness":..}`. Clauses, Items and Cases
+are removed as before, by putting their Contract, Interface or Harness again
+without them; what a put drops is recorded as retired too.
+
+- **The parts go with the whole.** A Context takes its Contracts, Interfaces and
+  Harnesses with it, and an asset its Clauses, Items or Cases.
+- **A peer that refers stops it.** Retiring is refused, naming what stands in the
+  way, when a Case that stays cites an Item or a Clause that would go (retire or
+  put the Harness that cites first), and when a Context is used by another one.
+  A Context based on its Contracts keeps its last Contract.
+- **Ids are reserved.** A retired id is never given again, and so a name an asset
+  had in its Context cannot be put again (`interface_put` of a retired name is
+  refused); make it again under another name. There is no way back.
+- **The record keeps names and revisions, not the text**: for each thing its kind,
+  names (the Context, the asset, and for a part the label, signature or case
+  name), the revision it had (`last_revision`) and `at`, the revision of what held
+  it once it was retired (the Project's for a Context, the Context's for an asset
+  and what went with it, the asset's for a part a put dropped). `status.retired`
+  lists them, in the order they were retired.
+- **Revisions.** The Project's revision moves when a Context is retired, a
+  Context's when one of its assets is, so a `change` of the Project or the Context
+  is met as for adding.
+- **Outside the Project, ids stay.** A Pin of a retired Interface stays and reads
+  `gone` (`pin.stale` does not report it: retiring is intentional). A `remove` expectation of a retired
+  target is met; a `change` of one reads `gone`. Measurements and findings keep
+  their ids. Wherever chidev names a target the live model does not have it names
+  it from the record with `(retired)` (`status`, errors, `unapplied`, findings and
+  `status.measurements`, whose `state` is then `retired`). The checks that judge
+  Interfaces and Harnesses (`pin.unpinned`, `mutation.*`, `sim.*`, the uncited
+  and no-harness checks) read the live model, so they do not judge a retired one.
+
+Retiring, like a put, does not need an open change request. The procedure retires
+as the work of a change request that expects the thing to go: open it with a
+`remove` for the Context or the asset, retire (the Cases that cite first), and
+resolve it once the expectation is met. The retire operation is not tied to the
+request (`for: <cr>` is a separate design).
+
 ## Change-request addresses
 
 Each entry in `cr_open.addresses` names a rule and the subject of its finding.

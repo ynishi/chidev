@@ -23,6 +23,7 @@ use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{MeasureKind, MeasureStamp, MeasureSubject};
 use crate::domain::vo::sim::{SimOutcome, SimStamp};
+use crate::domain::vo::target::Target;
 
 /// How many times a commit that lost a race with another writer is tried again. A measurement stands on a stamp, not
 /// on the store's revision, so a write in between does not make it wrong: it is kept, and a stale stamp would show.
@@ -169,7 +170,8 @@ pub struct MeasurementStanding {
     pub id: String,
     /// The stamp's digest.
     pub stamp: String,
-    /// `current` while what it stands on and the settings are as measured; `stale` once any moved.
+    /// `current` while what it stands on and the settings are as measured; `stale` once any moved; `retired` once
+    /// the Interface or Harness it is of was retired (the name then ends in `(retired)`).
     pub state: &'static str,
     /// `ok`, or `failed` when the run did not finish.
     pub outcome: &'static str,
@@ -601,6 +603,37 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     });
                 }
             }
+        }
+        // What was measured of a thing that is retired since is kept, and named from the record of it. It is not
+        // judged: the thing is not in the model.
+        for m in &measured.measurements {
+            let target = match m.subject() {
+                MeasureSubject::Interface(i) => Target::Interface(i),
+                MeasureSubject::Harness(h) => Target::Harness(h),
+            };
+            let Some(r) = p.retired_of(target) else {
+                continue;
+            };
+            let name = Some(format!("{} (retired)", self.retired_name(r).await?));
+            let is_interface = matches!(target, Target::Interface(_));
+            out.push(MeasurementStanding {
+                context: r.context().to_string(),
+                interface: name.clone().filter(|_| is_interface),
+                harness: name.filter(|_| !is_interface),
+                kind: m.kind().word(),
+                id: m.id().to_string(),
+                stamp: m.stamp().fingerprint().to_string(),
+                state: "retired",
+                outcome: if m.failure().is_some() {
+                    "failed"
+                } else {
+                    "ok"
+                },
+                failure: m.failure().map(ToString::to_string),
+                counts: m.counts(),
+                sim: m.sim().map(summary_of),
+                at: m.at().millis(),
+            });
         }
         Ok(out)
     }

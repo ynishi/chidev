@@ -36,6 +36,7 @@ use crate::domain::vo::name::ContextName;
 use crate::domain::vo::pin_basis::PinBasis;
 use crate::domain::vo::policy::{Policy, PolicyLine, PolicyLineId};
 use crate::domain::vo::prose::Prose;
+use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
@@ -106,6 +107,53 @@ pub(crate) struct ProjectDoc {
     contexts: Vec<ContextDoc>,
     /// The decision Policy; a document without it is from before the Project had one and does not load.
     policy: PolicyDoc,
+    /// What the Project retired, in the order it was retired; a document without it does not load.
+    retired: Vec<RetiredDoc>,
+}
+
+/// A thing the Project retired: names and revisions, never the text. `holder` and `label` are present for a Clause,
+/// an Item and a Case, and absent for the rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredDoc {
+    target: TargetDoc,
+    id: String,
+    context: String,
+    holder: Option<String>,
+    label: Option<String>,
+    last_revision: u64,
+    at: u64,
+}
+
+impl From<&Retired> for RetiredDoc {
+    fn from(r: &Retired) -> RetiredDoc {
+        let (target, id) = target_doc(&r.target());
+        RetiredDoc {
+            target,
+            id: id.unwrap_or_default(),
+            context: r.context().to_string(),
+            holder: r.holder().map(|h| h.to_string()),
+            label: r.label().map(str::to_string),
+            last_revision: r.last_revision().number(),
+            at: r.at().number(),
+        }
+    }
+}
+
+impl TryFrom<RetiredDoc> for Retired {
+    type Error = Bad;
+
+    fn try_from(d: RetiredDoc) -> Result<Retired, Bad> {
+        Retired::restore(
+            target_of(&d.target, &Some(d.id))?,
+            ContextName::try_from(d.context.as_str()).map_err(bad)?,
+            d.holder.as_deref().map(uuid).transpose()?,
+            d.label,
+            revision(d.last_revision)?,
+            revision(d.at)?,
+        )
+        .map_err(bad)
+    }
 }
 
 /// The decision Policy of a Project.
@@ -244,6 +292,7 @@ impl From<&Project> for ProjectDoc {
             revision: p.revision().number(),
             contexts: p.contexts().map(ContextDoc::from).collect(),
             policy: PolicyDoc::from(p.policy()),
+            retired: p.retired().iter().map(RetiredDoc::from).collect(),
         }
     }
 }
@@ -343,11 +392,17 @@ impl TryFrom<ProjectDoc> for Project {
             .into_iter()
             .map(Context::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        let retired = d
+            .retired
+            .into_iter()
+            .map(Retired::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
         Project::restore(
             ProjectId::from_uuid(uuid(&d.id)?),
             revision(d.revision)?,
             contexts,
             Policy::try_from(&d.policy)?,
+            retired,
         )
         .map_err(bad)
     }

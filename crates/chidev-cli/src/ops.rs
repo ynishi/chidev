@@ -7,11 +7,11 @@ use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
-    ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput, EvidenceInput,
-    EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, HarnessKind, Importance, Intent,
-    ItemInput, ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
-    PolicyLineInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RuleStanding,
-    RuleToJudge, SubjectInput, TargetInput,
+    Checked, ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput,
+    EvidenceInput, EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, HarnessKind,
+    Importance, Intent, ItemInput, ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue,
+    PinState, PolicyLineInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding,
+    RetiredStatus, Retirement, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -58,6 +58,15 @@ enum Op {
         source: String,
         cases: Vec<CaseDto>,
     },
+    /// Retires a Context and everything it owns: it leaves the model, its ids stay reserved, nothing brings it
+    /// back. Refused while a Context that stays uses it or a Case that stays cites what it owns.
+    ContextRetire { context: String },
+    /// Retires a Contract with its Clauses.
+    ContractRetire { context: String, contract: String },
+    /// Retires an Interface with its Items. Its Pin stays and reads `gone`.
+    InterfaceRetire { context: String, interface: String },
+    /// Retires a Harness with its Cases.
+    HarnessRetire { context: String, harness: String },
     /// Pins the code of an Interface.
     Pin {
         context: String,
@@ -844,10 +853,41 @@ struct ExternalOut<'a> {
     state: &'static str,
 }
 
+/// A thing the project retired, in the result of `status` and of a retire operation.
+#[derive(Debug, Serialize)]
+struct RetiredOut<'a> {
+    kind: &'static str,
+    context: &'a str,
+    name: &'a str,
+    last_revision: u64,
+    at: u64,
+}
+
+impl<'a> From<&'a RetiredStatus> for RetiredOut<'a> {
+    fn from(r: &'a RetiredStatus) -> RetiredOut<'a> {
+        RetiredOut {
+            kind: r.kind,
+            context: &r.context,
+            name: &r.name,
+            last_revision: r.last_revision,
+            at: r.at,
+        }
+    }
+}
+
+/// The result of a retire operation: everything that left the model, the thing first.
+#[derive(Debug, Serialize)]
+struct RetireOut<'a> {
+    op: &'static str,
+    retired: Vec<RetiredOut<'a>>,
+    findings: Vec<FindingOut<'a>>,
+}
+
 /// The result of `status`.
 #[derive(Debug, Serialize)]
 struct StatusOut<'a> {
     op: &'static str,
+    retired: Vec<RetiredOut<'a>>,
     pins: Vec<PinOut<'a>>,
     stale_cites: Vec<StaleCiteOut<'a>>,
     change_requests: Vec<CrOut<'a>>,
@@ -1321,6 +1361,15 @@ fn to_value(out: &impl Serialize) -> Result<Value, AppError> {
     serde_json::to_value(out).map_err(|e| AppError::Input(format!("cannot write the result: {e}")))
 }
 
+/// The result of the retire operation `op`.
+fn retire_out(op: &'static str, done: &Checked<Retirement>) -> Result<Value, AppError> {
+    to_value(&RetireOut {
+        op,
+        retired: done.value.retired.iter().map(RetiredOut::from).collect(),
+        findings: findings_out(&done.findings),
+    })
+}
+
 async fn apply<S, G, E>(app: &mut App<S, G, E>, op: Op) -> Result<Value, AppError>
 where
     S: Store,
@@ -1509,6 +1558,22 @@ where
                 .await?;
             json!({ "op": "harness_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
+        Op::ContextRetire { context } => {
+            let done = app.retire_context(&context).await?;
+            retire_out("context_retire", &done)?
+        }
+        Op::ContractRetire { context, contract } => {
+            let done = app.retire_contract(&context, &contract).await?;
+            retire_out("contract_retire", &done)?
+        }
+        Op::InterfaceRetire { context, interface } => {
+            let done = app.retire_interface(&context, &interface).await?;
+            retire_out("interface_retire", &done)?
+        }
+        Op::HarnessRetire { context, harness } => {
+            let done = app.retire_harness(&context, &harness).await?;
+            retire_out("harness_retire", &done)?
+        }
         Op::Pin {
             context,
             interface,
@@ -1637,6 +1702,7 @@ where
             let s = app.status().await?;
             to_value(&StatusOut {
                 op: "status",
+                retired: s.retired.iter().map(RetiredOut::from).collect(),
                 pins: s
                     .pins
                     .iter()

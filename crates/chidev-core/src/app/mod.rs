@@ -76,6 +76,7 @@ use crate::domain::vo::measure::MeasureError;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
+use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
@@ -104,6 +105,41 @@ pub enum AppError {
         kind: &'static str,
         /// The name.
         name: String,
+    },
+    /// The asset was retired: it is out of the model, and its name and id stay reserved.
+    #[error(
+        "the {kind} `{name}` of the context `{context}` was retired; its name and id are reserved, use another name"
+    )]
+    AssetRetired {
+        /// The Context.
+        context: String,
+        /// The kind of asset.
+        kind: &'static str,
+        /// The name.
+        name: String,
+    },
+    /// Cases that stay cite what the retirement would take away.
+    #[error(
+        "cannot retire: {} cite(s) {}; retire the cases' harness first, or put it again without the citation",
+        .cases.join(", "),
+        .cited.join(", ")
+    )]
+    RetireCited {
+        /// What would go and is cited, described.
+        cited: Vec<String>,
+        /// The Cases that stay and cite it, described.
+        cases: Vec<String>,
+    },
+    /// Contexts that stay use the Context to retire.
+    #[error(
+        "cannot retire the context `{context}`: the context(s) {} use it; change their uses or retire them first",
+        .by.join(", ")
+    )]
+    RetireUsed {
+        /// The Context to retire.
+        context: String,
+        /// The Contexts that use it.
+        by: Vec<String>,
     },
     /// The Interface declares no Item with this signature.
     #[error("the interface `{interface}` declares no `{signature}`")]
@@ -722,10 +758,36 @@ pub struct KeepMovedStatus {
     pub moved: Vec<String>,
 }
 
+/// A thing the Project retired, in the names a person knows it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredStatus {
+    /// `context`, `contract`, `interface`, `harness`, `clause`, `item` or `case`.
+    pub kind: &'static str,
+    /// The Context's name: its own for a retired Context, else the one the thing was in.
+    pub context: String,
+    /// Its name: the Context's, the asset's, or for a Clause, an Item or a Case the asset's name and its label,
+    /// signature or name.
+    pub name: String,
+    /// The revision it had when it was retired.
+    pub last_revision: u64,
+    /// The revision of what held it once it was retired: the Project's for a Context, the Context's for an asset
+    /// (and for the parts that went with it), the asset's for a part a put dropped.
+    pub at: u64,
+}
+
+/// What a retirement took out of the model: the thing and everything that went with it, in the order recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retirement {
+    /// The things retired.
+    pub retired: Vec<RetiredStatus>,
+}
+
 /// Where the Project stands: what is pinned and whether it holds, the citations behind their targets, the change
 /// requests, and those not yet applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
+    /// Everything the Project retired, in the order it was retired.
+    pub retired: Vec<RetiredStatus>,
     /// Every Interface, and every Pin whose Interface is gone.
     pub pins: Vec<PinStatus>,
     /// The citations behind their targets.
@@ -982,6 +1044,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .asset_id(ctx, AssetKind::Contract, name)
             .await?
             .map(ContractId::from_uuid);
+        if let Some(id) = id {
+            refuse_retired(&p, Target::Contract(id), context, AssetKind::Contract, name)?;
+        }
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.contract(id)));
         let mut given = Vec::with_capacity(clauses.len());
         for c in clauses {
@@ -1041,6 +1106,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .asset_id(ctx, AssetKind::Interface, name)
             .await?
             .map(InterfaceId::from_uuid);
+        if let Some(id) = id {
+            refuse_retired(
+                &p,
+                Target::Interface(id),
+                context,
+                AssetKind::Interface,
+                name,
+            )?;
+        }
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.interface(id)));
         let find = |sig: &str| {
             old.and_then(|i| i.items().iter().find(|it| it.signature().as_str() == sig))
@@ -1125,6 +1199,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .asset_id(ctx, AssetKind::Harness, name)
             .await?
             .map(HarnessId::from_uuid);
+        if let Some(id) = id {
+            refuse_retired(&p, Target::Harness(id), context, AssetKind::Harness, name)?;
+        }
         let old = id.and_then(|id| p.context(ctx).and_then(|c| c.harness(id)));
         let mut given = Vec::with_capacity(cases.len());
         for c in cases {
@@ -1175,6 +1252,176 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             value: Put { id, revision },
             findings: gate.found,
         })
+    }
+
+    /// Retires the Context named `context` and everything it owns: it leaves the model, the Project goes to its
+    /// next revision, and its ids stay reserved. Refused while a Context that stays uses it or a Case that stays
+    /// cites what it owns. Pins, change requests and measurements keep referring to it by id. Like a put, it does
+    /// not need an open change request; do it as the work of one that expects the Context to be removed.
+    pub async fn retire_context(&mut self, context: &str) -> Result<Checked<Retirement>, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
+        let before = p.clone();
+        let ctx = context_id(&p, context)?;
+        let done = p.retire_context(ctx);
+        self.finish_retire(at, before, p, done).await
+    }
+
+    /// Retires the Contract named `contract` of the Context `context` with its Clauses. The Context goes to its next
+    /// revision. See [`App::retire_context`].
+    pub async fn retire_contract(
+        &mut self,
+        context: &str,
+        contract: &str,
+    ) -> Result<Checked<Retirement>, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
+        let before = p.clone();
+        let ctx = context_id(&p, context)?;
+        let id = ContractId::from_uuid(
+            self.asset(ctx, context, AssetKind::Contract, contract)
+                .await?,
+        );
+        refuse_retired(
+            &p,
+            Target::Contract(id),
+            context,
+            AssetKind::Contract,
+            contract,
+        )?;
+        let done = p.retire_contract(ctx, id);
+        self.finish_retire(at, before, p, done).await
+    }
+
+    /// Retires the Interface named `interface` of the Context `context` with its Items. The Context goes to its
+    /// next revision. A Pin of it stays and reads `gone`. See [`App::retire_context`].
+    pub async fn retire_interface(
+        &mut self,
+        context: &str,
+        interface: &str,
+    ) -> Result<Checked<Retirement>, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
+        let before = p.clone();
+        let ctx = context_id(&p, context)?;
+        let id = InterfaceId::from_uuid(
+            self.asset(ctx, context, AssetKind::Interface, interface)
+                .await?,
+        );
+        refuse_retired(
+            &p,
+            Target::Interface(id),
+            context,
+            AssetKind::Interface,
+            interface,
+        )?;
+        let done = p.retire_interface(ctx, id);
+        self.finish_retire(at, before, p, done).await
+    }
+
+    /// Retires the Harness named `harness` of the Context `context` with its Cases. The Context goes to its next
+    /// revision. See [`App::retire_context`].
+    pub async fn retire_harness(
+        &mut self,
+        context: &str,
+        harness: &str,
+    ) -> Result<Checked<Retirement>, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
+        let before = p.clone();
+        let ctx = context_id(&p, context)?;
+        let id = HarnessId::from_uuid(
+            self.asset(ctx, context, AssetKind::Harness, harness)
+                .await?,
+        );
+        refuse_retired(
+            &p,
+            Target::Harness(id),
+            context,
+            AssetKind::Harness,
+            harness,
+        )?;
+        let done = p.retire_harness(ctx, id);
+        self.finish_retire(at, before, p, done).await
+    }
+
+    /// Checks and keeps a Project that retired something (`done`: how the retirement went on `after`, which is
+    /// unchanged when it failed), and says what went. The names of what went stay in the store: they are how the
+    /// retired things are named later.
+    async fn finish_retire(
+        &self,
+        at: StoreRevision,
+        before: Project,
+        after: Project,
+        done: Result<(), ProjectError>,
+    ) -> Result<Checked<Retirement>, AppError> {
+        if let Err(e) = done {
+            return Err(self.retire_error(&before, e).await?);
+        }
+        let gate = self.gate(Hook::Put, at, Some(&before), &after, &[]).await?;
+        let mut retired = Vec::new();
+        for r in after.retired().iter().skip(before.retired().len()) {
+            retired.push(self.retired_status(r).await?);
+        }
+        let changes = Changes {
+            project: Some(after),
+            invocations: gate.invocations,
+            external: gate.external,
+            ..Changes::default()
+        };
+        self.store.commit(at, changes).await?;
+        Ok(Checked {
+            value: Retirement { retired },
+            findings: gate.found,
+        })
+    }
+
+    /// A refusal of a retirement, with the Cases and Contexts that stand in the way named.
+    async fn retire_error(&self, p: &Project, e: ProjectError) -> Result<AppError, AppError> {
+        Ok(match e {
+            ProjectError::RetireCited { cited, cases } => {
+                let cases = cases.into_iter().map(Target::Case).collect::<Vec<_>>();
+                AppError::RetireCited {
+                    cited: self.describe_all(p, &cited).await?,
+                    cases: self.describe_all(p, &cases).await?,
+                }
+            }
+            ProjectError::RetireUsed { context, by } => AppError::RetireUsed {
+                context: p
+                    .context(context)
+                    .map_or_else(|| context.to_string(), |c| c.name().to_string()),
+                by: by
+                    .iter()
+                    .map(|id| {
+                        p.context(*id)
+                            .map_or_else(|| id.to_string(), |c| c.name().to_string())
+                    })
+                    .collect(),
+            },
+            other => other.into(),
+        })
+    }
+
+    /// A retired thing in the names a person knows it by.
+    async fn retired_status(&self, r: &Retired) -> Result<RetiredStatus, AppError> {
+        Ok(RetiredStatus {
+            kind: r.target().word(),
+            context: r.context().to_string(),
+            name: self.retired_name(r).await?,
+            last_revision: r.last_revision().number(),
+            at: r.at().number(),
+        })
+    }
+
+    /// The name of a retired thing: the Context's, the asset's, or the asset's with the label, signature or name.
+    async fn retired_name(&self, r: &Retired) -> Result<String, AppError> {
+        match (r.holder(), r.label(), r.target().as_uuid()) {
+            (Some(holder), Some(label), _) => {
+                Ok(format!("{} {label}", self.name_of(holder).await?))
+            }
+            (_, _, Some(id)) if !matches!(r.target(), Target::Context(_)) => self.name_of(id).await,
+            _ => Ok(r.context().to_string()),
+        }
     }
 
     /// Pins `code` as the code of the Interface named `interface` of the Context `context`, replacing its Pin.
@@ -1348,10 +1595,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         );
         let mut expects = Vec::with_capacity(cr.expects().len());
         for (target, e) in cr.expects() {
-            let named = self
-                .name_target(&p, *target)
-                .await?
-                .ok_or_else(|| AppError::Input(format!("{target:?} is not in the Project")))?;
+            let Some(named) = self.name_target(&p, *target).await? else {
+                return Err(AppError::Input(format!(
+                    "{} is not in the Project",
+                    self.describe(&p, *target).await?
+                )));
+            };
             expects.push(OpenedExpect {
                 kind: e.kind,
                 target: named,
@@ -1587,12 +1836,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         for pin in self.store.pins().await? {
             if !seen.contains(&pin.interface()) {
+                let name = self.name_of(pin.interface().as_uuid()).await?;
+                let (context, interface) = match p.retired_of(Target::Interface(pin.interface())) {
+                    Some(r) => (r.context().to_string(), format!("{name} (retired)")),
+                    None => (String::new(), name),
+                };
                 pins.push(PinStatus {
-                    context: String::new(),
-                    interface: self.name_of(pin.interface().as_uuid()).await?,
+                    context,
+                    interface,
                     state: PinState::Gone,
                 });
             }
+        }
+        let mut retired = Vec::with_capacity(p.retired().len());
+        for r in p.retired() {
+            retired.push(self.retired_status(r).await?);
         }
         let mut stale = Vec::new();
         for s in stale_cites(&p) {
@@ -1697,6 +1955,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .collect(),
         };
         Ok(Status {
+            retired,
             pins,
             stale_cites: stale,
             change_requests: records,
@@ -1883,16 +2142,25 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         pending: &[AssetName],
     ) -> Result<String, AppError> {
         Ok(match subject {
-            Subject::Context(id) => p
-                .context(id)
-                .map(|c| format!("context {}", c.name()))
-                .unwrap_or_else(|| format!("context {id}")),
+            Subject::Context(id) => match (p.context(id), p.retired_of(Target::Context(id))) {
+                (Some(c), _) => format!("context {}", c.name()),
+                (None, Some(r)) => format!("context {} (retired)", r.context()),
+                (None, None) => format!("context {id}"),
+            },
             Subject::Interface(id) => {
-                format!("interface {}", self.name_in(id.as_uuid(), pending).await?)
+                let name = self.name_in(id.as_uuid(), pending).await?;
+                if p.retired_of(Target::Interface(id)).is_some() {
+                    format!("interface {name} (retired)")
+                } else {
+                    format!("interface {name}")
+                }
             }
             Subject::Item(id) => self.describe_in(p, Target::Item(id), pending).await?,
             Subject::Clause(id) => self.describe_in(p, Target::Clause(id), pending).await?,
-            Subject::Case(id) => format!("case {}", case_name(p, id)),
+            Subject::Case(id) => match p.retired_of(Target::Case(id)) {
+                Some(_) => self.describe_in(p, Target::Case(id), pending).await?,
+                None => format!("case {}", case_name(p, id)),
+            },
             Subject::ChangeRequest(id) => crs
                 .iter()
                 .find(|c| c.id() == id)
@@ -2057,6 +2325,24 @@ fn not_applied_words(unchanged: &[String], gone: &[String], not_removed: &[Strin
         parts.push(format!("not removed: {}", not_removed.join(", ")));
     }
     parts.join("; ")
+}
+
+/// Refuses when the asset `target` (the `kind` named `name` of the Context `context`) was retired.
+fn refuse_retired(
+    p: &Project,
+    target: Target,
+    context: &str,
+    kind: AssetKind,
+    name: &str,
+) -> Result<(), AppError> {
+    if p.retired_of(target).is_some() {
+        return Err(AppError::AssetRetired {
+            context: context.to_string(),
+            kind: kind.word(),
+            name: name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The id of the Context named `name`.

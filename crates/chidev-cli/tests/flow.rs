@@ -1561,3 +1561,127 @@ fn a_missing_null_or_empty_rule_version_is_refused_and_replaces_nothing() {
         assert_eq!(judged(&results[2]).len(), 1);
     }
 }
+
+#[test]
+fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() {
+    let dir = fresh_dir("retire");
+    let ops = [
+        "{\"op\":\"init\"}\n",
+        "{\"op\":\"context_add\",\"name\":\"core\"}\n",
+        "{\"op\":\"context_add\",\"name\":\"scratch\"}\n",
+        "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a value is returned\"}]}\n",
+        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"signature\":\"fn value()\",\"lines\":[1,1]}]}\n",
+        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
+        "{\"op\":\"pin\",\"context\":\"core\",\"interface\":\"api\",\"code\":\"fn value() {}\"}\n",
+        // 8: the request asks for the Interface to go
+        "{\"op\":\"cr_open\",\"title\":\"Drop api\",\"intent\":\"change_behavior\",\"remove\":[{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}}]}\n",
+        // 9: a Case that stays cites the Clause: refused, naming the Case and the Clause
+        "{\"op\":\"contract_retire\",\"context\":\"core\",\"contract\":\"rules\"}\n",
+        // 10: the Interface is not gone yet
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
+        // 11, 12: the Harness that cites goes first, then the Interface it cited
+        "{\"op\":\"harness_retire\",\"context\":\"core\",\"harness\":\"tests\"}\n",
+        "{\"op\":\"interface_retire\",\"context\":\"core\",\"interface\":\"api\"}\n",
+        // 13: a retired target meets a Remove expectation
+        "{\"op\":\"cr_resolve\",\"title\":\"Drop api\"}\n",
+        // 14, 15: nothing cites the Contract any more; nothing uses `scratch`
+        "{\"op\":\"contract_retire\",\"context\":\"core\",\"contract\":\"rules\"}\n",
+        "{\"op\":\"context_retire\",\"context\":\"scratch\"}\n",
+        // 16: the name and the id are reserved
+        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[]}\n",
+        "{\"op\":\"status\"}\n",
+        "{\"op\":\"check\"}\n",
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [9, 10, 16], "{results:#?}");
+
+    let refused = error_at(&results, 9);
+    assert!(
+        refused.contains("tests checks_value") && refused.contains("rules C1"),
+        "{refused}"
+    );
+    assert!(
+        error_at(&results, 10).contains("not removed: interface api"),
+        "{}",
+        error_at(&results, 10)
+    );
+    let reserved = error_at(&results, 16);
+    assert!(
+        reserved.contains("retired") && reserved.contains("api"),
+        "{reserved}"
+    );
+
+    // what went with the Harness and with the Interface, the thing first, and the revision of what held it
+    let line = |kind: &str, name: &str, last: u64, at: u64| serde_json::json!({ "kind": kind, "context": "core", "name": name, "last_revision": last, "at": at });
+    assert_eq!(
+        at(&results, 11)["retired"],
+        serde_json::json!([
+            line("harness", "tests", 1, 5),
+            line("case", "tests checks_value", 1, 5)
+        ])
+    );
+    assert_eq!(
+        at(&results, 12)["retired"],
+        serde_json::json!([
+            line("interface", "api", 1, 6),
+            line("item", "api fn value()", 1, 6)
+        ])
+    );
+    assert_eq!(at(&results, 13)["ok"], true);
+    assert_eq!(
+        at(&results, 14)["retired"],
+        serde_json::json!([
+            line("contract", "rules", 1, 7),
+            line("clause", "rules C1", 1, 7)
+        ])
+    );
+    // the Project goes one up when a Context is retired
+    assert_eq!(
+        at(&results, 15)["retired"],
+        serde_json::json!([{ "kind": "context", "context": "scratch", "name": "scratch", "last_revision": 1, "at": 4 }])
+    );
+
+    let status = at(&results, 17);
+    // the Pin stays, reads gone, and the Interface is named as retired
+    assert_eq!(
+        status["pins"],
+        serde_json::json!([{ "context": "core", "interface": "api (retired)", "state": "gone", "why": [] }])
+    );
+    assert_eq!(status["change_requests"][0]["state"], "resolved");
+    assert_eq!(status["unapplied"], serde_json::json!([]));
+    let kinds: Vec<&str> = status["retired"]
+        .as_array()
+        .expect("retired")
+        .iter()
+        .map(|r| r["kind"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "harness",
+            "case",
+            "interface",
+            "item",
+            "contract",
+            "clause",
+            "context"
+        ]
+    );
+    // retiring is intentional and nothing can fix the Pin, so neither status nor check finds it stale
+    for view in [status, at(&results, 18)] {
+        let stale = view["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["rule"] == "pin.stale")
+            .count();
+        assert_eq!(stale, 0, "{view:#?}");
+    }
+}

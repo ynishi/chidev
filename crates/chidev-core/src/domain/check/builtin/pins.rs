@@ -11,6 +11,7 @@ use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::service::pin::{StaleReason, Staleness, staleness};
 use crate::domain::vo::finding::{RuleId, Subject};
+use crate::domain::vo::target::Target;
 
 /// A Pin whose basis moved.
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +42,15 @@ impl Check for StalePin {
             .filter_map(|pin| {
                 let (message, mentions) = match staleness(pin, view.after) {
                     Staleness::Fresh => return None,
+                    // A retired Interface is gone on purpose and nothing can fix the Pin: no finding.
+                    Staleness::InterfaceGone
+                        if view
+                            .after
+                            .retired_of(Target::Interface(pin.interface()))
+                            .is_some() =>
+                    {
+                        return None;
+                    }
                     Staleness::InterfaceGone => {
                         ("the pinned interface is gone".to_string(), Vec::new())
                     }

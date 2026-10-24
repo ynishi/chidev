@@ -18,6 +18,7 @@ pub mod name;
 pub mod pin_basis;
 pub mod policy;
 pub mod prose;
+pub mod retired;
 pub mod revision;
 pub mod signature;
 pub mod sim;

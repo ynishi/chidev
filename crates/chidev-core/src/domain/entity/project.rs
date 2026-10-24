@@ -6,8 +6,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::context::{Context, ContextError};
-use super::harness::CaseFound;
-use super::interface::ItemFound;
+use super::contract::{Clause, Contract};
+use super::harness::{Case, CaseFound, Harness};
+use super::interface::{Interface, Item, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
@@ -16,8 +17,10 @@ use crate::domain::vo::id::{
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::policy::{Policy, PolicyError, PolicyLineId};
 use crate::domain::vo::prose::Prose;
+use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
+use crate::domain::vo::target::Target;
 use crate::domain::vo::title::Title;
 
 /// Which rule of the Project a change would break. The change is not made.
@@ -43,10 +46,31 @@ pub enum ProjectError {
     /// Contexts would use each other in a ring; the ids are those on it, in the order of use.
     #[error("the contexts would use each other in a cycle: {0:?}")]
     Cycle(Vec<ContextId>),
-    /// An asset or a definition would have an id that another one in the Project has. A citation names its
-    /// target by id alone, so an id is one thing in the whole Project.
-    #[error("the id {0} is given to two things in the project")]
+    /// An asset or a definition would have an id that another one in the Project has, or that the Project retired
+    /// (a retired id is reserved for good). A citation names its target by id alone, so an id is one thing in the
+    /// whole Project.
+    #[error("the id {0} is given to two things in the project, or was retired")]
     IdTaken(Uuid),
+    /// Retiring would take away Items or Clauses that Cases which stay still cite. Retire those Cases first (or put
+    /// their Harness again without the citation).
+    #[error(
+        "cannot retire: the cases {} cite what would go",
+        listed(.cases)
+    )]
+    RetireCited {
+        /// The Items and Clauses that would go and are cited, in order.
+        cited: Vec<Target>,
+        /// The Cases that stay and cite them, in order.
+        cases: Vec<CaseId>,
+    },
+    /// Retiring a Context that other Contexts use. Change their uses (or retire them) first.
+    #[error("cannot retire the context {context}: the contexts {} use it", listed(.by))]
+    RetireUsed {
+        /// The Context to retire.
+        context: ContextId,
+        /// The Contexts that use it, in order.
+        by: Vec<ContextId>,
+    },
     /// A Case cites an Item that is neither in its Context's Interfaces nor in those of a Context it uses.
     #[error(
         "the case {case} of the context {context} cites the item {item}, which it cannot reach"
@@ -85,16 +109,24 @@ pub enum ProjectError {
 /// uses. A change to one Context can break a citation in another (an Item removed from an Interface that another
 /// Context's Case cites), so the whole Project is checked each time.
 ///
-/// Its revision is 1 when it is made and goes one up each time a Context is added to it or removed from it. It
+/// Its revision is 1 when it is made and goes one up each time a Context is added to it or retired. It
 /// does not move when a Context changes: the Context has a revision of its own. So a change request that adds a
 /// Context expects the Project to change. The decision Policy it holds has a revision of its own, and does not move
 /// the Project's.
+///
+/// Things are taken out of the live model by retiring them, never by deleting: the Project keeps a [`Retired`]
+/// record (names and revisions, not the text) and reserves the id for good. Retiring a Context retires everything
+/// it owns; retiring an asset retires its Clauses, Items or Cases (the parts go with the whole). A Clause, an Item
+/// or a Case that a change drops from its asset is recorded as retired too. What a Case that stays cites, or what
+/// another Context uses, cannot be retired (the peers are refused, not cascaded): retire the one that refers first.
+/// What lies outside the Project (Pins, change requests, measurements) refers by id and is not touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     id: ProjectId,
     revision: Revision,
     contexts: BTreeMap<ContextId, Context>,
     policy: Policy,
+    retired: Vec<Retired>,
 }
 
 impl Project {
@@ -105,16 +137,18 @@ impl Project {
             revision: Revision::first(),
             contexts: BTreeMap::new(),
             policy: Policy::new(),
+            retired: Vec::new(),
         }
     }
 
-    /// A Project as a store kept it, with its revision and its Policy. Every rule of the Project is checked on it,
-    /// as on a change.
+    /// A Project as a store kept it, with its revision, its Policy and what it retired. Every rule of the Project
+    /// is checked on it, as on a change: a retired id is given to no live thing and to no other retired one.
     pub(crate) fn restore(
         id: ProjectId,
         revision: Revision,
         contexts: Vec<Context>,
         policy: Policy,
+        retired: Vec<Retired>,
     ) -> Result<Project, ProjectError> {
         let mut map = BTreeMap::new();
         for c in contexts {
@@ -123,13 +157,24 @@ impl Project {
             }
             map.insert(c.id(), c);
         }
-        check(&map)?;
+        check(&map, &retired)?;
         Ok(Project {
             id,
             revision,
             contexts: map,
             policy,
+            retired,
         })
+    }
+
+    /// What the Project retired, in the order it was retired (a whole before its parts).
+    pub fn retired(&self) -> &[Retired] {
+        &self.retired
+    }
+
+    /// The record of `target`, when the Project retired it.
+    pub fn retired_of(&self, target: Target) -> Option<&Retired> {
+        self.retired.iter().find(|r| r.target() == target)
     }
 
     /// The decision Policy: the numbered lines that settle a choice without asking a decision maker.
@@ -175,9 +220,104 @@ impl Project {
         }
         let mut next = self.contexts.clone();
         next.insert(context.id(), context);
-        self.keep(next)?;
+        self.keep(next, Vec::new())?;
         self.revision = self.revision.next();
         Ok(())
+    }
+
+    /// Retires a Context and everything it owns. The Project goes to its next revision. Refused when another
+    /// Context uses it, or when a Case of another Context cites what it owns.
+    pub fn retire_context(&mut self, id: ContextId) -> Result<(), ProjectError> {
+        let context = self
+            .contexts
+            .get(&id)
+            .ok_or(ProjectError::UnknownContext(id))?;
+        let by: Vec<ContextId> = self
+            .contexts
+            .values()
+            .filter(|c| c.uses().contains(&id))
+            .map(Context::id)
+            .collect();
+        if !by.is_empty() {
+            return Err(ProjectError::RetireUsed { context: id, by });
+        }
+        let at = self.revision.next();
+        let name = context.name();
+        let mut records = vec![Retired::whole(
+            Target::Context(id),
+            name.clone(),
+            context.revision(),
+            at,
+        )];
+        for k in context.contracts() {
+            records.extend(contract_records(name, k, at));
+        }
+        for i in context.interfaces() {
+            records.extend(interface_records(name, i, at));
+        }
+        for h in context.harnesses() {
+            records.extend(harness_records(name, h, at));
+        }
+        let mut next = self.contexts.clone();
+        next.remove(&id);
+        self.retire(next, records)?;
+        self.revision = at;
+        Ok(())
+    }
+
+    /// Retires a Contract of a Context with its Clauses. The Context goes to its next revision. A Context based on
+    /// its Contracts keeps one at least.
+    pub fn retire_contract(
+        &mut self,
+        context: ContextId,
+        id: ContractId,
+    ) -> Result<(), ProjectError> {
+        self.retire_asset(context, |c| c.retire_contract(id).map(Taken::Contract))
+    }
+
+    /// Retires an Interface of a Context with its Items. The Context goes to its next revision.
+    pub fn retire_interface(
+        &mut self,
+        context: ContextId,
+        id: InterfaceId,
+    ) -> Result<(), ProjectError> {
+        self.retire_asset(context, |c| c.retire_interface(id).map(Taken::Interface))
+    }
+
+    /// Retires a Harness of a Context with its Cases. The Context goes to its next revision.
+    pub fn retire_harness(
+        &mut self,
+        context: ContextId,
+        id: HarnessId,
+    ) -> Result<(), ProjectError> {
+        self.retire_asset(context, |c| c.retire_harness(id).map(Taken::Harness))
+    }
+
+    /// Takes an asset out of a copy of the Context with `take`, and keeps the result and the records of what went
+    /// when the Project still holds.
+    fn retire_asset(
+        &mut self,
+        context: ContextId,
+        take: impl FnOnce(&mut Context) -> Result<Taken, ContextError>,
+    ) -> Result<(), ProjectError> {
+        let mut next = self.contexts.clone();
+        let c = next
+            .get_mut(&context)
+            .ok_or(ProjectError::UnknownContext(context))?;
+        let taken = take(c)?;
+        let records = taken.records(c.name(), c.revision());
+        self.retire(next, records)
+    }
+
+    /// Keeps `next` as the Contexts and `records` as retired, unless Cases that stay cite what `records` take away
+    /// or the Project would break a rule.
+    fn retire(
+        &mut self,
+        next: BTreeMap<ContextId, Context>,
+        records: Vec<Retired>,
+    ) -> Result<(), ProjectError> {
+        refuse_cited(&next, &records)?;
+        self.keep(next, records)
     }
 
     /// Sets the Contexts a Context uses.
@@ -239,7 +379,8 @@ impl Project {
         self.change(context, |c| c.put_harness(id, kind, source, cases))
     }
 
-    /// Applies `f` to a copy of the Context and keeps the result when the Project still holds.
+    /// Applies `f` to a copy of the Context and keeps the result when the Project still holds. A Clause, an Item or
+    /// a Case that `f` dropped from an asset is recorded as retired.
     fn change(
         &mut self,
         context: ContextId,
@@ -249,20 +390,181 @@ impl Project {
         let c = next
             .get_mut(&context)
             .ok_or(ProjectError::UnknownContext(context))?;
+        let before = c.clone();
         f(c)?;
-        self.keep(next)
+        let dropped = dropped_leaves(&before, c);
+        self.keep(next, dropped)
     }
 
-    /// Takes `next` as the Contexts when it breaks no rule of the Project.
-    fn keep(&mut self, next: BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
-        check(&next)?;
+    /// Takes `next` as the Contexts, and `added` as retired besides, when they break no rule of the Project.
+    fn keep(
+        &mut self,
+        next: BTreeMap<ContextId, Context>,
+        added: Vec<Retired>,
+    ) -> Result<(), ProjectError> {
+        let mut retired = self.retired.clone();
+        retired.extend(added);
+        check(&next, &retired)?;
         self.contexts = next;
+        self.retired = retired;
         Ok(())
     }
 }
 
-/// The rules of the Project over `contexts`.
-fn check(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
+/// An asset taken out of a Context.
+enum Taken {
+    Contract(Contract),
+    Interface(Interface),
+    Harness(Harness),
+}
+
+impl Taken {
+    /// The records of the asset and its parts, retired when the Context was at `at`.
+    fn records(&self, context: &ContextName, at: Revision) -> Vec<Retired> {
+        match self {
+            Taken::Contract(k) => contract_records(context, k, at),
+            Taken::Interface(i) => interface_records(context, i, at),
+            Taken::Harness(h) => harness_records(context, h, at),
+        }
+    }
+}
+
+/// The records of a Contract and its Clauses, retired when what held them was at `at`.
+fn contract_records(context: &ContextName, k: &Contract, at: Revision) -> Vec<Retired> {
+    let whole = Retired::whole(Target::Contract(k.id()), context.clone(), k.revision(), at);
+    std::iter::once(whole)
+        .chain(k.clauses().iter().map(|c| clause_record(context, k, c, at)))
+        .collect()
+}
+
+fn clause_record(context: &ContextName, k: &Contract, c: &Clause, at: Revision) -> Retired {
+    Retired::leaf(
+        Target::Clause(c.id()),
+        context.clone(),
+        k.id().as_uuid(),
+        c.content().label().to_string(),
+        c.revision(),
+        at,
+    )
+}
+
+/// The records of an Interface and its Items, retired when what held them was at `at`.
+fn interface_records(context: &ContextName, i: &Interface, at: Revision) -> Vec<Retired> {
+    let whole = Retired::whole(Target::Interface(i.id()), context.clone(), i.revision(), at);
+    std::iter::once(whole)
+        .chain(i.items().iter().map(|it| item_record(context, i, it, at)))
+        .collect()
+}
+
+fn item_record(context: &ContextName, i: &Interface, it: &Item, at: Revision) -> Retired {
+    Retired::leaf(
+        Target::Item(it.id()),
+        context.clone(),
+        i.id().as_uuid(),
+        it.signature().to_string(),
+        it.revision(),
+        at,
+    )
+}
+
+/// The records of a Harness and its Cases, retired when what held them was at `at`.
+fn harness_records(context: &ContextName, h: &Harness, at: Revision) -> Vec<Retired> {
+    let whole = Retired::whole(Target::Harness(h.id()), context.clone(), h.revision(), at);
+    std::iter::once(whole)
+        .chain(h.cases().iter().map(|c| case_record(context, h, c, at)))
+        .collect()
+}
+
+fn case_record(context: &ContextName, h: &Harness, c: &Case, at: Revision) -> Retired {
+    Retired::leaf(
+        Target::Case(c.id()),
+        context.clone(),
+        h.id().as_uuid(),
+        c.name().to_string(),
+        c.revision(),
+        at,
+    )
+}
+
+/// The Clauses, Items and Cases the assets of `before` had that the same assets of `after` do not, recorded as
+/// retired at the revision their asset has in `after`.
+fn dropped_leaves(before: &Context, after: &Context) -> Vec<Retired> {
+    let name = after.name();
+    let mut out = Vec::new();
+    for k in before.contracts() {
+        if let Some(now) = after.contract(k.id()) {
+            for c in k.clauses().iter().filter(|c| now.clause(c.id()).is_none()) {
+                out.push(clause_record(name, k, c, now.revision()));
+            }
+        }
+    }
+    for i in before.interfaces() {
+        if let Some(now) = after.interface(i.id()) {
+            for it in i.items().iter().filter(|it| now.item(it.id()).is_none()) {
+                out.push(item_record(name, i, it, now.revision()));
+            }
+        }
+    }
+    for h in before.harnesses() {
+        if let Some(now) = after.harness(h.id()) {
+            for c in h.cases().iter().filter(|c| now.case(c.id()).is_none()) {
+                out.push(case_record(name, h, c, now.revision()));
+            }
+        }
+    }
+    out
+}
+
+/// Refuses when a Case in `next` (a Case that stays) cites an Item or a Clause that `records` retire.
+fn refuse_cited(
+    next: &BTreeMap<ContextId, Context>,
+    records: &[Retired],
+) -> Result<(), ProjectError> {
+    let going: BTreeSet<Target> = records
+        .iter()
+        .map(Retired::target)
+        .filter(|t| matches!(t, Target::Item(_) | Target::Clause(_)))
+        .collect();
+    let mut cited = BTreeSet::new();
+    let mut cases = Vec::new();
+    for case in next
+        .values()
+        .flat_map(|c| c.harnesses())
+        .flat_map(|h| h.cases())
+    {
+        let cites = case.cites();
+        let hit: Vec<Target> = cites
+            .items()
+            .keys()
+            .map(|i| Target::Item(*i))
+            .chain(cites.clauses().keys().map(|k| Target::Clause(*k)))
+            .filter(|t| going.contains(t))
+            .collect();
+        if !hit.is_empty() {
+            cases.push(case.id());
+            cited.extend(hit);
+        }
+    }
+    if cases.is_empty() {
+        Ok(())
+    } else {
+        Err(ProjectError::RetireCited {
+            cited: cited.into_iter().collect(),
+            cases,
+        })
+    }
+}
+
+/// The ids of `ids`, separated by commas, for a message.
+fn listed<T: std::fmt::Display>(ids: &[T]) -> String {
+    ids.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The rules of the Project over `contexts` and what it retired.
+fn check(contexts: &BTreeMap<ContextId, Context>, retired: &[Retired]) -> Result<(), ProjectError> {
     let mut names = BTreeSet::new();
     for c in contexts.values() {
         if !names.insert(c.name()) {
@@ -278,15 +580,19 @@ fn check(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
     if let Some(ring) = find_cycle(contexts) {
         return Err(ProjectError::Cycle(ring));
     }
-    check_ids(contexts)?;
+    check_ids(contexts, retired)?;
     for c in contexts.values() {
         check_cites(c, contexts)?;
     }
     Ok(())
 }
 
-/// Every id of an asset or of a definition in an asset is given once in the whole Project.
-fn check_ids(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError> {
+/// Every id of an asset or of a definition in an asset is given once in the whole Project, and no id of a Context,
+/// an asset or a definition is one the Project retired: those are reserved. The retired ids are distinct too.
+fn check_ids(
+    contexts: &BTreeMap<ContextId, Context>,
+    retired: &[Retired],
+) -> Result<(), ProjectError> {
     let mut seen = BTreeSet::new();
     let mut once = |id: Uuid| {
         if seen.insert(id) {
@@ -295,7 +601,17 @@ fn check_ids(contexts: &BTreeMap<ContextId, Context>) -> Result<(), ProjectError
             Err(ProjectError::IdTaken(id))
         }
     };
+    for id in retired.iter().filter_map(|r| r.target().as_uuid()) {
+        once(id)?;
+    }
     for c in contexts.values() {
+        // A Context id is checked against the retired ones only: Context ids and asset ids are kept apart.
+        if retired
+            .iter()
+            .any(|r| r.target().as_uuid() == Some(c.id().as_uuid()))
+        {
+            return Err(ProjectError::IdTaken(c.id().as_uuid()));
+        }
         for k in c.contracts() {
             once(k.id().as_uuid())?;
             for clause in k.clauses() {
@@ -722,5 +1038,349 @@ mod tests {
             p.base_on_contract(ctx_id(9)),
             Err(ProjectError::UnknownContext(ctx_id(9)))
         );
+    }
+
+    fn interface_id(n: u128) -> InterfaceId {
+        InterfaceId::from_uuid(test_uuid(n))
+    }
+
+    fn contract_id(n: u128) -> ContractId {
+        ContractId::from_uuid(test_uuid(n))
+    }
+
+    fn harness_id(n: u128) -> HarnessId {
+        HarnessId::from_uuid(test_uuid(n))
+    }
+
+    fn targets(p: &Project) -> Vec<Target> {
+        p.retired().iter().map(Retired::target).collect()
+    }
+
+    #[test]
+    fn retiring_an_asset_retires_its_parts_and_moves_the_context_not_the_project() {
+        let mut p = project();
+        let project_at = p.revision();
+        let core = p.context(ctx_id(1)).unwrap().revision();
+        p.retire_interface(ctx_id(1), interface_id(101)).unwrap();
+        assert!(
+            p.context(ctx_id(1))
+                .unwrap()
+                .interface(interface_id(101))
+                .is_none()
+        );
+        assert_eq!(p.revision(), project_at);
+        let after = p.context(ctx_id(1)).unwrap().revision();
+        assert_eq!(after.number(), core.number() + 1);
+        // the asset, then its Item, both at the Context's new revision
+        assert_eq!(
+            targets(&p),
+            [Target::Interface(interface_id(101)), Target::Item(item(10))]
+        );
+        let whole = p.retired_of(Target::Interface(interface_id(101))).unwrap();
+        assert_eq!(whole.last_revision(), Revision::first());
+        assert_eq!(whole.at(), after);
+        assert_eq!(whole.context().as_str(), "core");
+        let leaf = p.retired_of(Target::Item(item(10))).unwrap();
+        assert_eq!(leaf.holder(), Some(test_uuid(101)));
+        assert_eq!(leaf.label(), Some("fn f()"));
+        assert_eq!(leaf.at(), after);
+        // a Contract and a Harness retire the same way
+        put_harness(&mut p, &[20], &[11]).unwrap();
+        p.retire_harness(ctx_id(1), harness_id(103)).unwrap();
+        p.retire_contract(ctx_id(1), contract_id(102)).unwrap();
+        assert_eq!(p.retired().len(), 2 + 2 + 2);
+        assert!(
+            p.retired_of(Target::Case(CaseId::from_uuid(test_uuid(50))))
+                .is_some()
+        );
+        assert!(p.retired_of(Target::Clause(clause(11))).is_some());
+        // an asset the Context does not have, or a Context the Project does not have
+        assert_eq!(
+            p.retire_harness(ctx_id(1), harness_id(103)),
+            Err(ProjectError::Context(ContextError::NoSuchAsset {
+                kind: "harness",
+                id: test_uuid(103)
+            }))
+        );
+        assert_eq!(
+            p.retire_harness(ctx_id(9), harness_id(103)),
+            Err(ProjectError::UnknownContext(ctx_id(9)))
+        );
+    }
+
+    #[test]
+    fn retiring_a_context_retires_everything_it_owns_and_moves_the_project() {
+        let mut p = project();
+        put_harness(&mut p, &[10], &[11]).unwrap();
+        // `core` uses `base`; nothing uses `core`
+        let before = p.revision();
+        p.retire_context(ctx_id(1)).unwrap();
+        assert_eq!(p.revision().number(), before.number() + 1);
+        assert!(p.context(ctx_id(1)).is_none());
+        assert_eq!(
+            targets(&p),
+            [
+                Target::Context(ctx_id(1)),
+                Target::Contract(contract_id(102)),
+                Target::Clause(clause(11)),
+                Target::Interface(interface_id(101)),
+                Target::Item(item(10)),
+                Target::Harness(harness_id(103)),
+                Target::Case(CaseId::from_uuid(test_uuid(50))),
+            ]
+        );
+        // every record is at the Project's new revision, and the Context's last one is the one it had
+        assert!(p.retired().iter().all(|r| r.at() == p.revision()));
+        let ctx = p.retired_of(Target::Context(ctx_id(1))).unwrap();
+        assert_eq!(ctx.context().as_str(), "core");
+        assert!(ctx.last_revision().number() > 1);
+        assert_eq!(p.context(ctx_id(2)).unwrap().interfaces().count(), 1);
+        assert_eq!(
+            p.retire_context(ctx_id(1)),
+            Err(ProjectError::UnknownContext(ctx_id(1)))
+        );
+    }
+
+    #[test]
+    fn what_a_case_that_stays_cites_cannot_be_retired_in_the_same_or_another_harness_or_context() {
+        let mut p = project();
+        put_harness(&mut p, &[10, 20], &[11, 30]).unwrap();
+        let before = p.clone();
+        let case = CaseId::from_uuid(test_uuid(50));
+        // an Interface and a Contract of `core`, cited by its Case in Harness 103
+        assert_eq!(
+            p.retire_interface(ctx_id(1), interface_id(101)),
+            Err(ProjectError::RetireCited {
+                cited: vec![Target::Item(item(10))],
+                cases: vec![case]
+            })
+        );
+        assert_eq!(
+            p.retire_contract(ctx_id(1), contract_id(102)),
+            Err(ProjectError::RetireCited {
+                cited: vec![Target::Clause(clause(11))],
+                cases: vec![case]
+            })
+        );
+        // the Interface and the Contract of `base`, cited by a Case of another Context through `uses`
+        assert!(matches!(
+            p.retire_interface(ctx_id(2), interface_id(201)),
+            Err(ProjectError::RetireCited { .. })
+        ));
+        assert!(matches!(
+            p.retire_contract(ctx_id(2), contract_id(202)),
+            Err(ProjectError::RetireCited { .. })
+        ));
+        assert_eq!(p, before);
+        // a second Harness of `core`, with a Case that cites the same Item, keeps the Interface too
+        let cites = CaseCites::new(
+            BTreeMap::from([(item(10), Revision::first())]),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        p.put_harness(
+            ctx_id(1),
+            harness_id(104),
+            Source::new("fn u() {}\n".to_string()),
+            vec![(
+                CaseId::from_uuid(test_uuid(51)),
+                CaseName::try_from("u").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+                cites,
+            )],
+        )
+        .unwrap();
+        p.retire_harness(ctx_id(1), harness_id(103)).unwrap();
+        assert_eq!(
+            p.retire_interface(ctx_id(1), interface_id(101)),
+            Err(ProjectError::RetireCited {
+                cited: vec![Target::Item(item(10))],
+                cases: vec![CaseId::from_uuid(test_uuid(51))]
+            })
+        );
+        // the Harness that cites goes first, then the Interface it cited
+        p.retire_harness(ctx_id(1), harness_id(104)).unwrap();
+        p.retire_interface(ctx_id(1), interface_id(101)).unwrap();
+        // a Case of `core` cites `base`: `base` cannot be retired while `core` uses it, and `core` is not
+        // retired because it is used by none
+        let mut q = project();
+        put_harness(&mut q, &[20], &[]).unwrap();
+        assert_eq!(
+            q.retire_context(ctx_id(2)),
+            Err(ProjectError::RetireUsed {
+                context: ctx_id(2),
+                by: vec![ctx_id(1)]
+            })
+        );
+        q.retire_context(ctx_id(1)).unwrap();
+        q.retire_context(ctx_id(2)).unwrap();
+        assert_eq!(q.contexts().count(), 0);
+    }
+
+    #[test]
+    fn a_context_that_another_uses_is_refused_until_the_use_goes() {
+        let mut p = project();
+        let before = p.clone();
+        assert_eq!(
+            p.retire_context(ctx_id(2)),
+            Err(ProjectError::RetireUsed {
+                context: ctx_id(2),
+                by: vec![ctx_id(1)]
+            })
+        );
+        assert_eq!(p, before);
+        p.set_uses(ctx_id(1), BTreeSet::new()).unwrap();
+        p.retire_context(ctx_id(2)).unwrap();
+    }
+
+    #[test]
+    fn a_retired_id_is_reserved_for_good() {
+        let mut p = project();
+        p.retire_interface(ctx_id(1), interface_id(101)).unwrap();
+        let before = p.clone();
+        // the asset, its Item, and the Context cannot be made again under the same ids
+        assert_eq!(
+            p.put_interface(
+                ctx_id(1),
+                interface_id(101),
+                Source::new("fn f()\n".to_string()),
+                Vec::new()
+            ),
+            Err(ProjectError::IdTaken(test_uuid(101)))
+        );
+        assert_eq!(
+            p.put_interface(
+                ctx_id(1),
+                interface_id(105),
+                Source::new("fn f()\n".to_string()),
+                vec![(
+                    item(10),
+                    Signature::try_from("fn f()").unwrap(),
+                    LineRange::new(1, 1).unwrap()
+                )]
+            ),
+            Err(ProjectError::IdTaken(test_uuid(10)))
+        );
+        p.retire_context(ctx_id(1)).unwrap();
+        assert_eq!(
+            p.add_context(context(1, "again", &[])),
+            Err(ProjectError::IdTaken(test_uuid(1)))
+        );
+        // a name is not reserved, only ids: a new Context may take the name `core`
+        p.add_context(context(3, "core", &[])).unwrap();
+        assert_ne!(p, before);
+    }
+
+    #[test]
+    fn a_leaf_a_put_drops_is_recorded_as_retired() {
+        let mut p = project();
+        let at = |p: &Project| {
+            p.context(ctx_id(1))
+                .unwrap()
+                .interface(interface_id(101))
+                .unwrap()
+                .revision()
+        };
+        // the Interface is put again without its only Item: the Item is retired at the Interface's new revision
+        p.put_interface(
+            ctx_id(1),
+            interface_id(101),
+            Source::new("\n".to_string()),
+            Vec::new(),
+        )
+        .unwrap();
+        let r = p.retired_of(Target::Item(item(10))).unwrap();
+        assert_eq!(r.holder(), Some(test_uuid(101)));
+        assert_eq!(r.label(), Some("fn f()"));
+        assert_eq!(r.last_revision(), Revision::first());
+        assert_eq!(r.at(), at(&p));
+        assert_eq!(p.retired().len(), 1);
+        // the same for a Clause and a Case
+        put_harness(&mut p, &[20], &[11]).unwrap();
+        p.put_harness(
+            ctx_id(1),
+            harness_id(103),
+            Source::new("\n".to_string()),
+            Vec::new(),
+        )
+        .unwrap();
+        p.put_contract(
+            ctx_id(1),
+            contract_id(102),
+            Title::try_from("T").unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let kinds: Vec<&str> = p.retired().iter().map(|r| r.target().word()).collect();
+        assert_eq!(kinds, ["item", "case", "clause"]);
+        // an Item that is put again by the same id is not retired
+        let mut q = project();
+        put_interface(&mut q, 1, 101, 10);
+        assert!(q.retired().is_empty());
+    }
+
+    #[test]
+    fn the_last_contract_of_a_context_based_on_its_contracts_is_not_retired() {
+        let mut p = project();
+        p.base_on_contract(ctx_id(1)).unwrap();
+        assert_eq!(
+            p.retire_contract(ctx_id(1), contract_id(102)),
+            Err(ProjectError::Context(ContextError::LastContract))
+        );
+        assert!(p.retired().is_empty());
+        // a second Contract lets the first go
+        p.put_contract(
+            ctx_id(1),
+            contract_id(110),
+            Title::try_from("U").unwrap(),
+            vec![(
+                clause(111),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C1").unwrap(),
+                    ClauseText::try_from("b").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+        p.retire_contract(ctx_id(1), contract_id(102)).unwrap();
+    }
+
+    #[test]
+    fn a_stored_project_with_a_live_id_that_is_retired_is_refused() {
+        let mut p = project();
+        p.retire_interface(ctx_id(1), interface_id(101)).unwrap();
+        let contexts: Vec<Context> = p.contexts().cloned().collect();
+        let mut live = project();
+        let retired = p.retired().to_vec();
+        // restored as it is, it holds
+        assert!(
+            Project::restore(
+                p.id(),
+                p.revision(),
+                contexts,
+                p.policy().clone(),
+                retired.clone()
+            )
+            .is_ok()
+        );
+        // the Interface is live in `live` and retired in `retired`
+        live.retire_context(ctx_id(1)).unwrap();
+        let all: Vec<Context> = project().contexts().cloned().collect();
+        assert_eq!(
+            Project::restore(
+                p.id(),
+                p.revision(),
+                all,
+                p.policy().clone(),
+                retired.clone()
+            ),
+            Err(ProjectError::IdTaken(test_uuid(101)))
+        );
+        // the same record twice
+        let twice = [retired.clone(), retired].concat();
+        assert!(matches!(
+            Project::restore(p.id(), p.revision(), Vec::new(), p.policy().clone(), twice),
+            Err(ProjectError::IdTaken(_))
+        ));
     }
 }

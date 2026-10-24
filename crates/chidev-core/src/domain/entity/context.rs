@@ -64,6 +64,17 @@ pub enum ContextError {
     /// The Context is to be based on Contracts and has none.
     #[error("the context has no contract to be based on")]
     NoContract,
+    /// The Context is based on its Contracts and the one to retire is its last.
+    #[error("the context is based on its contracts, and this is its last one")]
+    LastContract,
+    /// The Context has no asset of this kind with this id.
+    #[error("the context has no {kind} {id}")]
+    NoSuchAsset {
+        /// The kind of asset.
+        kind: &'static str,
+        /// The id looked for.
+        id: uuid::Uuid,
+    },
     /// The Contract content breaks a rule of the Contract.
     #[error(transparent)]
     Contract(#[from] ContractError),
@@ -245,6 +256,52 @@ impl Context {
         Ok(())
     }
 
+    /// Takes the Contract with this id out of the Context and gives it back. The Context goes to its next revision.
+    /// A Context based on its Contracts keeps one at least.
+    pub(super) fn retire_contract(&mut self, id: ContractId) -> Result<Contract, ContextError> {
+        if self.basis == Basis::Contract
+            && self.contracts.len() == 1
+            && self.contracts.contains_key(&id)
+        {
+            return Err(ContextError::LastContract);
+        }
+        let contract = self
+            .contracts
+            .remove(&id)
+            .ok_or(ContextError::NoSuchAsset {
+                kind: "contract",
+                id: id.as_uuid(),
+            })?;
+        self.revision = self.revision.next();
+        Ok(contract)
+    }
+
+    /// Takes the Interface with this id out of the Context and gives it back. The Context goes to its next revision.
+    pub(super) fn retire_interface(&mut self, id: InterfaceId) -> Result<Interface, ContextError> {
+        let interface = self
+            .interfaces
+            .remove(&id)
+            .ok_or(ContextError::NoSuchAsset {
+                kind: "interface",
+                id: id.as_uuid(),
+            })?;
+        self.revision = self.revision.next();
+        Ok(interface)
+    }
+
+    /// Takes the Harness with this id out of the Context and gives it back. The Context goes to its next revision.
+    pub(super) fn retire_harness(&mut self, id: HarnessId) -> Result<Harness, ContextError> {
+        let harness = self
+            .harnesses
+            .remove(&id)
+            .ok_or(ContextError::NoSuchAsset {
+                kind: "harness",
+                id: id.as_uuid(),
+            })?;
+        self.revision = self.revision.next();
+        Ok(harness)
+    }
+
     /// Makes the Contract with this id, or revises it when the Context has it.
     pub(super) fn put_contract(
         &mut self,
@@ -398,6 +455,34 @@ mod tests {
                 .id(),
             b
         );
+    }
+
+    #[test]
+    fn retiring_an_asset_hands_it_back_and_moves_the_context_and_a_missing_one_moves_nothing() {
+        let mut c = ctx();
+        let id = ContractId::from_uuid(test_uuid(100));
+        c.put_contract(id, title("A"), clauses(10)).unwrap();
+        let rev = c.revision();
+        let taken = c.retire_contract(id).unwrap();
+        assert_eq!(taken.id(), id);
+        assert!(c.contract(id).is_none());
+        assert_eq!(c.revision(), rev.next());
+        assert_eq!(
+            c.retire_contract(id),
+            Err(ContextError::NoSuchAsset {
+                kind: "contract",
+                id: id.as_uuid()
+            })
+        );
+        assert!(matches!(
+            c.retire_interface(InterfaceId::from_uuid(test_uuid(1))),
+            Err(ContextError::NoSuchAsset { .. })
+        ));
+        assert!(matches!(
+            c.retire_harness(HarnessId::from_uuid(test_uuid(1))),
+            Err(ContextError::NoSuchAsset { .. })
+        ));
+        assert_eq!(c.revision(), rev.next());
     }
 
     #[test]

@@ -447,6 +447,42 @@ mod tests {
     }
 
     #[test]
+    fn what_a_project_retired_comes_back_and_a_retired_id_that_is_live_is_corrupt() {
+        use crate::domain::vo::id::{ContextId, HarnessId, InterfaceId};
+        let mut p = project();
+        let top = ContextId::from_uuid(id(11));
+        p.retire_harness(top, HarnessId::from_uuid(id(40))).unwrap();
+        p.retire_interface(top, InterfaceId::from_uuid(id(IFACE)))
+            .unwrap();
+        // a Harness with its Case, then an Interface with its two Items
+        assert_eq!(p.retired().len(), 2 + 3);
+        let text = encode_project(&p).unwrap();
+        assert_eq!(decode_project(CURRENT, &text).unwrap(), p);
+
+        // a retired id that a live thing has
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["retired"][0]["id"] = serde_json::json!(id(20).to_string());
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("retired")
+        ));
+        // a Case retired without the Harness that held it
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["retired"][1]["holder"] = serde_json::Value::Null;
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
+        // a document without the record of what was retired does not load
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc.as_object_mut().unwrap().remove("retired");
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("retired")
+        ));
+    }
+
+    #[test]
     fn the_kind_of_a_harness_comes_back_and_a_document_without_one_is_a_harness_of_tests() {
         use crate::domain::vo::harness_kind::HarnessKind;
         use crate::domain::vo::id::HarnessId;

@@ -368,6 +368,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_of_a_retired_interface_is_not_stale_but_one_of_a_vanished_interface_is() {
+        use crate::domain::entity::project::Project;
+        use crate::domain::vo::id::{HarnessId, ProjectId, test_uuid};
+
+        let mut p = project();
+        let pins = [pin(&p)];
+        // the Case that cites the Interface goes first, then the Interface
+        p.retire_harness(ctx(), HarnessId::from_uuid(test_uuid(400)))
+            .unwrap();
+        p.retire_interface(ctx(), iface()).unwrap();
+        assert!(run(&StalePin, &p, &pins, &[]).is_empty());
+        // gone without being retired: reported as before
+        let empty = Project::new(ProjectId::from_uuid(test_uuid(1001)));
+        assert_eq!(
+            subjects(&run(&StalePin, &empty, &pins, &[])),
+            [Some(Subject::Interface(iface()))]
+        );
+    }
+
+    #[test]
     fn a_case_is_found_once_when_what_it_cites_moves() {
         let mut p = project();
         assert!(run(&StaleCite, &p, &[], &[]).is_empty());
