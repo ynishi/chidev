@@ -89,9 +89,30 @@ and this project adheres to
   met, and wherever chidev names a target the live model no longer has (`status`,
   errors, `unapplied`, findings, measurements) it names it from `retired` with
   `(retired)`. `status.retired` lists the records. See the README, "Retiring".
+- Change sets. `{"op":"change_set","puts":[..],"retires":[..]}` puts Contracts,
+  Interfaces and Harnesses (and `uses` / `base_on_contract` of a Context) and retires
+  Contexts and assets as one transition of the Project: the domain `ChangeSet` and
+  `Project::apply` apply it to a copy in the order the rules need, check the rules of
+  the Project once on the state it ends in, and keep all or nothing. A Case can cite
+  a Clause or an Item that the same set makes, and a Harness can be put without the
+  Cases that cite what the set removes, which a series of single puts refuses at its
+  first step. The put hook runs once, on the Project before and after, and the store
+  takes one commit with the names of the assets made. A thing named twice in a set is
+  refused, and a refused set names every problem. Each entry is tagged `put`
+  (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) or `retire`
+  (`context`, `contract`, `interface`, `harness`). The single puts and retirements
+  are change sets of one and answer as before. See the README, "Change sets".
+- The README describes the operations that build the model (`init`, `context_add`,
+  `context_uses`, `base_on_contract`, `contract_put`, `interface_put`, `harness_put`,
+  `pin`, `status`) with their JSON.
 
 ### Changed
 
+- Errors name things, not ids: a Case that cites what it cannot reach is
+  `the case stock-tests reserve refuses (context `core`) cites the clause stock C7,
+  which it cannot reach`, and a Pin refused because no Case cites an Item of the
+  Interface says `the interface `stock``. A Case that cites several unreachable
+  targets is now several problems of a change set, not the first only.
 - The stored Project document carries `retired` (layout 1, no compatibility code): a
   database written before does not load.
 - The process machinery of the external checks (spawn without a shell, process
