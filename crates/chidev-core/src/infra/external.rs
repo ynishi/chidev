@@ -30,10 +30,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+use super::process;
 use crate::app::ports::external::{
     ExecutionEvidence, ExternalAttempt, ExternalCall, ExternalExecutor, ExternalFailure,
     ExternalReply,
@@ -186,108 +185,6 @@ pub fn load(root: &Path) -> Result<(Vec<ExternalRule>, ProcessExecutor), Externa
     Ok((rules, ProcessExecutor { root, programs }))
 }
 
-impl ProcessExecutor {
-    async fn resolve(&self, command: &str) -> Result<PathBuf, ExternalFailure> {
-        let command_path = Path::new(command);
-        let candidate = if command_path.is_absolute() {
-            command_path.to_path_buf()
-        } else if command_path.components().count() > 1 {
-            self.root.join(command_path)
-        } else {
-            let search = std::env::var_os("PATH").unwrap_or_default();
-            let mut found = None;
-            for path in std::env::split_paths(&search) {
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    self.root.join(path)
-                };
-                let candidate = path.join(command);
-                if tokio::fs::metadata(&candidate).await.is_ok_and(|m| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        m.is_file() && m.permissions().mode() & 0o111 != 0
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        m.is_file()
-                    }
-                }) {
-                    found = Some(candidate);
-                    break;
-                }
-            }
-            found.ok_or_else(|| {
-                failure("spawn", format!("executable `{command}` not found in PATH"))
-            })?
-        };
-        tokio::fs::canonicalize(candidate)
-            .await
-            .map_err(|e| failure("spawn", e.to_string()))
-    }
-}
-
-async fn executable_digest(path: &Path) -> Result<String, ExternalFailure> {
-    if !tokio::fs::metadata(path)
-        .await
-        .map_err(|e| failure("spawn", e.to_string()))?
-        .is_file()
-    {
-        return Err(failure(
-            "spawn",
-            "the configured executable is not a regular file",
-        ));
-    }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| failure("spawn", e.to_string()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let n = file
-            .read(&mut buffer)
-            .await
-            .map_err(|e| failure("transport", e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-async fn bounded_read(
-    reader: impl AsyncRead + Unpin,
-    limit: usize,
-    pipe: &'static str,
-) -> Result<Vec<u8>, ExternalFailure> {
-    let mut bytes = Vec::new();
-    bounded_read_into(reader, limit, pipe, &mut bytes).await?;
-    Ok(bytes)
-}
-
-async fn bounded_read_into(
-    reader: impl AsyncRead + Unpin,
-    limit: usize,
-    pipe: &'static str,
-    bytes: &mut Vec<u8>,
-) -> Result<(), ExternalFailure> {
-    reader
-        .take((limit + 1) as u64)
-        .read_to_end(bytes)
-        .await
-        .map_err(|e| failure("transport", e.to_string()))?;
-    if bytes.len() > limit {
-        return Err(failure("limit", format!("{pipe} exceeded {limit} bytes")));
-    }
-    Ok(())
-}
-
 fn failure(kind: &str, message: impl Into<String>) -> ExternalFailure {
     ExternalFailure {
         kind: kind.into(),
@@ -295,56 +192,9 @@ fn failure(kind: &str, message: impl Into<String>) -> ExternalFailure {
     }
 }
 
-// The process group is created by this adapter, never supplied by the checker. Killing that group
-// prevents a timeout from leaving a descendant holding a pipe (or consuming resources) indefinitely.
-#[cfg(unix)]
-struct ProcessGroup {
-    child: Option<tokio::process::Child>,
-    pid: i32,
-}
-
-#[cfg(unix)]
-impl ProcessGroup {
-    fn stop(&mut self) {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        // SAFETY: `pid` is the positive process id returned by our child spawn; its negation
-        // identifies precisely the new process group created for that child. No pointers cross FFI.
-        // SIGKILL is 9 on the Unix platforms supported by Rust.
-        unsafe {
-            kill(-self.pid, 9);
-        }
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.start_kill();
-        }
-    }
-
-    async fn stop_and_reap(&mut self) {
-        self.stop();
-        if let Some(mut child) = self.child.take() {
-            let _ = child.wait().await;
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        if self.child.is_none() {
-            return;
-        }
-        self.stop();
-        if let Some(mut child) = self.child.take() {
-            // Cancellation cannot await. On a running runtime, explicitly reap asynchronously;
-            // otherwise Tokio's kill_on_drop child reaper handles the direct child at shutdown.
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = child.wait().await;
-                });
-            }
-        }
-    }
+/// A process failure as an external check reports it: the kind by its word.
+fn failed(f: process::Failure) -> ExternalFailure {
+    failure(f.kind.word(), f.message)
 }
 
 impl ExternalExecutor for ProcessExecutor {
@@ -356,20 +206,6 @@ impl ExternalExecutor for ProcessExecutor {
 }
 
 impl ProcessExecutor {
-    #[cfg(not(unix))]
-    async fn attempt(
-        &self,
-        _: &RuleId,
-        _: ExternalCall,
-        _: &mut ExecutionEvidence,
-    ) -> Result<ExternalReply, ExternalFailure> {
-        Err(failure(
-            "unsupported",
-            "external process groups are supported only on Unix",
-        ))
-    }
-
-    #[cfg(unix)]
     async fn attempt(
         &self,
         rule: &RuleId,
@@ -381,9 +217,7 @@ impl ProcessExecutor {
             .get(rule)
             .ok_or_else(|| failure("spawn", format!("no program configured for `{rule}`")))?;
         evidence.config_digest = spec.config_digest.clone();
-        let deadline = tokio::time::Instant::now()
-            .checked_add(spec.timeout)
-            .ok_or_else(|| failure("timeout", "configured timeout exceeds the clock's range"))?;
+        let deadline = process::deadline_in(spec.timeout).map_err(failed)?;
         let timed_out = || {
             failure(
                 "timeout",
@@ -391,91 +225,48 @@ impl ProcessExecutor {
             )
         };
         let executable = tokio::time::timeout_at(deadline, async {
-            let executable = self.resolve(&spec.command).await?;
+            let executable = process::resolve(&self.root, &spec.command)
+                .await
+                .map_err(failed)?;
             evidence.command = Some(executable.to_string_lossy().into_owned());
-            evidence.command_digest = Some(executable_digest(&executable).await?);
+            evidence.command_digest =
+                Some(process::file_digest(&executable).await.map_err(failed)?);
             Ok::<_, ExternalFailure>(executable)
         })
         .await
         .map_err(|_| timed_out())??;
         let input = serde_json::to_vec(&call).map_err(|e| failure("protocol", e.to_string()))?;
-        if tokio::time::Instant::now() >= deadline {
-            return Err(timed_out());
-        }
-        let mut command = tokio::process::Command::new(&executable);
-        command
-            .args(&spec.args)
-            .current_dir(&self.root)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|e| failure("spawn", e.to_string()))?;
-        let pid = child
-            .id()
-            .and_then(|p| i32::try_from(p).ok())
-            .ok_or_else(|| failure("spawn", "child has no valid process id"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| failure("transport", "missing stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| failure("transport", "missing stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| failure("transport", "missing stderr"))?;
-        let mut group = ProcessGroup {
-            child: Some(child),
-            pid,
-        };
-        let mut stderr_bytes = Vec::new();
-        let operation = async {
-            let write = async {
-                let mut stdin = stdin;
-                stdin
-                    .write_all(&input)
-                    .await
-                    .map_err(|e| failure("transport", e.to_string()))?;
-                stdin
-                    .shutdown()
-                    .await
-                    .map_err(|e| failure("transport", e.to_string()))?;
-                Ok::<_, ExternalFailure>(())
-            };
-            let wait = async {
-                let status = group
-                    .child
-                    .as_mut()
-                    .ok_or_else(|| failure("transport", "child missing before wait"))?
-                    .wait()
-                    .await
-                    .map_err(|e| failure("transport", e.to_string()))?;
-                evidence.exit_code = status.code();
-                Ok::<_, ExternalFailure>(status)
-            };
-            tokio::try_join!(
-                write,
-                bounded_read(stdout, STDOUT_LIMIT, "stdout"),
-                bounded_read_into(stderr, STDERR_LIMIT, "stderr", &mut stderr_bytes),
-                wait
-            )
-        };
-        let result = tokio::time::timeout_at(deadline, operation).await;
-        // Stop descendants even after normal exit. A checker must not daemonize a subprocess.
-        group.stop_and_reap().await;
-        stderr_bytes.truncate(STDERR_LIMIT);
-        evidence.stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-        let (_, stdout, (), status) = result.map_err(|_| timed_out())??;
+        let mut capture = process::Capture::default();
+        let result = process::run(
+            &process::Spec {
+                executable: &executable,
+                args: &spec.args,
+                cwd: &self.root,
+                env: &[],
+                stdin: Some(&input),
+                deadline,
+                stdout: process::Pipe {
+                    limit: STDOUT_LIMIT,
+                    over: process::Over::Fail,
+                },
+                stderr: process::Pipe {
+                    limit: STDERR_LIMIT,
+                    over: process::Over::Fail,
+                },
+            },
+            &mut capture,
+        )
+        .await;
+        evidence.exit_code = capture.exit_code;
+        evidence.stderr = String::from_utf8_lossy(&capture.stderr).into_owned();
+        let status = result.map_err(|f| match f.kind {
+            process::FailureKind::Timeout => timed_out(),
+            _ => failed(f),
+        })?;
         if !status.success() {
             return Err(failure("exit", format!("process exited with {status}")));
         }
-        serde_json::from_slice(&stdout).map_err(|e| failure("protocol", e.to_string()))
+        serde_json::from_slice(&capture.stdout).map_err(|e| failure("protocol", e.to_string()))
     }
 }
 

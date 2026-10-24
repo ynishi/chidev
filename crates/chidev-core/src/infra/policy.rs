@@ -91,6 +91,13 @@ pub fn parse(text: &str, origin: Origin) -> Result<Layer, String> {
             }
             continue;
         }
+        // The measure configuration (commands to run) is the project's, validated by the runner loader.
+        if key == "measure" && origin == Origin::Project {
+            if !value.is_table() {
+                return Err("`measure` is a table of measure settings".into());
+            }
+            continue;
+        }
         if key != "checks" {
             return Err(format!(
                 "`{key}` is not a section of a policy; there is `checks`"

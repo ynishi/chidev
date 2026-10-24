@@ -1,0 +1,19 @@
+[package]
+name = "chidev-provider-rust"
+description = "The Rust mutant provider of chidev: a pure function from a source text to single-site edits, speaking the chidev-mutants 1 protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/chidev-provider-rust"
+readme.workspace = true
+
+[dependencies]
+proc-macro2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+syn.workspace = true
+thiserror.workspace = true

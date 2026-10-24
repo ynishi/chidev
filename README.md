@@ -9,6 +9,7 @@ Contract, Interface and Harness as the assets of a codebase; the code is a cache
 | `chidev` | Umbrella: the name users depend on. Re-exports the core. |
 | `chidev-core` | Core (SDK): `domain` (pure rules and types), `app` (use cases and their ports), `infra` (adapters with real I/O). |
 | `chidev-cli` | The `chidev` command. |
+| `chidev-provider-rust` | The Rust mutant provider (`chidev provider mutants-rust`): a pure function from a source text to edits. Depended on by the CLI only; the core reaches a provider as a process. |
 
 The layer rules are in `arch-lint.toml` and run with `cargo test`. A crate or layer
 that does not fit the project is deleted, together with its `arch-lint.toml` scope.
@@ -67,6 +68,112 @@ cover script arguments, dependencies, or later filesystem changes; displaying a
 saved result does not re-hash the executable or check the filesystem. The check
 input consists of the selected model sections, not a snapshot of the working
 tree. Re-run a check after changing inputs outside that model.
+
+## Measurements
+
+A Harness that passes does not show it is strong. `measure` runs the pinned code
+against changes of itself (mutants) and keeps what the Harness noticed:
+
+```text
+{"op":"measure","kind":"mutate","context":"inventory","interface":"stock"}
+```
+
+It is an operation of its own, never a hook: it takes as long as the project's
+build and tests take, once per mutant. It runs the code the Pin accepted (`pin`
+keeps the text beside the Pin) and the Harness sources as the model holds them
+now, in a copy of the project made under `.chidev/measure/<run>/`, with a target
+directory of its own; the project's files and build output are never touched, and
+the runner removes the copy when it is done (a killed process can leave one; it is
+safe to delete). The working tree's own copy of the code is not read, so a tree
+that has moved on does not change what is measured. Symbolic links are not copied.
+
+The run builds and tests the copy once as it is (the *baseline*; if that fails the
+run is a failed measurement and no provider is asked), asks the provider for
+mutants, and for each one applies the edit, builds (a build that fails is
+*stillborn*), tests (a failure *killed* it, a pass lets it *survive*, a deadline is
+a *timeout*) and puts the code back. The result is kept as a measurement: its
+stamp (the Pin's code digest, the revisions the Pin stands on, a digest of the
+settings and of the provider program), each mutant with its site, operator and
+outcome, the evidence of the commands (command, executable digest, exit code,
+time), and the failure if there was one. Measurements are appended; the newest per
+kind and Interface is current, the older stay as history
+(`measure_runs`, `measure_items`). A result is kept in one commit with nothing else.
+
+The checks read the record and run nothing (they are builtin, at the `check` hook):
+
+| rule | default | finds |
+|---|---|---|
+| `measure.failed` | warning | the latest run failed (baseline, provider, protocol, timeout, budget, io) |
+| `mutation.unmeasured` | note | a pinned Interface with no run |
+| `mutation.stale` | warning | the Pin's code, the Interface, a Harness that checks it, a Contract it cites, or the settings moved after the run |
+| `mutation.survived` | note | one per mutant no case noticed, about the Interface, with key, line, column, operator and the change |
+
+A stale run is judged stale first, so a survivor of an old run is not reported for
+moved code. `status.measurements` lists the latest run per Interface: stamp,
+`killed` / `survived` / `stillborn` / `timeout`, `outcome` and `state`
+(`current` or `stale`).
+
+### `[measure]` in `checks.toml`
+
+```toml
+[measure]
+build = ["cargo", "build", "--quiet", "--tests"]   # a failure makes the mutant stillborn
+test  = ["cargo", "test", "--quiet"]               # all pass: survived; a failure: killed
+copy_exclude = [".git", "target", ".chidev"]       # relative to the root; the default
+env = { CARGO_TARGET_DIR = "{work}/target" }       # default; {work} is the run's directory
+timeout = 30            # seconds, one build or one test of a mutant
+baseline_timeout = 600  # the build and the test before any change
+budget = 900            # the whole run, at most 3600
+max_mutants = 40
+seed = 0                # moves where the even sampling of sites starts
+
+[measure.mutants]       # language -> the provider command
+rust = ["chidev", "provider", "mutants-rust"]
+
+[[measure.layout]]      # where an Interface's code is in the tree
+context = "inventory"
+interface = "stock"
+lang = "rust"           # selects the provider
+path = "src/stock.rs"
+
+[[measure.layout]]      # where a Harness's source is written
+context = "inventory"
+harness = "stock-tests"
+path = "tests/stock.rs"
+```
+
+`build` and `test` are commands, run without a shell in the copy; paths are
+relative to the project root and may not contain `..`. Every Harness that checks the
+Interface (the Harnesses of the Pin's basis) needs a layout entry, and the Harness
+must be a file of its own (an in-file `#[cfg(test)]` module cannot be told apart
+from the code). A field that is not known is refused by name. A project with no
+`[measure]` has no runner: `measure` is refused, and the checks still judge what is
+kept. The settings digest covers the whole table and the provider's executable, so
+changing a command or upgrading the provider makes earlier runs stale.
+
+### Provider protocol `chidev-mutants 1`
+
+The provider is a program that makes mutants and nothing else: a pure function
+of a source text, so a provider for another language is small. One JSON
+document on stdin, one on stdout, stderr for diagnostics:
+
+```json
+{"protocol":1,"path":"src/stock.rs","source":"...","max":40,"seed":0}
+{"protocol":1,"sites":118,"mutants":[{"key":"reserve/rel/2/9f3a","line":42,"col":13,
+  "operator":"rel","span":[1834,1835],"from":"<","to":"<="}]}
+```
+
+A mutant is an edit: `span` is a byte range of `source`, `from` the text it holds,
+`to` what replaces it. chidev checks `source[span] == from` for every edit before
+any is applied; a disagreement, a key given twice, a protocol other than 1, or a
+field the protocol does not have is a failed run (`protocol`). `key` is the
+provider's stable id of the mutant (the bundled one writes
+`<function>/<operator>/<n>/<digest of the line>`, which an edit elsewhere in the
+file does not move); chidev treats it as opaque text. The reply is capped at 4 MiB.
+The bundled Rust provider is `chidev provider mutants-rust`: it mutates operators
+(`rel`, `eq`, `arith`, `logic`), boolean literals (`bool`) and integer literals
+(`int`) inside function bodies, leaves `#[cfg(test)]` and `#[test]` code alone, and
+gives the same reply for the same request.
 
 ## Change requests
 

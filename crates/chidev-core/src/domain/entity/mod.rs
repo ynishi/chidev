@@ -6,5 +6,6 @@ pub mod context;
 pub mod contract;
 pub mod harness;
 pub mod interface;
+pub mod measurement;
 pub mod pin;
 pub mod project;

@@ -14,7 +14,12 @@ readme = "README.md"
 
 [workspace.dependencies]
 chidev-core = { path = "crates/chidev-core", version = "0.1.0" }
+chidev-provider-rust = { path = "crates/chidev-provider-rust", version = "0.1.0" }
 arch-lint = "0.11"
+# Token spans with byte ranges: the Rust provider edits the source by byte range.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+# Function bodies and test items of a Rust source (the provider only mutates code inside function bodies).
+syn = { version = "2", features = ["full", "visit"] }
 clap = { version = "4", features = ["derive"] }
 # rusqlite-isle 0.6 tracks rusqlite 0.40; the two move together (one libsqlite3-sys in the graph).
 rusqlite = { version = "0.40", default-features = false }

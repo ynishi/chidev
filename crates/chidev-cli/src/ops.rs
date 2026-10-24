@@ -14,6 +14,7 @@ use chidev_core::app::{
     SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
+use chidev_core::domain::vo::measure::MeasureKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -90,6 +91,14 @@ enum Op {
     },
     /// Closes the record of a change request whose change is applied.
     CrResolve { title: String },
+    /// Measures the code the Pin of an Interface accepted (`kind` is `mutate`): runs it against the Harnesses as the
+    /// model holds them, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. It
+    /// takes as long as the project's build and tests take, once per mutant.
+    Measure {
+        kind: MeasureKindDto,
+        context: String,
+        interface: String,
+    },
     /// Where the project stands.
     Status,
     /// Runs every check on the project as it is; nothing is kept.
@@ -108,6 +117,76 @@ enum Op {
     },
     /// What an agent judged of one rule: replaces every finding the rule had.
     FindingReport(Box<ReportDto>),
+}
+
+/// What a `measure` measures.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MeasureKindDto {
+    Mutate,
+}
+
+impl From<MeasureKindDto> for MeasureKind {
+    fn from(k: MeasureKindDto) -> MeasureKind {
+        match k {
+            MeasureKindDto::Mutate => MeasureKind::Mutate,
+        }
+    }
+}
+
+/// A mutant in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct MutantOut<'a> {
+    key: &'a str,
+    site: &'a str,
+    operator: &'a str,
+    change: &'a str,
+    outcome: &'static str,
+}
+
+/// A command of the run, in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct StepOut<'a> {
+    step: &'a str,
+    command: &'a str,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+}
+
+/// The result of `measure`.
+#[derive(Debug, Serialize)]
+struct MeasureOut<'a> {
+    op: &'static str,
+    kind: &'static str,
+    id: &'a str,
+    stamp: &'a str,
+    outcome: &'static str,
+    failure: Option<&'a str>,
+    sites: u32,
+    killed: u32,
+    survived: u32,
+    stillborn: u32,
+    timeout: u32,
+    mutants: Vec<MutantOut<'a>>,
+    evidence: Vec<StepOut<'a>>,
+}
+
+/// The latest measurement of an Interface, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct MeasurementOut<'a> {
+    context: &'a str,
+    interface: &'a str,
+    kind: &'static str,
+    id: &'a str,
+    stamp: &'a str,
+    state: &'static str,
+    outcome: &'static str,
+    failure: Option<&'a str>,
+    killed: u32,
+    survived: u32,
+    stillborn: u32,
+    timeout: u32,
+    at: u64,
 }
 
 /// The fields of `finding_report`.
@@ -715,6 +794,7 @@ struct StatusOut<'a> {
     findings: Vec<FindingOut<'a>>,
     judged: Vec<StandingOut<'a>>,
     external: Vec<ExternalOut<'a>>,
+    measurements: Vec<MeasurementOut<'a>>,
 }
 
 /// The result of `check`.
@@ -1188,6 +1268,51 @@ where
             let result = app.check_run().await?;
             json!({ "op": "check_run", "findings": findings_out(&result.findings), "external": result.external })
         }
+        Op::Measure {
+            kind,
+            context,
+            interface,
+        } => {
+            let done = app.measure(kind.into(), &context, &interface).await?;
+            to_value(&MeasureOut {
+                op: "measure",
+                kind: done.kind,
+                id: &done.id,
+                stamp: &done.stamp,
+                outcome: if done.failure.is_some() {
+                    "failed"
+                } else {
+                    "ok"
+                },
+                failure: done.failure.as_deref(),
+                sites: done.sites,
+                killed: done.counts.killed,
+                survived: done.counts.survived,
+                stillborn: done.counts.stillborn,
+                timeout: done.counts.timeout,
+                mutants: done
+                    .mutants
+                    .iter()
+                    .map(|m| MutantOut {
+                        key: &m.key,
+                        site: &m.site,
+                        operator: &m.operator,
+                        change: &m.change,
+                        outcome: m.outcome,
+                    })
+                    .collect(),
+                evidence: done
+                    .evidence
+                    .iter()
+                    .map(|e| StepOut {
+                        step: &e.step,
+                        command: &e.command,
+                        exit_code: e.exit_code,
+                        duration_ms: e.duration_ms,
+                    })
+                    .collect(),
+            })?
+        }
         Op::Init => json!({ "op": "init", "project": app.init().await?.to_string() }),
         Op::ContextAdd { name, uses } => {
             json!({ "op": "context_add", "context": app.add_context(&name, &uses).await?.to_string() })
@@ -1529,6 +1654,25 @@ where
                     .map(|r| ExternalOut {
                         rule: r.rule.as_str(),
                         state: r.state.word(),
+                    })
+                    .collect(),
+                measurements: s
+                    .measurements
+                    .iter()
+                    .map(|m| MeasurementOut {
+                        context: &m.context,
+                        interface: &m.interface,
+                        kind: m.kind,
+                        id: &m.id,
+                        stamp: &m.stamp,
+                        state: m.state,
+                        outcome: m.outcome,
+                        failure: m.failure.as_deref(),
+                        killed: m.counts.killed,
+                        survived: m.counts.survived,
+                        stillborn: m.counts.stillborn,
+                        timeout: m.counts.timeout,
+                        at: m.at,
                     })
                     .collect(),
             })?

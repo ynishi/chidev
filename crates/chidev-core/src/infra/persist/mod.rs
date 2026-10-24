@@ -10,6 +10,7 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
 
+pub(crate) mod measure;
 pub(crate) mod v1;
 
 use self::v1::{ChangeRequestDoc, PinDoc, ProjectDoc, SCHEMA};

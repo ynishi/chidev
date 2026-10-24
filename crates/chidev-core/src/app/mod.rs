@@ -15,6 +15,9 @@ mod external;
 pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
 use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
+mod measure;
+pub use self::measure::{EvidenceLine, MeasureDone, MeasurementStanding, MutantLine};
+use self::ports::measure::{NoRunner, Runner, RunnerError};
 mod model_view;
 pub mod subject;
 pub use self::subject::SubjectInput;
@@ -33,7 +36,7 @@ pub use self::judged::{
 };
 pub use self::model_view::{ModelView, VIEW_VERSION};
 use self::ports::{
-    AssetKind, AssetName, Changes, Clock, IdSource, Invocation, Store, StoreRevision,
+    AssetKind, AssetName, Changes, Clock, IdSource, Invocation, PinCode, Store, StoreRevision,
 };
 pub use crate::domain::check::ParamValue;
 use crate::domain::check::{CheckView, Finding, Hook, Mention};
@@ -65,6 +68,7 @@ use crate::domain::vo::id::{
 pub use crate::domain::vo::intent::Intent;
 use crate::domain::vo::intent::Issuer;
 use crate::domain::vo::line_range::LineRange;
+use crate::domain::vo::measure::MeasureError;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
@@ -156,6 +160,28 @@ pub enum AppError {
         /// The titles of the parts that are not resolved.
         children: Vec<String>,
     },
+    /// The Interface has no Pin, so there is no code to measure.
+    #[error(
+        "the interface `{interface}` of `{context}` is not pinned, so there is no code to measure"
+    )]
+    NotPinned {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
+    /// The Pin was made before the code it accepted was kept.
+    #[error("the pin of `{interface}` kept no code text; pin the code again")]
+    PinCodeNotKept {
+        /// The Interface.
+        interface: String,
+    },
+    /// The measure runner cannot measure this.
+    #[error(transparent)]
+    Runner(#[from] RunnerError),
+    /// What a run observed is not a measurement.
+    #[error("a measurement is refused: {0}")]
+    Measurement(#[from] MeasureError),
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -210,6 +236,9 @@ fn input(e: impl Display) -> AppError {
     AppError::Input(e.to_string())
 }
 
+/// No settings: what the hooks of a change give the checks, which read no measurement.
+static NO_SETTINGS: BTreeMap<InterfaceId, String> = BTreeMap::new();
+
 /// What the checks of a hook read.
 fn view<'a>(
     before: Option<&'a Project>,
@@ -222,6 +251,8 @@ fn view<'a>(
         after,
         pins,
         change_requests,
+        measurements: &[],
+        measure_settings: &NO_SETTINGS,
     }
 }
 
@@ -709,6 +740,9 @@ pub struct Status {
     pub judged: Vec<RuleStanding>,
     /// The freshness of saved external executions; reading status never starts a process.
     pub external: Vec<ExternalStanding>,
+    /// The latest measurement of each Interface that has one: its counts, and whether it still describes the
+    /// Pin (`current`) or not (`stale`).
+    pub measurements: Vec<MeasurementStanding>,
 }
 
 /// A decision, in words.
@@ -806,6 +840,7 @@ pub struct App<S, G, E = NoExternal> {
     ids: G,
     registry: Registry,
     external: E,
+    runner: Box<dyn Runner>,
     clock: Box<dyn Clock>,
 }
 
@@ -829,6 +864,7 @@ impl<S: Store, G: IdSource> App<S, G, NoExternal> {
             ids,
             registry,
             external: NoExternal,
+            runner: Box::new(NoRunner),
             clock: Box::new(clock),
         }
     }
@@ -842,8 +878,16 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             ids: self.ids,
             registry: self.registry,
             external,
+            runner: self.runner,
             clock: self.clock,
         }
+    }
+
+    /// Supplies the measure runner; without one, `measure` is refused and the checks of measurements only judge
+    /// what is already kept.
+    pub fn with_runner(mut self, runner: impl Runner + 'static) -> Self {
+        self.runner = Box::new(runner);
+        self
     }
 
     /// The checks and the policy they run under.
@@ -1142,6 +1186,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .await?;
         let changes = Changes {
             pins: vec![pin],
+            pin_codes: vec![PinCode {
+                pin: id,
+                interface: InterfaceId::from_uuid(iface),
+                code: code.to_string(),
+            }],
             invocations: gate.invocations,
             external: gate.external,
             ..Changes::default()
@@ -1447,12 +1496,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(self.checked().await?.0)
     }
 
-    /// The findings of [`App::check`], and the judged rules not up to date.
-    async fn checked(&self) -> Result<(Vec<Found>, Vec<RuleStanding>), AppError> {
+    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read.
+    async fn checked(
+        &self,
+    ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let pins = self.store.pins().await?;
         let crs = self.store.change_requests().await?;
+        let measured = self.measured(&p).await?;
         let run = self.registry.run(
             Hook::Check,
             at,
@@ -1461,13 +1513,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 after: &p,
                 pins: &pins,
                 change_requests: &crs,
+                measurements: &measured.measurements,
+                measure_settings: &measured.settings,
             },
         );
         let mut found = self.found(&run.findings, &p, &crs, &[]).await?;
         found.extend(self.external_standing(&p, &crs, at).await?.0);
         let (judged, standing) = self.judged_standing(&p, &crs, at).await?;
         found.extend(judged);
-        Ok((found, standing))
+        Ok((found, standing, measured))
     }
 
     /// The change request titled `title`.
@@ -1529,7 +1583,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             });
         }
         let crs = self.store.change_requests().await?;
-        let (findings, judged) = self.checked().await?;
+        let (findings, judged, measured) = self.checked().await?;
+        let measurements = self.measurement_standings(&p, &measured).await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
                 .find(|c| c.id() == id)
@@ -1631,6 +1686,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             findings,
             judged,
             external: self.external_standing(&p, &crs, at).await?.1,
+            measurements,
         })
     }
 

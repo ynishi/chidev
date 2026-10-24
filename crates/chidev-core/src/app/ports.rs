@@ -2,6 +2,7 @@
 //! store that keeps what one use case changed whole or not at all.
 
 pub mod external;
+pub mod measure;
 
 use std::future::Future;
 
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 use crate::domain::check::{Executor, Hook, Level};
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
@@ -16,7 +18,7 @@ use crate::domain::repository::{
 };
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
-use crate::domain::vo::id::ContextId;
+use crate::domain::vo::id::{ContextId, InterfaceId, PinId};
 use crate::domain::vo::timestamp::Timestamp;
 
 /// Gives a fresh id each time. The domain makes no ids; the use cases take them from here.
@@ -184,6 +186,18 @@ pub struct JudgedReport {
     pub findings: Vec<JudgedFinding>,
 }
 
+/// The code a Pin accepted, kept whole beside the Pin (which keeps only its digest): a measure runs this text and
+/// not the working tree's, so what it measures is what was pinned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinCode {
+    /// The Pin the code belongs to.
+    pub pin: PinId,
+    /// The Interface it is the code of; its code replaces the earlier one.
+    pub interface: InterfaceId,
+    /// The code.
+    pub code: String,
+}
+
 /// What one use case changed, to be kept at once.
 #[derive(Debug, Clone, Default)]
 pub struct Changes {
@@ -191,6 +205,10 @@ pub struct Changes {
     pub project: Option<Project>,
     /// Pins made (each replaces the Pin of its Interface).
     pub pins: Vec<Pin>,
+    /// The code of the Pins made, each replacing the code of its Interface.
+    pub pin_codes: Vec<PinCode>,
+    /// Measurements made, appended: the newest of a kind and Interface is the current one.
+    pub measurements: Vec<Measurement>,
     /// Change requests opened or changed.
     pub change_requests: Vec<ChangeRequest>,
     /// Asset names given.
@@ -224,6 +242,18 @@ pub trait Store:
     fn external_reports(
         &self,
     ) -> impl Future<Output = Result<Vec<external::ExternalReport>, StoreError>> + Send;
+
+    /// The newest measurement of each kind and Interface that has one, in the order they were made.
+    fn latest_measurements(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Measurement>, StoreError>> + Send;
+
+    /// The code the Pin `pin` accepted; none for a Pin made before the code was kept, or for a Pin that has been
+    /// replaced.
+    fn pin_code(
+        &self,
+        pin: PinId,
+    ) -> impl Future<Output = Result<Option<String>, StoreError>> + Send;
 
     /// Where the store stands now; read it before the use case reads anything else.
     fn revision(&self) -> impl Future<Output = Result<StoreRevision, StoreError>> + Send;

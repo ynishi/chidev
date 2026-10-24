@@ -9,7 +9,7 @@
 mod ops;
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -20,6 +20,7 @@ use chidev_core::infra::external;
 use chidev_core::infra::ids::UuidV7;
 use chidev_core::infra::judged;
 use chidev_core::infra::policy;
+use chidev_core::infra::runner;
 use chidev_core::infra::sqlite::SqliteStore;
 use clap::{Parser, Subcommand};
 
@@ -45,12 +46,54 @@ enum Command {
         #[arg(long, value_name = "PATH", default_value = DEFAULT_STORE)]
         store: PathBuf,
     },
+    /// The providers that come with chidev: programs that speak a protocol on standard input and output, which a
+    /// project names in the `[measure]` table of `checks.toml` like any provider of its own.
+    Provider {
+        #[command(subcommand)]
+        provider: Provider,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Provider {
+    /// Makes the mutants of a Rust source: reads one `chidev-mutants 1` request (JSON) on standard input and writes
+    /// the reply (JSON) on standard output. Pure: it reads no file and runs nothing.
+    MutantsRust,
+}
+
+/// Runs the provider `MutantsRust`: the protocol is the standard input and output, so a failure is a message on
+/// standard error and an exit code, never a half reply.
+fn mutants_rust() -> ExitCode {
+    let mut request = Vec::new();
+    if let Err(e) = io::stdin().lock().read_to_end(&mut request) {
+        eprintln!("chidev provider mutants-rust: cannot read the request: {e}");
+        return ExitCode::from(2);
+    }
+    match chidev_provider_rust::handle(&request) {
+        Ok(reply) => {
+            let mut out = io::stdout().lock();
+            match out.write_all(&reply).and_then(|()| out.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("chidev provider mutants-rust: cannot write the reply: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("chidev provider mutants-rust: {e}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Provider {
+            provider: Provider::MutantsRust,
+        } => mutants_rust(),
         Command::Exec { file, store } => {
             let reader: Box<dyn BufRead> = match file {
                 Some(path) => match File::open(&path) {
@@ -75,7 +118,8 @@ async fn main() -> ExitCode {
                         let registry =
                             Registry::with_external(builtin::all(), rules, external_rules, &layers)
                                 .map_err(|e| format!("policy: {e}"))?;
-                        Ok((registry, executor))
+                        let measure = runner::load(&root).map_err(|e| format!("measure: {e}"))?;
+                        Ok((registry, executor, measure))
                     }) {
                     Ok(r) => r,
                     Err(e) => {
@@ -90,9 +134,12 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let (registry, executor) = registry;
+            let (registry, executor, measure) = registry;
             let mut app =
                 App::with_registry(sqlite, UuidV7, registry, SystemClock).with_external(executor);
+            if let Some(measure) = measure {
+                app = app.with_runner(measure);
+            }
             let mut out = io::stdout().lock();
             let code = match ops::run(&mut app, reader, &mut out).await {
                 Ok(true) => ExitCode::SUCCESS,

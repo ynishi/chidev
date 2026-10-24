@@ -7,8 +7,9 @@
 //! `change_requests` (one JSON document each, in the schema the record names; see `persist`), `asset_names`, and
 //! `check_invocations` (the checks each use case ran, appended and never changed), `judged_reports` and
 //! `judged_findings` (what agents reported for the judged rules: one report per rule, replaced as a whole, and its
-//! findings), `external_reports` (the latest result per external rule), and `model_revision` (the store revision
-//! at which the model last changed). `PRAGMA user_version` is the layout of the tables; a file with a higher one
+//! findings), `external_reports` (the latest result per external rule), `pin_codes` (the code each Pin
+//! accepted), `measure_runs` and `measure_items` (the measurements, appended, and their mutants), and
+//! `model_revision` (the store revision at which the model last changed). `PRAGMA user_version` is the layout of the tables; a file with a higher one
 //! is refused. New tables, execution metadata on `check_invocations`, and `rule_digest` on `judged_reports` are added
 //! without a new layout number: they are created `IF NOT EXISTS` (or
 //! added when missing) each time a file of layout 1 is opened, so a database made before them gets them and
@@ -22,6 +23,7 @@ use rusqlite::{Connection, params};
 use rusqlite_isle::{AsyncIsle, AsyncIsleDriver, IsleError};
 use uuid::Uuid;
 
+use super::persist::measure::{ItemRow, RunRow};
 use super::persist::{self, CURRENT};
 use crate::app::ports::external::{ExecutionEvidence, ExternalReport};
 use crate::app::ports::{
@@ -30,6 +32,7 @@ use crate::app::ports::{
 };
 use crate::domain::check::{Executor, Hook, Level};
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
@@ -37,7 +40,7 @@ use crate::domain::repository::{
 };
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
-use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId, PinId};
 
 /// The layout of the tables this code creates and reads.
 const LAYOUT: i64 = 1;
@@ -136,6 +139,43 @@ CREATE TABLE IF NOT EXISTS external_reports (
 );
 ";
 
+/// The code each Pin accepted (the latest per Interface), and the measurements: `measure_runs` (appended, never
+/// changed: the newest per kind and subject is current, the older ones are history) with its `measure_items` (the
+/// mutants of a run), written in the commit of the use case that made the run.
+const CREATE_MEASURE: &str = "
+CREATE TABLE IF NOT EXISTS pin_codes (
+    interface TEXT PRIMARY KEY,
+    pin TEXT NOT NULL,
+    code TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS measure_runs (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    stamp TEXT NOT NULL,
+    inputs TEXT NOT NULL,
+    store_revision INTEGER NOT NULL,
+    started_at INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    failure TEXT,
+    evidence TEXT NOT NULL,
+    summary TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS measure_runs_by_subject ON measure_runs (kind, subject_id, seq);
+CREATE TABLE IF NOT EXISTS measure_items (
+    run TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    site TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    PRIMARY KEY (run, seq)
+);
+";
+
 /// Adds `column` to `table` when the table (made before the column existed) lacks it.
 fn add_column(
     conn: &Connection,
@@ -180,6 +220,7 @@ fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(CREATE_JUDGED)?;
         add_column(conn, "judged_reports", "rule_digest", "TEXT")?;
         conn.execute_batch(CREATE_EXTERNAL)?;
+        conn.execute_batch(CREATE_MEASURE)?;
     }
     Ok(())
 }
@@ -554,6 +595,71 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    async fn latest_measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        let runs: Vec<(RunRow, Vec<ItemRow>)> = self
+            .isle
+            .call(|c| {
+                let mut runs = c.prepare(
+                    "SELECT id, kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary
+                     FROM measure_runs
+                     WHERE seq IN (SELECT MAX(seq) FROM measure_runs GROUP BY kind, subject_id)
+                     ORDER BY seq",
+                )?;
+                let rows: Vec<RunRow> = runs
+                    .query_map([], |r| {
+                        Ok(RunRow {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            subject: r.get(2)?,
+                            stamp: r.get(3)?,
+                            inputs: r.get(4)?,
+                            started_at: r.get(5)?,
+                            outcome: r.get(6)?,
+                            failure: r.get(7)?,
+                            evidence: r.get(8)?,
+                            summary: r.get(9)?,
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
+                let mut items = c.prepare(
+                    "SELECT key, site, operator, outcome, detail FROM measure_items WHERE run = ?1 ORDER BY seq",
+                )?;
+                let mut out = Vec::with_capacity(rows.len());
+                for run in rows {
+                    let found: Vec<ItemRow> = items
+                        .query_map(params![run.id], |r| {
+                            Ok(ItemRow {
+                                key: r.get(0)?,
+                                site: r.get(1)?,
+                                operator: r.get(2)?,
+                                outcome: r.get(3)?,
+                                detail: r.get(4)?,
+                            })
+                        })?
+                        .collect::<Result<_, _>>()?;
+                    out.push((run, found));
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(failed)?;
+        runs.iter()
+            .map(|(run, items)| persist::measure::decode(run, items))
+            .collect()
+    }
+
+    async fn pin_code(&self, pin: PinId) -> Result<Option<String>, StoreError> {
+        let pin = pin.as_uuid().to_string();
+        self.isle
+            .call(move |c| {
+                let mut stmt = c.prepare("SELECT code FROM pin_codes WHERE pin = ?1")?;
+                let mut rows = stmt.query(params![pin])?;
+                rows.next()?.map(|r| r.get(0)).transpose()
+            })
+            .await
+            .map_err(failed)
+    }
+
     async fn revision(&self) -> Result<StoreRevision, StoreError> {
         let number: i64 = self
             .isle
@@ -608,6 +714,22 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let names = changes.names;
+        let pin_codes = changes
+            .pin_codes
+            .iter()
+            .map(|c| {
+                (
+                    c.interface.as_uuid().to_string(),
+                    c.pin.as_uuid().to_string(),
+                    c.code.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let measures = changes
+            .measurements
+            .iter()
+            .map(persist::measure::encode)
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let invocations = changes
             .invocations
             .iter()
@@ -700,6 +822,34 @@ impl Store for SqliteStore {
                          ON CONFLICT (interface) DO UPDATE SET schema = excluded.schema, doc = excluded.doc",
                         params![id, current, doc],
                     )?;
+                }
+                for (interface, pin, code) in &pin_codes {
+                    tx.execute(
+                        "INSERT INTO pin_codes (interface, pin, code) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (interface) DO UPDATE SET pin = excluded.pin, code = excluded.code",
+                        params![interface, pin, code],
+                    )?;
+                }
+                for (run, items) in &measures {
+                    tx.execute(
+                        "INSERT INTO measure_runs
+                         (id, kind, subject_kind, subject_id, stamp, inputs, store_revision, started_at, outcome, failure, evidence, summary)
+                         VALUES (?1, ?2, 'interface', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            run.id, run.kind, run.subject, run.stamp, run.inputs, read_at,
+                            run.started_at, run.outcome, run.failure, run.evidence, run.summary
+                        ],
+                    )?;
+                    for (n, item) in items.iter().enumerate() {
+                        tx.execute(
+                            "INSERT INTO measure_items (run, seq, key, site, operator, outcome, detail)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                run.id, n as i64, item.key, item.site, item.operator, item.outcome,
+                                item.detail
+                            ],
+                        )?;
+                    }
                 }
                 for (id, doc) in &crs {
                     tx.execute(
@@ -819,6 +969,8 @@ mod tests {
             }],
             judged: Vec::new(),
             external: Vec::new(),
+            pin_codes: Vec::new(),
+            measurements: Vec::new(),
         }
     }
 
@@ -1371,5 +1523,210 @@ mod tests {
         let store = SqliteStore::open(&path).await.unwrap();
         assert!(matches!(store.project().await, Err(StoreError::Corrupt(_))));
         store.close().await.unwrap();
+    }
+
+    fn run_of(
+        n: u128,
+        subject: u128,
+        mutants: Vec<crate::domain::vo::measure::MutantResult>,
+    ) -> Measurement {
+        use crate::domain::entity::measurement::fixture::{draft, empty_basis};
+        let mut d = draft(
+            n,
+            InterfaceId::from_uuid(fixture::id(subject)),
+            Digest::of(b"code"),
+            empty_basis(),
+            mutants,
+        );
+        // The settings must survive the round trip as they are, and differ from run to run.
+        d.stamp = crate::domain::vo::measure::MeasureStamp::new(
+            Digest::of(b"code"),
+            empty_basis(),
+            format!("settings-{n}"),
+        )
+        .unwrap();
+        Measurement::new(d).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_newest_measurement_of_a_subject_is_current_and_all_survive_reopening() {
+        use crate::domain::entity::measurement::fixture::result;
+        use crate::domain::vo::measure::{FailureKind, MeasureFailure, MutantOutcome};
+        let path = temp_db("measure");
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(store.latest_measurements().await.unwrap().is_empty());
+        let first = run_of(
+            1,
+            30,
+            vec![
+                result("f/rel/1/aaaa", 7, MutantOutcome::Killed),
+                result("f/rel/2/bbbb", 9, MutantOutcome::Survived),
+            ],
+        );
+        let at = store.revision().await.unwrap();
+        let kept = Changes {
+            measurements: vec![first.clone()],
+            ..Changes::default()
+        };
+        store.commit(at, kept).await.unwrap();
+        assert_eq!(
+            store.latest_measurements().await.unwrap(),
+            std::slice::from_ref(&first)
+        );
+
+        // a newer run of the same subject replaces it as the current one; another subject has its own
+        let mut failed = crate::domain::entity::measurement::fixture::draft(
+            2,
+            InterfaceId::from_uuid(fixture::id(30)),
+            Digest::of(b"code"),
+            crate::domain::entity::measurement::fixture::empty_basis(),
+            vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
+        );
+        failed.failure =
+            Some(MeasureFailure::new(FailureKind::Budget, "used the whole budget").unwrap());
+        let second = Measurement::new(failed).unwrap();
+        let other = run_of(3, 31, vec![]);
+        let at = store.revision().await.unwrap();
+        let kept = Changes {
+            measurements: vec![second.clone(), other.clone()],
+            ..Changes::default()
+        };
+        store.commit(at, kept).await.unwrap();
+        let latest = store.latest_measurements().await.unwrap();
+        assert_eq!(latest, [second.clone(), other.clone()]);
+        assert!(latest[0].failure().is_some());
+        assert_eq!(latest[0].mutants().len(), 1);
+        store.close().await.unwrap();
+
+        // history is kept: the runs are rows, and the first one's items are still there
+        let conn = Connection::open(&path).unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM measure_runs", [], |r| r.get(0))
+            .unwrap();
+        let items: i64 = conn
+            .query_row("SELECT COUNT(*) FROM measure_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((runs, items), (3, 3));
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.latest_measurements().await.unwrap(), [second, other]);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_commit_keeps_no_measurement_and_no_pin_code() {
+        use crate::app::ports::PinCode;
+        let path = temp_db("measure-conflict");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let at = store.revision().await.unwrap();
+        store.commit(at, changes()).await.unwrap();
+        let stale = Changes {
+            measurements: vec![run_of(1, 30, vec![])],
+            pin_codes: vec![PinCode {
+                pin: PinId::from_uuid(fixture::id(50)),
+                interface: InterfaceId::from_uuid(fixture::id(30)),
+                code: "fn a() {}".to_string(),
+            }],
+            ..Changes::default()
+        };
+        assert_eq!(store.commit(at, stale).await, Err(StoreError::Conflict));
+        assert!(store.latest_measurements().await.unwrap().is_empty());
+        assert_eq!(
+            store
+                .pin_code(PinId::from_uuid(fixture::id(50)))
+                .await
+                .unwrap(),
+            None
+        );
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_code_of_a_pin_is_kept_whole_and_the_next_pin_replaces_it() {
+        use crate::app::ports::PinCode;
+        let path = temp_db("pin-code");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let code = |pin: u128, text: &str| PinCode {
+            pin: PinId::from_uuid(fixture::id(pin)),
+            interface: InterfaceId::from_uuid(fixture::id(30)),
+            code: text.to_string(),
+        };
+        let text = "pub fn fits(a: u32) -> bool {\n    a <= 5\n}\n";
+        let at = store.revision().await.unwrap();
+        let kept = Changes {
+            pin_codes: vec![code(50, text)],
+            ..Changes::default()
+        };
+        store.commit(at, kept).await.unwrap();
+        assert_eq!(
+            store
+                .pin_code(PinId::from_uuid(fixture::id(50)))
+                .await
+                .unwrap(),
+            Some(text.to_string())
+        );
+        let at = store.revision().await.unwrap();
+        let kept = Changes {
+            pin_codes: vec![code(51, "other")],
+            ..Changes::default()
+        };
+        store.commit(at, kept).await.unwrap();
+        assert_eq!(
+            store
+                .pin_code(PinId::from_uuid(fixture::id(50)))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .pin_code(PinId::from_uuid(fixture::id(51)))
+                .await
+                .unwrap(),
+            Some("other".to_string())
+        );
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_measurement_row_changed_to_what_cannot_be_is_corrupt() {
+        use crate::domain::entity::measurement::fixture::result;
+        use crate::domain::vo::measure::MutantOutcome;
+        for (n, sql) in [
+            "UPDATE measure_items SET outcome = 'lost'",
+            "UPDATE measure_items SET site = '0:0'",
+            "UPDATE measure_runs SET outcome = 'failed'",
+            "UPDATE measure_runs SET inputs = '{'",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = temp_db(&format!("measure-corrupt-{n}"));
+            let store = SqliteStore::open(&path).await.unwrap();
+            let at = store.revision().await.unwrap();
+            let kept = Changes {
+                measurements: vec![run_of(
+                    1,
+                    30,
+                    vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
+                )],
+                ..Changes::default()
+            };
+            store.commit(at, kept).await.unwrap();
+            assert_eq!(store.latest_measurements().await.unwrap().len(), 1);
+            store.close().await.unwrap();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(sql, []).unwrap();
+            drop(conn);
+            let store = SqliteStore::open(&path).await.unwrap();
+            assert!(
+                matches!(
+                    store.latest_measurements().await,
+                    Err(StoreError::Corrupt(_))
+                ),
+                "{sql}"
+            );
+            store.close().await.unwrap();
+        }
     }
 }

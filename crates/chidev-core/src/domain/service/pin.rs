@@ -86,6 +86,13 @@ pub fn staleness(pin: &Pin, project: &Project) -> Staleness {
     }
 }
 
+/// What the code of `interface` stands on in `project` now: the revisions a Pin made at this moment would record.
+/// A measurement of the code records it, to tell later that what it measured has moved. `None` when the Interface
+/// is not in the Project.
+pub fn current_basis(project: &Project, interface: InterfaceId) -> Option<PinBasis> {
+    find(project, interface).map(|(context, pinned)| basis(project, context, pinned))
+}
+
 /// The keys whose revision differs between `was` and `now`, or that are in only one of them, in order.
 fn moved<'a, K: Ord + Copy, V: PartialEq>(
     was: &'a BTreeMap<K, V>,

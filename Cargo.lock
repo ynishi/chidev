@@ -230,6 +230,7 @@ name = "chidev-cli"
 version = "0.1.0"
 dependencies = [
  "chidev-core",
+ "chidev-provider-rust",
  "clap",
  "serde",
  "serde_json",
@@ -250,6 +251,18 @@ dependencies = [
  "tokio",
  "toml 1.1.8+spec-1.1.0",
  "uuid",
+]
+
+[[package]]
+name = "chidev-provider-rust"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "syn 2.0.119",
+ "thiserror",
 ]
 
 [[package]]

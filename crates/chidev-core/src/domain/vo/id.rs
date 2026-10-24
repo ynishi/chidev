@@ -74,6 +74,10 @@ uuid_id!(
     /// The identity of a change request.
     ChangeRequestId
 );
+uuid_id!(
+    /// The identity of a measurement: one run of a measure over one subject.
+    MeasurementId
+);
 
 /// A fixed uuid for the tests: the domain does not make ids, so a test makes them from a number.
 #[cfg(test)]

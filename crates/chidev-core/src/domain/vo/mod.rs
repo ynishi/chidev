@@ -12,6 +12,7 @@ pub mod finding;
 pub mod id;
 pub mod intent;
 pub mod line_range;
+pub mod measure;
 pub mod name;
 pub mod pin_basis;
 pub mod policy;

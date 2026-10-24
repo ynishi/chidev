@@ -6,6 +6,7 @@
 mod change_requests;
 mod citations;
 mod contexts;
+mod measure;
 mod pins;
 
 use super::Check;
@@ -16,6 +17,7 @@ pub use self::change_requests::{
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
+pub use self::measure::{MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
 pub use self::pins::{StalePin, Unpinned};
 
 /// Every builtin check.
@@ -33,6 +35,10 @@ pub fn all() -> &'static [&'static dyn Check] {
         &KeepMoved,
         &IntentMismatch,
         &PolicyLineGone,
+        &MeasureFailed,
+        &Unmeasured,
+        &StaleMutation,
+        &Survived,
     ]
 }
 
@@ -209,9 +215,31 @@ mod fixture {
                 after: p,
                 pins,
                 change_requests: crs,
+                measurements: &[],
+                measure_settings: &BTreeMap::new(),
             },
             &Params::default(),
         )
+    }
+
+    /// Revises the Harness (the one the project has): its code changes, so its revision does.
+    pub(super) fn revise_harness(p: &mut Project) {
+        p.put_harness(
+            ctx(),
+            HarnessId::from_uuid(test_uuid(400)),
+            Source::new("fn t() { /* changed */ }\n".to_string()),
+            vec![(
+                CaseId::from_uuid(test_uuid(40)),
+                CaseName::try_from("t").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+                CaseCites::new(
+                    BTreeMap::from([(item(10), Revision::first())]),
+                    BTreeMap::from([(clause(30), Revision::first())]),
+                )
+                .unwrap(),
+            )],
+        )
+        .unwrap();
     }
 }
 
@@ -243,6 +271,8 @@ mod tests {
                     | "cr.awaiting-decision"
                     | "cr.intent-mismatch"
                     | "crux.policy-line-gone"
+                    | "mutation.unmeasured"
+                    | "mutation.survived"
             );
             assert_eq!(
                 d.default_level,

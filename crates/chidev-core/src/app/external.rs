@@ -431,11 +431,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let p = self.project().await?;
         let pins = self.store.pins().await?;
         let crs = self.store.change_requests().await?;
+        let measured = self.measured(&p).await?;
         let view = CheckView {
             before: None,
             after: &p,
             pins: &pins,
             change_requests: &crs,
+            measurements: &measured.measurements,
+            measure_settings: &measured.settings,
         };
         let mut run = self.registry.run(Hook::Check, at, &view);
         let external = self.run_external(Hook::Check, at, &view, &[]).await?;

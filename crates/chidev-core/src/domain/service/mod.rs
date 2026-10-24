@@ -3,4 +3,5 @@
 
 pub mod change_request;
 pub mod cite;
+pub mod measure;
 pub mod pin;
