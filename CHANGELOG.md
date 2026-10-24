@@ -10,6 +10,34 @@ and this project adheres to
 
 ### Changed
 
+- A Crux is a choice that can be derived neither from the repository and general
+  knowledge (an Assumption) nor from the Project's decision Policy, so a decision
+  maker picks; it has no `default`, and what depends on the answer waits.
+  `recommended` is `{choice, reason?, confidence?}` with a `confidence` of 0 to
+  100, and the Crux takes an `importance` (`low`, `normal`, `high`) and
+  `supersedes` (the title of a change request whose answered Crux it replaces).
+- The decision is an `Answer`: the decision (chosen, worded or unspecified, as
+  before), its `basis` (a Policy line with the Policy revision, or an arbitrary
+  reason), the decision maker (`role` or `person`, by name) and the time. An
+  answer is immutable: `cr_decide` on an answered Crux is refused, and a
+  different decision is a new change request whose Crux `supersedes` the old
+  one. `cr_decide` takes `basis` (`{"policy":"P1"}` or `{"arbitrary":".."}`) and
+  `by` (`{"role":".."}` or `{"person":".."}`), both required; a Policy basis has
+  to name a line the Policy has.
+- `status` shows each request's `answer` (decision, basis, `by`, `at`) in place
+  of `decision`, its `supersedes` and its `assumptions`; `status.awaiting` shows
+  the undecided Cruxes with `kind`, `options`, `recommended` (with `confidence`)
+  and `importance`, and `status.policy` the revision and lines of the Policy.
+  `app::App::decide_change_request` takes the basis and the decision maker, and
+  needs a clock (`App::with_clock`).
+- The stored documents change again (layout 1, unreleased, no migration; an
+  older database does not load): a Project has a `policy`, a change request has
+  `assumptions` and (now required) `addresses`, and a Crux has `recommended` with
+  a `confidence`, `importance`, `supersedes` and its `answer` in place of the
+  request's `decision` and the Crux's `default`. A document with a field of the
+  older layout is refused by name.
+- `check_list` has 12 checks.
+
 - A change request says what it expects of its targets instead of listing
   `lines`: `expects`, each target with a kind (`change`, `remove` or `keep`) and
   the revision it had when the request opened. `cr_open` takes `change`,
@@ -39,6 +67,27 @@ and this project adheres to
   Crux option has `expects` in place of `changes`.
 
 ### Added
+
+- The Project's decision Policy: numbered lines `P1`, `P2`, ... each with a
+  text, and a revision that moves when its lines change (each line also records
+  the revision at which it got its text). The operation `policy_put` replaces
+  all the lines; `status.policy` shows them. The builtin check
+  `crux.policy-line-gone` (note; put, check) reports an answer that rests on a
+  Policy line that is gone or was reworded after it was applied.
+- Assumptions: `assumptions` on `cr_open`, and the operation `cr_assume`
+  (`title`, `statement`, `reason`, `evidence`) appends one to a request that is
+  not resolved. They only grow. Evidence is a place in the repository (a
+  relative path without `..`, with optional `lines`) or general knowledge (a
+  reference).
+- A `Clock` port of the application with a system adapter (`infra::clock::SystemClock`)
+  and a fixed clock for tests (`infra::clock::FixedClock`); the domain takes the
+  time as the value `Timestamp` and never reads a clock. The CLI sets the system
+  clock.
+- Domain values `Confidence`, `Importance`, `Recommended`, `Answer`, `Basis`,
+  `DecisionMaker`, `Timestamp`, `Policy`, `PolicyLineId`, `Assumption` and
+  `Evidence`, and the errors `AlreadyAnswered`, `SupersedesUnknown`,
+  `SupersedesUnanswered`, `UnknownPolicyLine` and `PolicyRevisionMismatch` of a
+  change request.
 
 - Every part of the asset tree can be a target: the Project, a Context, a
   Contract, an Interface, a Harness, a Clause, an Item and a Case. The Project
@@ -81,3 +130,8 @@ and this project adheres to
   a check to find).
 - The change request's `lines`, the `items` / `clauses` fields of `cr_open` and of
   a Crux option, and the `lines` of the model view.
+- The Crux's `default` (and `CruxKind::allows_default`, `ChangeRequestError::DefaultNotAllowed`):
+  a choice that can be derived is an Assumption or is settled by the Policy, and
+  one that cannot waits for a decision maker. A later decision no longer replaces
+  an earlier one (see `supersedes`). The compatibility read of a change request
+  stored without `addresses` is gone with it.
