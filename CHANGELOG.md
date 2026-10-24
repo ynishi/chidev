@@ -10,6 +10,16 @@ and this project adheres to
 
 ### Added
 
+- `interface_put`, `harness_put` and `pin`, and the `interface` and `harness`
+  entries of a `change_set`, can take their text from a file: `source_file` in
+  place of `source`, and `code_file` (of `pin`) in place of `code`. Exactly one of
+  the two is given. The path is relative to the directory `chidev` runs in; an
+  absolute path, a `..` part, and a missing, unreadable or non-UTF-8 file are
+  input errors that name the path, and a change set names every entry that has
+  one. The file is read at the CLI boundary (`ops.rs`) when the operation runs;
+  the use cases and the domain still receive text, and the model keeps the text,
+  not the path. `lines` of Items and Cases are unchanged. `chidev-cli` enables
+  tokio's `fs` feature.
 - A mutation run that did not look at every site says so. The measurement keeps
   the `planned` mutants the provider gave beside the `sites` it found and the
   mutants evaluated, and a run that ended (`ok`) with fewer mutants than sites,
