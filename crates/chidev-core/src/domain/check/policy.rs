@@ -87,7 +87,7 @@ impl Params {
         Params(
             d.params
                 .iter()
-                .map(|p| (p.name.to_string(), ParamValue::from(p.default)))
+                .map(|p| (p.name.to_string(), ParamValue::from(p.default.clone())))
                 .collect(),
         )
     }
@@ -365,13 +365,13 @@ mod tests {
 
     static PARAMS: [ParamSpec; 2] = [
         ParamSpec {
-            name: "max",
-            summary: "how many",
+            name: std::borrow::Cow::Borrowed("max"),
+            summary: std::borrow::Cow::Borrowed("how many"),
             default: ParamDefault::Int(3),
         },
         ParamSpec {
-            name: "strict",
-            summary: "whether",
+            name: std::borrow::Cow::Borrowed("strict"),
+            summary: std::borrow::Cow::Borrowed("whether"),
             default: ParamDefault::Bool(false),
         },
     ];
@@ -389,7 +389,7 @@ mod tests {
             hooks: [Hook::Check][..].into(),
             default_level: level,
             mandatory,
-            params,
+            params: params.into(),
             executor: Executor::Builtin,
         }
     }

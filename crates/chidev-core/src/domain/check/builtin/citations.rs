@@ -31,7 +31,7 @@ static STALE_CITE: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -80,7 +80,7 @@ static UNCITED_CLAUSE: Descriptor = Descriptor {
     hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -127,7 +127,7 @@ static UNCITED_ITEM: Descriptor = Descriptor {
     hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 

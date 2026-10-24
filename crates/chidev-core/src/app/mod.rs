@@ -11,6 +11,9 @@
 //! label, signature or case name keeps its id, and a new one gets a fresh id.
 
 mod check;
+mod external;
+pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
+use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod model_view;
 pub mod ports;
@@ -139,6 +142,14 @@ pub enum AppError {
     /// A mandatory check found something at `error`; nothing was kept.
     #[error("refused by the mandatory check(s) {}", rules_of(.0))]
     Refused(Vec<Found>),
+    /// An external gate refused the change; attempts are returned but not persisted.
+    #[error("refused by external gate(s)")]
+    ExternalRefused {
+        /// Findings that refused the change.
+        findings: Vec<Found>,
+        /// All external attempts made while checking the candidate.
+        external: Vec<ExternalReport>,
+    },
 }
 
 /// The rules of `found`, once each, for a message.
@@ -172,6 +183,7 @@ fn view<'a>(
 struct Gate {
     found: Vec<Found>,
     invocations: Vec<Invocation>,
+    external: Vec<ExternalReport>,
 }
 
 /// A Clause of a Contract, as a person writes it.
@@ -412,6 +424,8 @@ pub struct Status {
     pub findings: Vec<Found>,
     /// The judged rules never reported or gone stale: what an agent is to judge (`check_rules`).
     pub judged: Vec<RuleStanding>,
+    /// The freshness of saved external executions; reading status never starts a process.
+    pub external: Vec<ExternalStanding>,
 }
 
 /// A decision, in words.
@@ -438,17 +452,14 @@ fn reasoned(r: &ReasonedInput) -> Result<Reasoned, AppError> {
 
 /// The use cases over one store and one source of ids.
 #[derive(Debug)]
-pub struct App<S, G> {
+pub struct App<S, G, E = NoExternal> {
     store: S,
     ids: G,
     registry: Registry,
+    external: E,
 }
 
-impl<S, G> App<S, G>
-where
-    S: Store,
-    G: IdSource,
-{
+impl<S: Store, G: IdSource> App<S, G, NoExternal> {
     /// The use cases over `store`, with fresh ids from `ids`, running the builtin checks at their default levels.
     pub fn new(store: S, ids: G) -> App<S, G> {
         App::with_registry(store, ids, Registry::defaults())
@@ -460,6 +471,19 @@ where
             store,
             ids,
             registry,
+            external: NoExternal,
+        }
+    }
+}
+
+impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
+    /// Supplies the external execution port without changing the project or registry.
+    pub fn with_external<N: ExternalExecutor>(self, external: N) -> App<S, G, N> {
+        App {
+            store: self.store,
+            ids: self.ids,
+            registry: self.registry,
+            external,
         }
     }
 
@@ -582,7 +606,8 @@ where
                 std::slice::from_ref(&named),
             )
             .await?;
-        self.keep(at, p, named, gate.invocations).await?;
+        self.keep(at, p, named, gate.invocations, gate.external)
+            .await?;
         Ok(Checked {
             value: Put { id, revision },
             findings: gate.found,
@@ -650,7 +675,8 @@ where
                 std::slice::from_ref(&named),
             )
             .await?;
-        self.keep(at, p, named, gate.invocations).await?;
+        self.keep(at, p, named, gate.invocations, gate.external)
+            .await?;
         Ok(Checked {
             value: Put { id, revision },
             findings: gate.found,
@@ -720,7 +746,8 @@ where
                 std::slice::from_ref(&named),
             )
             .await?;
-        self.keep(at, p, named, gate.invocations).await?;
+        self.keep(at, p, named, gate.invocations, gate.external)
+            .await?;
         Ok(Checked {
             value: Put { id, revision },
             findings: gate.found,
@@ -757,6 +784,7 @@ where
         let changes = Changes {
             pins: vec![pin],
             invocations: gate.invocations,
+            external: gate.external,
             ..Changes::default()
         };
         self.store.commit(at, changes).await?;
@@ -839,7 +867,8 @@ where
                 addresses,
             },
         );
-        self.commit_change_request(at, cr, Vec::new()).await?;
+        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+            .await?;
         Ok(id)
     }
 
@@ -866,7 +895,8 @@ where
             },
         };
         decide(&mut cr, decision, &p)?;
-        self.commit_change_request(at, cr, Vec::new()).await?;
+        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+            .await?;
         Ok(())
     }
 
@@ -883,7 +913,8 @@ where
         let gate = self
             .gate_with(Hook::Resolve, at, &view(Some(&p), &p, &pins, &crs), &[])
             .await?;
-        self.commit_change_request(at, cr, gate.invocations).await?;
+        self.commit_change_request(at, cr, gate.invocations, gate.external)
+            .await?;
         Ok(Checked {
             value: (),
             findings: gate.found,
@@ -913,6 +944,7 @@ where
             },
         );
         let mut found = self.found(&run.findings, &p, &crs, &[]).await?;
+        found.extend(self.external_standing(&p, &crs, at).await?.0);
         let (judged, standing) = self.judged_standing(&p, &crs, at).await?;
         found.extend(judged);
         Ok((found, standing))
@@ -930,6 +962,7 @@ where
 
     /// Where the Project stands.
     pub async fn status(&self) -> Result<Status, AppError> {
+        let at = self.store.revision().await?;
         let p = self.project().await?;
         let mut pins = Vec::new();
         let mut seen = BTreeSet::new();
@@ -1016,6 +1049,7 @@ where
             unapplied: open,
             findings,
             judged,
+            external: self.external_standing(&p, &crs, at).await?.1,
         })
     }
 
@@ -1038,10 +1072,12 @@ where
         at: StoreRevision,
         cr: ChangeRequest,
         invocations: Vec<Invocation>,
+        external: Vec<ExternalReport>,
     ) -> Result<(), AppError> {
         let changes = Changes {
             change_requests: vec![cr],
             invocations,
+            external,
             ..Changes::default()
         };
         Ok(self.store.commit(at, changes).await?)
@@ -1056,11 +1092,13 @@ where
         p: Project,
         name: AssetName,
         invocations: Vec<Invocation>,
+        external: Vec<ExternalReport>,
     ) -> Result<(), AppError> {
         let changes = Changes {
             project: Some(p),
             names: vec![name],
             invocations,
+            external,
             ..Changes::default()
         };
         Ok(self.store.commit(at, changes).await?)
@@ -1092,15 +1130,39 @@ where
         view: &CheckView<'_>,
         pending: &[AssetName],
     ) -> Result<Gate, AppError> {
-        let run = self.registry.run(hook, at, view);
+        let mut run = self.registry.run(hook, at, view);
         let (after, crs) = (view.after, view.change_requests);
         if !run.refusing.is_empty() {
             return Err(AppError::Refused(
                 self.found(&run.refusing, after, crs, pending).await?,
             ));
         }
+        let external = self.run_external(hook, at, view, pending).await?;
+        if external.iter().any(|r| {
+            self.registry
+                .external()
+                .iter()
+                .any(|rule| rule.descriptor().id.as_str() == r.rule && rule.gate())
+                && !r.findings.is_empty()
+        }) {
+            let refusing = self
+                .external_findings(&external, after, crs, pending, false)
+                .await?;
+            return Err(AppError::ExternalRefused {
+                findings: refusing,
+                external,
+            });
+        }
+        run.invocations
+            .extend(self.external_invocations(&external, hook, at));
+        let mut found = self.found(&run.findings, after, crs, pending).await?;
+        found.extend(
+            self.external_findings(&external, after, crs, pending, false)
+                .await?,
+        );
         Ok(Gate {
-            found: self.found(&run.findings, after, crs, pending).await?,
+            external,
+            found,
             invocations: run.invocations,
         })
     }

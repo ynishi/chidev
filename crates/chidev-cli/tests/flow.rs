@@ -240,6 +240,92 @@ fn exec_in(dir: &Path, ops: &str) -> (Vec<Value>, Option<i32>, String) {
     )
 }
 
+#[test]
+#[cfg(unix)]
+fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fresh_dir("external-executor");
+    let checker = dir.join("checker");
+    std::fs::write(&checker, concat!(
+        "#!/bin/sh\ncat > request.json\n",
+        "echo run >> runs\n",
+        "printf '%s' '{\"protocol\":1,\"findings\":[{\"rule\":\"ext.contract\",\"message\":\"requires review\"}]}'\n"
+    )).unwrap();
+    std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registration = concat!(
+        "[external.\"ext.contract\"]\ncommand='./checker'\n",
+        "hooks=['check','put']\nreads=['contracts']\ngate=false\n",
+        "params = { strict = true }\n[checks.\"ext.contract\".params]\nstrict = false\n"
+    );
+    std::fs::write(dir.join("checks.toml"), registration).unwrap();
+    let (results, code, err) = exec_in(
+        &dir,
+        concat!(
+            "{\"op\":\"init\"}\n{\"op\":\"context_add\",\"name\":\"core\"}\n",
+            "{\"op\":\"status\"}\n{\"op\":\"check\"}\n{\"op\":\"check_list\"}\n",
+            "{\"op\":\"check_run\"}\n{\"op\":\"status\"}\n"
+        ),
+    );
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert_eq!(results[2]["external"][0]["state"], "unrun");
+    assert!(
+        results[4]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "ext.contract" && r["executor"] == "external")
+    );
+    assert_eq!(results[5]["external"][0]["findings"][0]["level"], "warning");
+    assert_eq!(results[6]["external"][0]["state"], "current");
+    assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap(), "run\n");
+    let input: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
+    assert_eq!(input["protocol"], 1);
+    assert_eq!(input["params"]["strict"], false);
+    assert!(input["model"]["contexts"][0].get("interfaces").is_none());
+    let (results, code, err) = exec_in(&dir, "{\"op\":\"status\"}\n");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(results[0]["external"][0]["state"], "current");
+    assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap(), "run\n");
+
+    std::fs::write(
+        dir.join("checks.toml"),
+        registration.replace("gate=false", "gate=true"),
+    )
+    .unwrap();
+    let (results, code, err) = exec_in(
+        &dir,
+        concat!(
+            "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a rule\"}]}\n",
+            "{\"op\":\"status\"}\n"
+        ),
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    assert_eq!(results[0]["ok"], false);
+    assert_eq!(results[0]["external"][0]["findings"][0]["level"], "error");
+    assert!(
+        results[0]["external"][0]["evidence"]["command_digest"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64)
+    );
+    assert_eq!(results[1]["external"][0]["state"], "stale");
+}
+
+#[test]
+fn malformed_external_registration_stops_before_initializing_a_store() {
+    let dir = fresh_dir("external-invalid");
+    std::fs::write(
+        dir.join("checks.toml"),
+        "[external.\"ext.bad\"]\ncommand='anything'\nhooks=['check']\nreads=['unknown']\n",
+    )
+    .unwrap();
+    let (results, code, err) = exec_in(&dir, "{\"op\":\"init\"}\n");
+    assert_eq!(code, Some(2));
+    assert!(results.is_empty());
+    assert!(err.contains("reads"), "{err}");
+    assert!(!dir.join("chidev.db").exists());
+}
+
 const CHECK_OPS: &str = concat!(
     "{\"op\":\"init\"}\n",
     "{\"op\":\"context_add\",\"name\":\"pricing\"}\n",

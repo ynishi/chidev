@@ -3,13 +3,14 @@
 //! `.await`, so [`Store::commit`] writes everything of one use case in a single `call_write` closure, after
 //! checking that nothing was committed since the use case began to read.
 //!
-//! The file holds nine tables: `meta` (the store's revision, which every commit bumps), `project`, `pins` and
+//! The file holds `meta` (the store's revision, which every commit bumps), `project`, `pins` and
 //! `change_requests` (one JSON document each, in the schema the record names; see `persist`), `asset_names`, and
 //! `check_invocations` (the checks each use case ran, appended and never changed), `judged_reports` and
 //! `judged_findings` (what agents reported for the judged rules: one report per rule, replaced as a whole, and its
-//! findings), and `model_revision` (the store revision at which the model last changed). `PRAGMA user_version` is
-//! the layout of the tables; a file with a higher one is refused. The last four, and the `executor` and `judge`
-//! columns of `check_invocations`, were added without a new layout number: they are created `IF NOT EXISTS` (or
+//! findings), `external_reports` (the latest result per external rule), and `model_revision` (the store revision
+//! at which the model last changed). `PRAGMA user_version` is the layout of the tables; a file with a higher one
+//! is refused. New tables, and the `executor`, `judge` and `external` columns of `check_invocations`, are added
+//! without a new layout number: they are created `IF NOT EXISTS` (or
 //! added when missing) each time a file of layout 1 is opened, so a database made before them gets them and
 //! nothing else in it changes.
 
@@ -21,6 +22,7 @@ use rusqlite_isle::{AsyncIsle, AsyncIsleDriver, IsleError};
 use uuid::Uuid;
 
 use super::persist::{self, CURRENT};
+use crate::app::ports::external::{ExecutionEvidence, ExternalReport};
 use crate::app::ports::{
     AssetKind, AssetNames, Changes, Invocation, JudgedFinding, JudgedReport, JudgedRepository,
     Outcome, Store, StoreRevision,
@@ -123,6 +125,14 @@ CREATE TABLE IF NOT EXISTS model_revision (
 INSERT OR IGNORE INTO model_revision (id, revision) SELECT 1, revision FROM meta WHERE id = 1;
 ";
 
+/// Latest external result per rule. The report and its invocation are committed with the change they checked.
+const CREATE_EXTERNAL: &str = "
+CREATE TABLE IF NOT EXISTS external_reports (
+    rule TEXT PRIMARY KEY,
+    doc TEXT NOT NULL
+);
+";
+
 /// Adds `column` to `table` when the table (made before the column existed) lacks it.
 fn add_column(
     conn: &Connection,
@@ -162,7 +172,9 @@ fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
             "TEXT NOT NULL DEFAULT 'builtin'",
         )?;
         add_column(conn, "check_invocations", "judge", "TEXT")?;
+        add_column(conn, "check_invocations", "external", "TEXT")?;
         conn.execute_batch(CREATE_JUDGED)?;
+        conn.execute_batch(CREATE_EXTERNAL)?;
     }
     Ok(())
 }
@@ -172,7 +184,7 @@ fn revision_of(n: i64) -> Option<StoreRevision> {
     u64::try_from(n).ok().map(StoreRevision)
 }
 
-/// An invocation as stored: revision, check, hook, the three counts, outcome, executor, judge.
+/// An invocation as stored: revision, check, hook, the three counts, outcome, executor, judge, external evidence.
 type InvocationRow = (
     i64,
     String,
@@ -182,6 +194,7 @@ type InvocationRow = (
     i64,
     String,
     String,
+    Option<String>,
     Option<String>,
 );
 
@@ -239,7 +252,7 @@ impl SqliteStore {
             .isle
             .call(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge
+                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external
                      FROM check_invocations ORDER BY seq",
                 )?;
                 stmt.query_map([], |r| {
@@ -253,6 +266,7 @@ impl SqliteStore {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
                     ))
                 })?
                 .collect()
@@ -262,7 +276,7 @@ impl SqliteStore {
         let corrupt = |what: &str| StoreError::Corrupt(format!("an invocation: {what}"));
         rows.into_iter()
             .map(
-                |(at, check, hook, notes, warnings, errors, outcome, executor, judge)| {
+                |(at, check, hook, notes, warnings, errors, outcome, executor, judge, external)| {
                     Ok(Invocation {
                         check: RuleId::try_from(check.as_str())
                             .map_err(|e| corrupt(&e.to_string()))?,
@@ -277,6 +291,12 @@ impl SqliteStore {
                         executor: Executor::from_word(&executor)
                             .ok_or_else(|| corrupt(&executor))?,
                         judge,
+                        external: external
+                            .map(|doc| {
+                                serde_json::from_str::<ExecutionEvidence>(&doc)
+                                    .map_err(|e| corrupt(&format!("external evidence: {e}")))
+                            })
+                            .transpose()?,
                     })
                 },
             )
@@ -483,6 +503,31 @@ impl JudgedRepository for SqliteStore {
 }
 
 impl Store for SqliteStore {
+    async fn external_reports(&self) -> Result<Vec<ExternalReport>, StoreError> {
+        let rows: Vec<(String, String)> = self
+            .isle
+            .call(|c| {
+                let mut stmt = c.prepare("SELECT rule, doc FROM external_reports ORDER BY rule")?;
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })
+            .await
+            .map_err(failed)?;
+        rows.into_iter()
+            .map(|(rule, doc)| {
+                let report: ExternalReport = serde_json::from_str(&doc)
+                    .map_err(|e| StoreError::Corrupt(format!("external report `{rule}`: {e}")))?;
+                if report.rule != rule {
+                    return Err(StoreError::Corrupt(format!(
+                        "external report `{rule}` names `{}`",
+                        report.rule
+                    )));
+                }
+                Ok(report)
+            })
+            .collect()
+    }
+
     async fn revision(&self) -> Result<StoreRevision, StoreError> {
         let number: i64 = self
             .isle
@@ -553,7 +598,21 @@ impl Store for SqliteStore {
                     i.outcome.word(),
                     i.executor.word(),
                     i.judge.clone(),
+                    i.external
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|e| StoreError::Failed(format!("external evidence: {e}")))?,
                 ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let external = changes
+            .external
+            .iter()
+            .map(|report| {
+                serde_json::to_string(report)
+                    .map(|doc| (report.rule.clone(), doc))
+                    .map_err(|e| StoreError::Failed(format!("external report: {e}")))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let judged = changes
@@ -633,14 +692,21 @@ impl Store for SqliteStore {
                         ],
                     )?;
                 }
-                for (at, check, hook, notes, warnings, errors, outcome, executor, judge) in
+                for (at, check, hook, notes, warnings, errors, outcome, executor, judge, external) in
                     &invocations
                 {
                     tx.execute(
                         "INSERT INTO check_invocations
-                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge],
+                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge, external],
+                    )?;
+                }
+                for (rule, doc) in &external {
+                    tx.execute(
+                        "INSERT INTO external_reports (rule, doc) VALUES (?1, ?2)
+                         ON CONFLICT (rule) DO UPDATE SET doc = excluded.doc",
+                        params![rule, doc],
                     )?;
                 }
                 for (rule, judge, read_at, reported_at, older, scope, findings) in &judged {
@@ -687,6 +753,7 @@ impl Store for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ports::external::{ExternalStoredFinding, ExternalSubject};
     use crate::domain::vo::id::ClauseId;
     use crate::infra::persist::fixture;
 
@@ -718,8 +785,10 @@ mod tests {
                 outcome: Outcome::Found,
                 executor: Executor::Builtin,
                 judge: None,
+                external: None,
             }],
             judged: Vec::new(),
+            external: Vec::new(),
         }
     }
 
@@ -880,6 +949,177 @@ mod tests {
             (ran[0].executor, ran[0].judge.clone()),
             (Executor::Builtin, None)
         );
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_database_before_external_checks_keeps_its_invocations_and_gets_the_new_storage() {
+        let path = temp_db("before-external");
+        let store = SqliteStore::open(&path).await.unwrap();
+        store.commit(StoreRevision(0), changes()).await.unwrap();
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE external_reports;
+             ALTER TABLE check_invocations DROP COLUMN external;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.revision().await.unwrap(), StoreRevision(1));
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(1));
+        assert!(store.external_reports().await.unwrap().is_empty());
+        let invocations = store.invocations().await.unwrap();
+        assert_eq!(invocations, changes().invocations);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_external_report_with_invalid_json_is_corrupt() {
+        let path = temp_db("external-corrupt");
+        SqliteStore::open(&path)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO external_reports (rule, doc) VALUES ('ext.a', '{')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(matches!(
+            store.external_reports().await,
+            Err(StoreError::Corrupt(_))
+        ));
+        store.close().await.unwrap();
+    }
+
+    fn external_report(rule: &str, failure: Option<&str>) -> ExternalReport {
+        ExternalReport {
+            rule: rule.into(),
+            input_stamp: Digest::of(b"input").to_string(),
+            config_stamp: Digest::of(b"config").to_string(),
+            findings: vec![ExternalStoredFinding {
+                subject: Some(ExternalSubject {
+                    kind: "clause".into(),
+                    id: fixture::id(50).to_string(),
+                }),
+                message: "the clause contradicts its example".into(),
+                level: "warning".into(),
+            }],
+            evidence: ExecutionEvidence {
+                command: Some("/tools/check-contract".into()),
+                command_digest: Some(Digest::of(b"program").to_string()),
+                config_digest: Digest::of(b"process").to_string(),
+                exit_code: Some(0),
+                stderr: "a diagnostic".into(),
+            },
+            failure: failure.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_reports_replace_their_rule_and_evidence_survives_reopening() {
+        let path = temp_db("external-reopen");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let first = external_report("ext.a", Some("timeout"));
+        let second = external_report("ext.b", None);
+        let mut first_changes = changes();
+        first_changes.external = vec![first, second.clone()];
+        first_changes.invocations[0].check = RuleId::from_static("ext.b");
+        first_changes.invocations[0].executor = Executor::External;
+        first_changes.invocations[0].external = Some(second.evidence.clone());
+        store
+            .commit(StoreRevision(0), first_changes.clone())
+            .await
+            .unwrap();
+        let mut replacement = external_report("ext.a", None);
+        replacement.findings.clear();
+        store
+            .commit(
+                StoreRevision(1),
+                Changes {
+                    external: vec![replacement.clone()],
+                    ..Changes::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Keeping an execution result does not change the model it checked.
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(1));
+        assert_eq!(store.revision().await.unwrap(), StoreRevision(2));
+        store.close().await.unwrap();
+
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(
+            store.external_reports().await.unwrap(),
+            vec![replacement, second]
+        );
+        assert_eq!(
+            store.invocations().await.unwrap(),
+            first_changes.invocations
+        );
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_commit_keeps_neither_external_reports_nor_evidence() {
+        let path = temp_db("external-conflict");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let first = external_report("ext.a", None);
+        store
+            .commit(
+                StoreRevision(0),
+                Changes {
+                    external: vec![first.clone()],
+                    ..Changes::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut stale = changes();
+        stale.external = vec![external_report("ext.b", Some("exit"))];
+        stale.invocations[0].external = Some(first.evidence.clone());
+        assert_eq!(
+            store.commit(StoreRevision(0), stale).await,
+            Err(StoreError::Conflict)
+        );
+        assert_eq!(store.external_reports().await.unwrap(), vec![first]);
+        assert!(store.invocations().await.unwrap().is_empty());
+        assert!(store.project().await.unwrap().is_none());
+        assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_external_report_whose_rule_disagrees_with_its_record_is_corrupt() {
+        let path = temp_db("external-rule-corrupt");
+        let store = SqliteStore::open(&path).await.unwrap();
+        store
+            .commit(
+                StoreRevision(0),
+                Changes {
+                    external: vec![external_report("ext.a", None)],
+                    ..Changes::default()
+                },
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE external_reports SET rule = 'ext.b'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(matches!(
+            store.external_reports().await,
+            Err(StoreError::Corrupt(_))
+        ));
         store.close().await.unwrap();
     }
 

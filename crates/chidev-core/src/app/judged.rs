@@ -163,10 +163,11 @@ fn state_of(rule: &JudgedRule, report: Option<&JudgedReport>, view: &ModelView) 
     }
 }
 
-impl<S, G> App<S, G>
+impl<S, G, E> App<S, G, E>
 where
     S: Store,
     G: IdSource,
+    E: super::ports::external::ExternalExecutor,
 {
     /// The judged rules to judge at `hook` (all when none), or the one named `rule`, with the level each is held
     /// to and a view of the model to judge them on. Rules the policy turned off are left out.
@@ -320,6 +321,7 @@ where
             },
             executor: Executor::Judged,
             judge: Some(judge.to_string()),
+            external: None,
         };
         let stored = StoreRevision(at.0 + 1);
         let stored_report = JudgedReport {

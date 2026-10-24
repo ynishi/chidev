@@ -26,7 +26,7 @@ static STALE_PIN: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Pin, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -83,7 +83,7 @@ static UNPINNED: Descriptor = Descriptor {
     hooks: Cow::Borrowed(ALL_HOOKS),
     default_level: Level::Note,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 

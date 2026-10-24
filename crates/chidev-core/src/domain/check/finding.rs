@@ -143,7 +143,7 @@ mod tests {
         hooks: Cow::Borrowed(&[Hook::Check]),
         default_level: Level::Note,
         mandatory: false,
-        params: &[],
+        params: std::borrow::Cow::Borrowed(&[]),
         executor: Executor::Builtin,
     };
 

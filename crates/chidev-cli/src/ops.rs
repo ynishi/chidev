@@ -3,6 +3,7 @@
 
 use std::io::{self, BufRead, Write};
 
+use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
@@ -77,6 +78,8 @@ enum Op {
     Status,
     /// Runs every check on the project as it is; nothing is kept.
     Check,
+    /// Explicitly executes external check-hook programs and records this run.
+    CheckRun,
     /// Lists every check with the level it runs at.
     CheckList,
     /// The judged rules to judge (those of `hook`, or the one `rule`; all when neither is given), with a view of
@@ -540,14 +543,15 @@ impl From<ClauseRefDto> for ClauseRef {
 /// Runs every line of `input` against `app` and writes one result line per operation to `out`. A blank line is
 /// skipped. A line that fails (bad JSON or a refused operation) gets a result with `"ok": false` and the run goes
 /// on. Returns whether every operation succeeded; an error is only a failure to read or write.
-pub async fn run<S, G>(
-    app: &mut App<S, G>,
+pub async fn run<S, G, E>(
+    app: &mut App<S, G, E>,
     input: impl BufRead,
     out: &mut impl Write,
 ) -> io::Result<bool>
 where
     S: Store,
     G: IdSource,
+    E: ExternalExecutor,
 {
     let mut all_ok = true;
     for (k, line) in input.lines().enumerate() {
@@ -565,6 +569,10 @@ where
                 Value::Object(fields)
             }
             Ok(other) => json!({ "ok": true, "result": other }),
+            Err(AppError::ExternalRefused { findings, external }) => {
+                all_ok = false;
+                json!({ "ok": false, "error": "refused by external gate(s)", "findings": findings_out(&findings), "external": external })
+            }
             Err(AppError::Refused(found)) => {
                 all_ok = false;
                 json!({ "ok": false, "error": AppError::Refused(found.clone()).to_string(), "findings": findings_out(&found) })
@@ -585,12 +593,17 @@ fn to_value(out: &impl Serialize) -> Result<Value, AppError> {
     serde_json::to_value(out).map_err(|e| AppError::Input(format!("cannot write the result: {e}")))
 }
 
-async fn apply<S, G>(app: &mut App<S, G>, op: Op) -> Result<Value, AppError>
+async fn apply<S, G, E>(app: &mut App<S, G, E>, op: Op) -> Result<Value, AppError>
 where
     S: Store,
     G: IdSource,
+    E: ExternalExecutor,
 {
     Ok(match op {
+        Op::CheckRun => {
+            let result = app.check_run().await?;
+            json!({ "op": "check_run", "findings": findings_out(&result.findings), "external": result.external })
+        }
         Op::Init => json!({ "op": "init", "project": app.init().await?.to_string() }),
         Op::ContextAdd { name, uses } => {
             json!({ "op": "context_add", "context": app.add_context(&name, &uses).await?.to_string() })
@@ -764,7 +777,12 @@ where
                 .map(|u| json!({ "cr": u.cr, "decision": u.decision, "unchanged": u.unchanged, "gone": u.gone }))
                 .collect();
             let judged = to_value(&standing_out(&s.judged))?;
-            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings), "judged": judged })
+            let external: Vec<Value> = s
+                .external
+                .iter()
+                .map(|r| json!({"rule":r.rule.as_str(),"state":r.state.word()}))
+                .collect();
+            json!({ "op": "status", "pins": pins, "stale_cites": stale, "change_requests": crs, "unapplied": open, "findings": findings_out(&s.findings), "judged": judged, "external": external })
         }
         Op::Check => {
             let found = app.check().await?;

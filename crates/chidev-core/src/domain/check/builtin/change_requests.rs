@@ -27,7 +27,7 @@ static UNAPPLIED: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -70,7 +70,7 @@ static KEEP_BEHAVIOR_CHANGED: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -120,7 +120,7 @@ static PARENT_RESOLVED_EARLY: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
     default_level: Level::Warning,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 

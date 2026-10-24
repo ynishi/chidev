@@ -83,6 +83,14 @@ pub fn parse(text: &str, origin: Origin) -> Result<Layer, String> {
     let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     let mut entries = Vec::new();
     for (key, value) in &doc {
+        // Project registrations are validated by the external adapter loader. A person
+        // may override levels here, but cannot register programs in their policy layer.
+        if key == "external" && origin == Origin::Project {
+            if !value.is_table() {
+                return Err("`external` is a table of rule registrations".into());
+            }
+            continue;
+        }
         if key != "checks" {
             return Err(format!(
                 "`{key}` is not a section of a policy; there is `checks`"

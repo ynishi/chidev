@@ -5,6 +5,7 @@
 //! so that nothing past this layer sees them. An adapter that grows large
 //! moves to a crate of its own.
 
+pub mod external;
 pub mod ids;
 pub mod judged;
 mod persist;

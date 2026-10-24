@@ -23,7 +23,7 @@ static NO_INTERFACE: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 
@@ -61,7 +61,7 @@ static NO_HARNESS: Descriptor = Descriptor {
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
-    params: &[],
+    params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
 };
 

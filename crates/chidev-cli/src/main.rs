@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chidev_core::app::{App, Registry};
+use chidev_core::domain::check::builtin;
+use chidev_core::infra::external;
 use chidev_core::infra::ids::UuidV7;
 use chidev_core::infra::judged;
 use chidev_core::infra::policy;
@@ -67,8 +69,12 @@ async fn main() -> ExitCode {
                     .and_then(|root| {
                         let layers = policy::load(&root).map_err(|e| format!("policy: {e}"))?;
                         let rules = judged::load(&root).map_err(|e| format!("rules: {e}"))?;
-                        Registry::builtin_with_judged(rules, &layers)
-                            .map_err(|e| format!("policy: {e}"))
+                        let (external_rules, executor) =
+                            external::load(&root).map_err(|e| format!("external: {e}"))?;
+                        let registry =
+                            Registry::with_external(builtin::all(), rules, external_rules, &layers)
+                                .map_err(|e| format!("policy: {e}"))?;
+                        Ok((registry, executor))
                     }) {
                     Ok(r) => r,
                     Err(e) => {
@@ -83,7 +89,8 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let mut app = App::with_registry(sqlite, UuidV7, registry);
+            let (registry, executor) = registry;
+            let mut app = App::with_registry(sqlite, UuidV7, registry).with_external(executor);
             let mut out = io::stdout().lock();
             let code = match ops::run(&mut app, reader, &mut out).await {
                 Ok(true) => ExitCode::SUCCESS,

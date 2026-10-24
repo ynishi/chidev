@@ -126,7 +126,7 @@ impl JudgedRule {
                 hooks: Cow::Owned(hooks),
                 default_level: level,
                 mandatory: false,
-                params: &[],
+                params: std::borrow::Cow::Borrowed(&[]),
                 executor: Executor::Judged,
             },
             question,

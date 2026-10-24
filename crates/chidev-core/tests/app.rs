@@ -95,7 +95,7 @@ mod checks {
         hooks: Cow::Borrowed(&[Hook::Put]),
         default_level: Level::Error,
         mandatory: true,
-        params: &[],
+        params: std::borrow::Cow::Borrowed(&[]),
         executor: Executor::Builtin,
     };
 

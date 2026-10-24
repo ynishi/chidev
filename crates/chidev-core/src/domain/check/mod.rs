@@ -9,14 +9,14 @@
 //! - **builtin** ([`builtin`]): Rust code of this crate, a pure function of the view. Done.
 //! - **judged** ([`judged`]): a rule written as data, which the agent driving chidev judges (chidev keeps the rules
 //!   and the results; it never judges). Done. It runs at no hook and cannot be mandatory.
-//! - **external**: a program run as a process. Designed, not implemented; the design is on [`Executor::External`]
-//!   (manifest in `checks.toml`, a versioned JSON request and response on stdin and stdout, advisory unless
-//!   promoted and then fail-closed, the command's checksum recorded, not sandboxed).
+//! - **external** ([`external`]): a project-registered program run through an application port. Its findings
+//!   share the policy and change gates; execution failures are explicit findings. See [`Executor::External`].
 //!
 //! What any of them finds is the same [`Finding`], which a change request can address.
 
 pub mod builtin;
 pub mod descriptor;
+pub mod external;
 pub mod finding;
 pub mod judged;
 pub mod level;

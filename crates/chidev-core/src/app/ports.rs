@@ -1,6 +1,8 @@
 //! What the use cases need from outside the domain: fresh ids, the names a person gives the assets, and a store
 //! that keeps what one use case changed whole or not at all.
 
+pub mod external;
+
 use std::future::Future;
 
 use uuid::Uuid;
@@ -82,6 +84,8 @@ pub enum Outcome {
     Ok,
     /// It found something (at any level).
     Found,
+    /// The external program failed to execute or answer the protocol.
+    Failed,
 }
 
 impl Outcome {
@@ -90,6 +94,7 @@ impl Outcome {
         match self {
             Outcome::Ok => "ok",
             Outcome::Found => "found",
+            Outcome::Failed => "failed",
         }
     }
 }
@@ -97,7 +102,7 @@ impl Outcome {
 impl Outcome {
     /// The outcome a word names; `None` for any other.
     pub fn from_word(word: &str) -> Option<Outcome> {
-        [Outcome::Ok, Outcome::Found]
+        [Outcome::Ok, Outcome::Found, Outcome::Failed]
             .into_iter()
             .find(|o| o.word() == word)
     }
@@ -127,6 +132,8 @@ pub struct Invocation {
     pub executor: Executor,
     /// The agent that judged it, for a judged rule; none otherwise.
     pub judge: Option<String>,
+    /// Evidence of an external process; absent for builtin and judged checks.
+    pub external: Option<external::ExecutionEvidence>,
 }
 
 /// One finding an agent reported for a judged rule.
@@ -180,6 +187,8 @@ pub struct Changes {
     pub invocations: Vec<Invocation>,
     /// Reports of judged rules (each replaces the report of its rule).
     pub judged: Vec<JudgedReport>,
+    /// Latest results of external checks, kept with the candidate model.
+    pub external: Vec<external::ExternalReport>,
 }
 
 /// Where the store stood when a use case began to read. A commit given an older one is refused
@@ -199,6 +208,11 @@ pub trait JudgedRepository {
 pub trait Store:
     ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames + JudgedRepository
 {
+    /// Latest persisted execution of every external rule.
+    fn external_reports(
+        &self,
+    ) -> impl Future<Output = Result<Vec<external::ExternalReport>, StoreError>> + Send;
+
     /// Where the store stands now; read it before the use case reads anything else.
     fn revision(&self) -> impl Future<Output = Result<StoreRevision, StoreError>> + Send;
 

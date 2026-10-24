@@ -4,6 +4,7 @@
 
 use super::ports::{Invocation, Outcome, StoreRevision};
 use crate::domain::check::builtin;
+use crate::domain::check::external::ExternalRule;
 use thiserror::Error;
 
 use crate::domain::check::{
@@ -30,6 +31,7 @@ pub enum RegistryError {
 pub struct Registry {
     checks: Vec<&'static dyn Check>,
     judged: Vec<JudgedRule>,
+    external: Vec<ExternalRule>,
     policy: Policy,
 }
 
@@ -78,6 +80,7 @@ impl Registry {
         Ok(Registry {
             checks: checks.to_vec(),
             judged: Vec::new(),
+            external: Vec::new(),
             policy: Policy::resolve(&descriptors, layers)?,
         })
     }
@@ -89,22 +92,38 @@ impl Registry {
         judged: Vec<JudgedRule>,
         layers: &[Layer],
     ) -> Result<Registry, RegistryError> {
+        Self::with_external(checks, judged, Vec::new(), layers)
+    }
+
+    /// Registers every executor under one policy; process I/O stays outside the registry.
+    pub fn with_external(
+        checks: &[&'static dyn Check],
+        judged: Vec<JudgedRule>,
+        external: Vec<ExternalRule>,
+        layers: &[Layer],
+    ) -> Result<Registry, RegistryError> {
         let mut seen: Vec<&RuleId> = checks.iter().map(|c| &c.descriptor().id).collect();
-        for r in &judged {
-            if seen.contains(&r.id()) {
-                return Err(RegistryError::DuplicateRule(r.id().clone()));
+        for id in judged
+            .iter()
+            .map(JudgedRule::id)
+            .chain(external.iter().map(|r| &r.descriptor().id))
+        {
+            if seen.contains(&id) {
+                return Err(RegistryError::DuplicateRule(id.clone()));
             }
-            seen.push(r.id());
+            seen.push(id);
         }
         let descriptors: Vec<&Descriptor> = checks
             .iter()
             .map(|c| c.descriptor())
             .chain(judged.iter().map(JudgedRule::descriptor))
+            .chain(external.iter().map(ExternalRule::descriptor))
             .collect();
         let policy = Policy::resolve(&descriptors, layers)?;
         Ok(Registry {
             checks: checks.to_vec(),
             judged,
+            external,
             policy,
         })
     }
@@ -128,6 +147,7 @@ impl Registry {
         Registry {
             checks: checks.to_vec(),
             judged: Vec::new(),
+            external: Vec::new(),
             policy: Policy::defaults(checks.iter().map(|c| c.descriptor())),
         }
     }
@@ -144,6 +164,7 @@ impl Registry {
             .iter()
             .map(|c| c.descriptor())
             .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .chain(self.external.iter().map(ExternalRule::descriptor))
             .filter_map(|d| {
                 let r = self.policy.of(&d.id)?;
                 Some(CheckInfo {
@@ -153,6 +174,11 @@ impl Registry {
                 })
             })
             .collect()
+    }
+
+    /// External rules, in configured order.
+    pub fn external(&self) -> &[ExternalRule] {
+        &self.external
     }
 
     /// The judged rules, in the order they were given.
@@ -171,6 +197,7 @@ impl Registry {
             .iter()
             .map(|c| c.descriptor())
             .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .chain(self.external.iter().map(ExternalRule::descriptor))
             .find(|d| d.id == *id)
             .map(|d| d.executor)
     }
@@ -210,6 +237,7 @@ impl Registry {
                 },
                 executor: Executor::Builtin,
                 judge: None,
+                external: None,
             };
             for f in &found {
                 match f.level() {
