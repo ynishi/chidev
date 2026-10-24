@@ -447,6 +447,53 @@ mod tests {
     }
 
     #[test]
+    fn the_kind_of_a_harness_comes_back_and_a_document_without_one_is_a_harness_of_tests() {
+        use crate::domain::vo::harness_kind::HarnessKind;
+        use crate::domain::vo::id::HarnessId;
+        use crate::domain::vo::source::Source;
+        let mut p = project();
+        let text = encode_project(&p).unwrap();
+        // tests are the default and are not written, so a document of before kinds is the same document
+        assert!(!text.contains("\"kind\""), "{text}");
+        let harness = HarnessId::from_uuid(id(40));
+        let top = p
+            .contexts()
+            .find(|c| c.harness(harness).is_some())
+            .map(|c| c.id())
+            .unwrap();
+        let given = || {
+            let c = p.context(top).and_then(|c| c.harness(harness)).unwrap();
+            c.cases()
+                .iter()
+                .map(|k| (k.id(), k.name().clone(), k.lines(), k.cites().clone()))
+                .collect::<Vec<_>>()
+        };
+        let cases = given();
+        p.put_harness_as(
+            top,
+            harness,
+            Some(HarnessKind::Sim),
+            Source::new("#[test]\nfn push_then_pop() {}\n".to_string()),
+            cases,
+        )
+        .unwrap();
+        let text = encode_project(&p).unwrap();
+        assert!(text.contains("\"kind\":\"sim\""), "{text}");
+        let back = decode_project(CURRENT, &text).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(
+            back.context(top)
+                .and_then(|c| c.harness(harness))
+                .unwrap()
+                .kind(),
+            HarnessKind::Sim
+        );
+        // a kind nobody knows is corrupt, not quietly tests
+        let odd = text.replace("\"kind\":\"sim\"", "\"kind\":\"fuzz\"");
+        assert!(decode_project(CURRENT, &odd).is_err());
+    }
+
+    #[test]
     fn a_pin_comes_back_as_it_was_written() {
         let pin = pin(&project());
         let text = encode_pin(&pin).unwrap();

@@ -9,6 +9,7 @@ use super::context::{Context, ContextError};
 use super::harness::CaseFound;
 use super::interface::ItemFound;
 use crate::domain::vo::clause::ClauseContent;
+use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
 };
@@ -215,7 +216,7 @@ impl Project {
         self.change(context, |c| c.put_interface(id, source, items))
     }
 
-    /// Makes or revises a Harness of a Context.
+    /// Makes or revises a Harness of a Context. A new one is of tests, and an existing one keeps its kind.
     pub fn put_harness(
         &mut self,
         context: ContextId,
@@ -223,7 +224,19 @@ impl Project {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ProjectError> {
-        self.change(context, |c| c.put_harness(id, source, cases))
+        self.put_harness_as(context, id, None, source, cases)
+    }
+
+    /// Makes or revises a Harness of a Context as one of `kind` (none: the kind it has, or tests for a new one).
+    pub fn put_harness_as(
+        &mut self,
+        context: ContextId,
+        id: HarnessId,
+        kind: Option<HarnessKind>,
+        source: Source,
+        cases: Vec<CaseFound>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, |c| c.put_harness(id, kind, source, cases))
     }
 
     /// Applies `f` to a copy of the Context and keeps the result when the Project still holds.

@@ -8,10 +8,10 @@ use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
     ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput, EvidenceInput,
-    EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, Importance, Intent, ItemInput,
-    ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput,
-    ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RuleStanding, RuleToJudge,
-    SubjectInput, TargetInput,
+    EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, HarnessKind, Importance, Intent,
+    ItemInput, ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
+    PolicyLineInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RuleStanding,
+    RuleToJudge, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -48,10 +48,13 @@ enum Op {
         source: String,
         items: Vec<ItemDto>,
     },
-    /// Makes or revises a Harness.
+    /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
+    /// keeps its kind when none is given.
     HarnessPut {
         context: String,
         name: String,
+        #[serde(default)]
+        kind: Option<String>,
         source: String,
         cases: Vec<CaseDto>,
     },
@@ -91,13 +94,18 @@ enum Op {
     },
     /// Closes the record of a change request whose change is applied.
     CrResolve { title: String },
-    /// Measures the code the Pin of an Interface accepted (`kind` is `mutate`): runs it against the Harnesses as the
-    /// model holds them, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. It
-    /// takes as long as the project's build and tests take, once per mutant.
+    /// Measures, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. `kind`
+    /// `mutate` (with `interface`) runs the code the Pin of the Interface accepted against the Harnesses as the
+    /// model holds them, once per mutant. `kind` `simulate` (with `harness`, a sim Harness) builds the program from
+    /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. Either takes as
+    /// long as the project's build and tests or script take.
     Measure {
         kind: MeasureKindDto,
         context: String,
-        interface: String,
+        #[serde(default)]
+        interface: Option<String>,
+        #[serde(default)]
+        harness: Option<String>,
     },
     /// Where the project stands.
     Status,
@@ -124,14 +132,61 @@ enum Op {
 #[serde(rename_all = "snake_case")]
 enum MeasureKindDto {
     Mutate,
+    Simulate,
 }
 
 impl From<MeasureKindDto> for MeasureKind {
     fn from(k: MeasureKindDto) -> MeasureKind {
         match k {
             MeasureKindDto::Mutate => MeasureKind::Mutate,
+            MeasureKindDto::Simulate => MeasureKind::Simulate,
         }
     }
+}
+
+/// A promise a case broke, in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct CaseFindingOut<'a> {
+    step: u32,
+    clause: &'a str,
+    text: &'a str,
+}
+
+/// A clause a case did not reach, in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct UnreachedOut<'a> {
+    clause: &'a str,
+    text: &'a str,
+}
+
+/// A case of a simulation, in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct CaseOut<'a> {
+    case: &'a str,
+    exit: &'a str,
+    findings: Vec<CaseFindingOut<'a>>,
+    unreached: Vec<UnreachedOut<'a>>,
+    undecided: &'a [String],
+    schedule: Option<&'a str>,
+    trace: Option<&'a str>,
+}
+
+/// A case run a second time, in the result of `measure`.
+#[derive(Debug, Serialize)]
+struct RerunOut<'a> {
+    case: &'a str,
+    result: &'static str,
+}
+
+/// What a simulation found, in numbers, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct SimSummaryOut {
+    cases: u32,
+    findings: u32,
+    unreached: u32,
+    abnormal: u32,
+    reruns: u32,
+    differing: u32,
 }
 
 /// A mutant in the result of `measure`.
@@ -168,14 +223,21 @@ struct MeasureOut<'a> {
     stillborn: u32,
     timeout: u32,
     mutants: Vec<MutantOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cases: Vec<CaseOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reruns: Vec<RerunOut<'a>>,
     evidence: Vec<StepOut<'a>>,
 }
 
-/// The latest measurement of an Interface, in the result of `status`.
+/// The latest measurement of an Interface or a sim Harness, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct MeasurementOut<'a> {
     context: &'a str,
-    interface: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<&'a str>,
     kind: &'static str,
     id: &'a str,
     stamp: &'a str,
@@ -186,6 +248,8 @@ struct MeasurementOut<'a> {
     survived: u32,
     stillborn: u32,
     timeout: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sim: Option<SimSummaryOut>,
     at: u64,
 }
 
@@ -1272,8 +1336,28 @@ where
             kind,
             context,
             interface,
+            harness,
         } => {
-            let done = app.measure(kind.into(), &context, &interface).await?;
+            let done = match (MeasureKind::from(kind), interface, harness) {
+                (MeasureKind::Mutate, Some(interface), None) => {
+                    app.measure(MeasureKind::Mutate, &context, &interface)
+                        .await?
+                }
+                (MeasureKind::Simulate, None, Some(harness)) => {
+                    app.simulate(&context, &harness).await?
+                }
+                (MeasureKind::Mutate, _, _) => {
+                    return Err(AppError::Input(
+                        "a `mutate` measure takes an `interface` and no `harness`".to_string(),
+                    ));
+                }
+                (MeasureKind::Simulate, _, _) => {
+                    return Err(AppError::Input(
+                        "a `simulate` measure takes a `harness` (a sim harness) and no `interface`"
+                            .to_string(),
+                    ));
+                }
+            };
             to_value(&MeasureOut {
                 op: "measure",
                 kind: done.kind,
@@ -1299,6 +1383,42 @@ where
                         operator: &m.operator,
                         change: &m.change,
                         outcome: m.outcome,
+                    })
+                    .collect(),
+                cases: done
+                    .cases
+                    .iter()
+                    .map(|c| CaseOut {
+                        case: &c.case,
+                        exit: &c.exit,
+                        findings: c
+                            .findings
+                            .iter()
+                            .map(|f| CaseFindingOut {
+                                step: f.step,
+                                clause: &f.label,
+                                text: &f.text,
+                            })
+                            .collect(),
+                        unreached: c
+                            .unreached
+                            .iter()
+                            .map(|u| UnreachedOut {
+                                clause: &u.label,
+                                text: &u.text,
+                            })
+                            .collect(),
+                        undecided: &c.undecided,
+                        schedule: c.schedule.as_deref(),
+                        trace: c.trace.as_deref(),
+                    })
+                    .collect(),
+                reruns: done
+                    .reruns
+                    .iter()
+                    .map(|r| RerunOut {
+                        case: &r.case,
+                        result: r.result,
                     })
                     .collect(),
                 evidence: done
@@ -1361,9 +1481,20 @@ where
         Op::HarnessPut {
             context,
             name,
+            kind,
             source,
             cases,
         } => {
+            let kind = kind
+                .as_deref()
+                .map(|w| {
+                    HarnessKind::from_word(w).ok_or_else(|| {
+                        AppError::Input(format!(
+                            "the harness kind `{w}` is not one; it is tests or sim"
+                        ))
+                    })
+                })
+                .transpose()?;
             let cases: Vec<CaseInput> = cases
                 .into_iter()
                 .map(|c| CaseInput {
@@ -1373,7 +1504,9 @@ where
                     clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
                 })
                 .collect();
-            let done = app.put_harness(&context, &name, &source, &cases).await?;
+            let done = app
+                .put_harness_of(&context, &name, kind, &source, &cases)
+                .await?;
             json!({ "op": "harness_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::Pin {
@@ -1661,7 +1794,8 @@ where
                     .iter()
                     .map(|m| MeasurementOut {
                         context: &m.context,
-                        interface: &m.interface,
+                        interface: m.interface.as_deref(),
+                        harness: m.harness.as_deref(),
                         kind: m.kind,
                         id: &m.id,
                         stamp: &m.stamp,
@@ -1672,6 +1806,14 @@ where
                         survived: m.counts.survived,
                         stillborn: m.counts.stillborn,
                         timeout: m.counts.timeout,
+                        sim: m.sim.map(|x| SimSummaryOut {
+                            cases: x.cases,
+                            findings: x.findings,
+                            unreached: x.unreached,
+                            abnormal: x.abnormal,
+                            reruns: x.reruns,
+                            differing: x.differing,
+                        }),
                         at: m.at,
                     })
                     .collect(),

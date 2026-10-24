@@ -9,7 +9,9 @@ use std::pin::Pin;
 
 use thiserror::Error;
 
+use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::measure::{MeasureFailure, MutantResult, StepEvidence};
+use crate::domain::vo::sim::{CaseRun, RegressName, Rerun};
 
 /// A future that is boxed so that the port can be used as a trait object: the use case holds one runner for the
 /// life of the program, chosen by the program that starts it.
@@ -52,6 +54,47 @@ pub struct MutateReport {
     pub evidence: Vec<StepEvidence>,
 }
 
+/// The code a Pin accepted, with the name of the Interface it is the code of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceText {
+    /// The Interface's name in its Context.
+    pub name: String,
+    /// The code the Pin accepted, whole.
+    pub code: String,
+}
+
+/// One request to simulate a sim Harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulateRequest {
+    /// An id of this run, unique, for the directory the run works in.
+    pub run: String,
+    /// The Context's name.
+    pub context: String,
+    /// The sim Harness's name.
+    pub harness: String,
+    /// The script, as the model holds it now.
+    pub script: String,
+    /// The code the Pins accepted for the Interfaces the Harness's Cases cite.
+    pub interfaces: Vec<InterfaceText>,
+    /// The labels of the Clauses the sweep Case cites: a report that names another is a protocol failure.
+    pub labels: Vec<ClauseLabel>,
+    /// The regress cases of the Harness, in the order they are to be run.
+    pub regress: Vec<RegressName>,
+}
+
+/// What a simulation observed. A run that failed carries the failure and what it got through before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulateReport {
+    /// Each case that was run, in order: the seeds, then the regress cases.
+    pub cases: Vec<CaseRun>,
+    /// The sampled cases, run a second time in a fresh copy, and how they compared.
+    pub reruns: Vec<Rerun>,
+    /// Why the run did not finish; none when it did.
+    pub failure: Option<MeasureFailure>,
+    /// What the commands did.
+    pub evidence: Vec<StepEvidence>,
+}
+
 /// Why a run could not even be set up: nothing was run, so nothing is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RunnerError {
@@ -80,6 +123,22 @@ pub trait Runner: fmt::Debug + Send + Sync {
         &'a self,
         request: &'a MutateRequest,
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>>;
+
+    /// A digest of everything the configuration contributes to a simulation of the sim Harness `harness` of
+    /// `context` (the commands, the layout of the script and of the Interfaces, the limits, the interpreter and
+    /// its executable). An error when the configuration cannot simulate it.
+    fn sim_settings<'a>(
+        &'a self,
+        context: &'a str,
+        harness: &'a str,
+    ) -> BoxFuture<'a, Result<String, RunnerError>>;
+
+    /// Builds the program from the pinned code and runs the script for each case, then again for a sample of the
+    /// cases in a fresh copy, to see that the same case gives the same schedule and trace.
+    fn simulate<'a>(
+        &'a self,
+        request: &'a SimulateRequest,
+    ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>>;
 }
 
 /// The runner of an application that has no measure configured.
@@ -99,6 +158,21 @@ impl Runner for NoRunner {
         &'a self,
         _: &'a MutateRequest,
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn sim_settings<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn simulate<'a>(
+        &'a self,
+        _: &'a SimulateRequest,
+    ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 }

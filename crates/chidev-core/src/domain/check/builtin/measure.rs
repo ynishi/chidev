@@ -36,7 +36,9 @@ fn pinned<'a>(
 }
 
 fn settings<'a>(view: &'a CheckView<'a>, m: &Measurement) -> Option<&'a str> {
-    view.measure_settings.get(&m.subject()).map(String::as_str)
+    view.measure_settings
+        .get(&m.interface()?)
+        .map(String::as_str)
 }
 
 /// The latest mutation run of an Interface failed.
@@ -231,6 +233,7 @@ mod tests {
                 change_requests: &[],
                 measurements,
                 measure_settings: settings,
+                sim_settings: &BTreeMap::new(),
             },
             &Params::default(),
         )

@@ -175,6 +175,149 @@ The bundled Rust provider is `chidev provider mutants-rust`: it mutates operator
 (`int`) inside function bodies, leaves `#[cfg(test)]` and `#[test]` code alone, and
 gives the same reply for the same request.
 
+### Simulation (blind, any language)
+
+Tests written next to the code tend to check what the code does. A *sim Harness*
+checks the code against the Contracts only: a script, written without reading the
+program, drives the program as a black box with a schedule it makes from a seed,
+and says which Clause did not hold. chidev runs it; it is the same for a Python,
+TypeScript or Rust program, because chidev only starts processes and reads their
+output.
+
+A Harness has a kind: `tests` (the default; what every Harness has been) or `sim`.
+
+```text
+{"op":"harness_put","context":"ledger","name":"bank-sim","kind":"sim","source":"...","cases":[
+  {"name":"sweep","lines":[1,1],"items":[...],"clauses":[{"contract":"account","label":"C1"},{"contract":"account","label":"C2"}]},
+  {"name":"regress-overdraw","lines":[2,2],"items":[...],"clauses":[{"contract":"account","label":"C2"}]}]}
+```
+
+A sim Harness has exactly one Case named `sweep` and any number named
+`regress-<name>` (`a-z`, `0-9`, `-`). The `sweep` stands for the seeded runs and
+cites every Clause the script checks; each `regress-<name>` stands for a fixed
+schedule the script keeps. Every Case cites Items (so the Harness enters the Pin's
+basis as any Harness does) and Clauses of this Context's Contracts. Without
+`kind`, a new Harness is of tests and an existing one keeps its kind; changing the
+kind is a new revision. A Context has at most one sim Harness, and the sweep cites
+each label once (the script names a Clause by its label).
+
+```text
+{"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"}
+```
+
+It copies the project under `.chidev/measure/<run>/` as a mutation run does,
+writes the code the Pins of the Interfaces the Harness's Cases cite accepted and
+the script (the Harness's source as the model holds it) over the copy, and runs
+`build`. A program that does not build is a failed run (`no_build`) and the script
+is not run. Then it starts the script once per case, `seed-0` to `seed-<seeds-1>`
+and every regress case, and then runs `seed-0` and up to `sample` of the cases that
+had findings once more, in a second, fresh copy.
+
+#### Protocol `chidev-sim 1`
+
+```text
+<interpreter...> <script> <case> --out <dir> -- <program argv...>
+```
+
+`<case>` is `seed-<n>` or `regress-<name>`; the working directory is the copy; the
+program argv is `program` of the configuration with `{work}` made the root of the
+copy. The script drives the program (standard input and output, arguments), writes
+`<dir>/schedule` (the choices it made from the case) and `<dir>/trace` (what the
+program did under them), and prints, one per line:
+
+```text
+FINDING <case> step <k> <ClauseLabel>: <text>
+UNREACHED <ClauseLabel>: <text>
+UNDECIDED <text>
+sim: findings=<n>
+```
+
+- `FINDING`: after step *k* (from 1) of this case a promise of the Clause did not
+  hold. The case must be the one the script was started for.
+- `UNREACHED`: this case never reached the situation the Clause needs. A Clause is
+  *unreached* for the run when every seed that ended normally said so.
+- `UNDECIDED`: the script could not decide something; counted, never a failure.
+- `sim: findings=<n>` is the last line and `n` is the number of `FINDING` lines.
+
+Exit 0 or 1 (1 when there are findings) means the report is read. A label the
+sweep Case does not cite, a line of none of these forms, a missing or repeated
+summary, a summary that disagrees with the lines, a normal case that wrote no
+`schedule` and `trace`, or a report over 1 MiB is a protocol failure of the whole
+run; the cases run so far are kept. Another exit code, or a case past `timeout`,
+is recorded for that case and the run goes on. chidev takes the SHA-256 of
+`schedule` and `trace` itself, and it is chidev, not the script, that runs the
+sampled cases again: a different schedule means the script draws something besides
+its seed (a fault of the script), the same schedule and a different trace means
+the program draws its own order (a fault of the program).
+
+#### `[measure.sim.<context>]` in `checks.toml`
+
+```toml
+[measure]
+build = ["python3", "-m", "py_compile", "bank.py"]   # a failure: the run fails with no_build
+# `test` and a layout `lang` are only for mutation; a project that is only simulated needs neither
+
+[measure.sim.ledger]
+interpreter = ["python3"]                  # argv prefix; the script path follows it
+program = ["python3", "{work}/bank.py"]    # the program under test; {work} = root of the copy
+seeds = 50       # seed-0 .. seed-49 (default 50, at most 10000)
+sample = 6       # cases with findings run again besides seed-0 (default 6, at most 1000)
+timeout = 60     # seconds, one case (default 60)
+budget = 600     # seconds, the whole run, second runs included (default 600, at most 3600)
+
+[[measure.layout]]
+context = "ledger"
+interface = "bank"          # the code of each cited Interface is written here
+path = "bank.py"
+
+[[measure.layout]]
+context = "ledger"
+harness = "bank-sim"        # the script
+path = "sim.py"
+```
+
+Every Interface a sim Case cites needs a layout entry and a Pin (`pin` keeps the
+code text); the script needs one. `build` runs with `baseline_timeout`. The
+settings digest covers the whole `[measure]` table and the interpreter's
+executable. Note that `{work}` in `program` is the root of the copy, while in `env`
+it is the run's directory (its parent).
+
+#### Rules
+
+| rule | default | finds |
+|---|---|---|
+| `sim.shape` | error | a sim Harness without exactly one `sweep`, with a Case that is neither `sweep` nor `regress-<name>`, that cites no Clause or a Clause of another Context, a repeated label in the sweep, or two sim Harnesses in a Context (hook `put`, and `check`) |
+| `sim.uncited-clause` | warning | a Clause of a Context that has a sim Harness which no sim Case cites |
+| `sim.unrun` | warning | a sim Harness never simulated |
+| `sim.stale` | warning | the script, a Contract or Interface its Cases cite, the code pinned for the program, or the settings moved after the run |
+| `sim.finding` | error | one per Clause with findings, about the Clause, with the first case and step |
+| `sim.unreached` | error | one per Clause no seed reached, about the Clause |
+| `sim.nondeterministic` | error, **mandatory** | a case that gave another schedule or trace the second time, about the Case; no policy lowers it |
+| `sim.error` | warning | the run failed (`no_build`, protocol, budget, ...) or the script failed for a case |
+
+A stale run is judged stale first (only a second run that did not reproduce is
+still reported). A failed run is judged by `sim.error` alone. `status.measurements`
+lists the latest simulation per sim Harness with `harness`, `sim` counts (`cases`,
+`findings`, `unreached`, `abnormal`, `reruns`, `differing`), `outcome` and `state`.
+
+#### Writing a sim script (for the procedure that writes it)
+
+The script is written blind, from the Contracts and the Interfaces only. It never
+reads the program's code, its tests or its history, so that it checks the promises
+and not the implementation. Therefore:
+
+- cite in the `sweep` Case every Clause the script checks, and print a `FINDING`
+  only with the label of a Clause it cites;
+- check each Clause literally, with an expected value computed from the Clause's
+  sentence by the script's own model, never from the program's answers;
+- use only the seed for randomness (`random.Random(seed)`, not the clock, the
+  process id, the environment, unseeded random numbers, or the iteration order of an
+  unordered collection), so that the same case gives the same `schedule` every time;
+- write everything the program did into `trace` in a stable order, and make a
+  schedule that reaches the situations the Clauses need (print `UNREACHED` when a
+  case does not), keeping a `regress-<name>` Case for each situation that is hard to
+  reach by chance or was once a finding.
+
 ## Change requests
 
 A change request says what it expects of the targets it points at, in three

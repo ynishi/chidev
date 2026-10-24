@@ -8,6 +8,7 @@ use super::contract::{Contract, ContractError};
 use super::harness::{CaseFound, Harness, HarnessError};
 use super::interface::{Interface, InterfaceError, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
+use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
@@ -280,17 +281,24 @@ impl Context {
         Ok(())
     }
 
-    /// Makes the Harness with this id, or revises it when the Context has it.
+    /// Makes the Harness with this id, or revises it when the Context has it. `kind` is the kind it is to have;
+    /// without one a new Harness is of tests and an existing one keeps its kind.
     pub(super) fn put_harness(
         &mut self,
         id: HarnessId,
+        kind: Option<HarnessKind>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ContextError> {
         match self.harnesses.get_mut(&id) {
-            Some(h) => h.revise(source, cases)?,
+            Some(h) => {
+                let kind = kind.unwrap_or(h.kind());
+                h.revise_as(kind, source, cases)?
+            }
             None => {
-                self.harnesses.insert(id, Harness::new(id, source, cases)?);
+                let kind = kind.unwrap_or_default();
+                self.harnesses
+                    .insert(id, Harness::of_kind(kind, id, source, cases)?);
                 self.revision = self.revision.next();
             }
         }

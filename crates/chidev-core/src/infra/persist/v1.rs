@@ -25,6 +25,7 @@ use crate::domain::vo::confidence::Confidence;
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
     PinId, ProjectId,
@@ -217,6 +218,9 @@ struct ItemDoc {
 struct HarnessDoc {
     id: String,
     revision: u64,
+    /// The kind's word; left out for a Harness of tests, which is what every document written before kinds says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     source: String,
     cases: Vec<CaseDoc>,
 }
@@ -308,6 +312,10 @@ impl From<&Harness> for HarnessDoc {
         HarnessDoc {
             id: h.id().as_uuid().to_string(),
             revision: h.revision().number(),
+            kind: match h.kind() {
+                HarnessKind::Tests => None,
+                other => Some(other.word().to_string()),
+            },
             source: h.source().as_str().to_string(),
             cases: h
                 .cases()
@@ -450,8 +458,14 @@ impl TryFrom<HarnessDoc> for Harness {
                 cites,
             ));
         }
+        let kind = match d.kind.as_deref() {
+            None => HarnessKind::Tests,
+            Some(word) => HarnessKind::from_word(word)
+                .ok_or_else(|| bad(format!("a harness of kind `{word}`")))?,
+        };
         Harness::restore(
             HarnessId::from_uuid(uuid(&d.id)?),
+            kind,
             revision(d.revision)?,
             Source::new(d.source),
             cases,

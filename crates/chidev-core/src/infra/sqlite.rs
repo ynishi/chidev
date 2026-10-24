@@ -600,7 +600,7 @@ impl Store for SqliteStore {
             .isle
             .call(|c| {
                 let mut runs = c.prepare(
-                    "SELECT id, kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary
+                    "SELECT id, kind, subject_kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary
                      FROM measure_runs
                      WHERE seq IN (SELECT MAX(seq) FROM measure_runs GROUP BY kind, subject_id)
                      ORDER BY seq",
@@ -610,14 +610,15 @@ impl Store for SqliteStore {
                         Ok(RunRow {
                             id: r.get(0)?,
                             kind: r.get(1)?,
-                            subject: r.get(2)?,
-                            stamp: r.get(3)?,
-                            inputs: r.get(4)?,
-                            started_at: r.get(5)?,
-                            outcome: r.get(6)?,
-                            failure: r.get(7)?,
-                            evidence: r.get(8)?,
-                            summary: r.get(9)?,
+                            subject_kind: r.get(2)?,
+                            subject: r.get(3)?,
+                            stamp: r.get(4)?,
+                            inputs: r.get(5)?,
+                            started_at: r.get(6)?,
+                            outcome: r.get(7)?,
+                            failure: r.get(8)?,
+                            evidence: r.get(9)?,
+                            summary: r.get(10)?,
                         })
                     })?
                     .collect::<Result<_, _>>()?;
@@ -834,10 +835,11 @@ impl Store for SqliteStore {
                     tx.execute(
                         "INSERT INTO measure_runs
                          (id, kind, subject_kind, subject_id, stamp, inputs, store_revision, started_at, outcome, failure, evidence, summary)
-                         VALUES (?1, ?2, 'interface', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                         params![
-                            run.id, run.kind, run.subject, run.stamp, run.inputs, read_at,
-                            run.started_at, run.outcome, run.failure, run.evidence, run.summary
+                            run.id, run.kind, run.subject_kind, run.subject, run.stamp, run.inputs,
+                            read_at, run.started_at, run.outcome, run.failure, run.evidence,
+                            run.summary
                         ],
                     )?;
                     for (n, item) in items.iter().enumerate() {
@@ -1544,7 +1546,8 @@ mod tests {
             empty_basis(),
             format!("settings-{n}"),
         )
-        .unwrap();
+        .unwrap()
+        .into();
         Measurement::new(d).unwrap()
     }
 

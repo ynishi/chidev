@@ -16,7 +16,10 @@ pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
 use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod measure;
-pub use self::measure::{EvidenceLine, MeasureDone, MeasurementStanding, MutantLine};
+pub use self::measure::{
+    CaseLine, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding, MutantLine, RerunLine,
+    SimSummary, UnreachedLine,
+};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
 mod model_view;
 pub mod subject;
@@ -61,6 +64,7 @@ pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+pub use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
     PinId, ProjectId,
@@ -238,6 +242,7 @@ fn input(e: impl Display) -> AppError {
 
 /// No settings: what the hooks of a change give the checks, which read no measurement.
 static NO_SETTINGS: BTreeMap<InterfaceId, String> = BTreeMap::new();
+static NO_SIM_SETTINGS: BTreeMap<HarnessId, String> = BTreeMap::new();
 
 /// What the checks of a hook read.
 fn view<'a>(
@@ -253,6 +258,7 @@ fn view<'a>(
         change_requests,
         measurements: &[],
         measure_settings: &NO_SETTINGS,
+        sim_settings: &NO_SIM_SETTINGS,
     }
 }
 
@@ -1096,6 +1102,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
+        self.put_harness_of(context, name, None, source, cases)
+            .await
+    }
+
+    /// As [`App::put_harness`], and the Harness is of `kind`: `tests`, or `sim` for a simulation script run by
+    /// `simulate`. Without a kind a new Harness is of tests and an existing one keeps its kind.
+    pub async fn put_harness_of(
+        &mut self,
+        context: &str,
+        name: &str,
+        kind: Option<HarnessKind>,
+        source: &str,
+        cases: &[CaseInput],
+    ) -> Result<Checked<Put<HarnessId>>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
         let before = p.clone();
@@ -1128,7 +1148,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             given.push((case, case_name, lines, cites));
         }
         let id = id.unwrap_or_else(|| HarnessId::from_uuid(self.ids.next_uuid()));
-        p.put_harness(ctx, id, Source::new(source.to_string()), given)?;
+        p.put_harness_as(ctx, id, kind, Source::new(source.to_string()), given)?;
         let revision = p
             .context(ctx)
             .and_then(|c| c.harness(id))
@@ -1515,6 +1535,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 change_requests: &crs,
                 measurements: &measured.measurements,
                 measure_settings: &measured.settings,
+                sim_settings: &measured.sim_settings,
             },
         );
         let mut found = self.found(&run.findings, &p, &crs, &[]).await?;

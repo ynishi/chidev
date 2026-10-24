@@ -12,9 +12,14 @@
 //! A run that cannot measure (the baseline fails, a command or the provider fails, the budget is used up) still
 //! reports what it observed: the failure, the commands' evidence and the mutants it got through. Only a
 //! configuration that cannot measure this Interface at all is an error, and then nothing was run.
+//!
+//! A simulation (`sim.rs`, which holds the protocol `chidev-sim 1`) is run in the same kind of copy: the pinned code of the Interfaces the sim Harness cites
+//! and the script are written over it, the build command runs, and the script is started once per case under the
+//! protocol `chidev-sim 1`. The sampled cases are then run a second time in a second, fresh copy.
 
 mod config;
 mod provider;
+mod sim;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -24,7 +29,9 @@ use thiserror::Error;
 
 use self::config::{Config, WORK_DIR};
 use super::process::{self, Capture, Over, Pipe};
-use crate::app::ports::measure::{BoxFuture, MutateReport, MutateRequest, Runner, RunnerError};
+use crate::app::ports::measure::{
+    BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
+};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MutantOutcome, MutantResult, StepEvidence,
@@ -91,10 +98,31 @@ impl Runner for ProcessRunner {
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>> {
         Box::pin(self.mutate_run(request))
     }
+
+    fn sim_settings<'a>(
+        &'a self,
+        context: &'a str,
+        harness: &'a str,
+    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        Box::pin(self.sim_settings_of(context, harness))
+    }
+
+    fn simulate<'a>(
+        &'a self,
+        request: &'a SimulateRequest,
+    ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
+        Box::pin(self.simulate_run(request))
+    }
 }
 
 fn config_error(message: String) -> RunnerError {
     RunnerError::Config(message)
+}
+
+fn needs_lang(interface: &str) -> RunnerError {
+    config_error(format!(
+        "the layout of interface `{interface}` has no `lang`, which mutating its code needs"
+    ))
 }
 
 /// A failure of a run, from one of the process module's.
@@ -125,6 +153,7 @@ impl ProcessRunner {
                 "[[measure.layout]] has no entry for the interface `{interface}` of `{context}`"
             ))
         })?;
+        let lang = lang.ok_or_else(|| needs_lang(interface))?;
         let command = self.provider_command(lang)?;
         let executable = process::locate(&self.root, &command[0])
             .await
@@ -157,7 +186,12 @@ impl ProcessRunner {
                     request.interface, request.context
                 ))
             })?;
+        let lang = lang.ok_or_else(|| needs_lang(&request.interface))?;
         let mutants_command = self.provider_command(lang)?;
+        let test =
+            self.config.test.as_deref().ok_or_else(|| {
+                config_error("[measure] has no `test` command to mutate with".into())
+            })?;
         let mut harnesses = Vec::with_capacity(request.harnesses.len());
         for h in &request.harnesses {
             let place = self
@@ -197,7 +231,7 @@ impl ProcessRunner {
             .steps(
                 (place.path.as_path(), &request.code),
                 &harnesses,
-                mutants_command,
+                (mutants_command, test),
                 &mut progress,
             )
             .await;
@@ -412,9 +446,10 @@ impl Job<'_> {
         &self,
         code: (&Path, &str),
         harnesses: &[(&Path, &str)],
-        mutants_command: &[String],
+        commands: (&[String], &[String]),
         out: &mut Progress,
     ) -> Result<(), MeasureFailure> {
+        let (mutants_command, test_words) = commands;
         let config = &self.runner.config;
         let (root, tree, exclude) = (
             self.runner.root.clone(),
@@ -432,7 +467,7 @@ impl Job<'_> {
         }
         let env = self.env();
         let build = self.command(&config.build).await?;
-        let test = self.command(&config.test).await?;
+        let test = self.command(test_words).await?;
         self.baseline("baseline-build", &build, &env, out).await?;
         self.baseline("baseline-test", &test, &env, out).await?;
 

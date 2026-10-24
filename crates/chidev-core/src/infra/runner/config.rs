@@ -1,6 +1,7 @@
 //! The `[measure]` table of `checks.toml`: what to run to build and test a project, where each Interface and Harness
-//! lives in the working tree, and which command makes mutants for a language. Nothing here is guessed from the
-//! project's files; a field that is not known is refused by name, so a typo does not silently measure nothing.
+//! lives in the working tree, which command makes mutants for a language, and (`[measure.sim.<context>]`) how to
+//! run the sim script of a Context against its program. Nothing here is guessed from the project's files; a field
+//! that is not known is refused by name, so a typo does not silently measure nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +13,10 @@ use crate::domain::vo::digest::Digest;
 
 /// The directory under the project root a run works in, and the directories a copy never takes.
 pub(super) const WORK_DIR: &str = ".chidev/measure";
+
+/// The most seeds and the most second runs a simulation may be told to make.
+const MAX_SEEDS: u32 = 10_000;
+const MAX_SAMPLE: usize = 1_000;
 
 /// What a copy leaves out when the file does not say: the version control data, build output, and chidev's own
 /// state (which holds the runs themselves).
@@ -29,9 +34,12 @@ struct Raw {
     #[serde(default)]
     env: Option<BTreeMap<String, String>>,
     build: Vec<String>,
-    test: Vec<String>,
+    #[serde(default)]
+    test: Option<Vec<String>>,
     #[serde(default)]
     mutants: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    sim: BTreeMap<String, RawSim>,
     #[serde(default)]
     layout: Vec<RawLayout>,
     #[serde(default)]
@@ -44,6 +52,22 @@ struct Raw {
     max_mutants: Option<usize>,
     #[serde(default)]
     seed: Option<u64>,
+}
+
+/// `[measure.sim.<context>]`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSim {
+    interpreter: Vec<String>,
+    program: Vec<String>,
+    #[serde(default)]
+    seeds: Option<u32>,
+    #[serde(default)]
+    sample: Option<usize>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    budget: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,10 +86,11 @@ struct RawLayout {
 /// What a layout entry places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Place {
-    /// An Interface's code, in this language.
+    /// An Interface's code. The language selects the provider that makes its mutants; an Interface that is only
+    /// simulated has none.
     Interface {
-        /// The language, which selects the provider.
-        lang: String,
+        /// The language, when the Interface is mutated.
+        lang: Option<String>,
     },
     /// A Harness's source.
     Harness,
@@ -81,6 +106,23 @@ pub(super) struct Layout {
     pub path: PathBuf,
 }
 
+/// How the sim script of one Context is run.
+#[derive(Debug, Clone)]
+pub(super) struct SimConfig {
+    /// The interpreter and its leading arguments (`["python3"]`); the script follows.
+    pub interpreter: Vec<String>,
+    /// The program under test, as the script is to start it; `{work}` is the root of the copy.
+    pub program: Vec<String>,
+    /// The seeds run: `seed-0` to `seed-<seeds - 1>`.
+    pub seeds: u32,
+    /// The most cases with findings that are run a second time (besides `seed-0`).
+    pub sample: usize,
+    /// For one case.
+    pub timeout: Duration,
+    /// For the whole run, the second runs included.
+    pub budget: Duration,
+}
+
 /// The measure configuration of a project.
 #[derive(Debug, Clone)]
 pub(super) struct Config {
@@ -88,9 +130,12 @@ pub(super) struct Config {
     /// Variable and value; the value may hold `{work}`.
     pub env: Vec<(String, String)>,
     pub build: Vec<String>,
-    pub test: Vec<String>,
+    /// Without it nothing is mutated (a project that is only simulated).
+    pub test: Option<Vec<String>>,
     /// Language to the command that makes its mutants.
     pub mutants: BTreeMap<String, Vec<String>>,
+    /// Context name to how its sim script is run.
+    pub sim: BTreeMap<String, SimConfig>,
     pub layout: Vec<Layout>,
     /// For one build or one test of a mutant.
     pub timeout: Duration,
@@ -105,11 +150,11 @@ pub(super) struct Config {
 }
 
 impl Config {
-    /// The place and language of the Interface `name` of `context`.
-    pub(super) fn interface(&self, context: &str, name: &str) -> Option<(&Layout, &str)> {
+    /// The place and language (if any) of the Interface `name` of `context`.
+    pub(super) fn interface(&self, context: &str, name: &str) -> Option<(&Layout, Option<&str>)> {
         self.layout.iter().find_map(|l| match &l.place {
             Place::Interface { lang } if l.context == context && l.name == name => {
-                Some((l, lang.as_str()))
+                Some((l, lang.as_deref()))
             }
             _ => None,
         })
@@ -161,7 +206,9 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         .try_into()
         .map_err(|e: toml::de::Error| e.to_string())?;
     command("build", &raw.build)?;
-    command("test", &raw.test)?;
+    if let Some(test) = &raw.test {
+        command("test", test)?;
+    }
     for (lang, words) in &raw.mutants {
         if lang.trim().is_empty() {
             return Err("a language in `mutants` has a name".to_string());
@@ -205,6 +252,45 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
     };
+    let mut sim = BTreeMap::new();
+    for (context, s) in raw.sim {
+        if context.trim().is_empty() {
+            return Err("a context in `sim` has a name".to_string());
+        }
+        command(&format!("sim.{context}.interpreter"), &s.interpreter)?;
+        command(&format!("sim.{context}.program"), &s.program)?;
+        let seeds = match s.seeds {
+            Some(0) => return Err(format!("`sim.{context}.seeds` must be at least 1")),
+            Some(n) if n > MAX_SEEDS => {
+                return Err(format!("`sim.{context}.seeds` is at most {MAX_SEEDS}"));
+            }
+            Some(n) => n,
+            None => 50,
+        };
+        let sample = match s.sample {
+            Some(n) if n > MAX_SAMPLE => {
+                return Err(format!("`sim.{context}.sample` is at most {MAX_SAMPLE}"));
+            }
+            Some(n) => n,
+            None => 6,
+        };
+        let sim_timeout = seconds(&format!("sim.{context}.timeout"), s.timeout, 60)?;
+        let sim_budget = seconds(&format!("sim.{context}.budget"), s.budget, 600)?;
+        if sim_budget.as_secs() > 3600 {
+            return Err(format!("`sim.{context}.budget` is at most 3600 seconds"));
+        }
+        sim.insert(
+            context,
+            SimConfig {
+                interpreter: s.interpreter,
+                program: s.program,
+                seeds,
+                sample,
+                timeout: sim_timeout,
+                budget: sim_budget,
+            },
+        );
+    }
     let mut layout = Vec::with_capacity(raw.layout.len());
     let mut seen = BTreeSet::new();
     for l in raw.layout {
@@ -216,11 +302,9 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
                         "the layout of interface `{name}` has lang `{lang}`, which `mutants` has no command for"
                     ));
                 }
-                (name, Place::Interface { lang })
+                (name, Place::Interface { lang: Some(lang) })
             }
-            (Some(name), None, None) => {
-                return Err(format!("the layout of interface `{name}` needs a `lang`"));
-            }
+            (Some(name), None, None) => (name, Place::Interface { lang: None }),
             (None, Some(name), None) => (name, Place::Harness),
             (None, Some(name), Some(_)) => {
                 return Err(format!("the layout of harness `{name}` takes no `lang`"));
@@ -260,6 +344,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         build: raw.build,
         test: raw.test,
         mutants: raw.mutants,
+        sim,
         layout,
         timeout,
         baseline_timeout,
@@ -312,7 +397,7 @@ path = "tests/stock.rs"
         let (place, lang) = config.interface("inventory", "stock").unwrap();
         assert_eq!(
             (place.path.as_path(), lang),
-            (Path::new("src/stock.rs"), "rust")
+            (Path::new("src/stock.rs"), Some("rust"))
         );
         assert_eq!(
             config.harness("inventory", "stock-tests").unwrap().path,
@@ -351,7 +436,6 @@ path = "tests/stock.rs"
                 "relative",
             ),
             ("lang = \"rust\"", "lang = \"go\"", "no command for"),
-            ("lang = \"rust\"\n", "", "needs a `lang`"),
             ("[mutants]", "timeout = 0\n[mutants]", "positive"),
             ("[mutants]", "budget = 7200\n[mutants]", "3600"),
             ("[mutants]", "max_mutants = 0\n[mutants]", "at least 1"),
@@ -359,6 +443,99 @@ path = "tests/stock.rs"
             let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
             assert!(error.contains(expected), "{error} vs {expected}");
         }
+    }
+
+    const SIM: &str = r#"
+build = ["python3", "-m", "py_compile", "prog.py"]
+[sim.inventory]
+interpreter = ["python3"]
+program = ["python3", "{work}/prog.py"]
+[[layout]]
+context = "inventory"
+interface = "prog"
+path = "prog.py"
+[[layout]]
+context = "inventory"
+harness = "sweep-script"
+path = "sim.py"
+"#;
+
+    #[test]
+    fn a_sim_context_gets_its_defaults_and_a_project_that_is_only_simulated_needs_no_test_or_language()
+     {
+        let config = parse(&table(SIM)).unwrap();
+        assert!(config.test.is_none());
+        let sim = &config.sim["inventory"];
+        assert_eq!(sim.interpreter, ["python3"]);
+        assert_eq!(sim.program, ["python3", "{work}/prog.py"]);
+        assert_eq!((sim.seeds, sim.sample), (50, 6));
+        assert_eq!(sim.timeout, Duration::from_secs(60));
+        assert_eq!(sim.budget, Duration::from_secs(600));
+        let (place, lang) = config.interface("inventory", "prog").unwrap();
+        assert_eq!((place.path.as_path(), lang), (Path::new("prog.py"), None));
+        assert_eq!(
+            config.harness("inventory", "sweep-script").unwrap().path,
+            Path::new("sim.py")
+        );
+    }
+
+    #[test]
+    fn what_a_sim_cannot_run_with_is_refused_by_name() {
+        for (from, to, expected) in [
+            (
+                "interpreter = [\"python3\"]",
+                "interpreter = []",
+                "sim.inventory.interpreter",
+            ),
+            (
+                "program = [\"python3\", \"{work}/prog.py\"]",
+                "program = []",
+                "sim.inventory.program",
+            ),
+            (
+                "[sim.inventory]",
+                "[sim.inventory]\nseeds = 0",
+                "at least 1",
+            ),
+            (
+                "[sim.inventory]",
+                "[sim.inventory]\nseeds = 10001",
+                "at most 10000",
+            ),
+            (
+                "[sim.inventory]",
+                "[sim.inventory]\nsample = 1001",
+                "at most 1000",
+            ),
+            (
+                "[sim.inventory]",
+                "[sim.inventory]\ntimeout = 0",
+                "positive",
+            ),
+            ("[sim.inventory]", "[sim.inventory]\nbudget = 3601", "3600"),
+            ("[sim.inventory]", "[sim.inventory]\nseedz = 3", "seedz"),
+        ] {
+            let error = parse(&table(&SIM.replacen(from, to, 1))).unwrap_err();
+            assert!(error.contains(expected), "{error} vs {expected}");
+        }
+        let tuned = SIM.replacen(
+            "[sim.inventory]",
+            "[sim.inventory]\nseeds = 8\nsample = 2\ntimeout = 5\nbudget = 90",
+            1,
+        );
+        let sim = &parse(&table(&tuned)).unwrap().sim["inventory"];
+        assert_eq!((sim.seeds, sim.sample), (8, 2));
+        assert_eq!(
+            (sim.timeout, sim.budget),
+            (Duration::from_secs(5), Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn the_sim_table_is_part_of_the_digest() {
+        let one = parse(&table(SIM)).unwrap().digest;
+        let other = SIM.replacen("[sim.inventory]", "[sim.inventory]\nseeds = 9", 1);
+        assert_ne!(one, parse(&table(&other)).unwrap().digest);
     }
 
     #[test]

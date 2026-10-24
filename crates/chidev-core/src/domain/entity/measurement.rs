@@ -1,15 +1,17 @@
-//! The Measurement: the record of one run of a measure over one Interface's code. It is a fact, not a judgment: it
-//! says what was run and what became of each mutant, tied by a stamp to the code and the Harness it measured. The
-//! rules read it and say what is worth a person's attention; a newer run of the same measure replaces it as the
-//! current one, and the older ones stay as history.
+//! The Measurement: the record of one run of a measure. It is a fact, not a judgment: it says what was run and what
+//! became of it, tied by a stamp to what it measured. A mutation run is of one Interface's code and says what became
+//! of each mutant; a simulation is of one sim Harness and says what each case of the script found. The rules read
+//! it and say what is worth a person's attention; a newer run of the same measure replaces it as the current one,
+//! and the older ones stay as history.
 
 use std::collections::BTreeSet;
 
-use crate::domain::vo::id::{InterfaceId, MeasurementId};
+use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
-    MeasureError, MeasureFailure, MeasureKind, MeasureStamp, MutantOutcome, MutantResult,
+    MeasureError, MeasureFailure, MeasureKind, MeasureSubject, MutantOutcome, MutantResult, Stamp,
     StepEvidence,
 };
+use crate::domain::vo::sim::SimOutcome;
 use crate::domain::vo::timestamp::Timestamp;
 
 /// How many mutants ended each way.
@@ -32,40 +34,74 @@ pub struct MeasurementDraft {
     pub id: MeasurementId,
     /// What was measured.
     pub kind: MeasureKind,
-    /// The Interface whose code was measured.
-    pub subject: InterfaceId,
+    /// What was measured: an Interface for a mutation run, a Harness for a simulation.
+    pub subject: MeasureSubject,
     /// What the run stands on.
-    pub stamp: MeasureStamp,
+    pub stamp: Stamp,
     /// When the run began.
     pub at: Timestamp,
-    /// How many places the provider found to change, before it chose among them.
+    /// How many places the provider found to change, before it chose among them (a mutation run).
     pub sites: u32,
-    /// Each mutant that was run and what became of it.
+    /// Each mutant that was run and what became of it (a mutation run).
     pub mutants: Vec<MutantResult>,
-    /// Why the run failed, when it did. A failed run keeps the mutants it got through, as history; the rules do
-    /// not judge them.
+    /// What each case of the script found, and how the second runs compared (a simulation).
+    pub sim: Option<SimOutcome>,
+    /// Why the run failed, when it did. A failed run keeps what it got through, as history; the rules do not
+    /// judge it.
     pub failure: Option<MeasureFailure>,
     /// What the commands of the run did.
     pub evidence: Vec<StepEvidence>,
 }
 
-/// One run of a measure over one Interface.
+/// One run of a measure over one subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measurement {
     id: MeasurementId,
     kind: MeasureKind,
-    subject: InterfaceId,
-    stamp: MeasureStamp,
+    subject: MeasureSubject,
+    stamp: Stamp,
     at: Timestamp,
     sites: u32,
     mutants: Vec<MutantResult>,
+    sim: Option<SimOutcome>,
     failure: Option<MeasureFailure>,
     evidence: Vec<StepEvidence>,
 }
 
 impl Measurement {
-    /// The run `draft` describes. The keys of its mutants are all different, and it has no more mutants than sites.
+    /// The run `draft` describes. A mutation run is of an Interface, stands on a code stamp, has mutants with
+    /// different keys and no more than there were sites; a simulation is of a Harness, stands on a sim stamp and
+    /// has no mutants.
     pub fn new(draft: MeasurementDraft) -> Result<Measurement, MeasureError> {
+        let not = |expected: &'static str, what: &'static str| MeasureError::NotOfKind {
+            kind: draft.kind.word(),
+            expected,
+            what,
+        };
+        match draft.kind {
+            MeasureKind::Mutate => {
+                if !matches!(draft.subject, MeasureSubject::Interface(_)) {
+                    return Err(not("an interface", "a harness subject"));
+                }
+                if draft.stamp.code().is_none() {
+                    return Err(not("an interface", "a simulation's stamp"));
+                }
+                if draft.sim.is_some() {
+                    return Err(not("an interface", "a simulation's result"));
+                }
+            }
+            MeasureKind::Simulate => {
+                if !matches!(draft.subject, MeasureSubject::Harness(_)) {
+                    return Err(not("a harness", "an interface subject"));
+                }
+                if draft.stamp.sim().is_none() {
+                    return Err(not("a harness", "a mutation run's stamp"));
+                }
+                if !draft.mutants.is_empty() || draft.sites != 0 {
+                    return Err(not("a harness", "mutants"));
+                }
+            }
+        }
         let mut seen = BTreeSet::new();
         for m in &draft.mutants {
             if !seen.insert(m.mutant.key().clone()) {
@@ -86,6 +122,7 @@ impl Measurement {
             at: draft.at,
             sites: draft.sites,
             mutants: draft.mutants,
+            sim: draft.sim,
             failure: draft.failure,
             evidence: draft.evidence,
         })
@@ -101,13 +138,29 @@ impl Measurement {
         self.kind
     }
 
-    /// The Interface whose code it measured.
-    pub fn subject(&self) -> InterfaceId {
+    /// What it is of.
+    pub fn subject(&self) -> MeasureSubject {
         self.subject
     }
 
+    /// The Interface whose code it measured; none for a simulation.
+    pub fn interface(&self) -> Option<InterfaceId> {
+        match self.subject {
+            MeasureSubject::Interface(i) => Some(i),
+            MeasureSubject::Harness(_) => None,
+        }
+    }
+
+    /// The sim Harness it ran; none for a mutation run.
+    pub fn harness(&self) -> Option<HarnessId> {
+        match self.subject {
+            MeasureSubject::Harness(h) => Some(h),
+            MeasureSubject::Interface(_) => None,
+        }
+    }
+
     /// What it stands on.
-    pub fn stamp(&self) -> &MeasureStamp {
+    pub fn stamp(&self) -> &Stamp {
         &self.stamp
     }
 
@@ -124,6 +177,11 @@ impl Measurement {
     /// The mutants it ran, in the order the provider gave them.
     pub fn mutants(&self) -> &[MutantResult] {
         &self.mutants
+    }
+
+    /// What the cases of the script gave; none for a mutation run.
+    pub fn sim(&self) -> Option<&SimOutcome> {
+        self.sim.as_ref()
     }
 
     /// Why it failed; none when it ran to its end.
@@ -168,8 +226,9 @@ pub(crate) mod fixture {
     use super::*;
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::test_uuid;
-    use crate::domain::vo::measure::{Mutant, MutantKey, Operator, Site};
+    use crate::domain::vo::measure::{MeasureStamp, Mutant, MutantKey, Operator, Site};
     use crate::domain::vo::pin_basis::PinBasis;
+    use crate::domain::vo::sim::{SimBasis, SimStamp};
 
     pub(crate) fn result(key: &str, line: u32, outcome: MutantOutcome) -> MutantResult {
         MutantResult {
@@ -185,6 +244,17 @@ pub(crate) mod fixture {
         }
     }
 
+    pub(crate) fn evidence() -> Vec<StepEvidence> {
+        vec![StepEvidence {
+            step: "baseline-test".into(),
+            command: "cargo test".into(),
+            command_digest: Some("ab".repeat(32)),
+            exit_code: Some(0),
+            duration_ms: 12,
+            stderr: String::new(),
+        }]
+    }
+
     pub(crate) fn draft(
         n: u128,
         subject: InterfaceId,
@@ -195,20 +265,35 @@ pub(crate) mod fixture {
         MeasurementDraft {
             id: MeasurementId::from_uuid(test_uuid(n)),
             kind: MeasureKind::Mutate,
-            subject,
-            stamp: MeasureStamp::new(code, basis, "settings").unwrap(),
+            subject: MeasureSubject::Interface(subject),
+            stamp: MeasureStamp::new(code, basis, "settings").unwrap().into(),
             at: Timestamp::from_millis(n as u64),
             sites: mutants.len() as u32 + 2,
             mutants,
+            sim: None,
             failure: None,
-            evidence: vec![StepEvidence {
-                step: "baseline-test".into(),
-                command: "cargo test".into(),
-                command_digest: Some("ab".repeat(32)),
-                exit_code: Some(0),
-                duration_ms: 12,
-                stderr: String::new(),
-            }],
+            evidence: evidence(),
+        }
+    }
+
+    /// A simulation of `harness` that stood on `basis`, with this outcome.
+    pub(crate) fn sim_draft(
+        n: u128,
+        harness: HarnessId,
+        basis: SimBasis,
+        outcome: SimOutcome,
+    ) -> MeasurementDraft {
+        MeasurementDraft {
+            id: MeasurementId::from_uuid(test_uuid(n)),
+            kind: MeasureKind::Simulate,
+            subject: MeasureSubject::Harness(harness),
+            stamp: SimStamp::new(basis, "settings").unwrap().into(),
+            at: Timestamp::from_millis(n as u64),
+            sites: 0,
+            mutants: Vec::new(),
+            sim: Some(outcome),
+            failure: None,
+            evidence: evidence(),
         }
     }
 
@@ -228,6 +313,7 @@ mod tests {
     use super::*;
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::sim::SimBasis;
 
     fn iface() -> InterfaceId {
         InterfaceId::from_uuid(test_uuid(100))
@@ -261,6 +347,8 @@ mod tests {
         let survivors: Vec<_> = m.survivors().map(|s| s.mutant.key().as_str()).collect();
         assert_eq!(survivors, ["b"]);
         assert_eq!(m.sites(), 7);
+        assert_eq!(m.interface(), Some(iface()));
+        assert_eq!(m.harness(), None);
     }
 
     #[test]
@@ -294,5 +382,52 @@ mod tests {
                 sites: 0
             }
         );
+    }
+
+    fn sim_basis() -> SimBasis {
+        SimBasis {
+            harness: crate::domain::vo::revision::Revision::first(),
+            contracts: Default::default(),
+            interfaces: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_simulation_is_of_a_harness_and_a_mutation_run_of_an_interface() {
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        let sim =
+            Measurement::new(sim_draft(1, harness, sim_basis(), SimOutcome::default())).unwrap();
+        assert_eq!(sim.harness(), Some(harness));
+        assert_eq!(sim.interface(), None);
+        assert!(sim.sim().is_some());
+        assert_eq!(sim.counts(), Counts::default());
+
+        // the pieces of one kind do not go with the other
+        let mut wrong_subject = sim_draft(2, harness, sim_basis(), SimOutcome::default());
+        wrong_subject.subject = MeasureSubject::Interface(iface());
+        assert!(matches!(
+            Measurement::new(wrong_subject),
+            Err(MeasureError::NotOfKind { .. })
+        ));
+        let mut with_mutants = sim_draft(3, harness, sim_basis(), SimOutcome::default());
+        with_mutants.mutants = vec![result("a", 1, MutantOutcome::Killed)];
+        with_mutants.sites = 1;
+        assert!(matches!(
+            Measurement::new(with_mutants),
+            Err(MeasureError::NotOfKind { .. })
+        ));
+        let mut mutate_with_sim = draft(4, iface(), Digest::of(b"c"), empty_basis(), vec![]);
+        mutate_with_sim.sim = Some(SimOutcome::default());
+        assert!(matches!(
+            Measurement::new(mutate_with_sim),
+            Err(MeasureError::NotOfKind { .. })
+        ));
+        let mut mutate_with_sim_stamp = sim_draft(5, harness, sim_basis(), SimOutcome::default());
+        mutate_with_sim_stamp.kind = MeasureKind::Mutate;
+        mutate_with_sim_stamp.subject = MeasureSubject::Interface(iface());
+        assert!(matches!(
+            Measurement::new(mutate_with_sim_stamp),
+            Err(MeasureError::NotOfKind { .. })
+        ));
     }
 }

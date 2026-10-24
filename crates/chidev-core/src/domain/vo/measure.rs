@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use thiserror::Error;
 
 use super::digest::Digest;
+use super::id::{HarnessId, InterfaceId};
 use super::pin_basis::PinBasis;
+use super::sim::SimStamp;
 
 /// Why a value of a measurement is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -42,23 +44,37 @@ pub enum MeasureError {
     /// A stamp has no settings.
     #[error("a stamp names the settings the run was made with")]
     BlankSettings,
+    /// A measurement's subject, stamp or result is not one of its kind.
+    #[error("a `{kind}` measurement is of {expected}, with {what}")]
+    NotOfKind {
+        /// The kind.
+        kind: &'static str,
+        /// What the kind measures.
+        expected: &'static str,
+        /// What is wrong.
+        what: &'static str,
+    },
 }
 
-/// What a measure measures. The first kind is mutation testing; the others (a simulation) will join it.
+/// What a measure measures: mutation testing and simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MeasureKind {
-    /// Single-site mutants of the code, run against the Harness.
+    /// Single-site mutants of the code of an Interface, run against the Harnesses that check it.
     Mutate,
+    /// A sim Harness (a script written blind from the Contracts), run as a driver of the program built from the
+    /// code of the Pins it cites.
+    Simulate,
 }
 
 impl MeasureKind {
     /// Every kind.
-    pub const ALL: [MeasureKind; 1] = [MeasureKind::Mutate];
+    pub const ALL: [MeasureKind; 2] = [MeasureKind::Mutate, MeasureKind::Simulate];
 
     /// The word for it.
     pub fn word(self) -> &'static str {
         match self {
             MeasureKind::Mutate => "mutate",
+            MeasureKind::Simulate => "simulate",
         }
     }
 
@@ -288,17 +304,20 @@ pub enum FailureKind {
     Budget,
     /// The copy of the project, or a program, could not be made or run.
     Io,
+    /// The program a simulation drives does not build, so the script was not run.
+    NoBuild,
 }
 
 impl FailureKind {
     /// Every kind.
-    pub const ALL: [FailureKind; 6] = [
+    pub const ALL: [FailureKind; 7] = [
         FailureKind::Baseline,
         FailureKind::Provider,
         FailureKind::Protocol,
         FailureKind::Timeout,
         FailureKind::Budget,
         FailureKind::Io,
+        FailureKind::NoBuild,
     ];
 
     /// The word for it.
@@ -310,6 +329,7 @@ impl FailureKind {
             FailureKind::Timeout => "timeout",
             FailureKind::Budget => "budget",
             FailureKind::Io => "io",
+            FailureKind::NoBuild => "no_build",
         }
     }
 
@@ -450,6 +470,89 @@ impl MeasureStamp {
         list("used", rows(self.basis.used_interfaces()));
         let _ = write!(text, ";settings={}", self.settings);
         Digest::of(text.as_bytes())
+    }
+}
+
+/// What a measurement is of: the Interface whose code was mutated, or the sim Harness that was run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MeasureSubject {
+    /// An Interface (a mutation run).
+    Interface(InterfaceId),
+    /// A Harness (a simulation).
+    Harness(HarnessId),
+}
+
+impl MeasureSubject {
+    /// The word for the kind of thing it is.
+    pub fn word(self) -> &'static str {
+        match self {
+            MeasureSubject::Interface(_) => "interface",
+            MeasureSubject::Harness(_) => "harness",
+        }
+    }
+
+    /// The id as a uuid, whichever it is.
+    pub fn as_uuid(self) -> uuid::Uuid {
+        match self {
+            MeasureSubject::Interface(i) => i.as_uuid(),
+            MeasureSubject::Harness(h) => h.as_uuid(),
+        }
+    }
+}
+
+/// What a measurement stands on, by its kind: the code of a Pin for a mutation run, the sim Harness and what it
+/// cites for a simulation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stamp {
+    /// Of a mutation run.
+    Code(MeasureStamp),
+    /// Of a simulation.
+    Sim(SimStamp),
+}
+
+impl Stamp {
+    /// One digest of the whole stamp.
+    pub fn fingerprint(&self) -> Digest {
+        match self {
+            Stamp::Code(s) => s.fingerprint(),
+            Stamp::Sim(s) => s.fingerprint(),
+        }
+    }
+
+    /// The settings digest.
+    pub fn settings(&self) -> &str {
+        match self {
+            Stamp::Code(s) => s.settings(),
+            Stamp::Sim(s) => s.settings(),
+        }
+    }
+
+    /// The stamp of a mutation run, if it is one.
+    pub fn code(&self) -> Option<&MeasureStamp> {
+        match self {
+            Stamp::Code(s) => Some(s),
+            Stamp::Sim(_) => None,
+        }
+    }
+
+    /// The stamp of a simulation, if it is one.
+    pub fn sim(&self) -> Option<&SimStamp> {
+        match self {
+            Stamp::Sim(s) => Some(s),
+            Stamp::Code(_) => None,
+        }
+    }
+}
+
+impl From<MeasureStamp> for Stamp {
+    fn from(s: MeasureStamp) -> Stamp {
+        Stamp::Code(s)
+    }
+}
+
+impl From<SimStamp> for Stamp {
+    fn from(s: SimStamp) -> Stamp {
+        Stamp::Sim(s)
     }
 }
 

@@ -1,31 +1,39 @@
-//! Measuring: the operation that runs a measure over an Interface's pinned code and keeps what it observed, and the
-//! reading of what is kept. A measure takes minutes and makes facts, so it is an operation of its own and never a
-//! hook; the checks (`measure.failed`, `mutation.*`) only judge the record it leaves.
+//! Measuring: the operations that run a measure and keep what it observed, and the reading of what is kept. A
+//! mutation run takes the code a Pin accepted and tests it against changes of itself; a simulation builds the
+//! program from the code of the Pins a sim Harness cites and drives it with the script. A measure takes minutes and
+//! makes facts, so it is an operation of its own and never a hook; the checks (`measure.failed`, `mutation.*`,
+//! `sim.*`) only judge the record it leaves.
 
 use std::collections::BTreeMap;
 
 use super::ports::external::ExternalExecutor;
-use super::ports::measure::{HarnessText, MutateRequest};
+use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
 use super::ports::{AssetKind, Changes, IdSource, Store, StoreRevision};
 use super::{App, AppError, context_id};
 use crate::domain::entity::measurement::{Counts, Measurement, MeasurementDraft};
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
-use crate::domain::service::measure::{Standing, standing};
+use crate::domain::service::measure::{Standing, sim_standing, standing};
 use crate::domain::service::pin::current_basis;
+use crate::domain::service::sim::{
+    basis_of, cited_interfaces, labels_of, regress_names, shape, sim_harnesses, sweep,
+};
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::id::{InterfaceId, MeasurementId};
-use crate::domain::vo::measure::{MeasureKind, MeasureStamp};
+use crate::domain::vo::harness_kind::HarnessKind;
+use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
+use crate::domain::vo::measure::{MeasureKind, MeasureStamp, MeasureSubject};
+use crate::domain::vo::sim::{SimOutcome, SimStamp};
 
 /// How many times a commit that lost a race with another writer is tried again. A measurement stands on a stamp, not
 /// on the store's revision, so a write in between does not make it wrong: it is kept, and a stale stamp would show.
 const COMMIT_TRIES: usize = 5;
 
-/// The latest measurements, and what the settings are now for the Interfaces the runner can say it for.
+/// The latest measurements, and what the settings are now for the subjects the runner can say it for.
 #[derive(Debug, Default)]
 pub(super) struct Measured {
     pub(super) measurements: Vec<Measurement>,
     pub(super) settings: BTreeMap<InterfaceId, String>,
+    pub(super) sim_settings: BTreeMap<HarnessId, String>,
 }
 
 /// A mutant and what became of it, in words.
@@ -41,6 +49,54 @@ pub struct MutantLine {
     pub change: String,
     /// What became of it: `killed`, `survived`, `stillborn` or `timeout`.
     pub outcome: &'static str,
+}
+
+/// A promise a case broke, in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingLine {
+    /// The step of the trace.
+    pub step: u32,
+    /// The Clause's label.
+    pub label: String,
+    /// What did not hold.
+    pub text: String,
+}
+
+/// A Clause a case did not reach, in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreachedLine {
+    /// The Clause's label.
+    pub label: String,
+    /// The situation that was needed.
+    pub text: String,
+}
+
+/// One case of a simulation, in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseLine {
+    /// The case: `seed-3` or `regress-<name>`.
+    pub case: String,
+    /// How the script ended: `normal`, `timeout` or `script:<code>`.
+    pub exit: String,
+    /// The promises it broke.
+    pub findings: Vec<FindingLine>,
+    /// The Clauses whose situation it did not reach.
+    pub unreached: Vec<UnreachedLine>,
+    /// What the script could not decide.
+    pub undecided: Vec<String>,
+    /// The digest of the schedule it ran.
+    pub schedule: Option<String>,
+    /// The digest of the trace the program made.
+    pub trace: Option<String>,
+}
+
+/// A case run a second time, in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunLine {
+    /// The case.
+    pub case: String,
+    /// `same`, `schedule-differs` or `trace-differs`.
+    pub result: &'static str,
 }
 
 /// A command of a run, in words.
@@ -73,24 +129,47 @@ pub struct MeasureDone {
     pub counts: Counts,
     /// Each mutant that was run.
     pub mutants: Vec<MutantLine>,
+    /// Each case of a simulation that was run.
+    pub cases: Vec<CaseLine>,
+    /// The cases of a simulation that were run a second time.
+    pub reruns: Vec<RerunLine>,
     /// What the commands did.
     pub evidence: Vec<EvidenceLine>,
 }
 
-/// Where the latest measurement of an Interface stands.
+/// What a simulation found, in numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimSummary {
+    /// How many cases were run.
+    pub cases: u32,
+    /// How many Clauses have a finding.
+    pub findings: u32,
+    /// How many Clauses no seed reached.
+    pub unreached: u32,
+    /// How many cases did not end normally.
+    pub abnormal: u32,
+    /// How many cases were run a second time.
+    pub reruns: u32,
+    /// How many of those did not give the same schedule and trace.
+    pub differing: u32,
+}
+
+/// Where the latest measurement of an Interface or a sim Harness stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementStanding {
     /// The Context's name.
     pub context: String,
-    /// The Interface's name.
-    pub interface: String,
+    /// The Interface's name (a mutation run).
+    pub interface: Option<String>,
+    /// The Harness's name (a simulation).
+    pub harness: Option<String>,
     /// What was measured.
     pub kind: &'static str,
     /// The measurement's id.
     pub id: String,
     /// The stamp's digest.
     pub stamp: String,
-    /// `current` while the Pin, what it stands on and the settings are as measured; `stale` once any moved.
+    /// `current` while what it stands on and the settings are as measured; `stale` once any moved.
     pub state: &'static str,
     /// `ok`, or `failed` when the run did not finish.
     pub outcome: &'static str,
@@ -98,32 +177,65 @@ pub struct MeasurementStanding {
     pub failure: Option<String>,
     /// How many mutants ended each way.
     pub counts: Counts,
+    /// What a simulation found; none for a mutation run.
+    pub sim: Option<SimSummary>,
     /// When the run began, in milliseconds since the epoch.
     pub at: u64,
 }
 
+fn summary_of(outcome: &SimOutcome) -> SimSummary {
+    let n = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+    SimSummary {
+        cases: n(outcome.cases.len()),
+        findings: n(outcome.found().len()),
+        unreached: n(outcome.unreached().len()),
+        abnormal: n(outcome.abnormal().count()),
+        reruns: n(outcome.reruns.len()),
+        differing: n(outcome.differing().count()),
+    }
+}
+
 impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
-    /// The latest measurements, and the settings now of the Interfaces they are of. An Interface the runner cannot
-    /// say the settings of (no runner, no layout, a provider that is gone) is absent from the settings.
+    /// The latest measurements, and the settings now of the subjects they are of. A subject the runner cannot say
+    /// the settings of (no runner, no layout, a provider that is gone) is absent from the settings.
     pub(super) async fn measured(&self, p: &Project) -> Result<Measured, AppError> {
         let measurements = self.store.latest_measurements().await?;
         let mut settings = BTreeMap::new();
+        let mut sim_settings = BTreeMap::new();
         for m in &measurements {
-            let Some(context) = p.contexts().find(|c| c.interface(m.subject()).is_some()) else {
-                continue;
-            };
-            let interface = self.name_of(m.subject().as_uuid()).await?;
-            if let Ok(s) = self
-                .runner
-                .settings(&context.name().to_string(), &interface)
-                .await
-            {
-                settings.insert(m.subject(), s);
+            match m.subject() {
+                MeasureSubject::Interface(i) => {
+                    let Some(context) = p.contexts().find(|c| c.interface(i).is_some()) else {
+                        continue;
+                    };
+                    let interface = self.name_of(i.as_uuid()).await?;
+                    if let Ok(s) = self
+                        .runner
+                        .settings(&context.name().to_string(), &interface)
+                        .await
+                    {
+                        settings.insert(i, s);
+                    }
+                }
+                MeasureSubject::Harness(h) => {
+                    let Some(context) = p.contexts().find(|c| c.harness(h).is_some()) else {
+                        continue;
+                    };
+                    let harness = self.name_of(h.as_uuid()).await?;
+                    if let Ok(s) = self
+                        .runner
+                        .sim_settings(&context.name().to_string(), &harness)
+                        .await
+                    {
+                        sim_settings.insert(h, s);
+                    }
+                }
             }
         }
         Ok(Measured {
             measurements,
             settings,
+            sim_settings,
         })
     }
 
@@ -138,6 +250,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         interface: &str,
     ) -> Result<MeasureDone, AppError> {
+        if kind != MeasureKind::Mutate {
+            return Err(AppError::Input(format!(
+                "a `{}` measure is of a harness, not of an interface; use `simulate`",
+                kind.word()
+            )));
+        }
         let p = self.project().await?;
         let ctx = context_id(&p, context)?;
         let iface = InterfaceId::from_uuid(
@@ -173,6 +291,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             else {
                 continue;
             };
+            // A simulation does not test the code against the Interface; it is run by `simulate`.
+            if h.kind() != HarnessKind::Tests {
+                continue;
+            }
             harnesses.push(HarnessText {
                 name: self.name_of(id.as_uuid()).await?,
                 source: h.source().as_str().to_string(),
@@ -189,17 +311,116 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             code,
             harnesses,
         };
-        let report = match kind {
-            MeasureKind::Mutate => self.runner.mutate(&request).await?,
-        };
+        let report = self.runner.mutate(&request).await?;
         let measurement = Measurement::new(MeasurementDraft {
             id,
             kind,
-            subject: iface,
-            stamp,
+            subject: MeasureSubject::Interface(iface),
+            stamp: stamp.into(),
             at,
             sites: report.sites,
             mutants: report.mutants,
+            sim: None,
+            failure: report.failure,
+            evidence: report.evidence,
+        })?;
+        self.keep_measurement(&measurement).await?;
+        Ok(self.measured_words(&measurement))
+    }
+
+    /// Simulates the sim Harness `harness` of the Context `context` and keeps what the run observed. The program
+    /// is built from the code the Pins of the Interfaces its Cases cite accepted, as they were pinned, and the
+    /// script is the model's as it is now; the working tree's own copies are not read, and no file of the project
+    /// is changed. A run that could not finish (the program does not build, the script broke the protocol, the
+    /// time ran out) is kept as a failed measurement; a Harness that is not a well-formed sim Harness, an
+    /// Interface it cites that is not pinned, or a configuration that cannot simulate it is an error and keeps
+    /// nothing.
+    pub async fn simulate(
+        &mut self,
+        context: &str,
+        harness: &str,
+    ) -> Result<MeasureDone, AppError> {
+        let p = self.project().await?;
+        let ctx = context_id(&p, context)?;
+        let id = HarnessId::from_uuid(
+            self.asset(ctx, context, AssetKind::Harness, harness)
+                .await?,
+        );
+        let owner = p
+            .context(ctx)
+            .ok_or_else(|| AppError::Input(format!("the context `{context}` is gone")))?;
+        let h = owner
+            .harness(id)
+            .ok_or_else(|| AppError::Input(format!("the harness `{harness}` is gone")))?;
+        if h.kind() != HarnessKind::Sim {
+            return Err(AppError::Input(format!(
+                "the harness `{harness}` is of {}; only a sim harness is simulated (put it with kind `sim`)",
+                h.kind().word()
+            )));
+        }
+        let problems = shape(owner);
+        if !problems.is_empty() || !sim_harnesses(owner).any(|k| k.id() == id) {
+            let said: Vec<String> = problems.into_iter().map(|s| s.message).collect();
+            return Err(AppError::Input(format!(
+                "the sim harness `{harness}` is not well formed ({}); see `sim.shape`",
+                said.join("; ")
+            )));
+        }
+        let sweep_case = sweep(h).ok_or_else(|| {
+            AppError::Input(format!("the sim harness `{harness}` has no `sweep` case"))
+        })?;
+        let labels: Vec<_> = labels_of(&p, sweep_case).keys().copied().collect();
+        let mut interfaces = Vec::new();
+        for iface in cited_interfaces(&p, h) {
+            let name = self.name_of(iface.as_uuid()).await?;
+            let pin = self
+                .store
+                .pin_of(iface)
+                .await?
+                .ok_or_else(|| AppError::NotPinned {
+                    context: context.to_string(),
+                    interface: name.clone(),
+                })?;
+            let code = self
+                .store
+                .pin_code(pin.id())
+                .await?
+                .filter(|c| Digest::of(c.as_bytes()) == pin.code())
+                .ok_or_else(|| AppError::PinCodeNotKept {
+                    interface: name.clone(),
+                })?;
+            interfaces.push(InterfaceText { name, code });
+        }
+        let pins = self.store.pins().await?;
+        let basis = basis_of(&p, id, &pins).ok_or_else(|| {
+            AppError::Input(format!("the sim harness `{harness}` is not in the project"))
+        })?;
+        let settings = self.runner.sim_settings(context, harness).await?;
+        let stamp = SimStamp::new(basis, settings).map_err(|e| AppError::Input(e.to_string()))?;
+        let run_id = MeasurementId::from_uuid(self.ids.next_uuid());
+        let at = self.clock.now();
+        let request = SimulateRequest {
+            run: run_id.to_string(),
+            context: context.to_string(),
+            harness: harness.to_string(),
+            script: h.source().as_str().to_string(),
+            interfaces,
+            labels,
+            regress: regress_names(h),
+        };
+        let report = self.runner.simulate(&request).await?;
+        let measurement = Measurement::new(MeasurementDraft {
+            id: run_id,
+            kind: MeasureKind::Simulate,
+            subject: MeasureSubject::Harness(id),
+            stamp: stamp.into(),
+            at,
+            sites: 0,
+            mutants: Vec::new(),
+            sim: Some(SimOutcome {
+                cases: report.cases,
+                reruns: report.reruns,
+            }),
             failure: report.failure,
             evidence: report.evidence,
         })?;
@@ -229,6 +450,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     fn measured_words(&self, m: &Measurement) -> MeasureDone {
+        let digest = |d: Option<Digest>| d.map(|d| d.to_string());
+        let sim = m.sim();
         MeasureDone {
             id: m.id().to_string(),
             kind: m.kind().word(),
@@ -247,6 +470,48 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     outcome: r.outcome.word(),
                 })
                 .collect(),
+            cases: sim
+                .map(|s| {
+                    s.cases
+                        .iter()
+                        .map(|c| CaseLine {
+                            case: c.case.to_string(),
+                            exit: c.exit.word(),
+                            findings: c
+                                .findings
+                                .iter()
+                                .map(|f| FindingLine {
+                                    step: f.step,
+                                    label: f.label.to_string(),
+                                    text: f.text.clone(),
+                                })
+                                .collect(),
+                            unreached: c
+                                .unreached
+                                .iter()
+                                .map(|u| UnreachedLine {
+                                    label: u.label.to_string(),
+                                    text: u.text.clone(),
+                                })
+                                .collect(),
+                            undecided: c.undecided.clone(),
+                            schedule: digest(c.schedule),
+                            trace: digest(c.trace),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reruns: sim
+                .map(|s| {
+                    s.reruns
+                        .iter()
+                        .map(|r| RerunLine {
+                            case: r.case.to_string(),
+                            result: r.result.word(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             evidence: m
                 .evidence()
                 .iter()
@@ -260,32 +525,34 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
     }
 
-    /// Where the latest measurement of each Interface stands, in the order of the Interfaces.
+    /// Where the latest measurement of each Interface and each sim Harness stands, in the order of the Contexts.
     pub(super) async fn measurement_standings(
         &self,
         p: &Project,
         measured: &Measured,
     ) -> Result<Vec<MeasurementStanding>, AppError> {
         let mut out = Vec::new();
+        let pins = self.store.pins().await?;
         for c in p.contexts() {
             for i in c.interfaces() {
                 for m in measured
                     .measurements
                     .iter()
-                    .filter(|m| m.subject() == i.id())
+                    .filter(|m| m.interface() == Some(i.id()))
                 {
-                    let state = match self.store.pin_of(i.id()).await? {
+                    let state = match pins.iter().find(|pin| pin.interface() == i.id()) {
                         Some(pin) => standing(
                             m,
                             p,
-                            &pin,
+                            pin,
                             measured.settings.get(&i.id()).map(String::as_str),
                         ),
                         None => Standing::Stale,
                     };
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
-                        interface: self.name_of(i.id().as_uuid()).await?,
+                        interface: Some(self.name_of(i.id().as_uuid()).await?),
+                        harness: None,
                         kind: m.kind().word(),
                         id: m.id().to_string(),
                         stamp: m.stamp().fingerprint().to_string(),
@@ -297,6 +564,39 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         },
                         failure: m.failure().map(ToString::to_string),
                         counts: m.counts(),
+                        sim: None,
+                        at: m.at().millis(),
+                    });
+                }
+            }
+            for h in c.harnesses() {
+                for m in measured
+                    .measurements
+                    .iter()
+                    .filter(|m| m.harness() == Some(h.id()))
+                {
+                    let state = sim_standing(
+                        m,
+                        p,
+                        &pins,
+                        measured.sim_settings.get(&h.id()).map(String::as_str),
+                    );
+                    out.push(MeasurementStanding {
+                        context: c.name().to_string(),
+                        interface: None,
+                        harness: Some(self.name_of(h.id().as_uuid()).await?),
+                        kind: m.kind().word(),
+                        id: m.id().to_string(),
+                        stamp: m.stamp().fingerprint().to_string(),
+                        state: state.word(),
+                        outcome: if m.failure().is_some() {
+                            "failed"
+                        } else {
+                            "ok"
+                        },
+                        failure: m.failure().map(ToString::to_string),
+                        counts: m.counts(),
+                        sim: m.sim().map(summary_of),
                         at: m.at().millis(),
                     });
                 }

@@ -439,6 +439,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             change_requests: &crs,
             measurements: &measured.measurements,
             measure_settings: &measured.settings,
+            sim_settings: &measured.sim_settings,
         };
         let mut run = self.registry.run(Hook::Check, at, &view);
         let external = self.run_external(Hook::Check, at, &view, &[]).await?;

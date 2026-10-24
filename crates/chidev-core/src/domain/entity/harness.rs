@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use crate::domain::vo::case::{CaseCites, CaseName};
+use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{CaseId, HarnessId};
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::revision::Revision;
@@ -74,6 +75,7 @@ pub enum HarnessError {
 pub struct Harness {
     id: HarnessId,
     revision: Revision,
+    kind: HarnessKind,
     source: Source,
     cases: Vec<Case>,
 }
@@ -107,10 +109,21 @@ impl Harness {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
+        Harness::of_kind(HarnessKind::Tests, id, source, cases)
+    }
+
+    /// A new Harness of `kind`, as [`Harness::new`] makes a Harness of tests.
+    pub fn of_kind(
+        kind: HarnessKind,
+        id: HarnessId,
+        source: Source,
+        cases: Vec<CaseFound>,
+    ) -> Result<Harness, HarnessError> {
         check(&source, &cases)?;
         Ok(Harness {
             id,
             revision: Revision::first(),
+            kind,
             source,
             cases: cases
                 .into_iter()
@@ -128,6 +141,7 @@ impl Harness {
     /// A Harness as a store kept it, revisions included. The rules of [`Harness::new`] hold on it.
     pub(crate) fn restore(
         id: HarnessId,
+        kind: HarnessKind,
         revision: Revision,
         source: Source,
         cases: Vec<(CaseId, Revision, CaseName, LineRange, CaseCites)>,
@@ -140,6 +154,7 @@ impl Harness {
         Ok(Harness {
             id,
             revision,
+            kind,
             source,
             cases: cases
                 .into_iter()
@@ -164,6 +179,11 @@ impl Harness {
         self.revision
     }
 
+    /// What it is for.
+    pub fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
     /// Its code.
     pub fn source(&self) -> &Source {
         &self.source
@@ -185,6 +205,17 @@ impl Harness {
     /// its Cases (which, in what order, named what, citing what) differ, and stays when nothing does. Content that
     /// breaks a rule changes nothing.
     pub fn revise(&mut self, source: Source, cases: Vec<CaseFound>) -> Result<(), HarnessError> {
+        self.revise_as(self.kind, source, cases)
+    }
+
+    /// As [`Harness::revise`], and the Harness becomes one of `kind`. A change of kind is a change of the Harness:
+    /// its revision goes up.
+    pub fn revise_as(
+        &mut self,
+        kind: HarnessKind,
+        source: Source,
+        cases: Vec<CaseFound>,
+    ) -> Result<(), HarnessError> {
         check(&source, &cases)?;
         let revised: Vec<Case> = cases
             .into_iter()
@@ -210,6 +241,7 @@ impl Harness {
             })
             .collect();
         let same = source == self.source
+            && kind == self.kind
             && revised.len() == self.cases.len()
             && revised.iter().zip(&self.cases).all(|(new, old)| {
                 new.id == old.id && new.name == old.name && new.cites == old.cites
@@ -217,6 +249,7 @@ impl Harness {
         if !same {
             self.revision = self.revision.next();
         }
+        self.kind = kind;
         self.source = source;
         self.cases = revised;
         Ok(())
@@ -434,6 +467,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!((h.revision().number(), revisions(&h)), (3, vec![2, 2]));
+    }
+
+    #[test]
+    fn a_harness_is_of_tests_unless_made_a_sim_and_a_change_of_kind_is_a_revision() {
+        let mut h = stack();
+        assert_eq!(h.kind(), HarnessKind::Tests);
+        let cases = |h: &Harness| -> Vec<CaseFound> {
+            h.cases()
+                .iter()
+                .map(|c| (c.id(), c.name().clone(), c.lines(), c.cites().clone()))
+                .collect()
+        };
+        // revising without a kind keeps the kind and, with nothing else changed, the revision
+        h.revise(src(CODE), cases(&h)).unwrap();
+        assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Tests, 1));
+        h.revise_as(HarnessKind::Sim, src(CODE), cases(&h)).unwrap();
+        assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
+        assert_eq!(revisions(&h), [1, 1]);
+        // and the kind stays through a revise that names none
+        h.revise(src(CODE), cases(&h)).unwrap();
+        assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
+        // a new Harness can be made a sim
+        let sim = Harness::of_kind(
+            HarnessKind::Sim,
+            HarnessId::from_uuid(test_uuid(101)),
+            src(CODE),
+            cases(&h),
+        )
+        .unwrap();
+        assert_eq!(sim.kind(), HarnessKind::Sim);
     }
 
     #[test]

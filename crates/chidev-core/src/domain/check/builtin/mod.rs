@@ -1,13 +1,15 @@
 //! The checks that come with the code. Each is one struct with a `static` descriptor and reads the model through
 //! the domain services that already decide it (`stale_cites`, `staleness`, `unapplied`), so the rule is written
-//! once. None is mandatory: what must never be kept the Project already refuses (its invariants), and a check is
-//! for what may be kept but should not be left.
+//! once. What must never be kept the Project already refuses (its invariants), and a check is for what may be kept
+//! but should not be left. The one builtin that is mandatory is `sim.nondeterministic`: a simulation that cannot be
+//! repeated finds nothing anyone can reproduce, so no policy turns it down.
 
 mod change_requests;
 mod citations;
 mod contexts;
 mod measure;
 mod pins;
+mod sim;
 
 use super::Check;
 use super::level::Hook;
@@ -19,6 +21,10 @@ pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
 pub use self::measure::{MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
 pub use self::pins::{StalePin, Unpinned};
+pub use self::sim::{
+    SimError, SimFinding, SimNondeterministic, SimShape, SimStale, SimUncitedClause, SimUnreached,
+    SimUnrun,
+};
 
 /// Every builtin check.
 pub fn all() -> &'static [&'static dyn Check] {
@@ -39,6 +45,14 @@ pub fn all() -> &'static [&'static dyn Check] {
         &Unmeasured,
         &StaleMutation,
         &Survived,
+        &SimShape,
+        &SimUncitedClause,
+        &SimUnrun,
+        &SimStale,
+        &SimFinding,
+        &SimUnreached,
+        &SimNondeterministic,
+        &SimError,
     ]
 }
 
@@ -217,6 +231,7 @@ mod fixture {
                 change_requests: crs,
                 measurements: &[],
                 measure_settings: &BTreeMap::new(),
+                sim_settings: &BTreeMap::new(),
             },
             &Params::default(),
         )
@@ -259,7 +274,12 @@ mod tests {
         assert_eq!(ids.len(), all.len());
         for c in all {
             let d = c.descriptor();
-            assert!(!d.mandatory, "{} is not mandatory yet", d.id);
+            assert_eq!(
+                d.mandatory,
+                d.id.as_str() == "sim.nondeterministic",
+                "{} is mandatory only if it is a repeatability rule",
+                d.id
+            );
             assert_eq!(d.executor, Executor::Builtin);
             assert!(d.hooks.contains(&Hook::Check), "{} runs on demand", d.id);
             assert!(!d.summary.is_empty() && !d.help.is_empty());
@@ -274,9 +294,19 @@ mod tests {
                     | "mutation.unmeasured"
                     | "mutation.survived"
             );
+            let error = matches!(
+                d.id.as_str(),
+                "sim.shape" | "sim.finding" | "sim.unreached" | "sim.nondeterministic"
+            );
             assert_eq!(
                 d.default_level,
-                if note { Level::Note } else { Level::Warning },
+                if error {
+                    Level::Error
+                } else if note {
+                    Level::Note
+                } else {
+                    Level::Warning
+                },
                 "{}",
                 d.id
             );
