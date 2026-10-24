@@ -7,10 +7,11 @@ use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
-    Checked, ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput,
-    EvidenceInput, EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, HarnessKind,
-    Importance, Intent, ItemInput, ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue,
-    PinState, PolicyLineInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding,
+    ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
+    DecisionInput, DecisionMakerInput, EvidenceInput, EvidenceStatus, ExpectInput, ExpectKind,
+    FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput,
+    ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone,
+    PutInput, ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RetireInput,
     RetiredStatus, Retirement, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
@@ -57,6 +58,18 @@ enum Op {
         kind: Option<String>,
         source: String,
         cases: Vec<CaseDto>,
+    },
+    /// Puts and retires several assets as one change: the rules of the project are checked once, on the state it
+    /// ends in, so a Harness can be put without the Cases that cite a Clause the same change removes, and can cite
+    /// a Clause the same change makes. All of it is applied, or none (and the error names every problem). Each
+    /// entry of `puts` is tagged with `put` (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) and
+    /// has the fields of the operation of that name without `op`; each entry of `retires` is tagged with `retire`
+    /// (`context`, `contract`, `interface`, `harness`).
+    ChangeSet {
+        #[serde(default)]
+        puts: Vec<PutDto>,
+        #[serde(default)]
+        retires: Vec<RetireDto>,
     },
     /// Retires a Context and everything it owns: it leaves the model, its ids stay reserved, nothing brings it
     /// back. Refused while a Context that stays uses it or a Case that stays cites what it owns.
@@ -134,6 +147,158 @@ enum Op {
     },
     /// What an agent judged of one rule: replaces every finding the rule had.
     FindingReport(Box<ReportDto>),
+}
+
+/// One entry of the `puts` of a `change_set`: the fields of the operation named by `put`, without `op`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "put", rename_all = "snake_case", deny_unknown_fields)]
+enum PutDto {
+    /// As `context_uses`.
+    Uses { context: String, uses: Vec<String> },
+    /// As `base_on_contract`.
+    BaseOnContract { context: String },
+    /// As `contract_put`.
+    Contract {
+        context: String,
+        name: String,
+        title: String,
+        clauses: Vec<ClauseDto>,
+    },
+    /// As `interface_put`.
+    Interface {
+        context: String,
+        name: String,
+        source: String,
+        items: Vec<ItemDto>,
+    },
+    /// As `harness_put`.
+    Harness {
+        context: String,
+        name: String,
+        #[serde(default)]
+        kind: Option<String>,
+        source: String,
+        cases: Vec<CaseDto>,
+    },
+}
+
+/// One entry of the `retires` of a `change_set`: the fields of the retire operation named by `retire`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "retire", rename_all = "snake_case", deny_unknown_fields)]
+enum RetireDto {
+    /// As `context_retire`.
+    Context { context: String },
+    /// As `contract_retire`.
+    Contract { context: String, contract: String },
+    /// As `interface_retire`.
+    Interface { context: String, interface: String },
+    /// As `harness_retire`.
+    Harness { context: String, harness: String },
+}
+
+impl TryFrom<PutDto> for PutInput {
+    type Error = AppError;
+
+    fn try_from(d: PutDto) -> Result<PutInput, AppError> {
+        Ok(match d {
+            PutDto::Uses { context, uses } => PutInput::Uses { context, uses },
+            PutDto::BaseOnContract { context } => PutInput::BaseOnContract { context },
+            PutDto::Contract {
+                context,
+                name,
+                title,
+                clauses,
+            } => PutInput::Contract(ContractPut {
+                context,
+                name,
+                title,
+                clauses: clause_inputs(clauses),
+            }),
+            PutDto::Interface {
+                context,
+                name,
+                source,
+                items,
+            } => PutInput::Interface(InterfacePut {
+                context,
+                name,
+                source,
+                items: item_inputs(items),
+            }),
+            PutDto::Harness {
+                context,
+                name,
+                kind,
+                source,
+                cases,
+            } => PutInput::Harness(HarnessPut {
+                context,
+                name,
+                kind: harness_kind(kind.as_deref())?,
+                source,
+                cases: case_inputs(cases),
+            }),
+        })
+    }
+}
+
+impl From<RetireDto> for RetireInput {
+    fn from(d: RetireDto) -> RetireInput {
+        match d {
+            RetireDto::Context { context } => RetireInput::Context(context),
+            RetireDto::Contract { context, contract } => {
+                RetireInput::Contract { context, contract }
+            }
+            RetireDto::Interface { context, interface } => {
+                RetireInput::Interface { context, interface }
+            }
+            RetireDto::Harness { context, harness } => RetireInput::Harness { context, harness },
+        }
+    }
+}
+
+fn clause_inputs(clauses: Vec<ClauseDto>) -> Vec<ClauseInput> {
+    clauses
+        .into_iter()
+        .map(|c| ClauseInput {
+            label: c.label,
+            text: c.text,
+        })
+        .collect()
+}
+
+fn item_inputs(items: Vec<ItemDto>) -> Vec<ItemInput> {
+    items
+        .into_iter()
+        .map(|i| ItemInput {
+            signature: i.signature,
+            lines: (i.lines[0], i.lines[1]),
+            replaces: i.replaces,
+        })
+        .collect()
+}
+
+fn case_inputs(cases: Vec<CaseDto>) -> Vec<CaseInput> {
+    cases
+        .into_iter()
+        .map(|c| CaseInput {
+            name: c.name,
+            lines: (c.lines[0], c.lines[1]),
+            items: c.items.into_iter().map(ItemRef::from).collect(),
+            clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+        })
+        .collect()
+}
+
+fn harness_kind(kind: Option<&str>) -> Result<Option<HarnessKind>, AppError> {
+    kind.map(|w| {
+        HarnessKind::from_word(w).ok_or_else(|| {
+            AppError::Input(format!(
+                "the harness kind `{w}` is not one; it is tests or sim"
+            ))
+        })
+    })
+    .transpose()
 }
 
 /// What a `measure` measures.
@@ -883,6 +1048,41 @@ struct RetireOut<'a> {
     findings: Vec<FindingOut<'a>>,
 }
 
+/// What one put of a `change_set` came to: the asset's name, id and revision (a setting of a Context has none).
+#[derive(Debug, Serialize)]
+struct PutOut<'a> {
+    put: &'static str,
+    context: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<u64>,
+}
+
+impl<'a> From<&'a PutDone> for PutOut<'a> {
+    fn from(d: &'a PutDone) -> PutOut<'a> {
+        PutOut {
+            put: d.kind,
+            context: &d.context,
+            name: d.name.as_deref(),
+            id: d.id.map(|id| id.to_string()),
+            revision: d.revision.map(|r| r.number()),
+        }
+    }
+}
+
+/// The result of a `change_set`: each put in the order listed, and everything that left the model (what the puts
+/// dropped, then what was retired).
+#[derive(Debug, Serialize)]
+struct ChangeSetOut<'a> {
+    op: &'static str,
+    puts: Vec<PutOut<'a>>,
+    retired: Vec<RetiredOut<'a>>,
+    findings: Vec<FindingOut<'a>>,
+}
+
 /// The result of `status`.
 #[derive(Debug, Serialize)]
 struct StatusOut<'a> {
@@ -1494,19 +1694,29 @@ where
             app.base_on_contract(&context).await?;
             json!({ "op": "base_on_contract" })
         }
+        Op::ChangeSet { puts, retires } => {
+            let set = ChangeSetInput {
+                puts: puts
+                    .into_iter()
+                    .map(PutInput::try_from)
+                    .collect::<Result<_, _>>()?,
+                retires: retires.into_iter().map(RetireInput::from).collect(),
+            };
+            let done = app.apply_change_set(&set).await?;
+            to_value(&ChangeSetOut {
+                op: "change_set",
+                puts: done.value.puts.iter().map(PutOut::from).collect(),
+                retired: done.value.retired.iter().map(RetiredOut::from).collect(),
+                findings: findings_out(&done.findings),
+            })?
+        }
         Op::ContractPut {
             context,
             name,
             title,
             clauses,
         } => {
-            let clauses: Vec<ClauseInput> = clauses
-                .into_iter()
-                .map(|c| ClauseInput {
-                    label: c.label,
-                    text: c.text,
-                })
-                .collect();
+            let clauses = clause_inputs(clauses);
             let done = app.put_contract(&context, &name, &title, &clauses).await?;
             json!({ "op": "contract_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
@@ -1516,14 +1726,7 @@ where
             source,
             items,
         } => {
-            let items: Vec<ItemInput> = items
-                .into_iter()
-                .map(|i| ItemInput {
-                    signature: i.signature,
-                    lines: (i.lines[0], i.lines[1]),
-                    replaces: i.replaces,
-                })
-                .collect();
+            let items = item_inputs(items);
             let done = app.put_interface(&context, &name, &source, &items).await?;
             json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
@@ -1534,25 +1737,8 @@ where
             source,
             cases,
         } => {
-            let kind = kind
-                .as_deref()
-                .map(|w| {
-                    HarnessKind::from_word(w).ok_or_else(|| {
-                        AppError::Input(format!(
-                            "the harness kind `{w}` is not one; it is tests or sim"
-                        ))
-                    })
-                })
-                .transpose()?;
-            let cases: Vec<CaseInput> = cases
-                .into_iter()
-                .map(|c| CaseInput {
-                    name: c.name,
-                    lines: (c.lines[0], c.lines[1]),
-                    items: c.items.into_iter().map(ItemRef::from).collect(),
-                    clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
-                })
-                .collect();
+            let kind = harness_kind(kind.as_deref())?;
+            let cases = case_inputs(cases);
             let done = app
                 .put_harness_of(&context, &name, kind, &source, &cases)
                 .await?;

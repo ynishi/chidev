@@ -3,6 +3,7 @@
 pub mod answer;
 pub mod assumption;
 pub mod case;
+pub mod change_set;
 pub mod choice;
 pub mod clause;
 pub mod confidence;

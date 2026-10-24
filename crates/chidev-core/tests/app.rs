@@ -1,8 +1,11 @@
 //! The use cases over the real store: each test opens an SQLite database of its own in a fresh temporary
 //! directory, so no test double of the store is needed.
 
-use chidev_core::app::ports::{AssetKind, AssetNames, IdSource};
-use chidev_core::app::{App, AppError, ClauseInput};
+use chidev_core::app::ports::{AssetKind, AssetNames, IdSource, Store};
+use chidev_core::app::{
+    App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, HarnessPut,
+    InterfacePut, ItemInput, ItemRef, PutInput, RetireInput,
+};
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
@@ -74,6 +77,217 @@ async fn an_asset_and_its_name_are_kept_together() {
     );
     let p = store.project().await.unwrap().unwrap();
     assert!(p.context(ctx).unwrap().contract(put.value.id).is_some());
+}
+
+/// `stock` with Clauses C1 and C7, its Interface with `fn reserve()` and `fn release()`, and a Harness `stock-tests`
+/// whose Case `reserve_refuses` cites the first of each and `release_frees` the second.
+async fn stock(name: &str) -> App<SqliteStore, Counter> {
+    let mut app = app(name).await;
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    app.put_contract("core", "stock", "Stock", &clauses(&["C1", "C7"]))
+        .await
+        .unwrap();
+    app.put_interface(
+        "core",
+        "stock",
+        "fn reserve()\nfn release()\n",
+        &[item("fn reserve()", 1), item("fn release()", 2)],
+    )
+    .await
+    .unwrap();
+    app.put_harness(
+        "core",
+        "stock-tests",
+        "fn reserve_refuses() {}\nfn release_frees() {}\n",
+        &cases(&["reserve", "release"]),
+    )
+    .await
+    .unwrap();
+    app
+}
+
+fn clauses(labels: &[&str]) -> Vec<ClauseInput> {
+    labels
+        .iter()
+        .map(|l| ClauseInput {
+            label: (*l).to_string(),
+            text: format!("{l} holds"),
+        })
+        .collect()
+}
+
+fn item(signature: &str, line: usize) -> ItemInput {
+    ItemInput {
+        signature: signature.to_string(),
+        lines: (line, line),
+        replaces: None,
+    }
+}
+
+/// The Cases for the words `reserve` and `release`: `reserve_refuses` cites `fn reserve()` and C1, and
+/// `release_frees` cites `fn release()` and C7.
+fn cases(words: &[&str]) -> Vec<CaseInput> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(k, w)| CaseInput {
+            name: if *w == "reserve" {
+                "reserve_refuses".to_string()
+            } else {
+                "release_frees".to_string()
+            },
+            lines: (k + 1, k + 1),
+            items: vec![ItemRef {
+                context: None,
+                interface: "stock".to_string(),
+                signature: format!("fn {w}()"),
+            }],
+            clauses: vec![ClauseRef {
+                context: None,
+                contract: "stock".to_string(),
+                label: if *w == "reserve" { "C1" } else { "C7" }.to_string(),
+            }],
+        })
+        .collect()
+}
+
+/// The change set that removes Clause C7 and Item `release` and puts the Harness without the Case that cites them.
+fn removal() -> ChangeSetInput {
+    ChangeSetInput {
+        puts: vec![
+            PutInput::Contract(ContractPut {
+                context: "core".to_string(),
+                name: "stock".to_string(),
+                title: "Stock".to_string(),
+                clauses: clauses(&["C1"]),
+            }),
+            PutInput::Interface(InterfacePut {
+                context: "core".to_string(),
+                name: "stock".to_string(),
+                source: "fn reserve()\n".to_string(),
+                items: vec![item("fn reserve()", 1)],
+            }),
+            PutInput::Harness(HarnessPut {
+                context: "core".to_string(),
+                name: "stock-tests".to_string(),
+                kind: None,
+                source: "fn reserve_refuses() {}\n".to_string(),
+                cases: cases(&["reserve"]),
+            }),
+        ],
+        retires: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_change_set_removes_what_cases_cite_with_the_harness_in_one_commit() {
+    let mut app = stock("change-set").await;
+    let before = app.store().revision().await.unwrap();
+    let done = app.apply_change_set(&removal()).await.unwrap();
+    assert_eq!(
+        app.store().revision().await.unwrap().0,
+        before.0 + 1,
+        "one commit"
+    );
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind).collect();
+    assert_eq!(kinds, ["contract", "interface", "harness"]);
+    assert!(
+        done.value
+            .puts
+            .iter()
+            .all(|p| p.revision.map(|r| r.number()) == Some(2))
+    );
+    // what the puts dropped, by name
+    let gone: Vec<&str> = done.value.retired.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        gone,
+        [
+            "stock C7",
+            "stock fn release()",
+            "stock-tests release_frees"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_same_removal_as_a_single_put_is_refused_naming_the_case_and_the_clause() {
+    let mut app = stock("single-puts").await;
+    let before = app.store().revision().await.unwrap();
+    let err = app
+        .put_contract("core", "stock", "Stock", &clauses(&["C1"]))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("stock-tests release_frees") && text.contains("stock C7"),
+        "{text}"
+    );
+    assert!(text.contains("cannot reach"), "{text}");
+    assert_eq!(
+        app.store().revision().await.unwrap(),
+        before,
+        "nothing kept"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_change_set_names_every_problem_and_keeps_nothing() {
+    let mut app = stock("refused-set").await;
+    let before = app.store().revision().await.unwrap();
+    let mut set = removal();
+    // the Harness is left as it is: the Case that cites C7 and `release` stays
+    set.puts.pop();
+    let err = app.apply_change_set(&set).await.unwrap_err();
+    let AppError::Many(all) = &err else {
+        panic!("two problems expected: {err}");
+    };
+    assert_eq!(all.len(), 2);
+    let text = err.to_string();
+    assert!(text.contains("case stock-tests release_frees"), "{text}");
+    assert!(text.contains("the item stock fn release()"), "{text}");
+    assert!(text.contains("the clause stock C7"), "{text}");
+    assert_eq!(app.store().revision().await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_retirement_and_a_put_are_one_change_set() {
+    let mut app = stock("retire-and-put").await;
+    let before = app.store().revision().await.unwrap();
+    let mut set = removal();
+    set.puts.pop();
+    set.retires.push(RetireInput::Harness {
+        context: "core".to_string(),
+        harness: "stock-tests".to_string(),
+    });
+    let done = app.apply_change_set(&set).await.unwrap();
+    assert_eq!(app.store().revision().await.unwrap().0, before.0 + 1);
+    assert!(done.value.retired.iter().any(|r| r.kind == "harness"));
+    let again = app.retire_harness("core", "stock-tests").await;
+    assert!(
+        matches!(again, Err(AppError::AssetRetired { .. })),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_pin_with_nothing_that_checks_it_names_the_interface_not_its_id() {
+    let mut app = app("pin-name").await;
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    app.put_interface(
+        "core",
+        "stock",
+        "fn reserve()\n",
+        &[item("fn reserve()", 1)],
+    )
+    .await
+    .unwrap();
+    let err = app.pin("core", "stock", "code").await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "no case cites an item of the interface `stock` (context `core`), so nothing checked the code to pin"
+    );
 }
 
 mod checks {

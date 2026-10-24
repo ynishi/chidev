@@ -14,6 +14,105 @@ Contract, Interface and Harness as the assets of a codebase; the code is a cache
 The layer rules are in `arch-lint.toml` and run with `cargo test`. A crate or layer
 that does not fit the project is deleted, together with its `arch-lint.toml` scope.
 
+## Operations
+
+`chidev exec <file> --store <db>` reads one JSON object per line, runs each as an
+operation, and prints one result line per operation (`"ok"`, the `line` it came
+from, and its fields). A line that fails gets `"ok":false` and an `error`, and the
+run goes on; the exit status is 1 if any line failed. Things are named, never
+given by id: a Context by its name, an asset by its name within its Context, a
+Clause by its label (`C1`), an Item by its signature, a Case by its name. These are
+the operations that build the model (the others are described below, where they
+belong):
+
+```json
+{"op":"init"}
+{"op":"context_add","name":"pricing","uses":["base"]}
+{"op":"context_uses","context":"pricing","uses":["base"]}
+{"op":"base_on_contract","context":"pricing"}
+{"op":"contract_put","context":"pricing","name":"discount","title":"Discount",
+ "clauses":[{"label":"C1","text":"a discount over 100% is refused"}]}
+{"op":"interface_put","context":"pricing","name":"price","source":"fn price(total: u64) -> u64;\n",
+ "items":[{"signature":"fn price(total: u64) -> u64","lines":[1,1]}]}
+{"op":"harness_put","context":"pricing","name":"price-tests","source":"#[test] fn refuses() {}\n",
+ "cases":[{"name":"refuses","lines":[1,1],
+   "items":[{"interface":"price","signature":"fn price(total: u64) -> u64"}],
+   "clauses":[{"contract":"discount","label":"C1"}]}]}
+{"op":"pin","context":"pricing","interface":"price","code":"fn price(total: u64) -> u64 { total }"}
+{"op":"status"}
+```
+
+- `init` makes the project (once). `context_add` adds a Context; `uses` (optional)
+  names the Contexts it uses, whose Contracts and Interfaces its Cases may cite.
+  `context_uses` replaces that list. `base_on_contract` bases a Context on its
+  Contracts (it needs one, and there is no way back).
+- `contract_put` makes the Contract or revises it, whole: the `clauses` given are
+  the Clauses it has afterwards, a label it had keeps its Clause, a label it
+  did not have is new, and one left out is removed. A label is `C` and a number.
+  The answer has the asset's `id` and `revision`.
+- `interface_put` is the same for an Interface: `source` is its code, and each
+  item has its `signature`, the first and last `lines` it is on (from 1) and,
+  when its signature changed, `replaces` (the signature it had) to keep its id.
+- `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
+  a new Harness) or `sim`. A Case cites one Item at least and any Clauses; `context`
+  in a citation (default: the Case's own) reaches a Context that one uses. A citation
+  records the revision its target has when the Harness is put.
+- `pin` records that the code was accepted: it needs a Case that cites an Item of the
+  Interface, and it goes stale when what it stands on changes.
+- `status` lists the Pins and whether they hold, the citations behind their
+  targets, the change requests, what was retired and the findings of every check.
+
+A put or a retire does not need an open change request. A change that touches
+several assets and holds only as a whole is one `change_set` (next section).
+
+## Change sets
+
+Every rule of the Project is about the state a change ends in: a Case may cite only
+what its Context owns or uses, a retirement may not take away what a Case that stays
+cites. A put of one asset checks them on the Project that put leaves, so a change
+that removes a Clause and an Item that Cases cite is refused whichever put comes
+first, unless the Harness goes first, then the Contract, then the Interface, then
+the Harness again. A `change_set` is that change as one operation: the rules are
+checked once, on the state it ends in, and all of it is applied or none of it.
+
+```json
+{"op":"change_set",
+ "puts":[
+  {"put":"contract","context":"core","name":"stock","title":"Stock","clauses":[{"label":"C1","text":".."}]},
+  {"put":"interface","context":"core","name":"stock","source":"fn reserve();\n",
+   "items":[{"signature":"fn reserve()","lines":[1,1]}]},
+  {"put":"harness","context":"core","name":"stock-tests","source":"..","cases":[
+   {"name":"reserve_refuses","lines":[1,1],
+    "items":[{"interface":"stock","signature":"fn reserve()"}],
+    "clauses":[{"contract":"stock","label":"C1"}]}]}],
+ "retires":[{"retire":"harness","context":"core","harness":"old-tests"}]}
+```
+
+- Each entry of `puts` has the fields of the operation of that name without `op`,
+  and a `put` that says which: `contract`, `interface`, `harness`, `uses`
+  (`context`, `uses`) or `base_on_contract` (`context`). Each entry of `retires`
+  has the fields of the retire operation and a `retire`: `context`, `contract`,
+  `interface` or `harness`.
+- The order the entries are listed in does not matter. They are applied in the
+  order the rules need: the uses of the Contexts, the Contracts and Interfaces,
+  the basis, the Harnesses, then the retirements. A Case can cite a Clause or an
+  Item that the same change set makes or revises, and the citation records the
+  revision it has there; a Case that cites what the set removes fails the set.
+- What a put drops (a Clause, an Item, a Case) is recorded as retired, as it is
+  for a put alone; the answer's `retired` lists it, then what was retired.
+- Each asset moves by one revision at most: a thing is named once in a set, and
+  naming it twice (or putting it and retiring it) is refused. An empty set is
+  refused.
+- When a set is refused nothing changes and the error names every problem found,
+  in names: ``the case stock-tests release_frees (context `core`) cites the clause
+  stock C7, which it cannot reach``. The checks of the put hook run once, on the
+  Project before and after the set, and the store takes one commit.
+- The answer has `puts` (each with its `put`, `context`, `name`, `id` and
+  `revision`, in the order listed; a `uses` or `base_on_contract` has only the
+  Context), `retired` and `findings`. A put or a retire alone is a change set of
+  one and answers as it did.
+- The set is not tied to a change request (`for: <cr>` is a separate design).
+
 ## External checks
 
 Register a project's checker in `checks.toml`:
@@ -395,6 +494,13 @@ the request that made it is left for later. A database written before
 expectations, or before the Crux, Policy and Assumptions below, does not load;
 chidev is unreleased and there is no migration.
 
+The change a request asks for is made by puts and retirements, and a change that
+touches several assets and holds only as a whole (a Clause removed, the Cases that
+cited it gone from their Harness, an Item removed with it) is one `change_set`
+(see "Change sets"), not a series of puts that has to be ordered around the
+citations; the request is met when the revisions it expects have moved, however
+they were made.
+
 ### Crux, Policy and Assumption
 
 Three things say how a question that came up while raising a request is settled,
@@ -491,6 +597,12 @@ as the work of a change request that expects the thing to go: open it with a
 `remove` for the Context or the asset, retire (the Cases that cite first), and
 resolve it once the expectation is met. The retire operation is not tied to the
 request (`for: <cr>` is a separate design).
+
+Retiring several things, or retiring together with a put, is one `change_set` with
+`retires` (see "Change sets"): the refusals above are judged on the state the set
+ends in, so a Harness can be put without the Cases that cite an Item and the
+Interface retired in the same set. Retire operations on their own are change sets
+of one.
 
 ## Change-request addresses
 

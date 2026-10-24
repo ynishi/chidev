@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::domain::vo::case::{CaseCites, CaseName};
+use crate::domain::vo::case::{CaseCites, CaseContentError, CaseName};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{CaseId, HarnessId};
 use crate::domain::vo::line_range::LineRange;
@@ -66,6 +66,9 @@ pub enum HarnessError {
         /// How many lines the code has.
         total: usize,
     },
+    /// What a Case cites cannot be recorded.
+    #[error(transparent)]
+    Cites(#[from] CaseContentError),
 }
 
 /// The cases that check a Context. The code is the content (it is what runs); the Cases are the tests in it,

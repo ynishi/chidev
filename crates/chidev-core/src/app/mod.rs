@@ -10,6 +10,12 @@
 //! the ids the domain works with: a definition given again under the same
 //! label, signature or case name keeps its id, and a new one gets a fresh id.
 
+mod change_set;
+use self::change_set::only_put;
+pub use self::change_set::{
+    ChangeSetDone, ChangeSetInput, ContractPut, HarnessPut, InterfacePut, PutDone, PutInput,
+    RetireInput,
+};
 mod check;
 mod external;
 pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
@@ -56,9 +62,8 @@ use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
-use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::choice::Choice;
-use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::confidence::Confidence;
 pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Reasoned, Recommended};
@@ -78,8 +83,6 @@ use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
-use crate::domain::vo::signature::Signature;
-use crate::domain::vo::source::Source;
 pub use crate::domain::vo::target::ExpectKind;
 use crate::domain::vo::target::Target;
 use crate::domain::vo::title::Title;
@@ -169,6 +172,42 @@ pub enum AppError {
     /// A value given is not well formed (a name, a label, a line range, ...).
     #[error("{0}")]
     Input(String),
+    /// A Case cites an Item or a Clause it cannot reach: it is not in the Case's Context, nor in a Context that
+    /// one uses (it was removed, or the Context does not use the one that owns it).
+    #[error(
+        "the {case} (context `{context}`) cites the {kind} {target}, which it cannot reach; put its harness again without the citation, or keep the {kind}"
+    )]
+    NotReached {
+        /// The Case, described (`case stock-tests reserve refuses`).
+        case: String,
+        /// The Context that owns the Case.
+        context: String,
+        /// `item` or `clause`.
+        kind: &'static str,
+        /// What is cited, described (`stock C7`, `stock fn release()`).
+        target: String,
+    },
+    /// A change set names one thing twice.
+    #[error("the change set names the {what} `{name}` twice")]
+    NamedTwice {
+        /// The kind of thing.
+        what: &'static str,
+        /// Its name.
+        name: String,
+    },
+    /// A change set has several problems; it was not applied, and each is here.
+    #[error("the change set is refused, {} problems: {}", .0.len(), problems_of(.0))]
+    Many(Vec<AppError>),
+    /// No Case cites an Item of the Interface, so nothing checked the code to pin.
+    #[error(
+        "no case cites an item of the interface `{interface}` (context `{context}`), so nothing checked the code to pin"
+    )]
+    NothingChecksIt {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
     /// The change breaks a rule of the Project.
     #[error(transparent)]
     Project(#[from] ProjectError),
@@ -270,6 +309,15 @@ fn rules_of(found: &[Found]) -> String {
     rules.sort_unstable();
     rules.dedup();
     rules.join(", ")
+}
+
+/// The messages of `problems`, separated by semicolons.
+fn problems_of(problems: &[AppError]) -> String {
+    problems
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn input(e: impl Display) -> AppError {
@@ -1035,57 +1083,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         title: &str,
         clauses: &[ClauseInput],
     ) -> Result<Checked<Put<ContractId>>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = self
-            .store
-            .asset_id(ctx, AssetKind::Contract, name)
-            .await?
-            .map(ContractId::from_uuid);
-        if let Some(id) = id {
-            refuse_retired(&p, Target::Contract(id), context, AssetKind::Contract, name)?;
-        }
-        let old = id.and_then(|id| p.context(ctx).and_then(|c| c.contract(id)));
-        let mut given = Vec::with_capacity(clauses.len());
-        for c in clauses {
-            let label = ClauseLabel::try_from(c.label.as_str()).map_err(input)?;
-            let text = ClauseText::try_from(c.text.as_str()).map_err(input)?;
-            let clause = match old.and_then(|k| k.clause_by_label(label)) {
-                Some(k) => k.id(),
-                None => ClauseId::from_uuid(self.ids.next_uuid()),
-            };
-            given.push((clause, ClauseContent::new(label, text)));
-        }
-        let id = id.unwrap_or_else(|| ContractId::from_uuid(self.ids.next_uuid()));
-        p.put_contract(ctx, id, Title::try_from(title).map_err(input)?, given)?;
-        let revision = p
-            .context(ctx)
-            .and_then(|c| c.contract(id))
-            .map(|k| k.revision())
-            .unwrap_or_else(Revision::first);
-        let named = AssetName {
-            context: ctx,
-            kind: AssetKind::Contract,
+        let put = PutInput::Contract(ContractPut {
+            context: context.to_string(),
             name: name.to_string(),
-            id: id.as_uuid(),
-        };
-        let gate = self
-            .gate(
-                Hook::Put,
-                at,
-                Some(&before),
-                &p,
-                std::slice::from_ref(&named),
-            )
-            .await?;
-        self.keep(at, p, named, gate.invocations, gate.external)
-            .await?;
-        Ok(Checked {
-            value: Put { id, revision },
-            findings: gate.found,
-        })
+            title: title.to_string(),
+            clauses: clauses.to_vec(),
+        });
+        let done = self.apply_one(put).await?;
+        only_put(done, ContractId::from_uuid)
     }
 
     /// Makes or revises the Interface named `name` of the Context `context` from its code and the Items found in
@@ -1097,73 +1102,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         items: &[ItemInput],
     ) -> Result<Checked<Put<InterfaceId>>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = self
-            .store
-            .asset_id(ctx, AssetKind::Interface, name)
-            .await?
-            .map(InterfaceId::from_uuid);
-        if let Some(id) = id {
-            refuse_retired(
-                &p,
-                Target::Interface(id),
-                context,
-                AssetKind::Interface,
-                name,
-            )?;
-        }
-        let old = id.and_then(|id| p.context(ctx).and_then(|c| c.interface(id)));
-        let find = |sig: &str| {
-            old.and_then(|i| i.items().iter().find(|it| it.signature().as_str() == sig))
-                .map(|it| it.id())
-        };
-        let mut given = Vec::with_capacity(items.len());
-        for it in items {
-            let signature = Signature::try_from(it.signature.as_str()).map_err(input)?;
-            let lines = LineRange::new(it.lines.0, it.lines.1).map_err(input)?;
-            let item = match &it.replaces {
-                Some(before) => find(before).ok_or_else(|| AppError::UnknownItem {
-                    interface: name.to_string(),
-                    signature: before.clone(),
-                })?,
-                None => match find(&it.signature) {
-                    Some(item) => item,
-                    None => ItemId::from_uuid(self.ids.next_uuid()),
-                },
-            };
-            given.push((item, signature, lines));
-        }
-        let id = id.unwrap_or_else(|| InterfaceId::from_uuid(self.ids.next_uuid()));
-        p.put_interface(ctx, id, Source::new(source.to_string()), given)?;
-        let revision = p
-            .context(ctx)
-            .and_then(|c| c.interface(id))
-            .map(|i| i.revision())
-            .unwrap_or_else(Revision::first);
-        let named = AssetName {
-            context: ctx,
-            kind: AssetKind::Interface,
+        let put = PutInput::Interface(InterfacePut {
+            context: context.to_string(),
             name: name.to_string(),
-            id: id.as_uuid(),
-        };
-        let gate = self
-            .gate(
-                Hook::Put,
-                at,
-                Some(&before),
-                &p,
-                std::slice::from_ref(&named),
-            )
-            .await?;
-        self.keep(at, p, named, gate.invocations, gate.external)
-            .await?;
-        Ok(Checked {
-            value: Put { id, revision },
-            findings: gate.found,
-        })
+            source: source.to_string(),
+            items: items.to_vec(),
+        });
+        let done = self.apply_one(put).await?;
+        only_put(done, InterfaceId::from_uuid)
     }
 
     /// Makes or revises the Harness named `name` of the Context `context` from its code and the Cases found in
@@ -1190,68 +1136,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = self
-            .store
-            .asset_id(ctx, AssetKind::Harness, name)
-            .await?
-            .map(HarnessId::from_uuid);
-        if let Some(id) = id {
-            refuse_retired(&p, Target::Harness(id), context, AssetKind::Harness, name)?;
-        }
-        let old = id.and_then(|id| p.context(ctx).and_then(|c| c.harness(id)));
-        let mut given = Vec::with_capacity(cases.len());
-        for c in cases {
-            let case_name = CaseName::try_from(c.name.as_str()).map_err(input)?;
-            let lines = LineRange::new(c.lines.0, c.lines.1).map_err(input)?;
-            let mut items = std::collections::BTreeMap::new();
-            for r in &c.items {
-                let (item, revision) = self.item(&p, Some(ctx), r).await?;
-                items.insert(item, revision);
-            }
-            let mut clauses = std::collections::BTreeMap::new();
-            for r in &c.clauses {
-                let (clause, revision) = self.clause(&p, Some(ctx), r).await?;
-                clauses.insert(clause, revision);
-            }
-            let cites = CaseCites::new(items, clauses).map_err(input)?;
-            let case = match old.and_then(|h| h.cases().iter().find(|k| *k.name() == case_name)) {
-                Some(k) => k.id(),
-                None => CaseId::from_uuid(self.ids.next_uuid()),
-            };
-            given.push((case, case_name, lines, cites));
-        }
-        let id = id.unwrap_or_else(|| HarnessId::from_uuid(self.ids.next_uuid()));
-        p.put_harness_as(ctx, id, kind, Source::new(source.to_string()), given)?;
-        let revision = p
-            .context(ctx)
-            .and_then(|c| c.harness(id))
-            .map(|h| h.revision())
-            .unwrap_or_else(Revision::first);
-        let named = AssetName {
-            context: ctx,
-            kind: AssetKind::Harness,
+        let put = PutInput::Harness(HarnessPut {
+            context: context.to_string(),
             name: name.to_string(),
-            id: id.as_uuid(),
-        };
-        let gate = self
-            .gate(
-                Hook::Put,
-                at,
-                Some(&before),
-                &p,
-                std::slice::from_ref(&named),
-            )
-            .await?;
-        self.keep(at, p, named, gate.invocations, gate.external)
-            .await?;
-        Ok(Checked {
-            value: Put { id, revision },
-            findings: gate.found,
-        })
+            kind,
+            source: source.to_string(),
+            cases: cases.to_vec(),
+        });
+        let done = self.apply_one(put).await?;
+        only_put(done, HarnessId::from_uuid)
     }
 
     /// Retires the Context named `context` and everything it owns: it leaves the model, the Project goes to its
@@ -1259,12 +1152,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// cites what it owns. Pins, change requests and measurements keep referring to it by id. Like a put, it does
     /// not need an open change request; do it as the work of one that expects the Context to be removed.
     pub async fn retire_context(&mut self, context: &str) -> Result<Checked<Retirement>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let done = p.retire_context(ctx);
-        self.finish_retire(at, before, p, done).await
+        self.retire_one(RetireInput::Context(context.to_string()))
+            .await
     }
 
     /// Retires the Contract named `contract` of the Context `context` with its Clauses. The Context goes to its next
@@ -1274,23 +1163,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         contract: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = ContractId::from_uuid(
-            self.asset(ctx, context, AssetKind::Contract, contract)
-                .await?,
-        );
-        refuse_retired(
-            &p,
-            Target::Contract(id),
-            context,
-            AssetKind::Contract,
-            contract,
-        )?;
-        let done = p.retire_contract(ctx, id);
-        self.finish_retire(at, before, p, done).await
+        self.retire_one(RetireInput::Contract {
+            context: context.to_string(),
+            contract: contract.to_string(),
+        })
+        .await
     }
 
     /// Retires the Interface named `interface` of the Context `context` with its Items. The Context goes to its
@@ -1300,23 +1177,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         interface: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = InterfaceId::from_uuid(
-            self.asset(ctx, context, AssetKind::Interface, interface)
-                .await?,
-        );
-        refuse_retired(
-            &p,
-            Target::Interface(id),
-            context,
-            AssetKind::Interface,
-            interface,
-        )?;
-        let done = p.retire_interface(ctx, id);
-        self.finish_retire(at, before, p, done).await
+        self.retire_one(RetireInput::Interface {
+            context: context.to_string(),
+            interface: interface.to_string(),
+        })
+        .await
     }
 
     /// Retires the Harness named `harness` of the Context `context` with its Cases. The Context goes to its next
@@ -1326,100 +1191,38 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         harness: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let before = p.clone();
-        let ctx = context_id(&p, context)?;
-        let id = HarnessId::from_uuid(
-            self.asset(ctx, context, AssetKind::Harness, harness)
-                .await?,
-        );
-        refuse_retired(
-            &p,
-            Target::Harness(id),
-            context,
-            AssetKind::Harness,
-            harness,
-        )?;
-        let done = p.retire_harness(ctx, id);
-        self.finish_retire(at, before, p, done).await
-    }
-
-    /// Checks and keeps a Project that retired something (`done`: how the retirement went on `after`, which is
-    /// unchanged when it failed), and says what went. The names of what went stay in the store: they are how the
-    /// retired things are named later.
-    async fn finish_retire(
-        &self,
-        at: StoreRevision,
-        before: Project,
-        after: Project,
-        done: Result<(), ProjectError>,
-    ) -> Result<Checked<Retirement>, AppError> {
-        if let Err(e) = done {
-            return Err(self.retire_error(&before, e).await?);
-        }
-        let gate = self.gate(Hook::Put, at, Some(&before), &after, &[]).await?;
-        let mut retired = Vec::new();
-        for r in after.retired().iter().skip(before.retired().len()) {
-            retired.push(self.retired_status(r).await?);
-        }
-        let changes = Changes {
-            project: Some(after),
-            invocations: gate.invocations,
-            external: gate.external,
-            ..Changes::default()
-        };
-        self.store.commit(at, changes).await?;
-        Ok(Checked {
-            value: Retirement { retired },
-            findings: gate.found,
+        self.retire_one(RetireInput::Harness {
+            context: context.to_string(),
+            harness: harness.to_string(),
         })
-    }
-
-    /// A refusal of a retirement, with the Cases and Contexts that stand in the way named.
-    async fn retire_error(&self, p: &Project, e: ProjectError) -> Result<AppError, AppError> {
-        Ok(match e {
-            ProjectError::RetireCited { cited, cases } => {
-                let cases = cases.into_iter().map(Target::Case).collect::<Vec<_>>();
-                AppError::RetireCited {
-                    cited: self.describe_all(p, &cited).await?,
-                    cases: self.describe_all(p, &cases).await?,
-                }
-            }
-            ProjectError::RetireUsed { context, by } => AppError::RetireUsed {
-                context: p
-                    .context(context)
-                    .map_or_else(|| context.to_string(), |c| c.name().to_string()),
-                by: by
-                    .iter()
-                    .map(|id| {
-                        p.context(*id)
-                            .map_or_else(|| id.to_string(), |c| c.name().to_string())
-                    })
-                    .collect(),
-            },
-            other => other.into(),
-        })
+        .await
     }
 
     /// A retired thing in the names a person knows it by.
-    async fn retired_status(&self, r: &Retired) -> Result<RetiredStatus, AppError> {
+    async fn retired_status(
+        &self,
+        r: &Retired,
+        pending: &[AssetName],
+    ) -> Result<RetiredStatus, AppError> {
         Ok(RetiredStatus {
             kind: r.target().word(),
             context: r.context().to_string(),
-            name: self.retired_name(r).await?,
+            name: self.retired_name(r, pending).await?,
             last_revision: r.last_revision().number(),
             at: r.at().number(),
         })
     }
 
     /// The name of a retired thing: the Context's, the asset's, or the asset's with the label, signature or name.
-    async fn retired_name(&self, r: &Retired) -> Result<String, AppError> {
+    /// A `pending` asset (named by the use case, not kept yet) is named first.
+    async fn retired_name(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
         match (r.holder(), r.label(), r.target().as_uuid()) {
             (Some(holder), Some(label), _) => {
-                Ok(format!("{} {label}", self.name_of(holder).await?))
+                Ok(format!("{} {label}", self.name_in(holder, pending).await?))
             }
-            (_, _, Some(id)) if !matches!(r.target(), Target::Context(_)) => self.name_of(id).await,
+            (_, _, Some(id)) if !matches!(r.target(), Target::Context(_)) => {
+                self.name_in(id, pending).await
+            }
             _ => Ok(r.context().to_string()),
         }
     }
@@ -1443,7 +1246,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             InterfaceId::from_uuid(iface),
             id,
             Digest::of(code.as_bytes()),
-        )?;
+        )
+        .map_err(|e| match e {
+            PinError::Unchecked(_) => AppError::NothingChecksIt {
+                context: context.to_string(),
+                interface: interface.to_string(),
+            },
+            other => other.into(),
+        })?;
         let mut pins = self.store.pins().await?;
         pins.retain(|k| k.interface() != pin.interface());
         pins.push(pin.clone());
@@ -1850,7 +1660,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         let mut retired = Vec::with_capacity(p.retired().len());
         for r in p.retired() {
-            retired.push(self.retired_status(r).await?);
+            retired.push(self.retired_status(r, &[]).await?);
         }
         let mut stale = Vec::new();
         for s in stale_cites(&p) {
@@ -1993,27 +1803,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<(), AppError> {
         let changes = Changes {
             change_requests: vec![cr],
-            invocations,
-            external,
-            ..Changes::default()
-        };
-        Ok(self.store.commit(at, changes).await?)
-    }
-
-    /// Commits `p` and the name of the asset that was just made or revised, together: a Project holding an asset
-    /// its name does not reach (or the reverse) is never kept. The `invocations` of the checks that ran go with
-    /// them.
-    async fn keep(
-        &self,
-        at: StoreRevision,
-        p: Project,
-        name: AssetName,
-        invocations: Vec<Invocation>,
-        external: Vec<ExternalReport>,
-    ) -> Result<(), AppError> {
-        let changes = Changes {
-            project: Some(p),
-            names: vec![name],
             invocations,
             external,
             ..Changes::default()

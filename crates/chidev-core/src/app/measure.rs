@@ -614,7 +614,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let Some(r) = p.retired_of(target) else {
                 continue;
             };
-            let name = Some(format!("{} (retired)", self.retired_name(r).await?));
+            let name = Some(format!("{} (retired)", self.retired_name(r, &[]).await?));
             let is_interface = matches!(target, Target::Interface(_));
             out.push(MeasurementStanding {
                 context: r.context().to_string(),

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod apply;
+
 use super::context::{Context, ContextError};
 use super::contract::{Clause, Contract};
 use super::harness::{Case, CaseFound, Harness};
@@ -95,6 +97,20 @@ pub enum ProjectError {
         /// The Clause cited.
         clause: ClauseId,
     },
+    /// A change set names one thing twice (puts it twice, or puts and retires it): which end state it wants is not
+    /// said.
+    #[error("the change set names the {what} {id} twice")]
+    Repeated {
+        /// The kind of thing (`contract`, `interface`, `harness`, or `context` for a Context's settings or its
+        /// retirement).
+        what: &'static str,
+        /// Its id.
+        id: Uuid,
+    },
+    /// A change set breaks several rules; it is not applied. Every problem is here, in the order found, and none is
+    /// itself a `Many`.
+    #[error("the change set is refused, {} problems: {}", .0.len(), joined(.0))]
+    Many(Vec<ProjectError>),
     /// The change breaks a rule of one Context.
     #[error(transparent)]
     Context(#[from] ContextError),
@@ -108,6 +124,10 @@ pub enum ProjectError {
 /// definition is given once in the whole Project, and every Case cites only Items and Clauses its Context owns or
 /// uses. A change to one Context can break a citation in another (an Item removed from an Interface that another
 /// Context's Case cites), so the whole Project is checked each time.
+///
+/// A change that touches several assets and is coherent only as a whole is one [`ChangeSet`](crate::domain::vo::change_set::ChangeSet), applied by
+/// [`Project::apply`]: the rules are checked once, on the state it ends in, not after each asset. A put or a retirement
+/// of one asset is a change set of one.
 ///
 /// Its revision is 1 when it is made and goes one up each time a Context is added to it or retired. It
 /// does not move when a Context changes: the Context has a revision of its own. So a change request that adds a
@@ -565,6 +585,18 @@ fn listed<T: std::fmt::Display>(ids: &[T]) -> String {
 
 /// The rules of the Project over `contexts` and what it retired.
 fn check(contexts: &BTreeMap<ContextId, Context>, retired: &[Retired]) -> Result<(), ProjectError> {
+    check_structure(contexts, retired)?;
+    match cite_problems(contexts, &BTreeSet::new()).into_iter().next() {
+        Some(first) => Err(first),
+        None => Ok(()),
+    }
+}
+
+/// The rules of the Project other than what the Cases cite: names, uses, and the ids.
+fn check_structure(
+    contexts: &BTreeMap<ContextId, Context>,
+    retired: &[Retired],
+) -> Result<(), ProjectError> {
     let mut names = BTreeSet::new();
     for c in contexts.values() {
         if !names.insert(c.name()) {
@@ -580,11 +612,16 @@ fn check(contexts: &BTreeMap<ContextId, Context>, retired: &[Retired]) -> Result
     if let Some(ring) = find_cycle(contexts) {
         return Err(ProjectError::Cycle(ring));
     }
-    check_ids(contexts, retired)?;
-    for c in contexts.values() {
-        check_cites(c, contexts)?;
-    }
-    Ok(())
+    check_ids(contexts, retired)
+}
+
+/// The messages of `errors`, separated by semicolons.
+fn joined(errors: &[ProjectError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Every id of an asset or of a definition in an asset is given once in the whole Project, and no id of a Context,
@@ -634,33 +671,42 @@ fn check_ids(
     Ok(())
 }
 
-/// Every Item and Clause a Case of `context` cites is in `context` or in a Context it uses.
-fn check_cites(
-    context: &Context,
+/// Every Item and Clause a Case of any Context cites that is neither in its Context nor in a Context it uses, one
+/// problem for each citation, in the order of the Contexts and Cases. A citation of a target in `skip` is left out:
+/// it is reported by the refusal to retire it.
+fn cite_problems(
     contexts: &BTreeMap<ContextId, Context>,
-) -> Result<(), ProjectError> {
-    let reach: Vec<&Context> = std::iter::once(context)
-        .chain(context.uses().iter().filter_map(|u| contexts.get(u)))
-        .collect();
-    let has_item = |item: &ItemId| reach.iter().any(|c| c.interface_of(*item).is_some());
-    let has_clause = |clause: &ClauseId| reach.iter().any(|c| c.contract_of(*clause).is_some());
-    for case in context.harnesses().flat_map(|h| h.cases()) {
-        if let Some(item) = case.cites().items().keys().find(|i| !has_item(i)) {
-            return Err(ProjectError::ItemNotReached {
-                context: context.id(),
-                case: case.id(),
-                item: *item,
-            });
-        }
-        if let Some(clause) = case.cites().clauses().keys().find(|k| !has_clause(k)) {
-            return Err(ProjectError::ClauseNotReached {
-                context: context.id(),
-                case: case.id(),
-                clause: *clause,
-            });
+    skip: &BTreeSet<Target>,
+) -> Vec<ProjectError> {
+    let mut out = Vec::new();
+    for context in contexts.values() {
+        let reach: Vec<&Context> = std::iter::once(context)
+            .chain(context.uses().iter().filter_map(|u| contexts.get(u)))
+            .collect();
+        let has_item = |item: &ItemId| reach.iter().any(|c| c.interface_of(*item).is_some());
+        let has_clause = |clause: &ClauseId| reach.iter().any(|c| c.contract_of(*clause).is_some());
+        for case in context.harnesses().flat_map(|h| h.cases()) {
+            for item in case.cites().items().keys().filter(|i| !has_item(i)) {
+                if !skip.contains(&Target::Item(*item)) {
+                    out.push(ProjectError::ItemNotReached {
+                        context: context.id(),
+                        case: case.id(),
+                        item: *item,
+                    });
+                }
+            }
+            for clause in case.cites().clauses().keys().filter(|k| !has_clause(k)) {
+                if !skip.contains(&Target::Clause(*clause)) {
+                    out.push(ProjectError::ClauseNotReached {
+                        context: context.id(),
+                        case: case.id(),
+                        clause: *clause,
+                    });
+                }
+            }
         }
     }
-    Ok(())
+    out
 }
 
 /// The ids on one cycle of `uses`, in the order of use, or `None` when there is none. Every id in a `uses` is in

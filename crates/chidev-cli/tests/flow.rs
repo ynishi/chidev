@@ -1685,3 +1685,185 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         assert_eq!(stale, 0, "{view:#?}");
     }
 }
+
+/// Where the store of `dir` stands: the revision it moves one up at each commit.
+fn store_revision(dir: &Path) -> u64 {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    rt.block_on(async {
+        let store = chidev_core::infra::sqlite::SqliteStore::open(dir.join("chidev.db"))
+            .await
+            .expect("a store");
+        chidev_core::app::ports::Store::revision(&store)
+            .await
+            .expect("a revision")
+            .0
+    })
+}
+
+fn case_json(name: &str, line: usize, signature: &str, label: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "lines": [line, line],
+        "items": [{ "interface": "stock", "signature": signature }],
+        "clauses": [{ "contract": "stock", "label": label }]
+    })
+}
+
+fn stock_clauses(count: usize) -> Value {
+    (1..=count)
+        .map(|k| serde_json::json!({ "label": format!("C{k}"), "text": format!("C{k} holds") }))
+        .collect()
+}
+
+#[test]
+fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_commit() {
+    use serde_json::json;
+    let dir = fresh_dir("change-set");
+    let tests_source = "fn reserve_refuses() {}\nfn release_frees() {}\nfn release_twice() {}\n";
+    let (setup, code, err) = run_values(
+        &dir,
+        &[
+            json!({ "op": "init" }),
+            json!({ "op": "context_add", "name": "core" }),
+            json!({ "op": "contract_put", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(8) }),
+            json!({ "op": "interface_put", "context": "core", "name": "stock", "source": "fn reserve();\nfn release();\n",
+                    "items": [{ "signature": "fn reserve()", "lines": [1, 1] }, { "signature": "fn release()", "lines": [2, 2] }] }),
+            json!({ "op": "harness_put", "context": "core", "name": "stock-tests", "source": tests_source,
+                    "cases": [
+                        case_json("reserve_refuses", 1, "fn reserve()", "C1"),
+                        case_json("release_frees", 2, "fn release()", "C7"),
+                        case_json("release_twice", 3, "fn release()", "C8"),
+                    ] }),
+        ],
+    );
+    assert_eq!(code, Some(0), "{err}\n{setup:#?}");
+    let before = store_revision(&dir);
+
+    let contract = json!({ "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(6) });
+    let interface = json!({ "put": "interface", "context": "core", "name": "stock", "source": "fn reserve();\n",
+                            "items": [{ "signature": "fn reserve()", "lines": [1, 1] }] });
+    let harness = json!({ "put": "harness", "context": "core", "name": "stock-tests", "source": "fn reserve_refuses() {}\n",
+                          "cases": [case_json("reserve_refuses", 1, "fn reserve()", "C1")] });
+    let (results, code, err) = run_values(
+        &dir,
+        &[
+            // 1: a single put cannot drop C7 while a Case cites it
+            json!({ "op": "contract_put", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(6) }),
+            // 2: nor can a change set that leaves the Harness as it is, and it names every problem
+            json!({ "op": "change_set", "puts": [contract.clone(), interface.clone()] }),
+            // 3: the whole change
+            json!({ "op": "change_set", "puts": [harness, contract, interface] }),
+            json!({ "op": "status" }),
+        ],
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+
+    let single = error_at(&results, 1);
+    assert!(
+        single.contains("stock-tests release_frees")
+            && single.contains("stock C7")
+            && single.contains("cannot reach"),
+        "{single}"
+    );
+    let refused = error_at(&results, 2);
+    for named in [
+        "case stock-tests release_frees",
+        "case stock-tests release_twice",
+        "the clause stock C7",
+        "the clause stock C8",
+        "the item stock fn release()",
+    ] {
+        assert!(refused.contains(named), "{named} not in {refused}");
+    }
+
+    let done = at(&results, 3);
+    assert_eq!(done["ok"], true, "{done:#?}");
+    assert_eq!(done["op"], "change_set");
+    let puts: Vec<(&str, u64)> = done["puts"]
+        .as_array()
+        .expect("puts")
+        .iter()
+        .map(|p| {
+            (
+                p["put"].as_str().expect("kind"),
+                p["revision"].as_u64().expect("revision"),
+            )
+        })
+        .collect();
+    assert_eq!(puts, [("harness", 2), ("contract", 2), ("interface", 2)]);
+    let gone: Vec<&str> = done["retired"]
+        .as_array()
+        .expect("retired")
+        .iter()
+        .map(|r| r["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        gone,
+        [
+            "stock C7",
+            "stock C8",
+            "stock fn release()",
+            "stock-tests release_frees",
+            "stock-tests release_twice"
+        ]
+    );
+    // one commit for the whole change; the refusals kept nothing
+    assert_eq!(store_revision(&dir), before + 1);
+    assert_eq!(
+        at(&results, 4)["retired"]
+            .as_array()
+            .expect("retired")
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn a_change_set_makes_what_its_harness_cites_and_retires_in_the_same_change() {
+    use serde_json::json;
+    let dir = fresh_dir("change-set-new");
+    let (results, code, err) = run_values(
+        &dir,
+        &[
+            json!({ "op": "init" }),
+            json!({ "op": "context_add", "name": "core" }),
+            json!({ "op": "context_add", "name": "scratch" }),
+            // 3: a Contract, an Interface and the Harness that cites both, none of which exists yet
+            json!({ "op": "change_set", "puts": [
+                { "put": "harness", "context": "core", "name": "stock-tests", "source": "fn reserve_refuses() {}\n",
+                  "cases": [case_json("reserve_refuses", 1, "fn reserve()", "C1")] },
+                { "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(1) },
+                { "put": "interface", "context": "core", "name": "stock", "source": "fn reserve();\n",
+                  "items": [{ "signature": "fn reserve()", "lines": [1, 1] }] },
+                { "put": "base_on_contract", "context": "core" }
+            ], "retires": [{ "retire": "context", "context": "scratch" }] }),
+            // 4: a thing named twice is refused
+            json!({ "op": "change_set", "puts": [
+                { "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(2) },
+                { "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(3) }
+            ] }),
+            // 5: an empty change set is not an operation
+            json!({ "op": "change_set" }),
+            json!({ "op": "check" }),
+        ],
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let done = at(&results, 4);
+    assert_eq!(done["ok"], true, "{done:#?}");
+    let kinds: Vec<&str> = done["puts"]
+        .as_array()
+        .expect("puts")
+        .iter()
+        .map(|p| p["put"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        ["harness", "contract", "interface", "base_on_contract"]
+    );
+    assert_eq!(done["retired"][0]["kind"], "context");
+    assert!(error_at(&results, 5).contains("names the contract `stock` twice"));
+    assert!(error_at(&results, 6).contains("nothing to put or retire"));
+    assert_eq!(at(&results, 7)["ok"], true);
+}
