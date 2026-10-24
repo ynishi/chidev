@@ -10,6 +10,26 @@ and this project adheres to
 
 ### Added
 
+- A mutation run that did not look at every site says so. The measurement keeps
+  the `planned` mutants the provider gave beside the `sites` it found and the
+  mutants evaluated, and a run that ended (`ok`) with fewer mutants than sites,
+  `max_mutants` having limited it, is *capped*. The new check `mutation.capped`
+  (note; about the Interface; `evaluated N of M sites`) reports it; a run that
+  stopped early (the budget) is still a failed run and is not capped. The results
+  of `measure` and `status.measurements` show `sites`, `evaluated` and `capped`. A
+  run that ended without a failure and with fewer mutants than it was given is
+  refused as a measurement. The summary of a stored mutation run has `planned`; a
+  store written before it is not read (no compatibility). `check_list` has 27
+  checks.
+- A sim case whose program could not be started is no longer a finding of every
+  Clause. The protocol `chidev-sim 2` gains the report line `CANNOT_START <text>`,
+  which a script prints (with `sim: findings=0` and no `FINDING`, `UNREACHED` or
+  `UNDECIDED` line) when it could not start the program; the case is recorded as
+  `cannot_start:<text>` with no findings, does not count towards *unreached*, and is
+  not run again. When every case that was run could not start the program, the run
+  is a failure of the new kind `no_start`, kept with its cases, with no second
+  runs, and judged by `sim.error` alone; when only some did, `sim.error` names
+  them. The test fixture script prints it when the program is not there.
 - Resolution of a change request is an explicit decision with a record, and a
   resolved request can be reopened. `{"op":"cr_resolve","title":..,
   "resolution":"done"|"wont_do"|"invalid"|{"duplicate":"<title>"}|
