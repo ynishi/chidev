@@ -108,6 +108,30 @@ and this project adheres to
 
 ### Changed
 
+- The sim protocol is `chidev-sim 2` and a sim Harness covers several Contracts.
+  A script names a Clause `<contract>:<label>` (`FINDING <case> step <k>
+  <contract>:<label>: <text>`, `UNREACHED <contract>:<label>: <text>`; the Contract's
+  name has no white space), because a label is unique only within a Contract. chidev
+  resolves each name to the Clause's id, among the Clauses the sweep cites, when the
+  run is recorded, and the measurement keeps Clause ids (the stored `findings` and
+  `unreached` hold `clause`, not `label`); the rules read ids and no longer resolve a
+  label against the model again. A name without a Contract, of a Contract the sweep
+  cites nothing of, or of a Clause it does not cite, is a protocol failure. Version 1
+  is not kept (no compatibility code; layout stays 1, so a database with a simulation
+  recorded before does not load). The rule "the sweep cites each label once" is gone.
+  `sim.uncited-clause` ranges only over the Contracts the sweep cites a Clause of;
+  a Contract it cites nothing of is left to the tests.
+- A sim Harness has `builds`, the Interfaces of its Context whose pinned code the
+  program is built from (`harness_put` and `change_set` harness entries of kind `sim`;
+  a name the Context has no Interface of, or a Harness of tests with `builds`, is
+  refused, and an Interface cannot be retired while a sim builds it). It replaces
+  citing Items just to get the code built: a sim Case now cites Clauses only (a sim
+  Case that cites an Item is refused, a Case of tests still needs one), so a sim is on
+  no Pin's basis and putting it never makes a Pin stale. The simulation's own basis
+  is the Harness (script, Cases and `builds`), the Contracts it cites a Clause of and
+  each built Interface with the digest of its pinned code. A sim Harness that builds
+  no Interface is a `sim.shape` error. The stored Harness document gains `builds` (left
+  out when empty).
 - Errors name things, not ids: a Case that cites what it cannot reach is
   `the case stock-tests reserve refuses (context `core`) cites the clause stock C7,
   which it cannot reach`, and a Pin refused because no Case cites an Item of the
