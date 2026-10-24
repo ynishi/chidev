@@ -39,6 +39,40 @@ and this project adheres to
   and `state` (`current` or `stale`).
 - Store: tables `measure_runs` and `measure_items` (appended; the newest per kind and
   Interface is current) and `pin_codes`, created when an older database is opened.
+- The blind simulation, for any language. A Harness has a kind, `tests` (the default)
+  or `sim`; `harness_put` takes an optional `kind` (an existing Harness keeps its kind
+  when none is given, and a change of kind is a new revision). A sim Harness is one
+  script with exactly one Case named `sweep` and any number named `regress-<name>`;
+  every Case cites Items (so the Harness enters the Pin's basis) and Clauses.
+  `{"op":"measure","kind":"simulate","context":..,"harness":..}` copies the project
+  under `.chidev/measure/<run>/`, writes the pinned code of the Interfaces the Cases
+  cite and the script over the copy, runs `build`, runs the script for `seed-0` to
+  `seed-<seeds-1>` and every regress case, and then runs `seed-0` and up to `sample`
+  cases with findings once more in a fresh copy. It keeps a measurement of kind
+  `simulate`: per case its exit, findings, unreached Clauses, undecided lines and the
+  digests of `schedule` and `trace` (taken by chidev), how each second run compared
+  with the first, the evidence, and a stamp (the Harness, the Contracts and
+  Interfaces its Cases cite, the pinned code, the settings), in one commit.
+- The protocol `chidev-sim 1`: `<interpreter...> <script> <case> --out <dir> --
+  <program argv...>`; the script writes `<dir>/schedule` and `<dir>/trace` and prints
+  `FINDING <case> step <k> <ClauseLabel>: <text>`, `UNREACHED <ClauseLabel>: <text>`,
+  `UNDECIDED <text>` and a last line `sim: findings=<n>`. A label the sweep does not
+  cite or a malformed line is a protocol failure, read in `infra`. A different
+  schedule on the second run is a fault of the script, a different trace of the
+  program. See the README, "Simulation", which also says how a sim script is written
+  (blind, from the Contracts and Interfaces only, citing every Clause it checks in the
+  sweep, with no randomness but the seed).
+- `[measure.sim.<context>]` in `checks.toml`: `interpreter`, `program` (with `{work}`
+  for the root of the copy), `seeds` (50), `sample` (6), `timeout` and `budget`. A
+  layout entry for an Interface needs a `lang` only for mutation, and `test` is
+  needed only for mutation, so a project that is only simulated needs neither.
+- Eight builtin checks: `sim.shape` (error, also at the `put` hook),
+  `sim.uncited-clause` (warning), `sim.unrun` (warning), `sim.stale` (warning),
+  `sim.finding` (error, one per Clause, with the first case and step), `sim.unreached`
+  (error, per Clause), `sim.nondeterministic` (error, mandatory, per Case) and
+  `sim.error` (warning). `check_list` has 24 checks. `status.measurements` also lists
+  the latest simulation per sim Harness, with a `sim` summary.
+- Failure kind `no_build`: the program a simulation drives does not build.
 
 ### Changed
 
