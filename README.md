@@ -61,6 +61,17 @@ belong):
   its target has when the Harness is put.
 - `pin` records that the code was accepted: it needs a Case that cites an Item of the
   Interface, and it goes stale when what it stands on changes.
+- The text of an Interface, a Harness or a Pin can be read from a file instead of
+  being written into the line: `interface_put` and `harness_put` take `source_file`
+  in place of `source`, and `pin` takes `code_file` in place of `code`. Exactly one
+  of the two is given (both, or neither, is refused). The path is relative to the
+  directory `chidev` runs in (the project's root, where `checks.toml` and the
+  measure settings are read from); an absolute path, a path with a `..` part, a file
+  that is missing or cannot be read, and a file that is not UTF-8 text are refused
+  with the path named. The file is read when the operation runs, and the model keeps
+  the *text*, not the path: changing the file later changes nothing until the
+  operation is run again. `lines` of an Item and of a Case are still given as they
+  are.
 - `status` lists the Pins and whether they hold, the citations behind their
   targets, the change requests, what was retired and the findings of every check.
 
@@ -97,6 +108,12 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   (`context`, `uses`) or `base_on_contract` (`context`). Each entry of `retires`
   has the fields of the retire operation and a `retire`: `context`, `contract`,
   `interface` or `harness`.
+- An `interface` entry takes `source_file` and a `harness` entry takes
+  `source_file` in place of `source` (one of the two, as for `interface_put` and
+  `harness_put`; the path is relative to the project's root, and the model keeps
+  the text read, not the path). The files are all read before anything is applied;
+  when several entries have a file that cannot be used, the set is refused with
+  each of them named.
 - `{"put":"context","name":"billing","uses":["ledger"]}` adds a Context, as
   `context_add` does (`uses` is optional; the Project goes to its next revision).
   It is applied first, so the same set can put the Context's first Contract,

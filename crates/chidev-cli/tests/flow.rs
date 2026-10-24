@@ -2344,3 +2344,203 @@ fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_projec
     );
     assert_eq!(at(&results, 6)["ok"], true, "{:#?}", at(&results, 6));
 }
+
+/// The Contract, Interface and Harness of the `source_file` tests, with the files they read written under `dir`.
+fn file_project(dir: &Path) {
+    for (path, text) in [
+        ("src/api.rs", "fn value();\n"),
+        ("tests/api_tests.rs", "fn checks_value() {}\n"),
+        ("code/api_impl.rs", "fn value() {}\n"),
+    ] {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+        std::fs::write(path, text).expect("a file");
+    }
+}
+
+fn file_setup() -> Vec<Value> {
+    use serde_json::json;
+    vec![
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        json!({"op":"contract_put","context":"core","name":"rules","title":"Rules","clauses":[{"label":"C1","text":"a value is returned"}]}),
+    ]
+}
+
+fn api_from_file(file: &str) -> Value {
+    serde_json::json!({"op":"interface_put","context":"core","name":"api","source_file":file,"items":[{"signature":"fn value()","lines":[1,1]}]})
+}
+
+fn tests_from_file(file: &str) -> Value {
+    serde_json::json!({"op":"harness_put","context":"core","name":"tests","source_file":file,"cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]})
+}
+
+#[test]
+fn an_interface_a_harness_and_a_pin_take_their_text_from_files_and_the_model_keeps_the_text() {
+    use serde_json::json;
+    let dir = fresh_dir("from-files");
+    file_project(&dir);
+    let mut ops = file_setup();
+    ops.push(api_from_file("src/api.rs"));
+    // a `./` path is a path under the root too
+    ops.push(tests_from_file("./tests/api_tests.rs"));
+    ops.push(json!({"op":"pin","context":"core","interface":"api","code_file":"code/api_impl.rs"}));
+    ops.push(json!({"op":"status"}));
+    let (results, code, err) = run_values(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert!(results.iter().all(|r| r["ok"] == true), "{results:#?}");
+    assert_eq!(at(&results, 4)["revision"], 1);
+    assert_eq!(at(&results, 5)["revision"], 1);
+    assert_eq!(pin_states(at(&results, 7)), states(&[("api", "fresh")]));
+
+    // the files change, and nothing is put again: the model holds the text it was given, not the path
+    std::fs::write(dir.join("src/api.rs"), "fn value();\nfn other();\n").expect("a file");
+    std::fs::write(dir.join("code/api_impl.rs"), "fn value() { 1 }\n").expect("a file");
+    let (after, code, err) = run_values(&dir, &[json!({"op":"status"})]);
+    assert_eq!(code, Some(0), "{err}\n{after:#?}");
+    assert_eq!(pin_states(&after[0]), states(&[("api", "fresh")]));
+
+    // put again from the file: now the model moves, and the pin falls behind
+    let (again, code, err) =
+        run_values(&dir, &[api_from_file("src/api.rs"), json!({"op":"status"})]);
+    assert_eq!(code, Some(0), "{err}\n{again:#?}");
+    assert_eq!(again[0]["revision"], 2);
+    assert_ne!(pin_states(&again[1]), states(&[("api", "fresh")]));
+}
+
+#[test]
+fn a_change_set_takes_the_text_of_its_interface_and_harness_entries_from_files() {
+    use serde_json::json;
+    let dir = fresh_dir("change-set-files");
+    file_project(&dir);
+    let (results, code, err) = run_values(
+        &dir,
+        &[
+            json!({"op":"init"}),
+            json!({"op":"change_set","puts":[
+                {"put":"context","name":"core"},
+                {"put":"contract","context":"core","name":"rules","title":"Rules","clauses":[{"label":"C1","text":"a value is returned"}]},
+                {"put":"interface","context":"core","name":"api","source_file":"src/api.rs","items":[{"signature":"fn value()","lines":[1,1]}]},
+                {"put":"harness","context":"core","name":"tests","source_file":"tests/api_tests.rs","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]}]}),
+            json!({"op":"pin","context":"core","interface":"api","code_file":"code/api_impl.rs"}),
+            json!({"op":"status"}),
+        ],
+    );
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert!(results.iter().all(|r| r["ok"] == true), "{results:#?}");
+    let kinds: Vec<&str> = at(&results, 2)["puts"]
+        .as_array()
+        .expect("puts")
+        .iter()
+        .map(|p| p["put"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(kinds, ["context", "contract", "interface", "harness"]);
+    assert_eq!(pin_states(at(&results, 4)), states(&[("api", "fresh")]));
+}
+
+/// The error of a refused result, which is not ok.
+fn refusal(result: &Value) -> &str {
+    assert_eq!(result["ok"], false, "{result:#?}");
+    result["error"].as_str().expect("an error")
+}
+
+#[test]
+fn a_file_that_is_not_a_path_under_the_root_or_not_text_or_given_twice_is_refused_by_name() {
+    use serde_json::json;
+    let dir = fresh_dir("file-refusals");
+    file_project(&dir);
+    std::fs::write(dir.join("src/binary.rs"), [0xff_u8, 0xfe, 0x00]).expect("a file");
+    let mut ops = file_setup();
+    ops.extend([
+        // 4: an absolute path, a path that goes up, a path that goes up after going down
+        api_from_file("/etc/hosts"),
+        api_from_file("../outside.rs"),
+        api_from_file("src/../../outside.rs"),
+        // 7: a file that is not there, a file that is not UTF-8, a directory
+        api_from_file("src/missing.rs"),
+        api_from_file("src/binary.rs"),
+        api_from_file("src"),
+        // 10: both given, neither given
+        json!({"op":"interface_put","context":"core","name":"api","source":"fn value();\n","source_file":"src/api.rs","items":[]}),
+        json!({"op":"interface_put","context":"core","name":"api","items":[]}),
+        // 12: the same for a harness and for a pin
+        tests_from_file("/etc/hosts"),
+        json!({"op":"harness_put","context":"core","name":"tests","source":"x","source_file":"src/api.rs","cases":[]}),
+        json!({"op":"pin","context":"core","interface":"api","code_file":"../outside.rs"}),
+        json!({"op":"pin","context":"core","interface":"api","code":"x","code_file":"code/api_impl.rs"}),
+        json!({"op":"pin","context":"core","interface":"api"}),
+        // 17: nothing was put by any of them
+        json!({"op":"status"}),
+    ]);
+    let (results, code, err) = run_values(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+
+    let error = |n: u64| refusal(at(&results, n));
+    assert!(
+        error(4).contains("absolute") && error(4).contains("/etc/hosts"),
+        "{}",
+        error(4)
+    );
+    assert!(
+        error(5).contains("..") && error(5).contains("../outside.rs"),
+        "{}",
+        error(5)
+    );
+    assert!(error(6).contains("..") && error(6).contains("src/../../outside.rs"));
+    assert!(
+        error(7).contains("cannot read") && error(7).contains("src/missing.rs"),
+        "{}",
+        error(7)
+    );
+    assert!(
+        error(8).contains("not UTF-8") && error(8).contains("src/binary.rs"),
+        "{}",
+        error(8)
+    );
+    assert!(error(9).contains("cannot read") && error(9).contains("`src`"));
+    assert!(
+        error(10).contains("`source` or `source_file`, not both"),
+        "{}",
+        error(10)
+    );
+    assert!(
+        error(11).contains("give `source` or `source_file`") && !error(11).contains("not both"),
+        "{}",
+        error(11)
+    );
+    assert!(error(12).contains("absolute"), "{}", error(12));
+    assert!(error(13).contains("not both"), "{}", error(13));
+    assert!(error(14).contains("..") && error(14).contains("code_file"));
+    assert!(error(15).contains("`code` or `code_file`, not both"));
+    assert!(error(16).contains("give `code` or `code_file`"));
+    // the refused puts left no Interface and no Harness behind
+    let status = at(&results, 17);
+    assert_eq!(status["ok"], true, "{status:#?}");
+    let (put, _, _) = run_values(&dir, &[api_from_file("src/api.rs")]);
+    assert_eq!(put[0]["revision"], 1, "{put:#?}");
+}
+
+#[test]
+fn a_change_set_with_a_bad_file_is_refused_whole_and_names_every_bad_entry() {
+    use serde_json::json;
+    let dir = fresh_dir("change-set-file-refusals");
+    file_project(&dir);
+    let mut ops = file_setup();
+    ops.extend([
+        json!({"op":"change_set","puts":[
+            {"put":"contract","context":"core","name":"extra","title":"Extra","clauses":[{"label":"C1","text":"x"}]},
+            {"put":"interface","context":"core","name":"api","source_file":"src/missing.rs","items":[]},
+            {"put":"harness","context":"core","name":"tests","source_file":"../outside.rs","cases":[]},
+            {"put":"interface","context":"core","name":"both","source":"x","source_file":"src/api.rs","items":[]}]}),
+        // the contract of the refused set was not made: this is its first revision
+        json!({"op":"contract_put","context":"core","name":"extra","title":"Extra","clauses":[{"label":"C1","text":"x"}]}),
+    ]);
+    let (results, code, err) = run_values(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let error = refusal(at(&results, 4));
+    assert!(error.contains("3 problems"), "{error}");
+    assert!(error.contains("src/missing.rs"), "{error}");
+    assert!(error.contains("../outside.rs"), "{error}");
+    assert!(error.contains("not both"), "{error}");
+    assert_eq!(at(&results, 5)["revision"], 1, "{results:#?}");
+}

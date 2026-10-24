@@ -2,6 +2,7 @@
 //! form is turned into the inputs of the use cases and back; nothing past it sees JSON.
 
 use std::io::{self, BufRead, Write};
+use std::path::{Component, Path};
 
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
@@ -43,17 +44,21 @@ enum Op {
         title: String,
         clauses: Vec<ClauseDto>,
     },
-    /// Makes or revises an Interface.
+    /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
+    /// project's root); exactly one is given.
     InterfacePut {
         context: String,
         name: String,
-        source: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        source_file: Option<String>,
         items: Vec<ItemDto>,
     },
     /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
     /// keeps its kind when none is given. `builds` (a sim only) names the Interfaces of the Context whose pinned
     /// code the program is built from; a put states all of it. A Case of tests cites an Item at least, a Case of a
-    /// sim cites Clauses only.
+    /// sim cites Clauses only. The source is `source`, or the text of the file `source_file`; exactly one is given.
     HarnessPut {
         context: String,
         name: String,
@@ -61,7 +66,10 @@ enum Op {
         kind: Option<String>,
         #[serde(default)]
         builds: Vec<String>,
-        source: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        source_file: Option<String>,
         cases: Vec<CaseDto>,
     },
     /// Puts and retires several assets as one change: the rules of the project are checked once, on the state it
@@ -90,11 +98,14 @@ enum Op {
     InterfaceRetire { context: String, interface: String },
     /// Retires a Harness with its Cases.
     HarnessRetire { context: String, harness: String },
-    /// Pins the code of an Interface.
+    /// Pins the code of an Interface. The code is `code`, or the text of the file `code_file`; exactly one is given.
     Pin {
         context: String,
         interface: String,
-        code: String,
+        #[serde(default)]
+        code: Option<String>,
+        #[serde(default)]
+        code_file: Option<String>,
     },
     /// Opens a change request.
     CrOpen(Box<OpenDto>),
@@ -200,7 +211,10 @@ enum PutDto {
     Interface {
         context: String,
         name: String,
-        source: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        source_file: Option<String>,
         items: Vec<ItemDto>,
     },
     /// As `harness_put`.
@@ -211,7 +225,10 @@ enum PutDto {
         kind: Option<String>,
         #[serde(default)]
         builds: Vec<String>,
-        source: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        source_file: Option<String>,
         cases: Vec<CaseDto>,
     },
 }
@@ -230,53 +247,145 @@ enum RetireDto {
     Harness { context: String, harness: String },
 }
 
-impl TryFrom<PutDto> for PutInput {
-    type Error = AppError;
+/// The puts of a change set as inputs, the files they name read. Every entry is looked at, so a set with several
+/// unreadable files is refused with all of them named, as the rest of the set's problems are.
+async fn put_inputs(root: &Path, puts: Vec<PutDto>) -> Result<Vec<PutInput>, AppError> {
+    let mut inputs = Vec::with_capacity(puts.len());
+    let mut problems = Vec::new();
+    for put in puts {
+        match put_input(root, put).await {
+            Ok(input) => inputs.push(input),
+            Err(problem) => problems.push(problem),
+        }
+    }
+    match problems.len() {
+        0 => Ok(inputs),
+        1 => Err(problems.remove(0)),
+        _ => Err(AppError::Many(problems)),
+    }
+}
 
-    fn try_from(d: PutDto) -> Result<PutInput, AppError> {
-        Ok(match d {
-            PutDto::Context { name, uses } => PutInput::Context { name, uses },
-            PutDto::Uses { context, uses } => PutInput::Uses { context, uses },
-            PutDto::BaseOnContract { context } => PutInput::BaseOnContract { context },
-            PutDto::Contract {
-                context,
-                name,
-                title,
-                clauses,
-            } => PutInput::Contract(ContractPut {
-                context,
-                name,
-                title,
-                clauses: clause_inputs(clauses),
-            }),
-            PutDto::Interface {
-                context,
-                name,
-                source,
-                items,
-            } => PutInput::Interface(InterfacePut {
+/// An entry of the `puts` of a change set as the input of the use case; the text of a `source_file` is read here.
+async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
+    Ok(match d {
+        PutDto::Context { name, uses } => PutInput::Context { name, uses },
+        PutDto::Uses { context, uses } => PutInput::Uses { context, uses },
+        PutDto::BaseOnContract { context } => PutInput::BaseOnContract { context },
+        PutDto::Contract {
+            context,
+            name,
+            title,
+            clauses,
+        } => PutInput::Contract(ContractPut {
+            context,
+            name,
+            title,
+            clauses: clause_inputs(clauses),
+        }),
+        PutDto::Interface {
+            context,
+            name,
+            source,
+            source_file,
+            items,
+        } => {
+            let label = format!("the put of the interface `{name}`");
+            let source = text_of(
+                root,
+                &label,
+                ("source", source),
+                ("source_file", source_file),
+            )
+            .await?;
+            PutInput::Interface(InterfacePut {
                 context,
                 name,
                 source,
                 items: item_inputs(items),
-            }),
-            PutDto::Harness {
-                context,
-                name,
-                kind,
-                builds,
-                source,
-                cases,
-            } => PutInput::Harness(HarnessPut {
+            })
+        }
+        PutDto::Harness {
+            context,
+            name,
+            kind,
+            builds,
+            source,
+            source_file,
+            cases,
+        } => {
+            let label = format!("the put of the harness `{name}`");
+            let source = text_of(
+                root,
+                &label,
+                ("source", source),
+                ("source_file", source_file),
+            )
+            .await?;
+            PutInput::Harness(HarnessPut {
                 context,
                 name,
                 kind: harness_kind(kind.as_deref())?,
                 builds,
                 source,
                 cases: case_inputs(cases),
-            }),
-        })
+            })
+        }
+    })
+}
+
+/// The text an operation takes either inline (the first field, `(name, value)`) or from a file (the second): exactly
+/// one is given. `label` says what the text is for, in the error.
+async fn text_of(
+    root: &Path,
+    label: &str,
+    (inline_field, inline): (&str, Option<String>),
+    (file_field, file): (&str, Option<String>),
+) -> Result<String, AppError> {
+    match (inline, file) {
+        (Some(text), None) => Ok(text),
+        (None, Some(file)) => read_text(root, label, file_field, &file).await,
+        (Some(_), Some(_)) => Err(AppError::Input(format!(
+            "{label}: give `{inline_field}` or `{file_field}`, not both"
+        ))),
+        (None, None) => Err(AppError::Input(format!(
+            "{label}: give `{inline_field}` or `{file_field}`"
+        ))),
     }
+}
+
+/// The text of the file `file`, a path relative to `root`. Reading is here, at the boundary, so the use cases and the
+/// domain receive text only, and a path is never kept.
+async fn read_text(root: &Path, label: &str, field: &str, file: &str) -> Result<String, AppError> {
+    let relative = relative_path(file)
+        .map_err(|why| AppError::Input(format!("{label}: `{field}` `{file}` {why}")))?;
+    let bytes = tokio::fs::read(root.join(relative))
+        .await
+        .map_err(|e| AppError::Input(format!("{label}: cannot read `{field}` `{file}`: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| AppError::Input(format!("{label}: `{field}` `{file}` is not UTF-8 text")))
+}
+
+/// `file` as a path that stays under the root: not empty, not absolute, with no `..`. The error says what is wrong.
+fn relative_path(file: &str) -> Result<&Path, &'static str> {
+    let path = Path::new(file);
+    if file.is_empty() {
+        return Err("is empty");
+    }
+    if path.is_absolute() || path.has_root() {
+        return Err("is an absolute path; it is relative to the project's root");
+    }
+    for part in path.components() {
+        match part {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("goes up with `..`; it stays under the project's root");
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("is an absolute path; it is relative to the project's root");
+            }
+        }
+    }
+    Ok(path)
 }
 
 impl From<RetireDto> for RetireInput {
@@ -1649,9 +1758,11 @@ impl From<ClauseRefDto> for ClauseRef {
 
 /// Runs every line of `input` against `app` and writes one result line per operation to `out`. A blank line is
 /// skipped. A line that fails (bad JSON or a refused operation) gets a result with `"ok": false` and the run goes
-/// on. Returns whether every operation succeeded; an error is only a failure to read or write.
+/// on. `root` is the project's root, the directory a `source_file` or a `code_file` is relative to. Returns whether
+/// every operation succeeded; an error is only a failure to read or write.
 pub async fn run<S, G, E>(
     app: &mut App<S, G, E>,
+    root: &Path,
     input: impl BufRead,
     out: &mut impl Write,
 ) -> io::Result<bool>
@@ -1667,7 +1778,7 @@ where
             continue;
         }
         let result = match serde_json::from_str::<Op>(&line) {
-            Ok(op) => apply(app, op).await,
+            Ok(op) => apply(app, root, op).await,
             Err(e) => Err(AppError::Input(format!("not an operation: {e}"))),
         };
         let mut result = match result {
@@ -1709,7 +1820,7 @@ fn retire_out(op: &'static str, done: &Checked<Retirement>) -> Result<Value, App
     })
 }
 
-async fn apply<S, G, E>(app: &mut App<S, G, E>, op: Op) -> Result<Value, AppError>
+async fn apply<S, G, E>(app: &mut App<S, G, E>, root: &Path, op: Op) -> Result<Value, AppError>
 where
     S: Store,
     G: IdSource,
@@ -1842,10 +1953,7 @@ where
         } => {
             let set = ChangeSetInput {
                 change_request: for_change_request,
-                puts: puts
-                    .into_iter()
-                    .map(PutInput::try_from)
-                    .collect::<Result<_, _>>()?,
+                puts: put_inputs(root, puts).await?,
                 retires: retires.into_iter().map(RetireInput::from).collect(),
             };
             let done = app.apply_change_set(&set).await?;
@@ -1870,8 +1978,17 @@ where
             context,
             name,
             source,
+            source_file,
             items,
         } => {
+            let label = format!("interface `{name}`");
+            let source = text_of(
+                root,
+                &label,
+                ("source", source),
+                ("source_file", source_file),
+            )
+            .await?;
             let items = item_inputs(items);
             let done = app.put_interface(&context, &name, &source, &items).await?;
             json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
@@ -1882,8 +1999,17 @@ where
             kind,
             builds,
             source,
+            source_file,
             cases,
         } => {
+            let label = format!("harness `{name}`");
+            let source = text_of(
+                root,
+                &label,
+                ("source", source),
+                ("source_file", source_file),
+            )
+            .await?;
             let kind = harness_kind(kind.as_deref())?;
             let cases = case_inputs(cases);
             let done = app
@@ -1911,7 +2037,10 @@ where
             context,
             interface,
             code,
+            code_file,
         } => {
+            let label = format!("pin of the interface `{interface}`");
+            let code = text_of(root, &label, ("code", code), ("code_file", code_file)).await?;
             let done = app.pin(&context, &interface, &code).await?;
             json!({ "op": "pin", "pin": done.value.to_string(), "findings": findings_out(&done.findings) })
         }
