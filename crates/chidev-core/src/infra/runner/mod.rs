@@ -481,6 +481,7 @@ impl Job<'_> {
             code,
             config.max_mutants,
             config.seed,
+            config.operators.as_deref(),
             self.deadline,
         )
         .await;

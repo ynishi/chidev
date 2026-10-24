@@ -4,7 +4,7 @@
 //! that disagrees with the source is a protocol failure and not a silently wrong mutant.
 //!
 //! ```json
-//! {"protocol":1,"path":"src/stock.rs","source":"...","max":40,"seed":0}
+//! {"protocol":1,"path":"src/stock.rs","source":"...","max":40,"seed":0,"operators":["rel","str"]}
 //! {"protocol":1,"sites":118,"mutants":[{"key":"reserve/rel/2/9f3a","line":42,"col":13,
 //!   "operator":"rel","span":[1834,1835],"from":"<","to":"<="}]}
 //! ```
@@ -36,6 +36,9 @@ struct Request<'a> {
     source: &'a str,
     max: usize,
     seed: u64,
+    /// Left out of the request when the settings name no classes: the provider then makes all it can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operators: Option<&'a [String]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +91,7 @@ pub(super) fn tail(text: &[u8], n: usize) -> String {
 
 /// Asks the provider `command` for the mutants of `source`, the text of `path`. The evidence of the call is given
 /// whether or not it worked.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ask(
     root: &Path,
     command: &[String],
@@ -95,6 +99,7 @@ pub(super) async fn ask(
     source: &str,
     max: usize,
     seed: u64,
+    operators: Option<&[String]>,
     deadline: tokio::time::Instant,
 ) -> (Result<Mutants, MeasureFailure>, StepEvidence) {
     let started = Instant::now();
@@ -113,6 +118,7 @@ pub(super) async fn ask(
         source,
         max,
         seed,
+        operators,
         deadline,
         &mut evidence,
     )
@@ -129,6 +135,7 @@ async fn run(
     source: &str,
     max: usize,
     seed: u64,
+    operators: Option<&[String]>,
     deadline: tokio::time::Instant,
     evidence: &mut StepEvidence,
 ) -> Result<Mutants, MeasureFailure> {
@@ -156,6 +163,7 @@ async fn run(
         source,
         max,
         seed,
+        operators,
     })
     .map_err(|e| failure(FailureKind::Provider, e.to_string()))?;
     let mut capture = process::Capture::default();

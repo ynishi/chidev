@@ -292,6 +292,149 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     );
 }
 
+const MESSAGE: &str = include_str!("fixtures/measure/message.rs");
+const MESSAGE_TESTS: &str = include_str!("fixtures/measure/message_tests.rs");
+
+/// A project whose only Interface, `message`, has a refusal text no test reads; `extra` is added to `[measure]`.
+fn message_project(name: &str, extra: &str) -> PathBuf {
+    let dir = fresh_dir(name);
+    std::fs::create_dir_all(dir.join("src")).expect("src");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"inventory\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .expect("Cargo.toml");
+    std::fs::write(dir.join("src/lib.rs"), "pub mod message;\n").expect("lib.rs");
+    std::fs::write(
+        dir.join("src/message.rs"),
+        "pub fn check(_: u32) -> Result<u32, String> { Ok(0) }\n",
+    )
+    .expect("message.rs");
+    std::fs::write(
+        dir.join("checks.toml"),
+        format!(
+            r#"[measure]
+build = ["cargo", "build", "--quiet", "--tests", "--offline"]
+test = ["cargo", "test", "--quiet", "--offline"]
+baseline_timeout = 300
+timeout = 120
+budget = 900
+{extra}
+
+[measure.mutants]
+rust = [{bin:?}, "provider", "mutants-rust"]
+
+[[measure.layout]]
+context = "inventory"
+interface = "message"
+lang = "rust"
+path = "src/message.rs"
+
+[[measure.layout]]
+context = "inventory"
+harness = "message-tests"
+path = "tests/message.rs"
+"#,
+            bin = env!("CARGO_BIN_EXE_chidev"),
+            extra = extra
+        ),
+    )
+    .expect("checks.toml");
+    dir
+}
+
+fn message_setup(dir: &Path) {
+    let signature = "fn check(n: u32) -> Result<u32, String>";
+    exec(
+        dir,
+        &[
+            json!({"op":"init"}),
+            json!({"op":"context_add","name":"inventory"}),
+            json!({"op":"contract_put","context":"inventory","name":"quantity","title":"Quantity",
+                   "clauses":[{"label":"C1","text":"zero is refused"},
+                              {"label":"C2","text":"a positive quantity passes"}]}),
+            json!({"op":"interface_put","context":"inventory","name":"message",
+                   "source":"pub fn check(n: u32) -> Result<u32, String>;\n",
+                   "items":[{"signature":signature,"lines":[1,1]}]}),
+            json!({"op":"harness_put","context":"inventory","name":"message-tests",
+                   "source":MESSAGE_TESTS,"cases":[
+                {"name":"zero_is_refused","lines":[3,6],
+                 "items":[{"interface":"message","signature":signature}],
+                 "clauses":[{"contract":"quantity","label":"C1"}]},
+                {"name":"a_positive_quantity_passes","lines":[8,11],
+                 "items":[{"interface":"message","signature":signature}],
+                 "clauses":[{"contract":"quantity","label":"C2"}]}]}),
+            json!({"op":"pin","context":"inventory","interface":"message","code":MESSAGE}),
+        ],
+    );
+}
+
+fn mutate_message(dir: &Path) -> Value {
+    exec(
+        dir,
+        &[json!({"op":"measure","kind":"mutate","context":"inventory","interface":"message"})],
+    )
+    .remove(0)
+}
+
+#[test]
+fn a_message_no_test_reads_is_a_surviving_str_mutant_unless_str_is_left_out() {
+    // By default every class is made: the refusal text is changed two ways, and the tests, which only ask whether
+    // the result is an error, notice neither.
+    let dir = message_project("measure-e2e-str", "");
+    message_setup(&dir);
+    let m = mutate_message(&dir);
+    assert_eq!(m["outcome"], "ok", "{m:#?}");
+    // `==`, `0` (the comparison and the literal), and the two edits of the text
+    assert_eq!(m["sites"].as_u64(), Some(4), "{m:#?}");
+    let mutants = m["mutants"].as_array().expect("mutants");
+    let survivors: Vec<&str> = mutants
+        .iter()
+        .filter(|x| x["outcome"] == "survived")
+        .map(|x| x["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(survivors.len(), 2, "{m:#?}");
+    assert!(
+        survivors[0].starts_with("check/str-empty/1/"),
+        "{survivors:?}"
+    );
+    assert!(
+        survivors[1].starts_with("check/str-marker/1/"),
+        "{survivors:?}"
+    );
+    assert!(
+        mutants
+            .iter()
+            .filter(|x| x["outcome"] == "killed")
+            .all(|x| !x["key"].as_str().expect("key").contains("/str-"))
+    );
+    let checked = exec(&dir, &[json!({"op":"check"})]);
+    assert_eq!(findings(&checked[0], "mutation.survived").len(), 2);
+
+    // Without `str` the text is not touched: the same tests kill what is left, and nothing survives.
+    let dir = message_project(
+        "measure-e2e-no-str",
+        "operators = [\"rel\", \"eq\", \"arith\", \"logic\", \"bool\", \"int\"]",
+    );
+    message_setup(&dir);
+    let m = mutate_message(&dir);
+    assert_eq!(m["outcome"], "ok", "{m:#?}");
+    assert_eq!(
+        (m["sites"].as_u64(), m["survived"].as_u64()),
+        (Some(2), Some(0)),
+        "{m:#?}"
+    );
+    assert!(
+        m["mutants"]
+            .as_array()
+            .expect("mutants")
+            .iter()
+            .all(|x| x["key"].as_str().is_some_and(|k| !k.contains("/str-")))
+    );
+    let checked = exec(&dir, &[json!({"op":"check"})]);
+    assert!(findings(&checked[0], "mutation.survived").is_empty());
+}
+
 #[test]
 fn a_run_limited_by_max_mutants_says_how_many_sites_it_left_out() {
     // The provider finds 2 sites; `max_mutants = 1` lets the run evaluate one of them.

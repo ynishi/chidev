@@ -9,15 +9,35 @@
 //! not a silent wrong mutant.
 //!
 //! A site is a swappable operator or boolean literal, or an integer literal (`n` becomes `n + 1`, the suffix
-//! kept), inside a function body. Code under `#[cfg(test)]` and `#[test]` functions is not mutated: it is the
-//! tests, not the thing they check. Unary minus and operators of other lengths (`->`, `=>`, `+=`, `<<`) are not
-//! sites, and neither are the angle brackets of a turbofish. The operator table and the even sampling of sites are
-//! ported from ryo-synth.
+//! kept), or a string literal, inside a function body. Code under `#[cfg(test)]` and `#[test]` functions is not
+//! mutated: it is the tests, not the thing they check. Unary minus and operators of other lengths (`->`, `=>`,
+//! `+=`, `<<`) are not sites, and neither are the angle brackets of a turbofish. The operator table and the even
+//! sampling of sites are ported from ryo-synth.
+//!
+//! # String literals (class `str`)
+//!
+//! A plain string literal (`"..."`) or a raw one (`r"..."`, `r#"..."#`) gives two mutants: **empty** (the text is
+//! dropped) and **marker** (`*` is appended inside the quotes, so the text changes observably and stays valid).
+//! A `{...}` placeholder is part of the text a format string needs, so the empty mutant keeps every placeholder
+//! (`"x = {x}, {:>w$}"` becomes `"{x}{:>w$}"`) and only the text around them goes; a literal with nothing but
+//! placeholders has no empty mutant, as it would be the same text. An empty literal has only the marker mutant.
+//! Skipped on purpose: byte strings (`b"..."`, `br"..."`) and C strings (`c"..."`), which are not text; literals
+//! inside attributes (`#[doc = "..."]`, `#[cfg(feature = "x")]`); and literals in the arguments of macros that
+//! read them at compile time (`include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!`, `concat!`,
+//! `stringify!`, `compile_error!`, `cfg!`, `asm!`, `global_asm!`, `macro_rules!`), where a changed text is not a
+//! changed message but another file, variable or no code at all.
+//!
+//! # Selection
+//!
+//! The optional request field `operators` lists the classes to make (`rel`, `eq`, `arith`, `logic`, `bool`,
+//! `int`, `str`); absent, all are made. A name that is not a class is an error, and `sites` counts the sites of
+//! the chosen classes only.
 //!
 //! A mutant's `key` is `<function>/<operator>/<n>/<line digest>`: the function (`Type::method` inside an `impl`),
 //! the operator class, the position among that class's sites in the function, and four hex digits of the SHA-256
-//! of the trimmed line. An edit elsewhere in the file moves none of them, so a record of a mutant outlives
-//! unrelated changes.
+//! of the trimmed line. The two mutants of a string literal are told apart by the class in the key, `str-empty`
+//! and `str-marker`; their `operator` is `str`. An edit elsewhere in the file moves none of them, so a record of
+//! a mutant outlives unrelated changes.
 
 #![warn(missing_docs)]
 
@@ -52,6 +72,31 @@ const SWAPS: [(&str, &str, &str); 12] = [
 /// The class of the integer literal sites.
 const INT_CLASS: &str = "int";
 
+/// The class of the string literal sites.
+const STR_CLASS: &str = "str";
+
+/// Every class a request can select.
+pub const OPERATORS: [&str; 7] = ["rel", "eq", "arith", "logic", "bool", "int", "str"];
+
+/// What is appended to a string literal by the marker mutant.
+const MARKER: &str = "*";
+
+/// Macros whose string arguments are read at compile time as something other than a message.
+const COMPILE_TIME_MACROS: [&str; 12] = [
+    "macro_rules",
+    "include_str",
+    "include_bytes",
+    "include",
+    "env",
+    "option_env",
+    "concat",
+    "stringify",
+    "compile_error",
+    "cfg",
+    "asm",
+    "global_asm",
+];
+
 /// What chidev asks for: the mutants of `source`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -66,6 +111,10 @@ pub struct Request {
     /// Shifts where the even sampling starts; 0 samples from the first site.
     #[serde(default)]
     pub seed: u64,
+    /// The operator classes to make (see [`OPERATORS`]); absent, every class. Optional, so a request of the
+    /// first protocol version without it still parses and means all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operators: Option<Vec<String>>,
 }
 
 /// One single-site edit.
@@ -77,7 +126,7 @@ pub struct Mutant {
     pub line: usize,
     /// The 1-based column of the site, in characters.
     pub col: usize,
-    /// The operator class: `rel`, `eq`, `arith`, `logic`, `bool` or `int`.
+    /// The operator class: `rel`, `eq`, `arith`, `logic`, `bool`, `int` or `str`.
     pub operator: String,
     /// The byte range `[start, end)` of the source the edit replaces.
     pub span: [usize; 2],
@@ -110,6 +159,9 @@ pub enum Error {
     /// The request asks for no mutant.
     #[error("`max` must be at least 1")]
     NoMax,
+    /// The request selects a class this provider does not make.
+    #[error("`{0}` is not an operator class of this provider (it makes {OPERATORS:?})")]
+    Operator(String),
     /// The source is not Rust that parses.
     #[error("the source does not parse as Rust: {0}")]
     Source(String),
@@ -134,6 +186,17 @@ pub fn mutants(request: &Request) -> Result<Reply, Error> {
     if request.max == 0 {
         return Err(Error::NoMax);
     }
+    if let Some(chosen) = &request.operators
+        && let Some(bad) = chosen.iter().find(|o| !OPERATORS.contains(&o.as_str()))
+    {
+        return Err(Error::Operator(bad.clone()));
+    }
+    let wanted = |class: &str| {
+        request
+            .operators
+            .as_ref()
+            .is_none_or(|chosen| chosen.iter().any(|o| o == class))
+    };
     let source = request.source.as_str();
     let file = syn::parse_file(source).map_err(|e| Error::Source(e.to_string()))?;
     let stream: TokenStream = source
@@ -142,7 +205,8 @@ pub fn mutants(request: &Request) -> Result<Reply, Error> {
     let mut finder = Bodies::default();
     finder.visit_file(&file);
     let mut sites = Vec::new();
-    scan(stream, &finder.bodies, &mut sites);
+    scan(stream, &finder.bodies, &mut sites, false);
+    sites.retain(|s| wanted(s.class));
     sites.sort_by_key(|s| (s.start, s.end));
     let total = sites.len();
     let mut counts: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
@@ -150,14 +214,12 @@ pub fn mutants(request: &Request) -> Result<Reply, Error> {
     let mut keyed = Vec::with_capacity(total);
     for site in sites {
         let name = innermost(&finder.bodies, &site).unwrap_or_default();
-        let n = counts.entry((name.clone(), site.class)).or_insert(0);
+        let key_class = site.key_class.unwrap_or(site.class);
+        let n = counts.entry((name.clone(), key_class)).or_insert(0);
         *n += 1;
         let line = lines.get(site.line - 1).map_or("", |l| l.trim());
         let digest = Sha256::digest(line.as_bytes());
-        let key = format!(
-            "{name}/{}/{n}/{:02x}{:02x}",
-            site.class, digest[0], digest[1]
-        );
+        let key = format!("{name}/{key_class}/{n}/{:02x}{:02x}", digest[0], digest[1]);
         keyed.push(Mutant {
             key,
             line: site.line,
@@ -198,7 +260,10 @@ struct Site {
     end: usize,
     line: usize,
     column: usize,
+    /// The operator class of the reply.
     class: &'static str,
+    /// The class a key names, when it tells apart several mutants of one site.
+    key_class: Option<&'static str>,
     from: String,
     to: String,
 }
@@ -309,14 +374,19 @@ impl<'a> Visit<'a> for Bodies {
 
 /// Finds the sites of one token stream, and of the groups inside it. An operator is binary only after an operand
 /// of the same stream, so the first `-` of a group is unary and is not a site.
-fn scan(stream: TokenStream, bodies: &[Body], sites: &mut Vec<Site>) {
+///
+/// `quiet` is set inside an attribute or a macro that reads its strings at compile time: no string site there.
+fn scan(stream: TokenStream, bodies: &[Body], sites: &mut Vec<Site>, quiet: bool) {
     let flat: Vec<TokenTree> = stream.into_iter().collect();
     // The depth of turbofish generic arguments (`::<` ... `>`): their angle brackets are not comparisons.
     let mut turbofish = 0usize;
     let mut i = 0;
     while i < flat.len() {
         match &flat[i] {
-            TokenTree::Group(g) => scan(g.stream(), bodies, sites),
+            TokenTree::Group(g) => {
+                let hidden = quiet || is_attribute(&flat, i, g) || is_compile_time(&flat, i);
+                scan(g.stream(), bodies, sites, hidden);
+            }
             TokenTree::Punct(p) => {
                 let mut op = p.as_char().to_string();
                 let mut j = i;
@@ -367,6 +437,9 @@ fn scan(stream: TokenStream, bodies: &[Body], sites: &mut Vec<Site>) {
             }
             TokenTree::Literal(l) => {
                 let text = l.to_string();
+                if !quiet {
+                    push_strings(sites, bodies, l, &text);
+                }
                 let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
                 let rest = &text[digits.len()..];
                 let suffix_ok = rest.is_empty()
@@ -393,6 +466,112 @@ fn scan(stream: TokenStream, bodies: &[Body], sites: &mut Vec<Site>) {
     }
 }
 
+/// Whether the group at `i` is the `[...]` of an attribute (`#[...]`, `#![...]`).
+fn is_attribute(flat: &[TokenTree], i: usize, g: &proc_macro2::Group) -> bool {
+    let punct = |at: Option<usize>, c: char| {
+        at.and_then(|k| flat.get(k))
+            .is_some_and(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == c))
+    };
+    g.delimiter() == proc_macro2::Delimiter::Bracket
+        && (punct(i.checked_sub(1), '#')
+            || (punct(i.checked_sub(1), '!') && punct(i.checked_sub(2), '#')))
+}
+
+/// Whether the group at `i` is the argument of a macro in [`COMPILE_TIME_MACROS`] (`name!(...)`, or the body of
+/// `macro_rules! name { ... }`).
+fn is_compile_time(flat: &[TokenTree], i: usize) -> bool {
+    let named = |at: Option<usize>| {
+        at.and_then(|k| flat.get(k)).is_some_and(
+            |t| matches!(t, TokenTree::Ident(id) if COMPILE_TIME_MACROS.contains(&id.to_string().as_str())),
+        )
+    };
+    let bang = |at: Option<usize>| {
+        at.and_then(|k| flat.get(k))
+            .is_some_and(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == '!'))
+    };
+    (bang(i.checked_sub(1)) && named(i.checked_sub(2)))
+        || (matches!(
+            i.checked_sub(1).and_then(|k| flat.get(k)),
+            Some(TokenTree::Ident(_))
+        ) && bang(i.checked_sub(2))
+            && named(i.checked_sub(3)))
+}
+
+/// The parts of a text string literal: what opens it (`"`, `r"`, `r#"`), its text, and what closes it. `None` for
+/// every other literal, byte and C strings included.
+fn string_parts(text: &str) -> Option<(&str, &str, &str)> {
+    let after_r = text.strip_prefix('r');
+    let hashes = after_r.map_or(0, |rest| rest.chars().take_while(|c| *c == '#').count());
+    let open = match after_r {
+        Some(_) => 1 + hashes + 1,
+        None => 1,
+    };
+    let opener = text.get(..open)?;
+    if !opener.ends_with('"') {
+        return None;
+    }
+    let close_len = 1 + hashes;
+    let body_end = text.len().checked_sub(close_len)?;
+    if body_end < open {
+        return None;
+    }
+    let closer = text.get(body_end..)?;
+    if !closer.starts_with('"') || closer[1..].chars().any(|c| c != '#') {
+        return None;
+    }
+    Some((opener, text.get(open..body_end)?, closer))
+}
+
+/// `text` with only its `{...}` placeholders left; `{{` and `}}` are escapes and go with the text around.
+fn placeholders(text: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(['{', '}']) {
+        let tail = &rest[at..];
+        if tail.starts_with("{{") || tail.starts_with("}}") {
+            rest = &tail[2..];
+        } else if tail.starts_with('{')
+            && let Some(close) = tail.find('}')
+        {
+            kept.push_str(&tail[..=close]);
+            rest = &tail[close + 1..];
+        } else {
+            rest = &tail[1..];
+        }
+    }
+    kept
+}
+
+/// Records the two mutants of a string literal (see the crate documentation), if it is inside a function body.
+fn push_strings(sites: &mut Vec<Site>, bodies: &[Body], l: &proc_macro2::Literal, text: &str) {
+    let Some((open, body, close)) = string_parts(text) else {
+        return;
+    };
+    let start = l.span().byte_range().start;
+    let end = start + text.len();
+    if !bodies.iter().any(|b| b.inside <= start && end <= b.close) {
+        return;
+    }
+    let at = l.span().start();
+    let kept = placeholders(body);
+    let emptied = format!("{open}{kept}{close}");
+    let marked = format!("{open}{body}{MARKER}{close}");
+    for (key_class, to) in [("str-empty", emptied), ("str-marker", marked)] {
+        if to != text {
+            sites.push(Site {
+                start,
+                end,
+                line: at.line,
+                column: at.column,
+                class: STR_CLASS,
+                key_class: Some(key_class),
+                from: text.to_string(),
+                to,
+            });
+        }
+    }
+}
+
 /// Records a site if it is inside a function body.
 fn push(
     sites: &mut Vec<Site>,
@@ -411,6 +590,7 @@ fn push(
             line: at.line,
             column: at.column,
             class,
+            key_class: None,
             from: from.to_string(),
             to: to.to_string(),
         });
@@ -428,7 +608,15 @@ mod tests {
             source: source.into(),
             max,
             seed,
+            operators: None,
         }
+    }
+
+    fn only(source: &str, operators: &[&str]) -> Result<Reply, Error> {
+        mutants(&Request {
+            operators: Some(operators.iter().map(ToString::to_string).collect()),
+            ..request(source, 100, 0)
+        })
     }
 
     fn all(source: &str) -> Reply {
@@ -454,6 +642,8 @@ mod tests {
             [
                 "1 -> 2",
                 "+ -> -",
+                "\"7\" -> \"\"",
+                "\"7\" -> \"7*\"",
                 "> -> >=",
                 "2 -> 3",
                 "&& -> ||",
@@ -463,12 +653,12 @@ mod tests {
                 "true -> false"
             ]
         );
-        assert_eq!(reply.sites, 9);
+        assert_eq!(reply.sites, 11);
         let classes: Vec<&str> = reply.mutants.iter().map(|m| m.operator.as_str()).collect();
         assert_eq!(
             classes,
             [
-                "int", "arith", "rel", "int", "logic", "eq", "int", "logic", "bool"
+                "int", "arith", "str", "str", "rel", "int", "logic", "eq", "int", "logic", "bool"
             ]
         );
     }
@@ -480,7 +670,7 @@ mod tests {
             assert_eq!(&SOURCE[m.span[0]..m.span[1]], m.from, "{}", m.key);
         }
         // and the position is where a person would look
-        let gt = &reply.mutants[2];
+        let gt = &reply.mutants[4];
         assert_eq!((gt.line, gt.col), (4, 13));
         assert_eq!(
             SOURCE.split('\n').nth(3).and_then(|l| l.get(gt.col - 1..)),
@@ -495,9 +685,17 @@ mod tests {
         for m in &reply.mutants {
             assert_eq!(&source[m.span[0]..m.span[1]], m.from);
         }
-        assert_eq!(edits(&reply), ["7 -> 8", "+ -> -"]);
+        assert_eq!(
+            edits(&reply),
+            [
+                "\"héllo\" -> \"\"",
+                "\"héllo\" -> \"héllo*\"",
+                "7 -> 8",
+                "+ -> -"
+            ]
+        );
         let mut edited = source.to_string();
-        edited.replace_range(reply.mutants[0].span[0]..reply.mutants[0].span[1], "8");
+        edited.replace_range(reply.mutants[2].span[0]..reply.mutants[2].span[1], "8");
         assert!(edited.contains("8u64 + s.len()"));
     }
 
@@ -571,6 +769,140 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), reply.mutants.len());
+    }
+
+    fn strs(source: &str) -> Vec<(String, String, String)> {
+        only(source, &["str"])
+            .expect("a reply")
+            .mutants
+            .into_iter()
+            .map(|m| (m.key, m.from, m.to))
+            .collect()
+    }
+
+    #[test]
+    fn a_string_gets_an_empty_and_a_marker_mutant_that_name_themselves_apart() {
+        let source = "fn f() -> String {\n    String::from(\"no stock\")\n}\n";
+        let reply = only(source, &["str"]).unwrap();
+        assert_eq!(reply.sites, 2);
+        assert_eq!(
+            edits(&reply),
+            ["\"no stock\" -> \"\"", "\"no stock\" -> \"no stock*\""]
+        );
+        assert!(reply.mutants.iter().all(|m| m.operator == "str"));
+        assert!(reply.mutants[0].key.starts_with("f/str-empty/1/"));
+        assert!(reply.mutants[1].key.starts_with("f/str-marker/1/"));
+        for m in &reply.mutants {
+            assert_eq!(&source[m.span[0]..m.span[1]], m.from);
+        }
+        // an empty string has only the marker; it cannot be emptied further
+        let blank = strs("fn f() -> &'static str { \"\" }");
+        assert_eq!(blank.len(), 1);
+        assert_eq!(blank[0].2, "\"*\"");
+    }
+
+    #[test]
+    fn a_format_string_keeps_every_placeholder_in_both_mutants() {
+        let source = r#"fn f(n: u32, w: usize, name: &str) -> String {
+    format!("{name}: {n:>w$} of {{braces}} {0:?}", n)
+}
+"#;
+        let edits = strs(source);
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].2, r#""{name}{n:>w$}{0:?}""#);
+        assert_eq!(edits[1].2, r#""{name}: {n:>w$} of {{braces}} {0:?}*""#);
+        // nothing but a placeholder: the emptied text would be the same, so there is the marker only
+        let bare = strs(r#"fn f(n: u32) -> String { format!("{n}") }"#);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].2, r#""{n}*""#);
+    }
+
+    #[test]
+    fn a_raw_string_keeps_its_delimiters_and_byte_strings_are_not_text() {
+        let raw = strs("fn f() -> &'static str { r#\"say \"hi\"\"# }");
+        assert_eq!(raw[0].2, "r#\"\"#");
+        assert_eq!(raw[1].2, "r#\"say \"hi\"*\"#");
+        let source = "fn f() -> usize { b\"abc\".len() + br\"x\".len() + c\"y\".to_bytes().len() }";
+        assert!(strs(source).is_empty());
+        // a char is not a string
+        assert!(strs("fn f() -> char { 'a' }").is_empty());
+    }
+
+    #[test]
+    fn strings_in_attributes_test_code_and_compile_time_macros_are_not_sites() {
+        let source = r##"
+#[doc = "outside"]
+fn f() -> String {
+    #[allow(clippy::all, reason = "inner")]
+    let a = include_str!("data.txt");
+    let b = concat!("a", "b");
+    let c = env!("HOME");
+    /// a doc comment on a statement
+    let d = "real";
+    let _ = (a, b, c);
+    d.to_string()
+}
+#[test]
+fn a_test() { assert_eq!(f(), "real"); }
+#[cfg(test)]
+mod tests { fn helper() -> &'static str { "helper" } }
+macro_rules! m { () => { "in a macro definition" }; }
+"##;
+        let found = strs(source);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|(_, from, _)| from == "\"real\""));
+    }
+
+    #[test]
+    fn a_string_mutant_applied_still_parses_and_the_key_survives_an_edit_elsewhere() {
+        let before = "fn msg(n: u32) -> String {\n    format!(\"{n} left\")\n}\n";
+        let after = format!("// new\nfn other() -> u32 {{ 1 }}\n{before}");
+        let keys = |s: &str| strs(s).into_iter().map(|(k, _, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys(before), keys(&after));
+        for m in only(before, &["str"]).unwrap().mutants {
+            let mut edited = before.to_string();
+            edited.replace_range(m.span[0]..m.span[1], &m.to);
+            syn::parse_file(&edited).expect("the mutant parses");
+        }
+    }
+
+    #[test]
+    fn operators_select_the_classes_and_the_default_is_all() {
+        let source = "fn f(a: u32) -> String {\n    if a > 1 { \"big\".into() } else { \"small\".into() }\n}\n";
+        let everything = all(source);
+        let classes = |r: &Reply| {
+            let mut c: Vec<String> = r.mutants.iter().map(|m| m.operator.clone()).collect();
+            c.dedup();
+            c
+        };
+        assert_eq!(classes(&everything), ["rel", "int", "str"]);
+        assert_eq!(only(source, &OPERATORS).unwrap().sites, everything.sites);
+        let no_str = only(source, &["rel", "eq", "arith", "logic", "bool", "int"]).unwrap();
+        assert_eq!(classes(&no_str), ["rel", "int"]);
+        assert_eq!(no_str.sites, everything.sites - 4);
+        let only_str = only(source, &["str"]).unwrap();
+        assert_eq!((only_str.sites, only_str.mutants.len()), (4, 4));
+        assert_eq!(only(source, &["rel"]).unwrap().mutants.len(), 1);
+        // a name that is no class is refused by name, and the old request (no field) parses
+        assert!(matches!(only(source, &["strings"]), Err(Error::Operator(o)) if o == "strings"));
+        let old = handle(
+            br#"{"protocol":1,"path":"a.rs","source":"fn f() -> &'static str { \"x\" }","max":9}"#,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&old).unwrap();
+        assert_eq!(value["sites"], 2);
+        let narrowed = handle(br#"{"protocol":1,"path":"a.rs","source":"fn f() -> &'static str { \"x\" }","max":9,"operators":["rel"]}"#)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&narrowed).unwrap();
+        assert_eq!(value["sites"], 0);
+    }
+
+    #[test]
+    fn string_mutants_are_deterministic() {
+        let source = "fn f() -> String { format!(\"{}-{}\", \"a\", \"b\") }";
+        let bytes = |seed| handle(&serde_json::to_vec(&request(source, 3, seed)).unwrap()).unwrap();
+        assert_eq!(bytes(2), bytes(2));
+        assert_eq!(strs(source), strs(source));
     }
 
     #[test]

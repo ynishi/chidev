@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::measure::Operator;
 
 /// The directory under the project root a run works in, and the directories a copy never takes.
 pub(super) const WORK_DIR: &str = ".chidev/measure";
@@ -52,6 +53,8 @@ struct Raw {
     max_mutants: Option<usize>,
     #[serde(default)]
     seed: Option<u64>,
+    #[serde(default)]
+    operators: Option<Vec<String>>,
 }
 
 /// `[measure.sim.<context>]`.
@@ -145,6 +148,9 @@ pub(super) struct Config {
     pub budget: Duration,
     pub max_mutants: usize,
     pub seed: u64,
+    /// The operator classes the provider is asked for; `None` leaves the choice to it (all it makes). Part of
+    /// the digest, as the whole table is.
+    pub operators: Option<Vec<String>>,
     /// Digest of the table as written: any change of it is a change of the settings of a run.
     pub digest: String,
 }
@@ -231,6 +237,19 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         Some(n) => n,
         None => 40,
     };
+    if let Some(operators) = &raw.operators {
+        if operators.is_empty() {
+            return Err("`operators` names at least one class (leave it out for all)".to_string());
+        }
+        if let Some(bad) = operators
+            .iter()
+            .find(|o| Operator::try_from(o.as_str()).is_err())
+        {
+            return Err(format!(
+                "`operators` has `{bad}`, which is not a class name (lowercase letters, digits, `-`)"
+            ));
+        }
+    }
     let copy_exclude = match raw.copy_exclude {
         Some(list) => list
             .iter()
@@ -351,6 +370,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         budget,
         max_mutants,
         seed: raw.seed.unwrap_or(0),
+        operators: raw.operators,
         digest,
     })
 }
@@ -416,6 +436,19 @@ path = "tests/stock.rs"
     }
 
     #[test]
+    fn operators_are_optional_and_part_of_the_digest() {
+        let one = parse(&table(MINIMAL)).unwrap();
+        assert_eq!(one.operators, None);
+        let chosen = MINIMAL.replacen("[mutants]", "operators = [\"rel\", \"int\"]\n[mutants]", 1);
+        let two = parse(&table(&chosen)).unwrap();
+        assert_eq!(
+            two.operators,
+            Some(vec!["rel".to_string(), "int".to_string()])
+        );
+        assert_ne!(one.digest, two.digest);
+    }
+
+    #[test]
     fn what_cannot_be_measured_with_is_refused_by_name() {
         // a top-level key goes before the first table, so those edits insert ahead of `[mutants]`
         for (from, to, expected) in [
@@ -439,6 +472,16 @@ path = "tests/stock.rs"
             ("[mutants]", "timeout = 0\n[mutants]", "positive"),
             ("[mutants]", "budget = 7200\n[mutants]", "3600"),
             ("[mutants]", "max_mutants = 0\n[mutants]", "at least 1"),
+            (
+                "[mutants]",
+                "operators = []\n[mutants]",
+                "at least one class",
+            ),
+            (
+                "[mutants]",
+                "operators = [\"Str\"]\n[mutants]",
+                "not a class name",
+            ),
         ] {
             let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
             assert!(error.contains(expected), "{error} vs {expected}");

@@ -280,6 +280,7 @@ baseline_timeout = 600  # the build and the test before any change
 budget = 900            # the whole run, at most 3600
 max_mutants = 40        # at most this many mutants are evaluated; more sites make the run capped
 seed = 0                # moves where the even sampling of sites starts
+operators = ["rel", "eq", "arith", "logic", "bool", "int", "str"]  # optional; default: every class the provider makes
 
 [measure.mutants]       # language -> the provider command
 rust = ["chidev", "provider", "mutants-rust"]
@@ -305,6 +306,11 @@ from the code). A field that is not known is refused by name. A project with no
 kept. The settings digest covers the whole table and the provider's executable, so
 changing a command or upgrading the provider makes earlier runs stale.
 
+`operators` limits the classes of mutant the provider is asked for (the bundled one
+makes `rel`, `eq`, `arith`, `logic`, `bool`, `int` and `str`). Leave it out for all of
+them; an empty list is refused. It is part of the settings digest, so changing it
+makes earlier runs stale. Leave `str` out to skip the mutants of string literals.
+
 ### Provider protocol `chidev-mutants 1`
 
 The provider is a program that makes mutants and nothing else: a pure function
@@ -312,7 +318,7 @@ of a source text, so a provider for another language is small. One JSON
 document on stdin, one on stdout, stderr for diagnostics:
 
 ```json
-{"protocol":1,"path":"src/stock.rs","source":"...","max":40,"seed":0}
+{"protocol":1,"path":"src/stock.rs","source":"...","max":40,"seed":0,"operators":["rel","str"]}
 {"protocol":1,"sites":118,"mutants":[{"key":"reserve/rel/2/9f3a","line":42,"col":13,
   "operator":"rel","span":[1834,1835],"from":"<","to":"<="}]}
 ```
@@ -325,9 +331,25 @@ provider's stable id of the mutant (the bundled one writes
 `<function>/<operator>/<n>/<digest of the line>`, which an edit elsewhere in the
 file does not move); chidev treats it as opaque text. The reply is capped at 4 MiB.
 The bundled Rust provider is `chidev provider mutants-rust`: it mutates operators
-(`rel`, `eq`, `arith`, `logic`), boolean literals (`bool`) and integer literals
-(`int`) inside function bodies, leaves `#[cfg(test)]` and `#[test]` code alone, and
-gives the same reply for the same request.
+(`rel`, `eq`, `arith`, `logic`), boolean literals (`bool`), integer literals
+(`int`) and string literals (`str`) inside function bodies, leaves `#[cfg(test)]`
+and `#[test]` code alone, and gives the same reply for the same request.
+
+The request field `operators` (optional, a list of class names; absent means all)
+selects the classes. It is optional, so the protocol stays version 1 and a request
+without it parses as before; a provider that does not know it may ignore it, and
+the bundled one refuses a name that is not one of its classes. `[measure]
+operators` is what chidev sends.
+
+A string literal (`"..."`, `r"..."`, `r#"..."#`) gives two mutants, both of class
+`str` and told apart in the key (`str-empty`, `str-marker`): the text emptied, and
+`*` appended inside the quotes. Every `{...}` placeholder is kept in the emptied
+text (`"{name}: {n:>w$} left"` becomes `"{name}{n:>w$}"`), so a format string still
+builds. Not mutated: byte and C strings, strings in attributes, strings in the
+arguments of `include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!`,
+`concat!`, `stringify!`, `compile_error!`, `cfg!`, `asm!` and `macro_rules!`. The
+point of the class is the message no test reads (a wrong number or an empty text
+in an error): such a mutant survives.
 
 ### Simulation (blind, any language)
 
