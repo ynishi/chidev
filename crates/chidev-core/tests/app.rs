@@ -4,6 +4,8 @@
 use chidev_core::app::ports::{AssetKind, AssetNames, IdSource};
 use chidev_core::app::{App, AppError, ClauseInput};
 use chidev_core::domain::repository::ProjectRepository;
+use chidev_core::domain::vo::timestamp::Timestamp;
+use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
 use uuid::Uuid;
 
@@ -23,7 +25,11 @@ async fn app(name: &str) -> App<SqliteStore, Counter> {
     let dir = std::env::temp_dir().join(format!("chidev-app-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = SqliteStore::open(dir.join("chidev.db")).await.unwrap();
-    App::new(store, Counter::default())
+    App::new(
+        store,
+        Counter::default(),
+        FixedClock(Timestamp::from_millis(1_000)),
+    )
 }
 
 #[tokio::test]
@@ -82,6 +88,8 @@ mod checks {
         Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, Level, Params,
     };
     use chidev_core::domain::vo::finding::RuleId;
+    use chidev_core::domain::vo::timestamp::Timestamp;
+    use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::sqlite::SqliteStore;
 
     use super::{Counter, app};
@@ -196,6 +204,7 @@ mod checks {
             issuer: None,
             expects: Vec::new(),
             crux: None,
+            assumptions: Vec::new(),
             addresses: vec![FindingInput {
                 rule: "cite.uncited-clause".to_string(),
                 subject: Some(SubjectInput::Clause(ClauseRef {
@@ -241,7 +250,12 @@ mod checks {
         let _ = std::fs::remove_dir_all(&dir);
         let store = SqliteStore::open(dir.join("chidev.db")).await.unwrap();
         let registry = Registry::new(&[&Forbidden], &[]).unwrap();
-        let mut app = App::with_registry(store, Counter::default(), registry);
+        let mut app = App::with_registry(
+            store,
+            Counter::default(),
+            registry,
+            FixedClock(Timestamp::from_millis(1_000)),
+        );
         app.init().await.unwrap();
         app.add_context("core", &[]).await.unwrap();
         let refused = app.put_contract("core", "stack", "Stack", &clauses()).await;
@@ -278,6 +292,8 @@ mod judged {
         JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
     };
     use chidev_core::domain::check::{Executor, FindingState, Hook, Level};
+    use chidev_core::domain::vo::timestamp::Timestamp;
+    use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::judged::parse;
     use chidev_core::infra::sqlite::SqliteStore;
 
@@ -297,7 +313,12 @@ mod judged {
         let store = SqliteStore::open(dir.join("chidev.db")).await.unwrap();
         let rules = texts.iter().map(|t| parse(t).unwrap()).collect();
         let registry = Registry::builtin_with_judged(rules, &[]).unwrap();
-        let mut app = App::with_registry(store, Counter::default(), registry);
+        let mut app = App::with_registry(
+            store,
+            Counter::default(),
+            registry,
+            FixedClock(Timestamp::from_millis(1_000)),
+        );
         app.init().await.unwrap();
         app.add_context("core", &[]).await.unwrap();
         put_stack(&mut app, "push then pop", "empty pops nothing").await;
@@ -724,6 +745,7 @@ mod judged {
             issuer: None,
             expects: Vec::new(),
             crux: None,
+            assumptions: Vec::new(),
             addresses: vec![FindingInput {
                 rule: "judged.vague".to_string(),
                 subject: Some(SubjectInput::Clause(ClauseRef {

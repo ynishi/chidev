@@ -9,6 +9,7 @@ use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::change_request::ChangeRequestState;
 use crate::domain::service::change_request::{awaiting_decision, keep_moved, unapplied};
+use crate::domain::vo::answer::Basis;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::intent::Intent;
 use crate::domain::vo::target::{ExpectKind, Target};
@@ -61,10 +62,13 @@ pub struct AwaitingDecision;
 
 static AWAITING_DECISION: Descriptor = Descriptor {
     id: RuleId::from_static("cr.awaiting-decision"),
-    summary: Cow::Borrowed("an unresolved change request whose question no person has decided"),
+    summary: Cow::Borrowed(
+        "an unresolved change request whose crux no decision maker has answered",
+    ),
     help: Cow::Borrowed(
-        "The change request asks a question and waits for the person. Work goes on with the default, if there is \
-           one, but the option chosen may expect more of other targets. Decide it (`cr_decide`).",
+        "The change request has a choice that neither the repository nor the decision Policy settles, and waits \
+           for a decision maker. What depends on the answer waits; the option chosen may expect more of other \
+           targets. Apply the Policy if a line covers it, or ask a person, then decide it (`cr_decide`).",
     ),
     hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
     default_level: Level::Note,
@@ -88,6 +92,64 @@ impl Check for AwaitingDecision {
                     Some(Subject::ChangeRequest(c.id())),
                     format!("a {kind} question is not decided yet"),
                 )
+            })
+            .collect()
+    }
+}
+
+/// An answer that rests on a line of the Policy which has since gone or been reworded.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyLineGone;
+
+static POLICY_LINE_GONE: Descriptor = Descriptor {
+    id: RuleId::from_static("crux.policy-line-gone"),
+    summary: Cow::Borrowed(
+        "a decision rests on a policy line that is gone or whose text changed since",
+    ),
+    help: Cow::Borrowed(
+        "The decision was made by applying a line of the decision Policy. The Policy no longer has that line, or \
+           the line now says something else than when it was applied. The answer stands (it is never rewritten), \
+           but what it was derived from is not what it was. If the decision should differ, open a change request \
+           whose Crux supersedes it.",
+    ),
+    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    default_level: Level::Note,
+    mandatory: false,
+    params: std::borrow::Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for PolicyLineGone {
+    fn descriptor(&self) -> &'static Descriptor {
+        &POLICY_LINE_GONE
+    }
+
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        let policy = view.after.policy();
+        view.change_requests
+            .iter()
+            .filter_map(|c| {
+                let answer = c.crux().and_then(|q| q.answer())?;
+                let Basis::Policy {
+                    line,
+                    policy_revision,
+                } = answer.basis()
+                else {
+                    return None;
+                };
+                let message = match policy.line(*line) {
+                    None => format!("the policy line {line} it was decided on is gone"),
+                    Some(l) if l.changed_at() > *policy_revision => format!(
+                        "the policy line {line} was reworded after it was applied (policy {policy_revision}, now {})",
+                        policy.revision()
+                    ),
+                    Some(_) => return None,
+                };
+                Some(Finding::new(
+                    &POLICY_LINE_GONE,
+                    Some(Subject::ChangeRequest(c.id())),
+                    message,
+                ))
             })
             .collect()
     }

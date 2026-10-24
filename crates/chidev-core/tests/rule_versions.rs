@@ -8,6 +8,8 @@ use chidev_core::app::{
     App, ClauseInput, ClauseRef, JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
 };
 use chidev_core::domain::check::{Executor, FindingState, Level, Origin};
+use chidev_core::domain::vo::timestamp::Timestamp;
+use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::{judged, policy, sqlite::SqliteStore};
 use uuid::Uuid;
 
@@ -48,6 +50,7 @@ async fn open(path: &Path, text: &str, level: Option<&str>) -> App<SqliteStore, 
         SqliteStore::open(path).await.unwrap(),
         Counter(1000),
         registry(text, level),
+        FixedClock(Timestamp::from_millis(1_000)),
     )
 }
 
@@ -62,6 +65,7 @@ async fn fixture() -> (App<SqliteStore, Counter>, PathBuf) {
         SqliteStore::open(&path).await.unwrap(),
         Counter::default(),
         registry(&rule_text("can this be tested?"), None),
+        FixedClock(Timestamp::from_millis(1_000)),
     );
     app.init().await.unwrap();
     app.add_context("core", &[]).await.unwrap();

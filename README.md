@@ -71,8 +71,9 @@ tree. Re-run a check after changing inputs outside that model.
 ## Change requests
 
 A change request says what it expects of the targets it points at, in three
-lists, and may carry a `crux`, a question for a person. The targets are the
-assets, as a tree, and each has a revision:
+lists, and may carry a `crux`, a choice a decision maker has to make, and the
+`assumptions` made while raising it (see below). The targets are the assets, as a
+tree, and each has a revision:
 
 ```text
 Project
@@ -102,13 +103,13 @@ the request opens, and a target has one expectation.
 - Each option of the Crux takes the same `change` / `remove` / `keep` lists
   (and `wording`, the exact new text of the definitions, which was `change`
   before the lists took that name). `cr_decide` records the revision each of
-  them has at that moment; a later decision replaces it. Deciding with the
-  person's own wording, or leaving it unspecified, expects nothing more.
+  them has at that moment. Deciding with the decision maker's own wording, or
+  leaving it unspecified, expects nothing more.
 - `intent` (`change_behavior` or `keep_behavior`) is a record. No rule of
   resolving reads it; the note `cr.intent-mismatch` points out a keep-behavior
   request that changes or removes a Clause, and a change-behavior request that
   changes or removes nothing.
-- `cr_resolve` needs the Crux decided, every `change` and `remove` met (the
+- `cr_resolve` needs the Crux answered, every `change` and `remove` met (the
   request's own and the chosen option's), no `keep` moved, and every request
   whose `parent` it is resolved. When it refuses it names what is missing, by
   name (`rounding C1`): what has not changed, what is gone, what is not removed
@@ -117,7 +118,8 @@ the request opens, and a target has one expectation.
 ```json
 {"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
  "change":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}],
- "crux":{"kind":"ambiguity","default":{"choice":"reuse InvalidDiscount"},
+ "crux":{"kind":"ambiguity","importance":"normal",
+  "recommended":{"choice":"reuse InvalidDiscount","reason":"no new type","confidence":85},
   "options":[{"choice":"reuse InvalidDiscount"},
              {"choice":"new error","change":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}]}]}}
 ```
@@ -131,15 +133,69 @@ the request opens, and a target has one expectation.
 
 `cr_open` answers with the expectations it recorded, so a wrong reference is
 seen at once: `{"kind":"keep","target":{"clause":{"context":"pricing","contract":"discount","label":"C1"}},"recorded":1}`.
-`status` lists a request whose Crux has no decision under `awaiting` (title and
-kind of the Crux), the requests whose `change` / `remove` have not been met
+`status` lists a request whose Crux has no decision under `awaiting` (title, kind,
+options with what each expects, the recommendation with its confidence, and the
+importance), the requests whose `change` / `remove` have not been met
 under `unapplied` (`unchanged`, `gone`, `not_removed`), and those whose `keep`
 moved under `keep_moved`. The checks `cr.awaiting-decision` (a note),
 `cr.unapplied` and `cr.keep-moved` (warnings) report them. A "change" is judged
 by the revision alone, so another request's change satisfies it too, and a change
 to a container is met by any change inside it that moves it; tying a change to
 the request that made it is left for later. A database written before
-expectations does not load; chidev is unreleased and there is no migration.
+expectations, or before the Crux, Policy and Assumptions below, does not load;
+chidev is unreleased and there is no migration.
+
+### Crux, Policy and Assumption
+
+Three things say how a question that came up while raising a request is settled,
+by how it can be answered:
+
+| | when | who | recorded |
+|---|---|---|---|
+| Assumption | there is no choice: the repository and general knowledge give the answer | the role at work | the statement, the reason, the evidence |
+| Crux settled by the Policy | a choice must be made, and a line of the Policy derives it | a decision maker (a role such as `orchestrator`) | the choice, the Policy line applied and the Policy revision |
+| Crux nobody derives | not even the Policy settles it | a person | the choice, the reason, who decided |
+
+A **Crux** is a choice that cannot be derived, neither from the repository and
+general knowledge (that is an Assumption) nor from the Project's decision Policy,
+so a decision maker picks. It has no default: what depends on the answer waits,
+and what does not goes on. Most choices are settled by the Policy and recorded as
+such; what is left is an arbitrary, intentional decision, and the point is to
+record who decided what, on which basis, strictly and immutably, because it
+cannot be reproduced. It applies to every change request and finding (Contracts,
+Interfaces, Harness implementation, code), not only to the specification.
+
+- The Crux has a `kind`, its `options` (each with the expectations it asks), a
+  `recommended` choice `{choice, reason?, confidence?}` where `confidence` is a
+  percentage from 0 to 100, an `importance` (`low`, `normal` or `high`), and
+  `supersedes`, the title of a change request whose answered Crux this one
+  replaces (it has to exist and be answered when the request opens). The
+  recommendation and the importance are what a Policy line is written against.
+- `cr_decide` gives the answer, once:
+  `{"op":"cr_decide","title":..,"choice":..` (or `"wording"`, or `"unspecified"`)
+  `,"basis":{"policy":"P1"}` (or `{"arbitrary":"<reason>"}`)
+  `,"by":{"role":"orchestrator"}` (or `{"person":"alice"}`)`}`. A `policy` basis
+  has to name a line the Policy has now, and the revision of the Policy is
+  recorded with it. The time comes from the clock of the application, never from
+  the domain. An answer is never rewritten: deciding a Crux that has an answer is
+  refused. Changing a decision means opening a new change request whose Crux
+  `supersedes` the old one; the old answer stays as it was given.
+- The **Policy** is the Project's decision policy: numbered lines `P1`, `P2`, ...
+  each with a text. `policy_put` replaces all of them:
+  `{"op":"policy_put","lines":[{"id":"P1","text":"take the recommendation when its confidence is 80 or more"}]}`.
+  Its revision goes up when the lines change, and `status.policy` shows the
+  revision and the lines. The note `crux.policy-line-gone` (hooks: put, check)
+  reports an answer that rests on a line which is gone or whose text changed
+  since; the answer itself stands.
+- An **Assumption** `{statement, reason, evidence}` is an interpretation settled
+  from the repository and general knowledge, so nobody is asked. `evidence` is a
+  list of `{"repo":{"path":"src/round.rs","lines":[10,14]}}` (a path relative to
+  the repository, without `..`; `lines` optional) and
+  `{"knowledge":{"reference":"IEEE 754 roundTiesToEven"}}`. Give them with
+  `cr_open.assumptions`, or append later with
+  `{"op":"cr_assume","title":..,"statement":..,"reason":..,"evidence":[..]}`.
+  Assumptions only grow, and a resolved request takes none. `status` lists them
+  with each request, beside its answer (decision, basis, who and when).
 
 ## Change-request addresses
 

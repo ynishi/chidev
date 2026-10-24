@@ -10,14 +10,16 @@ use chidev_core::app::ports::external::{
 };
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, FindingInput, Intent, ItemInput, ItemRef, OptionInput, ReasonedInput, Registry,
-    ReportInput, ReportedFinding, SubjectInput,
+    App, AppError, BasisInput, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput,
+    CruxKind, DecisionInput, DecisionMakerInput, FindingInput, Intent, ItemInput, ItemRef,
+    OptionInput, ReasonedInput, Registry, ReportInput, ReportedFinding, SubjectInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{FindingState, Hook};
 use chidev_core::domain::repository::{ChangeRequestRepository, ProjectRepository};
 use chidev_core::domain::vo::finding::{RuleId, SubjectKind};
+use chidev_core::domain::vo::timestamp::Timestamp;
+use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::{judged, sqlite::SqliteStore};
 use uuid::Uuid;
 
@@ -49,6 +51,7 @@ fn request(title: &str, addresses: Vec<FindingInput>) -> ChangeRequestInput {
         issuer: None,
         expects: vec![],
         crux: None,
+        assumptions: vec![],
         addresses,
     }
 }
@@ -109,7 +112,12 @@ fn judged_registry() -> Registry {
 async fn fixture(registry: Registry) -> (App<SqliteStore, Counter>, PathBuf) {
     let path = fresh_path();
     let store = SqliteStore::open(&path).await.unwrap();
-    let mut app = App::with_registry(store, Counter::default(), registry);
+    let mut app = App::with_registry(
+        store,
+        Counter::default(),
+        registry,
+        FixedClock(Timestamp::from_millis(1_000)),
+    );
     app.init().await.unwrap();
     app.add_context("core", &[]).await.unwrap();
     app.put_contract(
@@ -227,6 +235,7 @@ async fn every_subject_is_addressed_deduplicated_persisted_and_resolved() {
         SqliteStore::open(&path).await.unwrap(),
         Counter(1000),
         judged_registry(),
+        FixedClock(Timestamp::from_millis(1_000)),
     );
     let restored = app.store().change_requests().await.unwrap();
     assert_eq!(
@@ -387,8 +396,9 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
             expects: vec![],
             consequence: None,
         }],
-        default: None,
         recommended: None,
+        importance: None,
+        supersedes: None,
     });
     app.open_change_request(&review).await.unwrap();
     app.decide_change_request(
@@ -397,6 +407,8 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
             choice: "keep".into(),
             reason: None,
         }),
+        &BasisInput::Arbitrary("nothing derives it".into()),
+        &DecisionMakerInput::Person("alice".into()),
     )
     .await
     .unwrap();

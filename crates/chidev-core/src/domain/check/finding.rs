@@ -166,6 +166,7 @@ mod tests {
                 issuer: None,
                 expects: BTreeMap::new(),
                 crux: None,
+                assumptions: Vec::new(),
                 addresses,
             },
         );

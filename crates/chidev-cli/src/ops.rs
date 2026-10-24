@@ -6,10 +6,12 @@ use std::io::{self, BufRead, Write};
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-    DecisionInput, ExpectInput, ExpectKind, FindingInput, Found, Intent, ItemInput, ItemRef,
-    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, ReasonedInput, ReportInput,
-    ReportedFinding, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
+    App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
+    ClauseInput, ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput, EvidenceInput,
+    EvidenceStatus, ExpectInput, ExpectKind, FindingInput, Found, Importance, Intent, ItemInput,
+    ItemRef, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput,
+    ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, RuleStanding, RuleToJudge,
+    SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use serde::{Deserialize, Serialize};
@@ -60,7 +62,11 @@ enum Op {
     },
     /// Opens a change request.
     CrOpen(Box<OpenDto>),
-    /// Decides the Crux of a change request: exactly one of `choice`, `wording` and `unspecified`.
+    /// Replaces the decision Policy (the numbered lines `P1`, `P2`, ... that settle a choice without asking a
+    /// decision maker) with `lines`, whole.
+    PolicyPut { lines: Vec<PolicyLineDto> },
+    /// Decides the Crux of a change request, once: exactly one of `choice`, `wording` and `unspecified`, the `basis`
+    /// it rests on (a Policy line or an arbitrary reason), and who decides (`by`).
     CrDecide {
         title: String,
         #[serde(default)]
@@ -71,6 +77,16 @@ enum Op {
         unspecified: Option<Vec<String>>,
         #[serde(default)]
         reason: Option<String>,
+        basis: BasisDto,
+        by: MakerDto,
+    },
+    /// Appends an Assumption to a change request that is not resolved.
+    CrAssume {
+        title: String,
+        statement: String,
+        reason: String,
+        #[serde(default)]
+        evidence: Vec<EvidenceDto>,
     },
     /// Closes the record of a change request whose change is applied.
     CrResolve { title: String },
@@ -215,12 +231,100 @@ struct OpenDto {
     /// The targets it expects to stay as they are.
     #[serde(default)]
     keep: Vec<RefDto>,
-    /// The question for a person, besides the expectations; none: nothing to ask.
+    /// The choice for a decision maker, besides the expectations; none: nothing to decide.
     #[serde(default)]
     crux: Option<CruxDto>,
+    /// The interpretations settled from the repository and general knowledge while raising it.
+    #[serde(default)]
+    assumptions: Vec<AssumptionDto>,
     /// The findings it deals with.
     #[serde(default)]
     addresses: Vec<AddressDto>,
+}
+
+/// An Assumption: what is assumed, why it holds, and what it stands on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssumptionDto {
+    statement: String,
+    reason: String,
+    #[serde(default)]
+    evidence: Vec<EvidenceDto>,
+}
+
+/// What an Assumption stands on: a place in the repository, or general knowledge.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum EvidenceDto {
+    Repo {
+        path: String,
+        #[serde(default)]
+        lines: Option<(usize, usize)>,
+    },
+    Knowledge {
+        reference: String,
+    },
+}
+
+impl From<EvidenceDto> for EvidenceInput {
+    fn from(e: EvidenceDto) -> EvidenceInput {
+        match e {
+            EvidenceDto::Repo { path, lines } => EvidenceInput::Repo { path, lines },
+            EvidenceDto::Knowledge { reference } => EvidenceInput::Knowledge { reference },
+        }
+    }
+}
+
+impl From<AssumptionDto> for AssumptionInput {
+    fn from(a: AssumptionDto) -> AssumptionInput {
+        AssumptionInput {
+            statement: a.statement,
+            reason: a.reason,
+            evidence: a.evidence.into_iter().map(EvidenceInput::from).collect(),
+        }
+    }
+}
+
+/// What a decision rests on: `{"policy": "P1"}` or `{"arbitrary": "<reason>"}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BasisDto {
+    Policy(String),
+    Arbitrary(String),
+}
+
+impl From<BasisDto> for BasisInput {
+    fn from(b: BasisDto) -> BasisInput {
+        match b {
+            BasisDto::Policy(line) => BasisInput::Policy(line),
+            BasisDto::Arbitrary(reason) => BasisInput::Arbitrary(reason),
+        }
+    }
+}
+
+/// Who decides: `{"role": "<name>"}` or `{"person": "<name>"}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MakerDto {
+    Role(String),
+    Person(String),
+}
+
+impl From<MakerDto> for DecisionMakerInput {
+    fn from(m: MakerDto) -> DecisionMakerInput {
+        match m {
+            MakerDto::Role(name) => DecisionMakerInput::Role(name),
+            MakerDto::Person(name) => DecisionMakerInput::Person(name),
+        }
+    }
+}
+
+/// One line of the decision Policy.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyLineDto {
+    id: String,
+    text: String,
 }
 
 /// A finding a change request addresses. New and legacy input forms normalize at the CLI boundary.
@@ -451,6 +555,52 @@ struct StaleCiteOut<'a> {
     now: u64,
 }
 
+/// What a decision rests on, in the result of `status`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BasisOut<'a> {
+    Policy { line: &'a str, policy_revision: u64 },
+    Arbitrary { reason: &'a str },
+}
+
+/// Who decided, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct MakerOut<'a> {
+    kind: &'static str,
+    name: &'a str,
+}
+
+/// The answer to a Crux, in the result of `status`: the decision, what it rests on, who gave it, and when
+/// (milliseconds since the epoch).
+#[derive(Debug, Serialize)]
+struct AnswerOut<'a> {
+    decision: &'a str,
+    basis: BasisOut<'a>,
+    by: MakerOut<'a>,
+    at: u64,
+}
+
+/// What an Assumption stands on, in the result of `status`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceOut<'a> {
+    Repo {
+        path: &'a str,
+        lines: Option<(usize, usize)>,
+    },
+    Knowledge {
+        reference: &'a str,
+    },
+}
+
+/// An Assumption of a change request, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct AssumptionOut<'a> {
+    statement: &'a str,
+    reason: &'a str,
+    evidence: Vec<EvidenceOut<'a>>,
+}
+
 /// A change request in the result of `status`.
 #[derive(Debug, Serialize)]
 struct CrOut<'a> {
@@ -459,8 +609,10 @@ struct CrOut<'a> {
     parent: Option<&'a str>,
     issuer: Option<&'a str>,
     crux: Option<&'static str>,
+    supersedes: Option<&'a str>,
     state: &'static str,
-    decision: Option<&'a str>,
+    answer: Option<AnswerOut<'a>>,
+    assumptions: Vec<AssumptionOut<'a>>,
 }
 
 /// A change request the definitions have not followed, in the result of `status`.
@@ -480,11 +632,66 @@ struct KeepMovedOut<'a> {
     moved: &'a [String],
 }
 
+/// What an option of an undecided Crux expects of one target.
+#[derive(Debug, Serialize)]
+struct AwaitingExpectOut<'a> {
+    kind: &'static str,
+    target: &'a str,
+}
+
+/// An option of an undecided Crux.
+#[derive(Debug, Serialize)]
+struct AwaitingOptionOut<'a> {
+    choice: &'a str,
+    wording: Option<&'a str>,
+    expects: Vec<AwaitingExpectOut<'a>>,
+    consequence: Option<&'a str>,
+}
+
+/// The recommendation of an undecided Crux, with how sure (0 to 100).
+#[derive(Debug, Serialize)]
+struct RecommendedOut<'a> {
+    choice: &'a str,
+    reason: Option<&'a str>,
+    confidence: Option<u8>,
+}
+
 /// A change request whose Crux has no decision yet, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct AwaitingOut<'a> {
     cr: &'a str,
-    crux: &'static str,
+    kind: &'static str,
+    options: Vec<AwaitingOptionOut<'a>>,
+    recommended: Option<RecommendedOut<'a>>,
+    importance: Option<&'static str>,
+}
+
+/// One line of the decision Policy.
+#[derive(Debug, Serialize)]
+struct PolicyLineOut<'a> {
+    id: &'a str,
+    text: &'a str,
+}
+
+/// The decision Policy, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct PolicyOut<'a> {
+    revision: u64,
+    lines: Vec<PolicyLineOut<'a>>,
+}
+
+/// The result of `policy_put`.
+#[derive(Debug, Serialize)]
+struct PolicyPutOut<'a> {
+    op: &'static str,
+    revision: u64,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// The result of an operation that gives nothing back but its name.
+#[derive(Debug, Serialize)]
+struct DoneOut {
+    op: &'static str,
 }
 
 /// The freshness of a saved external execution, in the result of `status`.
@@ -504,6 +711,7 @@ struct StatusOut<'a> {
     unapplied: Vec<UnappliedOut<'a>>,
     keep_moved: Vec<KeepMovedOut<'a>>,
     awaiting: Vec<AwaitingOut<'a>>,
+    policy: PolicyOut<'a>,
     findings: Vec<FindingOut<'a>>,
     judged: Vec<StandingOut<'a>>,
     external: Vec<ExternalOut<'a>>,
@@ -660,14 +868,58 @@ impl From<IntentDto> for Intent {
     }
 }
 
+/// The choice for a decision maker. There is no `default`: work that depends on the answer waits for it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CruxDto {
     kind: KindDto,
     options: Vec<OptionDto>,
     #[serde(default)]
-    default: Option<ReasonedDto>,
+    recommended: Option<RecommendedDto>,
     #[serde(default)]
-    recommended: Option<ReasonedDto>,
+    importance: Option<ImportanceDto>,
+    /// The title of the change request whose answered Crux this one replaces.
+    #[serde(default)]
+    supersedes: Option<String>,
+}
+
+/// The option recommended, why, and how sure (0 to 100).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecommendedDto {
+    choice: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    confidence: Option<u64>,
+}
+
+impl From<RecommendedDto> for RecommendedInput {
+    fn from(r: RecommendedDto) -> RecommendedInput {
+        RecommendedInput {
+            choice: r.choice,
+            reason: r.reason,
+            confidence: r.confidence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ImportanceDto {
+    Low,
+    Normal,
+    High,
+}
+
+impl From<ImportanceDto> for Importance {
+    fn from(i: ImportanceDto) -> Importance {
+        match i {
+            ImportanceDto::Low => Importance::Low,
+            ImportanceDto::Normal => Importance::Normal,
+            ImportanceDto::High => Importance::High,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -808,22 +1060,6 @@ fn expects_of(
         }
     }
     Ok(out)
-}
-
-#[derive(Debug, Deserialize)]
-struct ReasonedDto {
-    choice: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-impl From<ReasonedDto> for ReasonedInput {
-    fn from(r: ReasonedDto) -> ReasonedInput {
-        ReasonedInput {
-            choice: r.choice,
-            reason: r.reason,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1034,6 +1270,7 @@ where
                 remove,
                 keep,
                 crux,
+                assumptions,
                 addresses,
             } = *open;
             let crux = crux
@@ -1052,8 +1289,9 @@ where
                                 })
                             })
                             .collect::<Result<_, AppError>>()?,
-                        default: q.default.map(ReasonedInput::from),
-                        recommended: q.recommended.map(ReasonedInput::from),
+                        recommended: q.recommended.map(RecommendedInput::from),
+                        importance: q.importance.map(Importance::from),
+                        supersedes: q.supersedes,
                     })
                 })
                 .transpose()?;
@@ -1065,6 +1303,7 @@ where
                 issuer,
                 expects: expects_of(change, remove, keep)?,
                 crux,
+                assumptions: assumptions.into_iter().map(AssumptionInput::from).collect(),
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
             let opened = app.open_change_request(&input).await?;
@@ -1078,12 +1317,43 @@ where
                     .collect(),
             })?
         }
+        Op::PolicyPut { lines } => {
+            let lines: Vec<PolicyLineInput> = lines
+                .into_iter()
+                .map(|l| PolicyLineInput {
+                    id: l.id,
+                    text: l.text,
+                })
+                .collect();
+            let done = app.put_policy(&lines).await?;
+            to_value(&PolicyPutOut {
+                op: "policy_put",
+                revision: done.value.revision.number(),
+                findings: findings_out(&done.findings),
+            })?
+        }
+        Op::CrAssume {
+            title,
+            statement,
+            reason,
+            evidence,
+        } => {
+            let assumption = AssumptionInput::from(AssumptionDto {
+                statement,
+                reason,
+                evidence,
+            });
+            app.assume(&title, &assumption).await?;
+            to_value(&DoneOut { op: "cr_assume" })?
+        }
         Op::CrDecide {
             title,
             choice,
             wording,
             unspecified,
             reason,
+            basis,
+            by,
         } => {
             let decision = match (choice, wording, unspecified) {
                 (Some(choice), None, None) => {
@@ -1097,8 +1367,9 @@ where
                     ));
                 }
             };
-            app.decide_change_request(&title, &decision).await?;
-            json!({ "op": "cr_decide" })
+            app.decide_change_request(&title, &decision, &basis.into(), &by.into())
+                .await?;
+            to_value(&DoneOut { op: "cr_decide" })?
         }
         Op::CrResolve { title } => {
             let done = app.resolve_change_request(&title).await?;
@@ -1145,8 +1416,47 @@ where
                         parent: c.parent.as_deref(),
                         issuer: c.issuer.as_deref(),
                         crux: c.crux,
+                        supersedes: c.supersedes.as_deref(),
                         state: c.state,
-                        decision: c.decision.as_deref(),
+                        answer: c.answer.as_ref().map(|a| AnswerOut {
+                            decision: &a.decision,
+                            basis: match &a.basis {
+                                BasisStatus::Policy {
+                                    line,
+                                    policy_revision,
+                                } => BasisOut::Policy {
+                                    line,
+                                    policy_revision: *policy_revision,
+                                },
+                                BasisStatus::Arbitrary { reason } => BasisOut::Arbitrary { reason },
+                            },
+                            by: MakerOut {
+                                kind: a.by_kind,
+                                name: &a.by,
+                            },
+                            at: a.at,
+                        }),
+                        assumptions: c
+                            .assumptions
+                            .iter()
+                            .map(|a| AssumptionOut {
+                                statement: &a.statement,
+                                reason: &a.reason,
+                                evidence: a
+                                    .evidence
+                                    .iter()
+                                    .map(|e| match e {
+                                        EvidenceStatus::Repo { path, lines } => EvidenceOut::Repo {
+                                            path,
+                                            lines: *lines,
+                                        },
+                                        EvidenceStatus::Knowledge { reference } => {
+                                            EvidenceOut::Knowledge { reference }
+                                        }
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
                     })
                     .collect(),
                 unapplied: s
@@ -1173,9 +1483,44 @@ where
                     .iter()
                     .map(|a| AwaitingOut {
                         cr: &a.cr,
-                        crux: a.crux,
+                        kind: a.kind,
+                        options: a
+                            .options
+                            .iter()
+                            .map(|o| AwaitingOptionOut {
+                                choice: &o.choice,
+                                wording: o.wording.as_deref(),
+                                expects: o
+                                    .expects
+                                    .iter()
+                                    .map(|e| AwaitingExpectOut {
+                                        kind: e.kind,
+                                        target: &e.target,
+                                    })
+                                    .collect(),
+                                consequence: o.consequence.as_deref(),
+                            })
+                            .collect(),
+                        recommended: a.recommended.as_ref().map(|r| RecommendedOut {
+                            choice: &r.choice,
+                            reason: r.reason.as_deref(),
+                            confidence: r.confidence,
+                        }),
+                        importance: a.importance,
                     })
                     .collect(),
+                policy: PolicyOut {
+                    revision: s.policy.revision,
+                    lines: s
+                        .policy
+                        .lines
+                        .iter()
+                        .map(|l| PolicyLineOut {
+                            id: &l.id,
+                            text: &l.text,
+                        })
+                        .collect(),
+                },
                 findings: findings_out(&s.findings),
                 judged: standing_out(&s.judged),
                 external: s

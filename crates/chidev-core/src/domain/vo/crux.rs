@@ -1,33 +1,29 @@
-//! The values of a Crux, the question a person settles for a change request: its kind, its options, and the
-//! decision taken.
+//! The values of a Crux, a choice that can be derived neither from the repository and general knowledge (that is an
+//! Assumption) nor from the Project's decision Policy, so a decision maker must pick: its kind, its options, the
+//! recommendation and importance that let a Policy settle it, and the decision taken.
 
 use std::collections::BTreeMap;
 
 use super::choice::Choice;
+use super::confidence::Confidence;
 use super::prose::Prose;
 use super::target::{ExpectKind, Target};
 
-/// What kind of question a Crux is. The kind says whether work may go on with a default until the person answers,
-/// and whether the question may be left unspecified.
+/// What kind of question a Crux is. The kind says whether the question may be left unspecified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CruxKind {
-    /// The text can be read more than one way. Work goes on with a default.
+    /// The text can be read more than one way.
     Ambiguity,
-    /// Two promises cannot both hold. There is no default: the person decides.
+    /// Two promises cannot both hold.
     Conflict,
-    /// The words of the model are in question (one word for two things, two words for one). There is no default,
-    /// and it cannot be left unspecified: it is about words, not behaviour.
+    /// The words of the model are in question (one word for two things, two words for one). It cannot be left
+    /// unspecified: it is about words, not behaviour.
     Model,
-    /// A test and the promise it checks read differently. Work goes on with a default.
+    /// A test and the promise it checks read differently.
     Disagreement,
 }
 
 impl CruxKind {
-    /// Whether work may go on with a default until the person answers.
-    pub fn allows_default(self) -> bool {
-        matches!(self, CruxKind::Ambiguity | CruxKind::Disagreement)
-    }
-
     /// Whether the question may be left unspecified (the behaviour left free, within invariants).
     pub fn allows_unspecified(self) -> bool {
         self != CruxKind::Model
@@ -56,8 +52,7 @@ pub struct CruxOption {
 
 impl CruxOption {
     /// An option. `expects` is what the option expects of targets once it is chosen, besides the expectations of
-    /// the change request, which hold whatever is chosen (one kind for each target). The default option normally
-    /// expects nothing.
+    /// the change request, which hold whatever is chosen (one kind for each target).
     pub fn new(
         choice: Choice,
         change: Option<Prose>,
@@ -93,7 +88,75 @@ impl CruxOption {
     }
 }
 
-/// A choice with the reason it was taken (a default, a recommendation).
+/// How much the answer matters. A Policy can settle a Crux of low importance by its recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Importance {
+    /// The options are close to equal in what they cost.
+    Low,
+    /// The usual.
+    Normal,
+    /// The answer shapes much that follows.
+    High,
+}
+
+impl Importance {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Importance::Low => "low",
+            Importance::Normal => "normal",
+            Importance::High => "high",
+        }
+    }
+
+    /// The importance a word names; `None` for any other.
+    pub fn from_word(word: &str) -> Option<Importance> {
+        [Importance::Low, Importance::Normal, Importance::High]
+            .into_iter()
+            .find(|i| i.word() == word)
+    }
+}
+
+/// The option the one who raised the Crux recommends, why, and how sure they are. Derived from the inside, so it
+/// is not a decision: a Policy line may take it, a decision maker may not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recommended {
+    choice: Choice,
+    reason: Option<Prose>,
+    confidence: Option<Confidence>,
+}
+
+impl Recommended {
+    /// A recommendation.
+    pub fn new(
+        choice: Choice,
+        reason: Option<Prose>,
+        confidence: Option<Confidence>,
+    ) -> Recommended {
+        Recommended {
+            choice,
+            reason,
+            confidence,
+        }
+    }
+
+    /// The choice recommended.
+    pub fn choice(&self) -> &Choice {
+        &self.choice
+    }
+
+    /// Why.
+    pub fn reason(&self) -> Option<&Prose> {
+        self.reason.as_ref()
+    }
+
+    /// How sure, from 0 to 100; none: not said.
+    pub fn confidence(&self) -> Option<Confidence> {
+        self.confidence
+    }
+}
+
+/// A choice with the reason it was taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reasoned {
     choice: Choice,
@@ -117,19 +180,19 @@ impl Reasoned {
     }
 }
 
-/// What the person decided.
+/// What was decided, apart from the basis, the decision maker and the time (see `Answer`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// One of the options, and why.
     Chosen(Reasoned),
-    /// None of the options: the behaviour in the person's own words, and why.
+    /// None of the options: the behaviour in the decision maker's own words, and why.
     Worded {
         /// The behaviour.
         wording: Prose,
         /// Why.
         reason: Option<Prose>,
     },
-    /// The behaviour is left free, as long as these still hold (none: the defaults of the Project).
+    /// The behaviour is left free, as long as these still hold (none: nothing more).
     Unspecified {
         /// What must still hold.
         keep: Vec<Prose>,
@@ -141,10 +204,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_ambiguity_or_a_disagreement_has_a_default_and_a_model_question_is_never_unspecified()
-    {
-        assert!(CruxKind::Ambiguity.allows_default() && CruxKind::Disagreement.allows_default());
-        assert!(!CruxKind::Conflict.allows_default() && !CruxKind::Model.allows_default());
-        assert!(CruxKind::Conflict.allows_unspecified() && !CruxKind::Model.allows_unspecified());
+    fn a_model_question_is_never_unspecified() {
+        assert!(CruxKind::Ambiguity.allows_unspecified());
+        assert!(CruxKind::Conflict.allows_unspecified());
+        assert!(CruxKind::Disagreement.allows_unspecified());
+        assert!(!CruxKind::Model.allows_unspecified());
+    }
+
+    #[test]
+    fn an_importance_is_one_of_three_words() {
+        for i in [Importance::Low, Importance::Normal, Importance::High] {
+            assert_eq!(Importance::from_word(i.word()), Some(i));
+        }
+        assert_eq!(Importance::from_word("urgent"), None);
+    }
+
+    #[test]
+    fn a_recommendation_keeps_its_confidence() {
+        let r = Recommended::new(
+            Choice::try_from("up").unwrap(),
+            None,
+            Some(Confidence::try_from(85).unwrap()),
+        );
+        assert_eq!(r.confidence().map(Confidence::percent), Some(85));
+        assert_eq!(r.choice().as_str(), "up");
+        assert!(r.reason().is_none());
     }
 }

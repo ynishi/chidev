@@ -11,7 +11,9 @@ mod pins;
 use super::Check;
 use super::level::Hook;
 
-pub use self::change_requests::{AwaitingDecision, IntentMismatch, KeepMoved, Unapplied};
+pub use self::change_requests::{
+    AwaitingDecision, IntentMismatch, KeepMoved, PolicyLineGone, Unapplied,
+};
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
 pub use self::pins::{StalePin, Unpinned};
@@ -30,6 +32,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &AwaitingDecision,
         &KeepMoved,
         &IntentMismatch,
+        &PolicyLineGone,
     ]
 }
 
@@ -187,6 +190,7 @@ mod fixture {
                 issuer: None,
                 expects: expectations_now(p, wanted.iter().copied()),
                 crux: None,
+                assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
         )
@@ -238,6 +242,7 @@ mod tests {
                     | "context.no-harness"
                     | "cr.awaiting-decision"
                     | "cr.intent-mismatch"
+                    | "crux.policy-line-gone"
             );
             assert_eq!(
                 d.default_level,
@@ -334,15 +339,19 @@ mod tests {
         use std::collections::BTreeMap;
 
         use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+        use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
         use crate::domain::vo::choice::Choice;
         use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
         use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::timestamp::Timestamp;
         use crate::domain::vo::title::Title;
         let option =
             |c: &str| CruxOption::new(Choice::try_from(c).unwrap(), None, BTreeMap::new(), None);
         let crux = Crux::new(
             CruxKind::Conflict,
             vec![option("a"), option("b")],
+            None,
             None,
             None,
         )
@@ -359,6 +368,7 @@ mod tests {
                 issuer: None,
                 expects: BTreeMap::new(),
                 crux: Some(crux),
+                assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
         );
@@ -369,8 +379,129 @@ mod tests {
         );
         assert_eq!(found[0].level(), crate::domain::check::Level::Note);
         let choice = Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None));
-        asking.decide(choice, &BTreeMap::new()).unwrap();
+        let answer = Answer::new(
+            choice,
+            Basis::Arbitrary {
+                reason: Prose::try_from("nothing derives it").unwrap(),
+            },
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(1),
+        );
+        asking.decide(answer, &BTreeMap::new()).unwrap();
         assert!(run(&AwaitingDecision, &p, &[], &[plain, asking]).is_empty());
+    }
+
+    #[test]
+    fn a_decision_on_a_policy_line_that_is_gone_or_reworded_is_noted() {
+        use std::collections::BTreeMap;
+
+        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+        use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
+        use crate::domain::vo::choice::Choice;
+        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+        use crate::domain::vo::policy::PolicyLineId;
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::timestamp::Timestamp;
+        use crate::domain::vo::title::Title;
+        let line = |n: &str, t: &str| {
+            (
+                PolicyLineId::try_from(n).unwrap(),
+                Prose::try_from(t).unwrap(),
+            )
+        };
+        let mut p = project();
+        p.put_policy(vec![
+            line("P1", "take it from 80"),
+            line("P2", "low: either"),
+        ])
+        .unwrap();
+        let answered = |n: u128, title: &str, on: Basis| {
+            let crux = Crux::new(
+                CruxKind::Ambiguity,
+                vec![CruxOption::new(
+                    Choice::try_from("a").unwrap(),
+                    None,
+                    BTreeMap::new(),
+                    None,
+                )],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let mut c = ChangeRequest::open(
+                ChangeRequestId::from_uuid(test_uuid(n)),
+                ChangeRequestDraft {
+                    title: Title::try_from(title).unwrap(),
+                    situation: None,
+                    intent: Intent::ChangeBehavior,
+                    parent: None,
+                    issuer: None,
+                    expects: BTreeMap::new(),
+                    crux: Some(crux),
+                    assumptions: Vec::new(),
+                    addresses: Vec::new(),
+                },
+            );
+            let answer = Answer::new(
+                Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None)),
+                on,
+                DecisionMaker::role("orchestrator").unwrap(),
+                Timestamp::from_millis(1),
+            );
+            c.decide(answer, &BTreeMap::new()).unwrap();
+            c
+        };
+        let on = |n: &str| {
+            p.policy()
+                .basis_on(PolicyLineId::try_from(n).unwrap())
+                .unwrap()
+        };
+        let on_p1 = answered(1, "on p1", on("P1"));
+        let on_p2 = answered(2, "on p2", on("P2"));
+        let arbitrary = answered(
+            3,
+            "arbitrary",
+            Basis::Arbitrary {
+                reason: Prose::try_from("the product leans this way").unwrap(),
+            },
+        );
+        let crs = [on_p1.clone(), on_p2.clone(), arbitrary];
+        // Nothing moved.
+        assert!(run(&PolicyLineGone, &p, &[], &crs).is_empty());
+        // P1 is reworded, P2 is dropped: both are found, the arbitrary one never is.
+        p.put_policy(vec![line("P1", "take it from 90")]).unwrap();
+        let found = run(&PolicyLineGone, &p, &[], &crs);
+        assert_eq!(
+            subjects(&found),
+            [
+                Some(Subject::ChangeRequest(on_p1.id())),
+                Some(Subject::ChangeRequest(on_p2.id()))
+            ]
+        );
+        assert_eq!(found[0].level(), crate::domain::check::Level::Note);
+        // A line left as it was, while others change, is not found.
+        let mut q = project();
+        q.put_policy(vec![
+            line("P1", "take it from 80"),
+            line("P2", "low: either"),
+        ])
+        .unwrap();
+        let kept = [answered(
+            1,
+            "on p1",
+            q.policy()
+                .basis_on(PolicyLineId::try_from("P1").unwrap())
+                .unwrap(),
+        )];
+        q.put_policy(vec![line("P1", "take it from 80"), line("P3", "new")])
+            .unwrap();
+        assert!(run(&PolicyLineGone, &q, &[], &kept).is_empty());
+        // Written again after it was dropped, it is a new text.
+        q.put_policy(vec![line("P3", "new")]).unwrap();
+        q.put_policy(vec![line("P1", "take it from 80")]).unwrap();
+        assert_eq!(run(&PolicyLineGone, &q, &[], &kept).len(), 1);
     }
 
     #[test]
@@ -473,6 +604,7 @@ mod tests {
             )],
             None,
             None,
+            None,
         )
         .unwrap();
         let option_removes = ChangeRequest::open(
@@ -485,6 +617,7 @@ mod tests {
                 issuer: None,
                 expects: BTreeMap::new(),
                 crux: Some(crux),
+                assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
         );

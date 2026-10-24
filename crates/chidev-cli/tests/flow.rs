@@ -1,5 +1,5 @@
 //! Runs `tests/flow.jsonl` through `chidev exec`: two Contexts get their Contract, Interfaces and Harnesses, are
-//! pinned; a change request is opened, with a part a person decides through its Crux against the default; the
+//! pinned; a change request is opened, with a part whose Crux a person decides once, on a stated basis; the
 //! change is made and both change requests resolved; the Pins and citations go stale, the Harnesses are brought up
 //! to date, the code is pinned again, and a change that would orphan a citation is refused. Each step reports what the
 //! checks find: the Clause the new contract gains is cited by no Case until the Harness is brought up, and a change
@@ -88,7 +88,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
         states(&[("price", "fresh"), ("print", "fresh")])
     );
 
-    // the request is open; its part decided against the default, with the clause written on the default unchanged
+    // the request is open; its part decided, with the clause still to be written
     let decided = at(&results, 16);
     let crs = &decided["change_requests"];
     assert_eq!(crs[0]["title"], "Fair totals");
@@ -98,7 +98,17 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(crs[1]["issuer"], "designer");
     assert_eq!(crs[1]["crux"], "ambiguity");
     assert_eq!(crs[1]["state"], "decided");
-    assert_eq!(crs[1]["decision"], "half to even");
+    assert_eq!(crs[1]["answer"]["decision"], "half to even");
+    assert_eq!(
+        crs[1]["answer"]["basis"],
+        serde_json::json!({ "arbitrary": { "reason": "the shop accepts the cost of fairness" } })
+    );
+    assert_eq!(
+        crs[1]["answer"]["by"],
+        serde_json::json!({ "kind": "person", "name": "alice" })
+    );
+    assert!(crs[1]["answer"]["at"].as_u64().expect("a time") > 0);
+    assert_eq!(crs[0]["answer"], Value::Null);
     assert_eq!(decided["unapplied"][0]["unchanged"][0], "rounding C1");
 
     // the clause changed (line 17), so both change requests resolve (lines 19, 20); then the interface changes
@@ -205,14 +215,18 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
             "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
-            "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
+            "],\"recommended\":{\"choice\":\"reuse InvalidDiscount\",\"reason\":\"no new type\",\"confidence\":60},",
+            "\"importance\":\"normal\"}}\n"
         )
         .to_string(),
         "{\"op\":\"status\"}\n".to_string(),
         "{\"op\":\"check\"}\n".to_string(),
-        "{\"op\":\"cr_decide\",\"title\":\"Refuse big discounts\",\"choice\":\"reuse InvalidDiscount\"}\n"
-            .to_string(),
-        // 8: decided with the default, yet C1 never changed: it does not resolve, and says which definition
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Refuse big discounts\",\"choice\":\"reuse InvalidDiscount\",",
+            "\"basis\":{\"arbitrary\":\"one error type is enough\"},\"by\":{\"person\":\"alice\"}}\n"
+        )
+        .to_string(),
+        // 8: decided, yet C1 never changed: it does not resolve, and says which definition
         "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
         "{\"op\":\"status\"}\n".to_string(),
         discount_put(
@@ -220,17 +234,21 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "a refused discount is an InvalidDiscount",
         ),
         "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\"}\n".to_string(),
-        // 12: a question whose non-default option asks C2 to change
+        // 12: a question whose second option asks C2 to change
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
             "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
             "{\"choice\":\"new error\",\"change\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
-            "],\"default\":{\"choice\":\"reuse InvalidDiscount\"}}}\n"
+            "]}}\n"
         )
         .to_string(),
         "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
-        "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"new error\"}\n".to_string(),
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"new error\",",
+            "\"basis\":{\"arbitrary\":\"callers tell the errors apart\"},\"by\":{\"person\":\"alice\"}}\n"
+        )
+        .to_string(),
         "{\"op\":\"cr_resolve\",\"title\":\"Name the error\"}\n".to_string(),
         discount_put(
             "a discount above 50% is refused",
@@ -264,7 +282,21 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     let waiting = at(&results, 5);
     assert_eq!(
         waiting["awaiting"],
-        serde_json::json!([{ "cr": "Refuse big discounts", "crux": "ambiguity" }])
+        serde_json::json!([{
+            "cr": "Refuse big discounts",
+            "kind": "ambiguity",
+            "options": [
+                { "choice": "reuse InvalidDiscount", "wording": null, "expects": [], "consequence": null },
+                { "choice": "new error", "wording": null,
+                  "expects": [{ "kind": "change", "target": "discount C2" }], "consequence": null }
+            ],
+            "recommended": { "choice": "reuse InvalidDiscount", "reason": "no new type", "confidence": 60 },
+            "importance": "normal"
+        }])
+    );
+    assert_eq!(
+        waiting["policy"],
+        serde_json::json!({ "revision": 1, "lines": [] })
     );
     assert_eq!(waiting["unapplied"][0]["unchanged"][0], "discount C1");
     let finding = |r: &Value, rule: &str| -> Option<Value> {
@@ -279,7 +311,7 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(note["level"], "note");
     assert!(finding(at(&results, 6), "cr.unapplied").is_some());
 
-    // decided with the default and not resolved: the error names the definition, not its id
+    // decided and not resolved: the error names the definition, not its id
     let refused = at(&results, 8)["error"].as_str().expect("error");
     assert!(refused.contains("discount C1"), "{refused}");
     assert!(
@@ -291,7 +323,7 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(decided["unapplied"][0]["decision"], "reuse InvalidDiscount");
     assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
 
-    // the second question: awaited, refused undecided, and after the non-default choice C2 is required
+    // the second question: awaited, refused undecided, and after the choice of the second option C2 is required
     assert_eq!(at(&results, 13)["ok"], false);
     assert!(
         at(&results, 13)["error"]
@@ -307,6 +339,219 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(last["unapplied"], serde_json::json!([]));
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
+}
+
+fn policy_put(lines: &[(&str, &str)]) -> String {
+    let lines: Vec<Value> = lines
+        .iter()
+        .map(|(id, text)| serde_json::json!({ "id": id, "text": text }))
+        .collect();
+    format!(
+        "{}\n",
+        serde_json::json!({ "op": "policy_put", "lines": lines })
+    )
+}
+
+#[test]
+fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersedes_it() {
+    let dir = fresh_dir("decisions");
+    let crux = |kind: &str, recommended: &str, importance: &str, supersedes: &str| {
+        format!(
+            "\"crux\":{{\"kind\":\"{kind}\",\"options\":[{{\"choice\":\"half up\"}},{{\"choice\":\"half to even\"}}]{recommended}{importance}{supersedes}}}"
+        )
+    };
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put("a half rounds up", "a refused discount is an InvalidDiscount"),
+        // 4: the decision Policy
+        policy_put(&[
+            ("P1", "take the recommendation when its confidence is 80 or more"),
+            ("P2", "when the importance is low and the options cost the same, either is fine"),
+        ]),
+        // 5: a Crux whose recommendation is 85 sure
+        format!(
+            "{{\"op\":\"cr_open\",\"title\":\"Round half to even?\",\"intent\":\"change_behavior\",{}}}\n",
+            crux(
+                "ambiguity",
+                ",\"recommended\":{\"choice\":\"half to even\",\"reason\":\"no bias\",\"confidence\":85}",
+                ",\"importance\":\"low\"",
+                ""
+            )
+        ),
+        // 6: a Crux nothing derives
+        format!(
+            "{{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",{}}}\n",
+            crux("conflict", "", ",\"importance\":\"high\"", "")
+        ),
+        "{\"op\":\"status\"}\n".to_string(),
+        // 8: the orchestrator applies P1
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Round half to even?\",\"choice\":\"half to even\",",
+            "\"basis\":{\"policy\":\"P1\"},\"by\":{\"role\":\"orchestrator\"}}\n"
+        )
+        .to_string(),
+        // 9: a person decides what no line derives
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"half up\",\"reason\":\"keep what callers know\",",
+            "\"basis\":{\"arbitrary\":\"the requester wants the old behaviour kept\"},\"by\":{\"person\":\"alice\"}}\n"
+        )
+        .to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+        // 11: an answer is never rewritten
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Round half to even?\",\"choice\":\"half up\",",
+            "\"basis\":{\"arbitrary\":\"changed my mind\"},\"by\":{\"person\":\"alice\"}}\n"
+        )
+        .to_string(),
+        // 12: a third change request replaces the first decision
+        format!(
+            "{{\"op\":\"cr_open\",\"title\":\"Round half up after all\",\"intent\":\"change_behavior\",{}}}\n",
+            crux("ambiguity", "", "", ",\"supersedes\":\"Round half to even?\"")
+        ),
+        "{\"op\":\"cr_open\",\"title\":\"Plain\",\"intent\":\"keep_behavior\"}\n".to_string(),
+        // 14: there is nothing to replace in a change request without an answered Crux
+        format!(
+            "{{\"op\":\"cr_open\",\"title\":\"Bad supersede\",\"intent\":\"change_behavior\",{}}}\n",
+            crux("ambiguity", "", "", ",\"supersedes\":\"Plain\"")
+        ),
+        // 15: an Assumption appended to an open change request
+        concat!(
+            "{\"op\":\"cr_assume\",\"title\":\"Plain\",\"statement\":\"a half cent is a tie\",",
+            "\"reason\":\"the rounding code treats it so\",\"evidence\":[",
+            "{\"repo\":{\"path\":\"src/round.rs\",\"lines\":[10,14]}},",
+            "{\"knowledge\":{\"reference\":\"IEEE 754 roundTiesToEven\"}}]}\n"
+        )
+        .to_string(),
+        // 16: evidence that leaves the repository
+        concat!(
+            "{\"op\":\"cr_assume\",\"title\":\"Plain\",\"statement\":\"x\",\"reason\":\"y\",",
+            "\"evidence\":[{\"repo\":{\"path\":\"../secret\"}}]}\n"
+        )
+        .to_string(),
+        // 17: a Policy line the policy does not have
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Round half up after all\",\"choice\":\"half up\",",
+            "\"basis\":{\"policy\":\"P9\"},\"by\":{\"role\":\"harness-lead\"}}\n"
+        )
+        .to_string(),
+        // 18: the harness lead applies P2
+        concat!(
+            "{\"op\":\"cr_decide\",\"title\":\"Round half up after all\",\"choice\":\"half up\",",
+            "\"basis\":{\"policy\":\"P2\"},\"by\":{\"role\":\"harness-lead\"}}\n"
+        )
+        .to_string(),
+        "{\"op\":\"status\"}\n".to_string(),
+        // 20: the policy is replaced: P1 is reworded and P2 is gone
+        policy_put(&[("P1", "take the recommendation when its confidence is 90 or more")]),
+        "{\"op\":\"status\"}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    let failed: Vec<u64> = results
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .map(|r| r["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(failed, [11, 14, 16, 17], "{results:#?}");
+
+    // the policy: revision 2 after the first put (1 is the empty one)
+    assert_eq!(at(&results, 4)["revision"], 2);
+
+    // both Cruxes are awaited, with what a decision maker needs to choose
+    let waiting = at(&results, 7);
+    let awaiting = waiting["awaiting"].as_array().expect("awaiting");
+    assert_eq!(awaiting.len(), 2);
+    assert_eq!(awaiting[0]["cr"], "Round half to even?");
+    assert_eq!(awaiting[0]["kind"], "ambiguity");
+    assert_eq!(awaiting[0]["importance"], "low");
+    assert_eq!(
+        awaiting[0]["recommended"],
+        serde_json::json!({ "choice": "half to even", "reason": "no bias", "confidence": 85 })
+    );
+    assert_eq!(awaiting[0]["options"].as_array().expect("options").len(), 2);
+    assert_eq!(awaiting[1]["recommended"], Value::Null);
+    assert_eq!(awaiting[1]["importance"], "high");
+    assert_eq!(
+        waiting["policy"]["lines"][0],
+        serde_json::json!({
+            "id": "P1",
+            "text": "take the recommendation when its confidence is 80 or more"
+        })
+    );
+    assert_eq!(waiting["policy"]["revision"], 2);
+
+    // status shows both answers: who decided, on what basis, and when
+    let decided = at(&results, 10);
+    assert_eq!(decided["awaiting"], serde_json::json!([]));
+    let first = &decided["change_requests"][0]["answer"];
+    assert_eq!(first["decision"], "half to even");
+    assert_eq!(
+        first["basis"],
+        serde_json::json!({ "policy": { "line": "P1", "policy_revision": 2 } })
+    );
+    assert_eq!(
+        first["by"],
+        serde_json::json!({ "kind": "role", "name": "orchestrator" })
+    );
+    assert!(first["at"].as_u64().expect("a time") > 0);
+    let second = &decided["change_requests"][1]["answer"];
+    assert_eq!(second["decision"], "half up");
+    assert_eq!(
+        second["basis"],
+        serde_json::json!({ "arbitrary": { "reason": "the requester wants the old behaviour kept" } })
+    );
+    assert_eq!(
+        second["by"],
+        serde_json::json!({ "kind": "person", "name": "alice" })
+    );
+
+    // the answer stands
+    assert!(error_at(&results, 11).contains("answered already"));
+    // nothing to replace, a Policy line that is not there, evidence outside the repository
+    assert!(error_at(&results, 14).contains("no answered crux"));
+    assert!(error_at(&results, 16).contains(".."));
+    assert!(error_at(&results, 17).contains("no line P9"));
+
+    // the third change request supersedes the first; the Assumption is on its change request
+    let later = at(&results, 19);
+    let crs = &later["change_requests"];
+    assert_eq!(crs[2]["title"], "Round half up after all");
+    assert_eq!(crs[2]["supersedes"], "Round half to even?");
+    assert_eq!(crs[2]["state"], "decided");
+    assert_eq!(
+        crs[2]["answer"]["by"],
+        serde_json::json!({ "kind": "role", "name": "harness-lead" })
+    );
+    assert_eq!(crs[0]["answer"]["decision"], "half to even");
+    assert_eq!(crs[3]["title"], "Plain");
+    assert_eq!(
+        crs[3]["assumptions"],
+        serde_json::json!([{
+            "statement": "a half cent is a tie",
+            "reason": "the rounding code treats it so",
+            "evidence": [
+                { "repo": { "path": "src/round.rs", "lines": [10, 14] } },
+                { "knowledge": { "reference": "IEEE 754 roundTiesToEven" } }
+            ]
+        }])
+    );
+
+    // the policy changed: both decisions that rested on it are noted, and neither was rewritten
+    let replaced = at(&results, 20);
+    assert_eq!(replaced["revision"], 3);
+    let gone: Vec<&Value> = replaced["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|f| f["rule"] == "crux.policy-line-gone")
+        .collect();
+    assert_eq!(gone.len(), 2, "{replaced:#?}");
+    assert!(gone.iter().all(|f| f["level"] == "note"));
+    let after = at(&results, 21);
+    assert_eq!(after["change_requests"][0]["answer"], *first);
+    assert_eq!(after["policy"]["lines"].as_array().expect("lines").len(), 1);
 }
 
 /// The `error` of the operation on line `n`.
@@ -714,7 +959,12 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 11);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 12);
+    assert_eq!(entry("crux.policy-line-gone")["level"], "note");
+    assert_eq!(
+        entry("crux.policy-line-gone")["hooks"],
+        serde_json::json!(["put", "check"])
+    );
     assert_eq!(entry("context.no-harness")["level"], "off");
     assert_eq!(entry("context.no-harness")["default_level"], "note");
     // the person's layer comes after the project's

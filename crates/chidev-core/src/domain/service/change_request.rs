@@ -8,10 +8,10 @@ use std::collections::BTreeMap;
 
 use super::cite::revision_of;
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestError, ChangeRequestState,
+    ChangeRequest, ChangeRequestError, ChangeRequestState, Crux,
 };
 use crate::domain::entity::project::Project;
-use crate::domain::vo::crux::Decision;
+use crate::domain::vo::answer::{Answer, Basis};
 use crate::domain::vo::id::ChangeRequestId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::{ExpectKind, Expectation, Target};
@@ -41,20 +41,55 @@ pub fn expectations_now(
         .collect()
 }
 
-/// Gives the Crux of `cr` the person's decision, with each target the option chosen expects something of at the
-/// revision it has in `project` now.
+/// Gives the Crux of `cr` its answer, once, with each target the option chosen expects something of at the
+/// revision it has in `project` now. An answer on the basis of a Policy line must cite a line the Policy of
+/// `project` has, at the revision it has now (the line applied is the line as it reads at the decision). A Crux
+/// that is answered already takes no other answer.
 pub fn decide(
     cr: &mut ChangeRequest,
-    decision: Decision,
+    answer: Answer,
     project: &Project,
 ) -> Result<(), ChangeRequestError> {
+    if let Basis::Policy {
+        line,
+        policy_revision,
+    } = answer.basis()
+    {
+        let policy = project.policy();
+        if policy.line(*line).is_none() {
+            return Err(ChangeRequestError::UnknownPolicyLine(*line));
+        }
+        if *policy_revision != policy.revision() {
+            return Err(ChangeRequestError::PolicyRevisionMismatch {
+                recorded: *policy_revision,
+                now: policy.revision(),
+            });
+        }
+    }
     let targets = cr
         .crux()
         .into_iter()
         .flat_map(|q| q.options())
         .flat_map(|o| o.expects().keys().copied());
     let now = revisions_now(project, targets);
-    cr.decide(decision, &now)
+    cr.decide(answer, &now)
+}
+
+/// Whether a Crux may supersede the answered Crux of the change request `replaced`: `all` must have it, and its
+/// Crux must be answered. What was decided is not rewritten; a different decision is a new Crux that points at the
+/// one it replaces.
+pub fn check_supersedes(
+    replaced: ChangeRequestId,
+    all: &[ChangeRequest],
+) -> Result<(), ChangeRequestError> {
+    let cr = all
+        .iter()
+        .find(|c| c.id() == replaced)
+        .ok_or(ChangeRequestError::SupersedesUnknown(replaced))?;
+    match cr.crux().and_then(Crux::answer) {
+        Some(_) => Ok(()),
+        None => Err(ChangeRequestError::SupersedesUnanswered(replaced)),
+    }
 }
 
 /// Where the targets of one change request stand against a Project.
@@ -203,10 +238,11 @@ mod tests {
     use super::*;
     use crate::domain::entity::change_request::{ChangeRequestDraft, Crux};
     use crate::domain::entity::context::Context;
+    use crate::domain::vo::answer::DecisionMaker;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-    use crate::domain::vo::crux::{CruxKind, CruxOption, Reasoned};
+    use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned, Recommended};
     use crate::domain::vo::id::{
         CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
         test_uuid,
@@ -214,9 +250,11 @@ mod tests {
     use crate::domain::vo::intent::Intent;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
+    use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
     use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
+    use crate::domain::vo::timestamp::Timestamp;
     use crate::domain::vo::title::Title;
 
     fn clause() -> Target {
@@ -358,6 +396,7 @@ mod tests {
             issuer: None,
             expects: expectations_now(p, wanted.iter().copied()),
             crux: None,
+            assumptions: Vec::new(),
             addresses: Vec::new(),
         }
     }
@@ -394,19 +433,39 @@ mod tests {
                     None,
                 ),
             ],
-            Some(Reasoned::new(choice("up"), None)),
+            Some(Recommended::new(choice("up"), None, None)),
+            None,
             None,
         )
         .unwrap();
         cr(p, Some(crux))
     }
 
-    fn chosen(c: &str) -> Decision {
-        Decision::Chosen(Reasoned::new(choice(c), None))
+    /// An answer on an arbitrary basis, by a person.
+    fn chosen(c: &str) -> Answer {
+        answer_on(
+            c,
+            Basis::Arbitrary {
+                reason: Prose::try_from("nothing derives it").unwrap(),
+            },
+        )
+    }
+
+    fn answer_on(c: &str, basis: Basis) -> Answer {
+        Answer::new(
+            Decision::Chosen(Reasoned::new(choice(c), None)),
+            basis,
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(5),
+        )
+    }
+
+    fn line_id(text: &str) -> PolicyLineId {
+        PolicyLineId::try_from(text).unwrap()
     }
 
     #[test]
-    fn the_default_still_requires_the_own_expectations() {
+    fn the_choice_of_the_recommended_option_still_requires_the_own_expectations() {
         let mut p = project();
         let mut c = person(&p);
         decide(&mut c, chosen("up"), &p).unwrap();
@@ -473,19 +532,105 @@ mod tests {
     }
 
     #[test]
-    fn a_new_decision_replaces_what_the_earlier_one_asked() {
+    fn a_second_decision_is_refused_and_what_the_first_asked_still_holds() {
         let mut p = project();
         let mut c = person(&p);
         decide(&mut c, chosen("to even"), &p).unwrap();
-        decide(&mut c, chosen("up"), &p).unwrap();
-        // Only the own expectation is behind now; the detail the first decision asked is not.
-        assert_eq!(unapplied([&c], &p)[0].unchanged, [clause()]);
+        assert_eq!(
+            decide(&mut c, chosen("up"), &p),
+            Err(ChangeRequestError::AlreadyAnswered)
+        );
+        // The detail the first decision asked is still behind, besides the own expectation.
+        assert_eq!(unapplied([&c], &p)[0].unchanged, [clause(), detail()]);
         put_both(
             &mut p,
             "a discount above 50% is refused",
-            "a refusal is InvalidDiscount",
+            "a refusal is InvalidRate",
         );
         resolve(&mut c, &p, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_decision_on_a_policy_basis_must_cite_a_line_the_policy_has() {
+        let mut p = project();
+        let mut c = person(&p);
+        let on = |line: &str, revision| {
+            answer_on(
+                "up",
+                Basis::Policy {
+                    line: line_id(line),
+                    policy_revision: revision,
+                },
+            )
+        };
+        // The policy has no lines yet.
+        assert_eq!(
+            decide(&mut c, on("P1", p.policy().revision()), &p),
+            Err(ChangeRequestError::UnknownPolicyLine(line_id("P1")))
+        );
+        assert!(c.awaits_decision());
+        p.put_policy(vec![(
+            line_id("P1"),
+            Prose::try_from("take the recommendation from 80").unwrap(),
+        )])
+        .unwrap();
+        // A line it does not have, and a revision it is not at, are refused.
+        assert_eq!(
+            decide(&mut c, on("P2", p.policy().revision()), &p),
+            Err(ChangeRequestError::UnknownPolicyLine(line_id("P2")))
+        );
+        assert_eq!(
+            decide(&mut c, on("P1", Revision::first()), &p),
+            Err(ChangeRequestError::PolicyRevisionMismatch {
+                recorded: Revision::first(),
+                now: p.policy().revision()
+            })
+        );
+        assert!(c.awaits_decision());
+        // The line it has, at the revision it has: taken, and the revision is recorded.
+        let basis = p.policy().basis_on(line_id("P1")).unwrap();
+        decide(&mut c, answer_on("up", basis.clone()), &p).unwrap();
+        assert_eq!(
+            c.crux().and_then(Crux::answer).map(Answer::basis),
+            Some(&basis)
+        );
+    }
+
+    #[test]
+    fn a_crux_may_supersede_only_an_answered_crux_of_a_change_request_that_exists() {
+        let p = project();
+        let mut answered = person(&p);
+        let unanswered = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(2)),
+            draft(&p, Intent::ChangeBehavior, &[]),
+        );
+        let asking = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(3)),
+            ChangeRequestDraft {
+                crux: person(&p).crux().cloned(),
+                ..draft(&p, Intent::ChangeBehavior, &[])
+            },
+        );
+        let all = [answered.clone(), unanswered.clone(), asking.clone()];
+        // It does not exist.
+        let ghost = ChangeRequestId::from_uuid(test_uuid(99));
+        assert_eq!(
+            check_supersedes(ghost, &all),
+            Err(ChangeRequestError::SupersedesUnknown(ghost))
+        );
+        // It has no Crux, or its Crux is not answered.
+        assert_eq!(
+            check_supersedes(unanswered.id(), &all),
+            Err(ChangeRequestError::SupersedesUnanswered(unanswered.id()))
+        );
+        assert_eq!(
+            check_supersedes(asking.id(), &all),
+            Err(ChangeRequestError::SupersedesUnanswered(asking.id()))
+        );
+        // It is answered.
+        decide(&mut answered, chosen("up"), &p).unwrap();
+        let all = [answered.clone(), unanswered, asking];
+        assert_eq!(check_supersedes(answered.id(), &all), Ok(()));
     }
 
     #[test]
@@ -800,6 +945,7 @@ mod tests {
                     None,
                 ),
             ],
+            None,
             None,
             None,
         )

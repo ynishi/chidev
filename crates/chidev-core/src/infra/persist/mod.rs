@@ -81,10 +81,15 @@ pub(crate) mod fixture {
     use crate::domain::entity::project::Project;
     use crate::domain::service::change_request::{decide, expectations_now};
     use crate::domain::service::pin::record;
+    use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
+    use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-    use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+    use crate::domain::vo::confidence::Confidence;
+    use crate::domain::vo::crux::{
+        CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended,
+    };
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
     use crate::domain::vo::id::{
@@ -94,11 +99,13 @@ pub(crate) mod fixture {
     use crate::domain::vo::intent::{Intent, Issuer};
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
+    use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
     use crate::domain::vo::revision::Revision;
     use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::target::{ExpectKind, Target};
+    use crate::domain::vo::timestamp::Timestamp;
     use crate::domain::vo::title::Title;
 
     pub(crate) fn id(n: u128) -> Uuid {
@@ -108,9 +115,21 @@ pub(crate) mod fixture {
     pub(crate) const IFACE: u128 = 30;
 
     /// Two Contexts (the second uses the first and rests on its Contract), with a Contract of two Clauses, an
-    /// Interface revised once, and a Harness citing an Item and a Clause.
+    /// Interface revised once, a Harness citing an Item and a Clause, and a decision Policy of two lines of which
+    /// the second was reworded.
     pub(crate) fn project() -> Project {
         let mut p = Project::new(ProjectId::from_uuid(id(1)));
+        let line = |n: &str, t: &str| (PolicyLineId::try_from(n).unwrap(), prose(t));
+        p.put_policy(vec![
+            line("P1", "take the recommendation from 80"),
+            line("P2", "low importance: either"),
+        ])
+        .unwrap();
+        p.put_policy(vec![
+            line("P1", "take the recommendation from 80"),
+            line("P2", "low importance and equal cost: the recommendation"),
+        ])
+        .unwrap();
         let base = ContextId::from_uuid(id(10));
         let top = ContextId::from_uuid(id(11));
         let ctx = |c: ContextId, name: &str, uses: &[ContextId]| {
@@ -203,8 +222,32 @@ pub(crate) mod fixture {
         Reasoned::new(Choice::try_from(c).unwrap(), Some(prose("because")))
     }
 
+    fn answer(decision: Decision, basis: Basis, by: DecisionMaker, at: u64) -> Answer {
+        Answer::new(decision, basis, by, Timestamp::from_millis(at))
+    }
+
+    fn assumption() -> Assumption {
+        Assumption::new(
+            prose("pop of empty is a failure, not a zero"),
+            prose("the sibling functions fail on empty input"),
+            vec![
+                Evidence::Repo {
+                    path: RepoPath::try_from("src/stack.rs").unwrap(),
+                    lines: Some(LineRange::new(10, 14).unwrap()),
+                },
+                Evidence::Repo {
+                    path: RepoPath::try_from("README.md").unwrap(),
+                    lines: None,
+                },
+                Evidence::Knowledge {
+                    reference: KnowledgeRef::try_from("Rust API guidelines C-FAILURE").unwrap(),
+                },
+            ],
+        )
+    }
+
     /// A change request without a Crux that expects something of a target of every kind, and one with a Crux, a
-    /// parent and a decision that asks a change.
+    /// parent, an Assumption and a decision on a Policy line that asks a change.
     pub(crate) fn change_requests(p: &Project) -> Vec<ChangeRequest> {
         let targets = [
             Target::Item(ItemId::from_uuid(id(31))),
@@ -245,6 +288,7 @@ pub(crate) mod fixture {
                 issuer: None,
                 expects: expectations_now(p, of_every_kind),
                 crux: None,
+                assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
         );
@@ -268,8 +312,13 @@ pub(crate) mod fixture {
                     None,
                 ),
             ],
-            Some(reasoned("fail")),
-            Some(reasoned("zero")),
+            Some(Recommended::new(
+                Choice::try_from("zero").unwrap(),
+                Some(prose("callers already handle zero")),
+                Some(Confidence::try_from(85).unwrap()),
+            )),
+            Some(Importance::High),
+            None,
         )
         .unwrap();
         let mut second = ChangeRequest::open(
@@ -282,6 +331,7 @@ pub(crate) mod fixture {
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
                 expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Change))),
                 crux: Some(crux),
+                assumptions: vec![assumption()],
                 addresses: vec![
                     FindingRef::new(
                         RuleId::from_static("cite.uncited-clause"),
@@ -291,11 +341,27 @@ pub(crate) mod fixture {
                 ],
             },
         );
-        decide(&mut second, Decision::Chosen(reasoned("zero")), p).unwrap();
+        let basis = p
+            .policy()
+            .basis_on(PolicyLineId::try_from("P1").unwrap())
+            .unwrap();
+        let by = DecisionMaker::role("orchestrator").unwrap();
+        decide(
+            &mut second,
+            answer(
+                Decision::Chosen(reasoned("zero")),
+                basis,
+                by,
+                1_700_000_000_123,
+            ),
+            p,
+        )
+        .unwrap();
         vec![first, second]
     }
 
-    /// The other kinds of decision, on Crux of kinds that allow them.
+    /// The other kinds of decision, on an arbitrary basis by a person, each superseding the Crux of the change
+    /// request `pop of empty` (the second of `change_requests`).
     pub(crate) fn other_decisions(p: &Project) -> Vec<ChangeRequest> {
         let open = |n: u128, title: &str, kind: CruxKind| {
             ChangeRequest::open(
@@ -320,30 +386,46 @@ pub(crate) mod fixture {
                                 None,
                             )],
                             None,
-                            None,
+                            Some(Importance::Low),
+                            Some(ChangeRequestId::from_uuid(id(61))),
                         )
                         .unwrap(),
                     ),
+                    assumptions: Vec::new(),
                     addresses: Vec::new(),
                 },
             )
         };
+        let arbitrary = |reason: &str| Basis::Arbitrary {
+            reason: prose(reason),
+        };
+        let alice = || DecisionMaker::person("alice").unwrap();
         let mut worded = open(70, "worded", CruxKind::Conflict);
         decide(
             &mut worded,
-            Decision::Worded {
-                wording: prose("in my words"),
-                reason: None,
-            },
+            answer(
+                Decision::Worded {
+                    wording: prose("in my words"),
+                    reason: None,
+                },
+                arbitrary("the product leans this way"),
+                alice(),
+                1_700_000_000_456,
+            ),
             p,
         )
         .unwrap();
         let mut free = open(71, "free", CruxKind::Disagreement);
         decide(
             &mut free,
-            Decision::Unspecified {
-                keep: vec![prose("it terminates")],
-            },
+            answer(
+                Decision::Unspecified {
+                    keep: vec![prose("it terminates")],
+                },
+                arbitrary("either is fine here"),
+                alice(),
+                1_700_000_000_789,
+            ),
             p,
         )
         .unwrap();
@@ -380,17 +462,134 @@ mod tests {
     }
 
     #[test]
-    fn a_change_request_stored_before_it_could_address_findings_still_reads() {
+    fn an_answer_comes_back_with_its_basis_its_maker_and_its_time() {
+        use crate::domain::vo::answer::Basis;
+        use crate::domain::vo::crux::Importance;
         let p = project();
-        for cr in change_requests(&p) {
-            let mut doc: serde_json::Value =
-                serde_json::from_str(&encode_change_request(&cr).unwrap()).unwrap();
-            // A document of the first layout of this schema has no `addresses` at all.
-            doc.as_object_mut().unwrap().remove("addresses");
-            let read = decode_change_request(CURRENT, &doc.to_string()).unwrap();
-            assert!(read.addresses().is_empty());
-            assert_eq!(read.title(), cr.title());
-        }
+        let second = &change_requests(&p)[1];
+        let text = encode_change_request(second).unwrap();
+        let read = decode_change_request(CURRENT, &text).unwrap();
+        let answer = read.crux().and_then(|q| q.answer()).unwrap();
+        assert!(matches!(
+            answer.basis(),
+            Basis::Policy { line, policy_revision }
+                if line.to_string() == "P1" && policy_revision.number() == p.policy().revision().number()
+        ));
+        assert_eq!(answer.by().to_string(), "role orchestrator");
+        assert_eq!(answer.at().millis(), 1_700_000_000_123);
+        assert_eq!(read.assumptions().len(), 1);
+        assert_eq!(read.assumptions()[0].evidence().len(), 3);
+        let q = read.crux().unwrap();
+        assert_eq!(
+            q.recommended()
+                .and_then(|r| r.confidence())
+                .map(|c| c.percent()),
+            Some(85)
+        );
+        assert_eq!(q.importance(), Some(Importance::High));
+        let superseding = &other_decisions(&p)[0];
+        let text = encode_change_request(superseding).unwrap();
+        let read = decode_change_request(CURRENT, &text).unwrap();
+        assert_eq!(read.crux().and_then(|q| q.supersedes()), Some(second.id()));
+    }
+
+    #[test]
+    fn the_policy_comes_back_with_its_revision_and_the_revision_of_each_line() {
+        let p = project();
+        let text = encode_project(&p).unwrap();
+        let read = decode_project(CURRENT, &text).unwrap();
+        assert_eq!(read.policy(), p.policy());
+        let lines = read.policy().lines();
+        assert_eq!(read.policy().revision().number(), 3);
+        assert_eq!(lines[0].changed_at().number(), 2);
+        assert_eq!(lines[1].changed_at().number(), 3);
+    }
+
+    #[test]
+    fn a_document_of_an_older_layout_is_refused_and_says_what_is_wrong() {
+        let p = project();
+        // Without the Assumptions, or the Policy, a document does not load: there is no migration.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("assumptions");
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("assumptions")
+        ));
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_project(&p).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("policy");
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("policy")
+        ));
+        // A Crux that still has a `default`, and a request that still has a `decision`, are refused by name.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
+        doc["crux"]["default"] = serde_json::json!(null);
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("default")
+        ));
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
+        doc["decision"] = serde_json::json!(null);
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("decision")
+        ));
+        // A request without `addresses` does not load either.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&change_requests(&p)[0]).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("addresses");
+        assert!(matches!(
+            decode_change_request(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("addresses")
+        ));
+    }
+
+    #[test]
+    fn an_invariant_the_domain_holds_is_checked_on_restore() {
+        let p = project();
+        let second = encode_change_request(&change_requests(&p)[1]).unwrap();
+        let corrupt = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut doc: serde_json::Value = serde_json::from_str(&second).unwrap();
+            edit(&mut doc);
+            decode_change_request(CURRENT, &doc.to_string())
+        };
+        // A confidence above 100, a blank maker, an answer to a choice that is not an option, a bad line id.
+        assert!(matches!(
+            corrupt(&|d| d["crux"]["recommended"]["confidence"] = serde_json::json!(101)),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            corrupt(&|d| d["crux"]["answer"]["by"] = serde_json::json!({ "role": " " })),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            corrupt(&|d| d["crux"]["answer"]["decision"] =
+                serde_json::json!({ "chosen": { "choice": "nope", "reason": null } })),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            corrupt(&|d| d["crux"]["answer"]["basis"] =
+                serde_json::json!({ "policy": { "line": "P0", "policy_revision": 3 } })),
+            Err(StoreError::Corrupt(_))
+        ));
+        // Evidence that leaves the repository.
+        assert!(matches!(
+            corrupt(&|d| d["assumptions"][0]["evidence"][0]["repo"]["path"] =
+                serde_json::json!("../secret")),
+            Err(StoreError::Corrupt(_))
+        ));
+        // A Policy line changed after the Policy's own revision.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_project(&p).unwrap()).unwrap();
+        doc["policy"]["lines"][0]["changed_at"] = serde_json::json!(9);
+        assert!(matches!(
+            decode_project(CURRENT, &doc.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -438,7 +637,8 @@ mod tests {
         let p = project();
         let mut doc: serde_json::Value =
             serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
-        doc["decision"] = serde_json::json!({ "chosen": { "choice": "fail", "reason": null } });
+        doc["crux"]["answer"]["decision"] =
+            serde_json::json!({ "chosen": { "choice": "fail", "reason": null } });
         assert!(matches!(
             decode_change_request(CURRENT, &doc.to_string()),
             Err(StoreError::Corrupt(_))

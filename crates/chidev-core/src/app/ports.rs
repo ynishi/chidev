@@ -1,5 +1,5 @@
-//! What the use cases need from outside the domain: fresh ids, the names a person gives the assets, and a store
-//! that keeps what one use case changed whole or not at all.
+//! What the use cases need from outside the domain: fresh ids, the time, the names a person gives the assets, and a
+//! store that keeps what one use case changed whole or not at all.
 
 pub mod external;
 
@@ -17,11 +17,19 @@ use crate::domain::repository::{
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::ContextId;
+use crate::domain::vo::timestamp::Timestamp;
 
 /// Gives a fresh id each time. The domain makes no ids; the use cases take them from here.
 pub trait IdSource {
     /// An id not given before.
     fn next_uuid(&mut self) -> Uuid;
+}
+
+/// Tells the time. The domain reads no clock; a use case that dates a record (a decision) takes the time from here
+/// and passes it in as a value, and a test fixes it.
+pub trait Clock: std::fmt::Debug + Send + Sync {
+    /// The time now.
+    fn now(&self) -> Timestamp;
 }
 
 /// The kind of an asset, for its name.

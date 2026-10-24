@@ -18,6 +18,8 @@ use chidev_core::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
 use chidev_core::domain::vo::finding::RuleId;
+use chidev_core::domain::vo::timestamp::Timestamp;
+use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
 use uuid::Uuid;
 
@@ -119,7 +121,13 @@ async fn app_with_reads(
     )
     .unwrap();
     let registry = Registry::with_external(&[], vec![], vec![external], &[]).unwrap();
-    let mut app = App::with_registry(store, Counter::default(), registry).with_external(executor);
+    let mut app = App::with_registry(
+        store,
+        Counter::default(),
+        registry,
+        FixedClock(Timestamp::from_millis(1_000)),
+    )
+    .with_external(executor);
     app.init().await.unwrap();
     app.add_context("core", &[]).await.unwrap();
     app
@@ -488,8 +496,13 @@ async fn changing_the_registered_process_configuration_invalidates_its_previous_
         &[],
     )
     .unwrap();
-    let app =
-        App::with_registry(store, Counter::default(), registry).with_external(executor.clone());
+    let app = App::with_registry(
+        store,
+        Counter::default(),
+        registry,
+        FixedClock(Timestamp::from_millis(1_000)),
+    )
+    .with_external(executor.clone());
     assert_eq!(
         app.status().await.unwrap().external[0].state.word(),
         "stale"
@@ -521,8 +534,13 @@ async fn a_policy_disabled_rule_is_not_executed_and_a_gate_cannot_be_disabled() 
         &[layer],
     )
     .unwrap();
-    let mut app = App::with_registry(app.into_store(), Counter::default(), registry)
-        .with_external(executor.clone());
+    let mut app = App::with_registry(
+        app.into_store(),
+        Counter::default(),
+        registry,
+        FixedClock(Timestamp::from_millis(1_000)),
+    )
+    .with_external(executor.clone());
     let checked = app.check_run().await.unwrap();
     assert!(checked.findings.is_empty());
     assert!(checked.external.is_empty());
@@ -652,6 +670,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
             issuer: None,
             expects: vec![],
             crux: None,
+            assumptions: vec![],
             addresses: vec![],
         })
         .await

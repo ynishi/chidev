@@ -13,6 +13,8 @@ use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
 };
 use crate::domain::vo::name::ContextName;
+use crate::domain::vo::policy::{Policy, PolicyError, PolicyLineId};
+use crate::domain::vo::prose::Prose;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::title::Title;
@@ -71,6 +73,9 @@ pub enum ProjectError {
     /// The change breaks a rule of one Context.
     #[error(transparent)]
     Context(#[from] ContextError),
+    /// The decision Policy would break a rule of its own.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
 }
 
 /// The Contexts of one repository. Every change is made on a copy and kept only when the Project still holds:
@@ -81,30 +86,34 @@ pub enum ProjectError {
 ///
 /// Its revision is 1 when it is made and goes one up each time a Context is added to it or removed from it. It
 /// does not move when a Context changes: the Context has a revision of its own. So a change request that adds a
-/// Context expects the Project to change.
+/// Context expects the Project to change. The decision Policy it holds has a revision of its own, and does not move
+/// the Project's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     id: ProjectId,
     revision: Revision,
     contexts: BTreeMap<ContextId, Context>,
+    policy: Policy,
 }
 
 impl Project {
-    /// A Project with no Contexts, at its first revision.
+    /// A Project with no Contexts and an empty decision Policy, at its first revision.
     pub fn new(id: ProjectId) -> Project {
         Project {
             id,
             revision: Revision::first(),
             contexts: BTreeMap::new(),
+            policy: Policy::new(),
         }
     }
 
-    /// A Project as a store kept it, with its revision. Every rule of the Project is checked on it, as on a
-    /// change.
+    /// A Project as a store kept it, with its revision and its Policy. Every rule of the Project is checked on it,
+    /// as on a change.
     pub(crate) fn restore(
         id: ProjectId,
         revision: Revision,
         contexts: Vec<Context>,
+        policy: Policy,
     ) -> Result<Project, ProjectError> {
         let mut map = BTreeMap::new();
         for c in contexts {
@@ -118,7 +127,19 @@ impl Project {
             id,
             revision,
             contexts: map,
+            policy,
         })
+    }
+
+    /// The decision Policy: the numbered lines that settle a choice without asking a decision maker.
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+
+    /// Replaces the decision Policy with `lines`. Its revision goes one up when they differ from the ones it has.
+    pub fn put_policy(&mut self, lines: Vec<(PolicyLineId, Prose)>) -> Result<(), ProjectError> {
+        self.policy = self.policy.put(lines)?;
+        Ok(())
     }
 
     /// Its id.
@@ -645,6 +666,33 @@ mod tests {
             p.set_uses(ctx_id(1), BTreeSet::new()),
             Err(ProjectError::ItemNotReached { .. })
         ));
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn the_policy_is_replaced_whole_and_does_not_move_the_projects_revision() {
+        let mut p = project();
+        let revision = p.revision();
+        assert!(p.policy().lines().is_empty());
+        let line = |n: &str, t: &str| {
+            (
+                PolicyLineId::try_from(n).unwrap(),
+                Prose::try_from(t).unwrap(),
+            )
+        };
+        p.put_policy(vec![line("P1", "a"), line("P2", "b")])
+            .unwrap();
+        assert_eq!(p.policy().lines().len(), 2);
+        p.put_policy(vec![line("P2", "b")]).unwrap();
+        assert_eq!(p.policy().lines().len(), 1);
+        assert_eq!(p.policy().revision().number(), 3);
+        assert_eq!(p.revision(), revision);
+        // A refused policy changes nothing.
+        let before = p.clone();
+        assert!(
+            p.put_policy(vec![line("P1", "a"), line("P1", "b")])
+                .is_err()
+        );
         assert_eq!(p, before);
     }
 

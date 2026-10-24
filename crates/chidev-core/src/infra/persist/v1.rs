@@ -16,10 +16,13 @@ use crate::domain::entity::harness::Harness;
 use crate::domain::entity::interface::Interface;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
+use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, DecisionMaker};
+use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+use crate::domain::vo::confidence::Confidence;
+use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{
@@ -30,11 +33,13 @@ use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::pin_basis::PinBasis;
+use crate::domain::vo::policy::{Policy, PolicyLine, PolicyLineId};
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::target::{ExpectKind, Expectation, Target};
+use crate::domain::vo::timestamp::Timestamp;
 use crate::domain::vo::title::Title;
 
 /// The schema number these documents carry.
@@ -91,12 +96,68 @@ fn unrevs<I: Ord>(list: &[Rev], make: impl Fn(Uuid) -> I) -> Result<BTreeMap<I, 
 
 /// The Project with everything in it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProjectDoc {
     pub schema: u32,
     id: String,
     /// The revision of the Project; a document without it is from before the Project had one and does not load.
     revision: u64,
     contexts: Vec<ContextDoc>,
+    /// The decision Policy; a document without it is from before the Project had one and does not load.
+    policy: PolicyDoc,
+}
+
+/// The decision Policy of a Project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyDoc {
+    revision: u64,
+    lines: Vec<PolicyLineDoc>,
+}
+
+/// One line of the decision Policy and the revision at which it got its text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyLineDoc {
+    id: String,
+    text: String,
+    changed_at: u64,
+}
+
+impl From<&Policy> for PolicyDoc {
+    fn from(p: &Policy) -> PolicyDoc {
+        PolicyDoc {
+            revision: p.revision().number(),
+            lines: p
+                .lines()
+                .iter()
+                .map(|l| PolicyLineDoc {
+                    id: l.id().to_string(),
+                    text: l.text().to_string(),
+                    changed_at: l.changed_at().number(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&PolicyDoc> for Policy {
+    type Error = Bad;
+
+    fn try_from(d: &PolicyDoc) -> Result<Policy, Bad> {
+        let lines = d
+            .lines
+            .iter()
+            .map(|l| {
+                Ok(PolicyLine::restore(
+                    PolicyLineId::try_from(l.id.as_str()).map_err(bad)?,
+                    Prose::try_from(l.text.as_str()).map_err(bad)?,
+                    revision(l.changed_at)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Bad>>()?;
+        Policy::restore(revision(d.revision)?, lines).map_err(bad)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +239,7 @@ impl From<&Project> for ProjectDoc {
             id: p.id().as_uuid().to_string(),
             revision: p.revision().number(),
             contexts: p.contexts().map(ContextDoc::from).collect(),
+            policy: PolicyDoc::from(p.policy()),
         }
     }
 }
@@ -277,6 +339,7 @@ impl TryFrom<ProjectDoc> for Project {
             ProjectId::from_uuid(uuid(&d.id)?),
             revision(d.revision)?,
             contexts,
+            Policy::try_from(&d.policy)?,
         )
         .map_err(bad)
     }
@@ -458,8 +521,9 @@ impl TryFrom<PinDoc> for Pin {
 
 // ---------------------------------------------------------- ChangeRequest
 
-/// A change request, with its Crux and the decision on it.
+/// A change request, with its Crux (and the answer to it) and its Assumptions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ChangeRequestDoc {
     pub schema: u32,
     id: String,
@@ -470,11 +534,11 @@ pub(crate) struct ChangeRequestDoc {
     issuer: Option<String>,
     expects: Vec<ExpectDoc>,
     crux: Option<CruxDoc>,
-    decision: Option<DecisionDoc>,
     /// What the option decided expects, with the revision each target had at the decision.
     decided_expects: Vec<ExpectDoc>,
-    /// Absent in the documents written before a change request could address findings.
-    #[serde(default)]
+    /// The interpretations it records; a document without them is from before they existed and does not load.
+    assumptions: Vec<AssumptionDoc>,
+    /// The findings it deals with.
     addresses: Vec<AddressDoc>,
     resolved: bool,
 }
@@ -705,11 +769,211 @@ enum CruxKindDoc {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CruxDoc {
     kind: CruxKindDoc,
     options: Vec<OptionDoc>,
-    default: Option<ReasonedDoc>,
-    recommended: Option<ReasonedDoc>,
+    recommended: Option<RecommendedDoc>,
+    importance: Option<ImportanceDoc>,
+    /// The id of the change request whose answered Crux this one replaces.
+    supersedes: Option<String>,
+    answer: Option<AnswerDoc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecommendedDoc {
+    choice: String,
+    reason: Option<String>,
+    confidence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ImportanceDoc {
+    Low,
+    Normal,
+    High,
+}
+
+/// The answer to a Crux: the decision, what it rests on, who gave it, and when (milliseconds since the epoch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerDoc {
+    decision: DecisionDoc,
+    basis: AnswerBasisDoc,
+    by: MakerDoc,
+    at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AnswerBasisDoc {
+    Policy { line: String, policy_revision: u64 },
+    Arbitrary { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MakerDoc {
+    Role(String),
+    Person(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssumptionDoc {
+    statement: String,
+    reason: String,
+    evidence: Vec<EvidenceDoc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceDoc {
+    Repo {
+        path: String,
+        lines: Option<(usize, usize)>,
+    },
+    Knowledge {
+        reference: String,
+    },
+}
+
+impl From<&Decision> for DecisionDoc {
+    fn from(d: &Decision) -> DecisionDoc {
+        match d {
+            Decision::Chosen(r) => DecisionDoc::Chosen(ReasonedDoc::from(r)),
+            Decision::Worded { wording, reason } => DecisionDoc::Worded {
+                wording: wording.to_string(),
+                reason: reason.as_ref().map(|p| p.to_string()),
+            },
+            Decision::Unspecified { keep } => DecisionDoc::Unspecified {
+                keep: keep.iter().map(|p| p.to_string()).collect(),
+            },
+        }
+    }
+}
+
+impl TryFrom<&DecisionDoc> for Decision {
+    type Error = Bad;
+
+    fn try_from(d: &DecisionDoc) -> Result<Decision, Bad> {
+        Ok(match d {
+            DecisionDoc::Chosen(r) => Decision::Chosen(Reasoned::try_from(r)?),
+            DecisionDoc::Worded { wording, reason } => Decision::Worded {
+                wording: Prose::try_from(wording.as_str()).map_err(bad)?,
+                reason: prose(reason)?,
+            },
+            DecisionDoc::Unspecified { keep } => Decision::Unspecified {
+                keep: keep
+                    .iter()
+                    .map(|k| Prose::try_from(k.as_str()).map_err(bad))
+                    .collect::<Result<_, _>>()?,
+            },
+        })
+    }
+}
+
+impl From<&Answer> for AnswerDoc {
+    fn from(a: &Answer) -> AnswerDoc {
+        AnswerDoc {
+            decision: DecisionDoc::from(a.decision()),
+            basis: match a.basis() {
+                AnswerBasis::Policy {
+                    line,
+                    policy_revision,
+                } => AnswerBasisDoc::Policy {
+                    line: line.to_string(),
+                    policy_revision: policy_revision.number(),
+                },
+                AnswerBasis::Arbitrary { reason } => AnswerBasisDoc::Arbitrary {
+                    reason: reason.to_string(),
+                },
+            },
+            by: match a.by() {
+                DecisionMaker::Role(n) => MakerDoc::Role(n.to_string()),
+                DecisionMaker::Person(n) => MakerDoc::Person(n.to_string()),
+            },
+            at: a.at().millis(),
+        }
+    }
+}
+
+impl TryFrom<&AnswerDoc> for Answer {
+    type Error = Bad;
+
+    fn try_from(d: &AnswerDoc) -> Result<Answer, Bad> {
+        let basis = match &d.basis {
+            AnswerBasisDoc::Policy {
+                line,
+                policy_revision,
+            } => AnswerBasis::Policy {
+                line: PolicyLineId::try_from(line.as_str()).map_err(bad)?,
+                policy_revision: revision(*policy_revision)?,
+            },
+            AnswerBasisDoc::Arbitrary { reason } => AnswerBasis::Arbitrary {
+                reason: Prose::try_from(reason.as_str()).map_err(bad)?,
+            },
+        };
+        let by = match &d.by {
+            MakerDoc::Role(n) => DecisionMaker::role(n),
+            MakerDoc::Person(n) => DecisionMaker::person(n),
+        }
+        .map_err(bad)?;
+        Ok(Answer::new(
+            Decision::try_from(&d.decision)?,
+            basis,
+            by,
+            Timestamp::from_millis(d.at),
+        ))
+    }
+}
+
+impl From<&Assumption> for AssumptionDoc {
+    fn from(a: &Assumption) -> AssumptionDoc {
+        AssumptionDoc {
+            statement: a.statement().to_string(),
+            reason: a.reason().to_string(),
+            evidence: a
+                .evidence()
+                .iter()
+                .map(|e| match e {
+                    Evidence::Repo { path, lines } => EvidenceDoc::Repo {
+                        path: path.to_string(),
+                        lines: lines.map(|l| (l.first(), l.last())),
+                    },
+                    Evidence::Knowledge { reference } => EvidenceDoc::Knowledge {
+                        reference: reference.to_string(),
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&AssumptionDoc> for Assumption {
+    type Error = Bad;
+
+    fn try_from(d: &AssumptionDoc) -> Result<Assumption, Bad> {
+        let mut evidence = Vec::with_capacity(d.evidence.len());
+        for e in &d.evidence {
+            evidence.push(match e {
+                EvidenceDoc::Repo { path, lines: range } => Evidence::Repo {
+                    path: RepoPath::try_from(path.as_str()).map_err(bad)?,
+                    lines: range.map(|(first, last)| lines(first, last)).transpose()?,
+                },
+                EvidenceDoc::Knowledge { reference } => Evidence::Knowledge {
+                    reference: KnowledgeRef::try_from(reference.as_str()).map_err(bad)?,
+                },
+            });
+        }
+        Ok(Assumption::new(
+            Prose::try_from(d.statement.as_str()).map_err(bad)?,
+            Prose::try_from(d.reason.as_str()).map_err(bad)?,
+            evidence,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -801,20 +1065,21 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
                         consequence: o.consequence().map(|p| p.to_string()),
                     })
                     .collect(),
-                default: q.default().map(ReasonedDoc::from),
-                recommended: q.recommended().map(ReasonedDoc::from),
-            }),
-            decision: c.crux().and_then(|q| q.decision()).map(|d| match d {
-                Decision::Chosen(r) => DecisionDoc::Chosen(ReasonedDoc::from(r)),
-                Decision::Worded { wording, reason } => DecisionDoc::Worded {
-                    wording: wording.to_string(),
-                    reason: reason.as_ref().map(|p| p.to_string()),
-                },
-                Decision::Unspecified { keep } => DecisionDoc::Unspecified {
-                    keep: keep.iter().map(|p| p.to_string()).collect(),
-                },
+                recommended: q.recommended().map(|r| RecommendedDoc {
+                    choice: r.choice().to_string(),
+                    reason: r.reason().map(|p| p.to_string()),
+                    confidence: r.confidence().map(|c| u64::from(c.percent())),
+                }),
+                importance: q.importance().map(|i| match i {
+                    Importance::Low => ImportanceDoc::Low,
+                    Importance::Normal => ImportanceDoc::Normal,
+                    Importance::High => ImportanceDoc::High,
+                }),
+                supersedes: q.supersedes().map(|s| s.as_uuid().to_string()),
+                answer: q.answer().map(AnswerDoc::from),
             }),
             decided_expects: expect_docs(c.decided_expects()),
+            assumptions: c.assumptions().iter().map(AssumptionDoc::from).collect(),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             resolved: c.state() == ChangeRequestState::Resolved,
         }
@@ -845,31 +1110,38 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                     CruxKindDoc::Model => CruxKind::Model,
                     CruxKindDoc::Disagreement => CruxKind::Disagreement,
                 };
-                Some(
-                    Crux::new(
-                        kind,
-                        options,
-                        q.default.as_ref().map(Reasoned::try_from).transpose()?,
-                        q.recommended.as_ref().map(Reasoned::try_from).transpose()?,
-                    )
-                    .map_err(bad)?,
-                )
+                let recommended = q
+                    .recommended
+                    .as_ref()
+                    .map(|r| {
+                        Ok::<_, Bad>(Recommended::new(
+                            Choice::try_from(r.choice.as_str()).map_err(bad)?,
+                            prose(&r.reason)?,
+                            r.confidence
+                                .map(|c| Confidence::try_from(c).map_err(bad))
+                                .transpose()?,
+                        ))
+                    })
+                    .transpose()?;
+                let importance = q.importance.map(|i| match i {
+                    ImportanceDoc::Low => Importance::Low,
+                    ImportanceDoc::Normal => Importance::Normal,
+                    ImportanceDoc::High => Importance::High,
+                });
+                let supersedes = q
+                    .supersedes
+                    .as_deref()
+                    .map(|s| Ok::<_, Bad>(ChangeRequestId::from_uuid(uuid(s)?)))
+                    .transpose()?;
+                Some(Crux::new(kind, options, recommended, importance, supersedes).map_err(bad)?)
             }
         };
-        let decision = match &d.decision {
-            None => None,
-            Some(DecisionDoc::Chosen(r)) => Some(Decision::Chosen(Reasoned::try_from(r)?)),
-            Some(DecisionDoc::Worded { wording, reason }) => Some(Decision::Worded {
-                wording: Prose::try_from(wording.as_str()).map_err(bad)?,
-                reason: prose(reason)?,
-            }),
-            Some(DecisionDoc::Unspecified { keep }) => Some(Decision::Unspecified {
-                keep: keep
-                    .iter()
-                    .map(|k| Prose::try_from(k.as_str()).map_err(bad))
-                    .collect::<Result<_, _>>()?,
-            }),
-        };
+        let answer = d
+            .crux
+            .as_ref()
+            .and_then(|q| q.answer.as_ref())
+            .map(Answer::try_from)
+            .transpose()?;
         let draft = ChangeRequestDraft {
             title: Title::try_from(d.title.as_str()).map_err(bad)?,
             situation: prose(&d.situation)?,
@@ -889,6 +1161,11 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .transpose()?,
             expects,
             crux,
+            assumptions: d
+                .assumptions
+                .iter()
+                .map(Assumption::try_from)
+                .collect::<Result<_, _>>()?,
             addresses: d
                 .addresses
                 .iter()
@@ -898,7 +1175,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
         ChangeRequest::restore(
             ChangeRequestId::from_uuid(uuid(&d.id)?),
             draft,
-            decision,
+            answer,
             decided_expects,
             d.resolved,
         )

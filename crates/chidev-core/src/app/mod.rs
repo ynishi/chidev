@@ -32,7 +32,9 @@ pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
 };
 pub use self::model_view::{ModelView, VIEW_VERSION};
-use self::ports::{AssetKind, AssetName, Changes, IdSource, Invocation, Store, StoreRevision};
+use self::ports::{
+    AssetKind, AssetName, Changes, Clock, IdSource, Invocation, Store, StoreRevision,
+};
 pub use crate::domain::check::ParamValue;
 use crate::domain::check::{CheckView, Finding, Hook, Mention};
 use crate::domain::entity::change_request::{
@@ -42,15 +44,18 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{
-    awaiting_decision, decide, expectations_now, keep_moved, resolve, unapplied,
+    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, resolve, unapplied,
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
+use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
+use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-pub use crate::domain::vo::crux::CruxKind;
-use crate::domain::vo::crux::{CruxOption, Decision, Reasoned};
+use crate::domain::vo::confidence::Confidence;
+pub use crate::domain::vo::crux::{CruxKind, Importance};
+use crate::domain::vo::crux::{CruxOption, Decision, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{
@@ -61,6 +66,7 @@ pub use crate::domain::vo::intent::Intent;
 use crate::domain::vo::intent::Issuer;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
+use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::signature::Signature;
@@ -341,7 +347,7 @@ pub struct OptionInput {
     pub consequence: Option<String>,
 }
 
-/// A choice and why (a default, a recommendation, a decision).
+/// A choice and why (a decision).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasonedInput {
     /// The choice.
@@ -350,17 +356,92 @@ pub struct ReasonedInput {
     pub reason: Option<String>,
 }
 
-/// The question of a change request a person settles.
+/// The option recommended, why, and how sure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedInput {
+    /// The choice.
+    pub choice: String,
+    /// Why.
+    pub reason: Option<String>,
+    /// How sure, from 0 to 100.
+    pub confidence: Option<u64>,
+}
+
+/// The choice of a change request a decision maker makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CruxInput {
     /// What kind of question it is.
     pub kind: CruxKind,
     /// The options.
     pub options: Vec<OptionInput>,
-    /// The option work goes on with until the person decides.
-    pub default: Option<ReasonedInput>,
     /// The option recommended.
-    pub recommended: Option<ReasonedInput>,
+    pub recommended: Option<RecommendedInput>,
+    /// How much the answer matters.
+    pub importance: Option<Importance>,
+    /// The title of the change request whose answered Crux this one replaces.
+    pub supersedes: Option<String>,
+}
+
+/// Where an Assumption stands, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceInput {
+    /// A place in the repository: a path relative to it, and the first and last line when they matter.
+    Repo {
+        /// The file.
+        path: String,
+        /// The first and last line, from 1.
+        lines: Option<(usize, usize)>,
+    },
+    /// General knowledge, by where it is written.
+    Knowledge {
+        /// The reference.
+        reference: String,
+    },
+}
+
+/// An interpretation settled from the repository and general knowledge, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssumptionInput {
+    /// What is assumed.
+    pub statement: String,
+    /// Why it holds.
+    pub reason: String,
+    /// What it stands on.
+    pub evidence: Vec<EvidenceInput>,
+}
+
+/// What a decision rests on, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BasisInput {
+    /// A line of the Project's decision Policy (`P1`); the Policy must have it.
+    Policy(String),
+    /// Nothing derives it; the reason it went this way.
+    Arbitrary(String),
+}
+
+/// Who decides, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionMakerInput {
+    /// A role that holds the authority to decide (`orchestrator`).
+    Role(String),
+    /// A person.
+    Person(String),
+}
+
+/// One line of the decision Policy, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyLineInput {
+    /// Its id (`P1`).
+    pub id: String,
+    /// What it says.
+    pub text: String,
+}
+
+/// The decision Policy as `policy_put` left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyPut {
+    /// The revision of the Policy after the change.
+    pub revision: Revision,
 }
 
 /// A change request as it is opened. Citations name their Context. A change request is addressed by its title,
@@ -379,8 +460,10 @@ pub struct ChangeRequestInput {
     pub issuer: Option<String>,
     /// What it expects of targets: change, remove or keep, each target once.
     pub expects: Vec<ExpectInput>,
-    /// The question for a person, besides the expectations; none: nothing to ask.
+    /// The choice for a decision maker, besides the expectations; none: nothing to decide.
     pub crux: Option<CruxInput>,
+    /// The interpretations settled from the repository and general knowledge while raising it.
+    pub assumptions: Vec<AssumptionInput>,
     /// The findings it deals with.
     pub addresses: Vec<FindingInput>,
 }
@@ -401,7 +484,7 @@ pub struct FindingInput {
     pub subject: Option<SubjectInput>,
 }
 
-/// What the person decided about a Crux.
+/// What the decision maker decided about a Crux.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionInput {
     /// One of the options.
@@ -420,6 +503,66 @@ pub enum DecisionInput {
     },
 }
 
+/// What a decision rests on, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BasisStatus {
+    /// A line of the decision Policy, and the revision of the Policy when it was applied.
+    Policy {
+        /// The line (`P1`).
+        line: String,
+        /// The revision of the Policy when the line was applied.
+        policy_revision: u64,
+    },
+    /// Nothing derived it.
+    Arbitrary {
+        /// Why it went this way.
+        reason: String,
+    },
+}
+
+/// The answer to a Crux, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerStatus {
+    /// What was decided, in words.
+    pub decision: String,
+    /// What it rests on.
+    pub basis: BasisStatus,
+    /// `role` or `person`.
+    pub by_kind: &'static str,
+    /// The name of the role or the person.
+    pub by: String,
+    /// When, in milliseconds since the epoch.
+    pub at: u64,
+}
+
+/// Where an Assumption stands, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceStatus {
+    /// A place in the repository.
+    Repo {
+        /// The file.
+        path: String,
+        /// The first and last line, when they were given.
+        lines: Option<(usize, usize)>,
+    },
+    /// General knowledge.
+    Knowledge {
+        /// Where it is written.
+        reference: String,
+    },
+}
+
+/// An Assumption of a change request, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssumptionStatus {
+    /// What is assumed.
+    pub statement: String,
+    /// Why it holds.
+    pub reason: String,
+    /// What it stands on.
+    pub evidence: Vec<EvidenceStatus>,
+}
+
 /// Where one change request stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRequestStatus {
@@ -431,12 +574,16 @@ pub struct ChangeRequestStatus {
     pub parent: Option<String>,
     /// Who raised it.
     pub issuer: Option<String>,
-    /// The kind of its Crux; none: it has no question.
+    /// The kind of its Crux; none: it has no choice for a decision maker.
     pub crux: Option<&'static str>,
+    /// The title of the change request whose answered Crux its Crux supersedes.
+    pub supersedes: Option<String>,
     /// `open`, `decided` or `resolved`.
     pub state: &'static str,
-    /// The decision on its Crux, in words.
-    pub decision: Option<String>,
+    /// The answer to its Crux: the decision, what it rests on, who gave it and when.
+    pub answer: Option<AnswerStatus>,
+    /// The interpretations it records, in order.
+    pub assumptions: Vec<AssumptionStatus>,
 }
 
 /// A change request as it was opened.
@@ -448,13 +595,70 @@ pub struct Opened {
     pub expects: Vec<OpenedExpect>,
 }
 
-/// A change request whose Crux has no decision yet.
+/// What an option of an undecided Crux expects of one target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingExpect {
+    /// `change`, `remove` or `keep`.
+    pub kind: &'static str,
+    /// The target, described.
+    pub target: String,
+}
+
+/// An option of an undecided Crux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitingOption {
+    /// The choice.
+    pub choice: String,
+    /// The new wording it makes of the definitions.
+    pub wording: Option<String>,
+    /// What it expects of targets when chosen.
+    pub expects: Vec<AwaitingExpect>,
+    /// What else it affects.
+    pub consequence: Option<String>,
+}
+
+/// The recommendation of an undecided Crux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedStatus {
+    /// The choice recommended.
+    pub choice: String,
+    /// Why.
+    pub reason: Option<String>,
+    /// How sure, from 0 to 100.
+    pub confidence: Option<u8>,
+}
+
+/// A change request whose Crux has no decision yet: what a decision maker is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwaitingStatus {
     /// The change request's title.
     pub cr: String,
     /// The kind of its Crux.
-    pub crux: &'static str,
+    pub kind: &'static str,
+    /// The options.
+    pub options: Vec<AwaitingOption>,
+    /// The option recommended, with how sure.
+    pub recommended: Option<RecommendedStatus>,
+    /// How much the answer matters.
+    pub importance: Option<&'static str>,
+}
+
+/// One line of the decision Policy, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyLineStatus {
+    /// Its id (`P1`).
+    pub id: String,
+    /// What it says.
+    pub text: String,
+}
+
+/// The decision Policy of the Project, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyStatus {
+    /// Its revision.
+    pub revision: u64,
+    /// Its lines, in order.
+    pub lines: Vec<PolicyLineStatus>,
 }
 
 /// An unresolved change request the targets have not followed.
@@ -497,6 +701,8 @@ pub struct Status {
     pub keep_moved: Vec<KeepMovedStatus>,
     /// The change requests whose Crux has no decision yet.
     pub awaiting: Vec<AwaitingStatus>,
+    /// The decision Policy of the Project.
+    pub policy: PolicyStatus,
     /// What every check finds in the state as it is, each with whether a change request deals with it.
     pub findings: Vec<Found>,
     /// The judged rules never reported or gone stale: what an agent is to judge (`check_rules`).
@@ -527,28 +733,103 @@ fn reasoned(r: &ReasonedInput) -> Result<Reasoned, AppError> {
     ))
 }
 
-/// The use cases over one store and one source of ids.
+/// An Assumption as the domain holds it, from what a person wrote.
+fn assumption_of(a: &AssumptionInput) -> Result<Assumption, AppError> {
+    let mut evidence = Vec::with_capacity(a.evidence.len());
+    for e in &a.evidence {
+        evidence.push(match e {
+            EvidenceInput::Repo { path, lines } => Evidence::Repo {
+                path: RepoPath::try_from(path.as_str()).map_err(input)?,
+                lines: lines
+                    .map(|(first, last)| LineRange::new(first, last).map_err(input))
+                    .transpose()?,
+            },
+            EvidenceInput::Knowledge { reference } => Evidence::Knowledge {
+                reference: KnowledgeRef::try_from(reference.as_str()).map_err(input)?,
+            },
+        });
+    }
+    Ok(Assumption::new(
+        Prose::try_from(a.statement.as_str()).map_err(input)?,
+        Prose::try_from(a.reason.as_str()).map_err(input)?,
+        evidence,
+    ))
+}
+
+/// An Assumption, in words, for `status`.
+fn assumption_status(a: &Assumption) -> AssumptionStatus {
+    AssumptionStatus {
+        statement: a.statement().to_string(),
+        reason: a.reason().to_string(),
+        evidence: a
+            .evidence()
+            .iter()
+            .map(|e| match e {
+                Evidence::Repo { path, lines } => EvidenceStatus::Repo {
+                    path: path.to_string(),
+                    lines: lines.map(|l| (l.first(), l.last())),
+                },
+                Evidence::Knowledge { reference } => EvidenceStatus::Knowledge {
+                    reference: reference.to_string(),
+                },
+            })
+            .collect(),
+    }
+}
+
+/// An answer, in words, for `status`.
+fn answer_status(a: &Answer) -> AnswerStatus {
+    AnswerStatus {
+        decision: decision_text(a.decision()),
+        basis: match a.basis() {
+            Basis::Policy {
+                line,
+                policy_revision,
+            } => BasisStatus::Policy {
+                line: line.to_string(),
+                policy_revision: policy_revision.number(),
+            },
+            Basis::Arbitrary { reason } => BasisStatus::Arbitrary {
+                reason: reason.to_string(),
+            },
+        },
+        by_kind: a.by().word(),
+        by: a.by().name().to_string(),
+        at: a.at().millis(),
+    }
+}
+
+/// The use cases over one store, one source of ids and one clock (which dates the decisions).
 #[derive(Debug)]
 pub struct App<S, G, E = NoExternal> {
     store: S,
     ids: G,
     registry: Registry,
     external: E,
+    clock: Box<dyn Clock>,
 }
 
 impl<S: Store, G: IdSource> App<S, G, NoExternal> {
-    /// The use cases over `store`, with fresh ids from `ids`, running the builtin checks at their default levels.
-    pub fn new(store: S, ids: G) -> App<S, G> {
-        App::with_registry(store, ids, Registry::defaults())
+    /// The use cases over `store`, with fresh ids from `ids` and the time from `clock`, running the builtin checks
+    /// at their default levels.
+    pub fn new(store: S, ids: G, clock: impl Clock + 'static) -> App<S, G> {
+        App::with_registry(store, ids, Registry::defaults(), clock)
     }
 
-    /// The use cases over `store`, with fresh ids from `ids`, running the checks of `registry`.
-    pub fn with_registry(store: S, ids: G, registry: Registry) -> App<S, G> {
+    /// The use cases over `store`, with fresh ids from `ids` and the time from `clock`, running the checks of
+    /// `registry`.
+    pub fn with_registry(
+        store: S,
+        ids: G,
+        registry: Registry,
+        clock: impl Clock + 'static,
+    ) -> App<S, G> {
         App {
             store,
             ids,
             registry,
             external: NoExternal,
+            clock: Box::new(clock),
         }
     }
 }
@@ -561,6 +842,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             ids: self.ids,
             registry: self.registry,
             external,
+            clock: self.clock,
         }
     }
 
@@ -932,14 +1214,45 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         prose(&o.consequence)?,
                     ));
                 }
+                let recommended = q
+                    .recommended
+                    .as_ref()
+                    .map(|r| {
+                        Ok::<_, AppError>(Recommended::new(
+                            Choice::try_from(r.choice.as_str()).map_err(input)?,
+                            prose(&r.reason)?,
+                            r.confidence
+                                .map(|c| Confidence::try_from(c).map_err(input))
+                                .transpose()?,
+                        ))
+                    })
+                    .transpose()?;
+                let supersedes = match &q.supersedes {
+                    None => None,
+                    Some(t) => {
+                        let replaced = existing
+                            .iter()
+                            .find(|cr| cr.title().as_str() == t.trim())
+                            .map(|cr| cr.id())
+                            .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))?;
+                        check_supersedes(replaced, &existing)?;
+                        Some(replaced)
+                    }
+                };
                 Some(Crux::new(
                     q.kind,
                     options,
-                    q.default.as_ref().map(reasoned).transpose()?,
-                    q.recommended.as_ref().map(reasoned).transpose()?,
+                    recommended,
+                    q.importance,
+                    supersedes,
                 )?)
             }
         };
+        let assumptions = c
+            .assumptions
+            .iter()
+            .map(assumption_of)
+            .collect::<Result<Vec<_>, _>>()?;
         let issuer = c
             .issuer
             .as_deref()
@@ -960,6 +1273,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 issuer,
                 expects: expectations_now(&p, wanted),
                 crux,
+                assumptions,
                 addresses,
             },
         );
@@ -980,15 +1294,37 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(Opened { id, expects })
     }
 
-    /// Takes the person's decision on the Crux of the change request titled `title`.
+    /// Records the answer to the Crux of the change request titled `title`: the `decision`, what it rests on
+    /// (`basis`: a line of the Project's Policy, which must exist, or an arbitrary reason), who decided it (`by`),
+    /// and when (from the clock). The answer is recorded once and never rewritten: a Crux already answered refuses
+    /// another. The Policy line is cited at the revision the Policy has now.
     pub async fn decide_change_request(
         &mut self,
         title: &str,
         decision: &DecisionInput,
+        basis: &BasisInput,
+        by: &DecisionMakerInput,
     ) -> Result<(), AppError> {
+        let now = self.clock.now();
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let mut cr = self.change_request_titled(title).await?;
+        let basis = match basis {
+            BasisInput::Policy(line) => {
+                let line = PolicyLineId::try_from(line.as_str()).map_err(input)?;
+                p.policy()
+                    .basis_on(line)
+                    .map_err(|_| ChangeRequestError::UnknownPolicyLine(line))?
+            }
+            BasisInput::Arbitrary(reason) => Basis::Arbitrary {
+                reason: Prose::try_from(reason.as_str()).map_err(input)?,
+            },
+        };
+        let by = match by {
+            DecisionMakerInput::Role(name) => DecisionMaker::role(name),
+            DecisionMakerInput::Person(name) => DecisionMaker::person(name),
+        }
+        .map_err(input)?;
         let decision = match decision {
             DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
             DecisionInput::Worded { wording, reason } => Decision::Worded {
@@ -1002,10 +1338,58 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .collect::<Result<_, _>>()?,
             },
         };
-        decide(&mut cr, decision, &p)?;
+        decide(&mut cr, Answer::new(decision, basis, by, now), &p)?;
         self.commit_change_request(at, cr, Vec::new(), Vec::new())
             .await?;
         Ok(())
+    }
+
+    /// Appends an Assumption to the change request titled `title`. Assumptions only grow; a resolved change
+    /// request takes none.
+    pub async fn assume(
+        &mut self,
+        title: &str,
+        assumption: &AssumptionInput,
+    ) -> Result<(), AppError> {
+        let at = self.store.revision().await?;
+        let mut cr = self.change_request_titled(title).await?;
+        cr.assume(assumption_of(assumption)?)?;
+        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+            .await?;
+        Ok(())
+    }
+
+    /// Replaces the decision Policy of the Project with `lines`, whole. Its revision goes one up when they differ
+    /// from the ones it has. The checks of the put hook run (`crux.policy-line-gone` notes a decision that rests
+    /// on a line that is now gone or reworded).
+    pub async fn put_policy(
+        &mut self,
+        lines: &[PolicyLineInput],
+    ) -> Result<Checked<PolicyPut>, AppError> {
+        let at = self.store.revision().await?;
+        let mut p = self.project().await?;
+        let before = p.clone();
+        let mut given = Vec::with_capacity(lines.len());
+        for l in lines {
+            given.push((
+                PolicyLineId::try_from(l.id.as_str()).map_err(input)?,
+                Prose::try_from(l.text.as_str()).map_err(input)?,
+            ));
+        }
+        p.put_policy(given)?;
+        let revision = p.policy().revision();
+        let gate = self.gate(Hook::Put, at, Some(&before), &p, &[]).await?;
+        let changes = Changes {
+            project: Some(p),
+            invocations: gate.invocations,
+            external: gate.external,
+            ..Changes::default()
+        };
+        self.store.commit(at, changes).await?;
+        Ok(Checked {
+            value: PolicyPut { revision },
+            findings: gate.found,
+        })
     }
 
     /// Closes the record of the change request titled `title`, once the change is applied.
@@ -1162,8 +1546,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 parent: c.parent().map(title_of),
                 issuer: c.issuer().map(|i| i.to_string()),
                 crux: c.crux().map(|q| q.kind().word()),
+                supersedes: c.crux().and_then(Crux::supersedes).map(title_of),
                 state: c.state().word(),
-                decision: decision_of(c),
+                answer: c.crux().and_then(Crux::answer).map(answer_status),
+                assumptions: c.assumptions().iter().map(assumption_status).collect(),
             })
             .collect();
         let mut open = Vec::new();
@@ -1189,13 +1575,51 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 moved: self.describe_all(&p, &k.moved).await?,
             });
         }
-        let awaiting = awaiting_decision(crs.iter())
-            .into_iter()
-            .map(|c| AwaitingStatus {
+        let mut awaiting = Vec::new();
+        for c in awaiting_decision(crs.iter()) {
+            let Some(q) = c.crux() else {
+                continue;
+            };
+            let mut options = Vec::with_capacity(q.options().len());
+            for o in q.options() {
+                let mut expects = Vec::with_capacity(o.expects().len());
+                for (target, kind) in o.expects() {
+                    expects.push(AwaitingExpect {
+                        kind: kind.word(),
+                        target: self.describe(&p, *target).await?,
+                    });
+                }
+                options.push(AwaitingOption {
+                    choice: o.choice().to_string(),
+                    wording: o.change().map(|w| w.to_string()),
+                    expects,
+                    consequence: o.consequence().map(|w| w.to_string()),
+                });
+            }
+            awaiting.push(AwaitingStatus {
                 cr: c.title().to_string(),
-                crux: c.crux().map_or("question", |q| q.kind().word()),
-            })
-            .collect();
+                kind: q.kind().word(),
+                options,
+                recommended: q.recommended().map(|r| RecommendedStatus {
+                    choice: r.choice().to_string(),
+                    reason: r.reason().map(|w| w.to_string()),
+                    confidence: r.confidence().map(Confidence::percent),
+                }),
+                importance: q.importance().map(Importance::word),
+            });
+        }
+        let policy = PolicyStatus {
+            revision: p.policy().revision().number(),
+            lines: p
+                .policy()
+                .lines()
+                .iter()
+                .map(|l| PolicyLineStatus {
+                    id: l.id().to_string(),
+                    text: l.text().to_string(),
+                })
+                .collect(),
+        };
         Ok(Status {
             pins,
             stale_cites: stale,
@@ -1203,6 +1627,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             unapplied: open,
             keep_moved: moved,
             awaiting,
+            policy,
             findings,
             judged,
             external: self.external_standing(&p, &crs, at).await?.1,
