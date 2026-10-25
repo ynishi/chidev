@@ -209,11 +209,17 @@ enum Op {
     /// Contexts always come with their `id`, `name`, `basis` and `uses`; the change requests belong to the Project,
     /// so they come when `change_requests` is a section, whatever `contexts` says. The result is the `view`, and the
     /// `store_revision` it was read at.
-    View {
-        sections: Vec<SectionDto>,
-        #[serde(default)]
-        contexts: Option<Vec<String>>,
-    },
+    View(ViewDto),
+}
+
+/// The fields of `view`. A field it does not know is refused: a misspelled `contexts` would otherwise read every
+/// Context, more than the reader was to be given.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ViewDto {
+    sections: Vec<SectionDto>,
+    #[serde(default)]
+    contexts: Option<Vec<String>>,
 }
 
 /// One entry of the `puts` of a `change_set`: the fields of the operation named by `put`, without `op`.
@@ -2615,7 +2621,7 @@ where
                 model: &view.model,
             })?
         }
-        Op::View { sections, contexts } => {
+        Op::View(ViewDto { sections, contexts }) => {
             let read = app
                 .view(&ViewInput {
                     contexts,

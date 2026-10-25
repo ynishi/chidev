@@ -94,7 +94,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         crs: &[ChangeRequest],
         pending: &[AssetName],
     ) -> Result<ExternalModelView, AppError> {
-        let names = self.names_in_model(p, pending).await?;
+        let names = self.names_in_model(p.contexts(), pending).await?;
         let selection = ViewSelection {
             contexts: None,
             sections: rule.reads().iter().copied().collect(),

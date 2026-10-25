@@ -161,7 +161,9 @@ belong):
     `sections`), `[]` is `input.view-sections-empty`, and a word that is not a
     section is `input.invalid` (with `did_you_mean`).
   - `contexts` names the Contexts to read. Leaving it out reads every Context, `[]`
-    reads none, and a name the Project does not have is `input.unknown-name`. The
+    reads none, and a name the Project does not have is `input.unknown-name`. A
+    field `view` does not take (a misspelled `contexts`) is `input.unknown-field`,
+    not a view of every Context. The
     change requests belong to the Project, not to a Context, so they come whenever
     `change_requests` is a section, whatever `contexts` says.
   - The result is the envelope of an operation (`ok`, `line`, `op`) with the

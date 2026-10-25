@@ -430,7 +430,7 @@ where
         crs: &[ChangeRequest],
         at: StoreRevision,
     ) -> Result<ModelView, AppError> {
-        let names = self.names_in_model(p, &[]).await?;
+        let names = self.names_in_model(p.contexts(), &[]).await?;
         Ok(ModelView::build(at.0, p, crs, &names))
     }
 }

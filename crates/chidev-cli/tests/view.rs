@@ -144,6 +144,7 @@ fn a_view_without_sections_or_with_none_or_an_unknown_one_is_refused_by_its_rule
             json!({"op":"view","sections":[]}),
             json!({"op":"view","sections":["contract"]}),
             json!({"op":"view","sections":["contracts"],"contexts":["cor"]}),
+            json!({"op":"view","sections":["contracts"],"context":["core"]}),
         ],
     );
     let missing = one(&r[0]);
@@ -163,6 +164,11 @@ fn a_view_without_sections_or_with_none_or_an_unknown_one_is_refused_by_its_rule
     assert_eq!(context["code"], "input.unknown-name");
     assert_eq!(context["values"]["kind"], "context");
     assert_eq!(context["did_you_mean"], json!(["core"]));
+
+    // a misspelled `contexts` is refused, not read as "every Context"
+    let misspelled = one(&r[4]);
+    assert_eq!(misspelled["code"], "input.unknown-field");
+    assert_eq!(misspelled["did_you_mean"], json!(["contexts"]));
 }
 
 #[test]

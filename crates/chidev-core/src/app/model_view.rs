@@ -384,32 +384,30 @@ impl ModelView {
     /// The part of the model `selection` takes. The Contexts always keep their metadata; only the sections taken
     /// are kept in them. The cut is made on the typed view, so what a reader is given is what a judged rule would
     /// have been given, entry for entry.
-    pub(crate) fn select(&self, selection: &ViewSelection) -> ModelSlice {
+    pub(crate) fn select(self, selection: &ViewSelection) -> ModelSlice {
         let takes = |section| selection.sections.contains(&section);
+        let wanted: Option<BTreeSet<String>> = selection
+            .contexts
+            .as_ref()
+            .map(|ids| ids.iter().map(ToString::to_string).collect());
         let contexts = self
             .contexts
-            .iter()
-            .filter(|c| {
-                selection
-                    .contexts
-                    .as_ref()
-                    .is_none_or(|ids| ids.iter().any(|id| id.to_string() == c.id))
-            })
+            .into_iter()
+            .filter(|c| wanted.as_ref().is_none_or(|ids| ids.contains(&c.id)))
             .map(|c| ContextSlice {
-                id: c.id.clone(),
-                name: c.name.clone(),
+                id: c.id,
+                name: c.name,
                 basis: c.basis,
-                uses: c.uses.clone(),
-                contracts: takes(ModelSection::Contracts).then(|| c.contracts.clone()),
-                interfaces: takes(ModelSection::Interfaces).then(|| c.interfaces.clone()),
-                harnesses: takes(ModelSection::Harnesses).then(|| c.harnesses.clone()),
+                uses: c.uses,
+                contracts: takes(ModelSection::Contracts).then_some(c.contracts),
+                interfaces: takes(ModelSection::Interfaces).then_some(c.interfaces),
+                harnesses: takes(ModelSection::Harnesses).then_some(c.harnesses),
             })
             .collect();
         ModelSlice {
             version: self.version,
             contexts,
-            change_requests: takes(ModelSection::ChangeRequests)
-                .then(|| self.change_requests.clone()),
+            change_requests: takes(ModelSection::ChangeRequests).then_some(self.change_requests),
         }
     }
 

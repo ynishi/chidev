@@ -12,7 +12,7 @@ use super::model_view::{ModelSlice, ModelView, ViewSelection};
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetName, IdSource, Store, StoreRevision};
 use super::{App, AppError, context_ids};
-use crate::domain::entity::project::Project;
+use crate::domain::entity::context::Context;
 use crate::domain::vo::model_section::ModelSection;
 
 /// What a `view` asks for, in the names a person writes.
@@ -49,7 +49,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .map(|names| context_ids(&p, names))
             .transpose()?;
         let crs = self.store.change_requests().await?;
-        let names = self.names_in_model(&p, &[]).await?;
+        // the names are those of the assets of the Contexts read, and only an asset section shows them
+        let names = if input
+            .sections
+            .iter()
+            .any(|s| *s != ModelSection::ChangeRequests)
+        {
+            let read = |c: &&Context| contexts.as_ref().is_none_or(|ids| ids.contains(&c.id()));
+            self.names_in_model(p.contexts().filter(read), &[]).await?
+        } else {
+            BTreeMap::new()
+        };
         let selection = ViewSelection {
             contexts,
             sections: input.sections.clone(),
@@ -60,15 +70,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// The names a person gave the Contracts, Interfaces and Harnesses of `p`, by id. `pending` are the names of
-    /// assets a change is about to make, which the store does not have yet; they stand before the store's.
-    pub(super) async fn names_in_model(
+    /// The names a person gave the Contracts, Interfaces and Harnesses of `contexts`, by id. `pending` are the names
+    /// of assets a change is about to make, which the store does not have yet; they stand before the store's.
+    pub(super) async fn names_in_model<'a>(
         &self,
-        p: &Project,
+        contexts: impl Iterator<Item = &'a Context>,
         pending: &[AssetName],
     ) -> Result<BTreeMap<Uuid, String>, AppError> {
         let mut names = BTreeMap::new();
-        for c in p.contexts() {
+        for c in contexts {
             let ids = c
                 .contracts()
                 .map(|x| x.id().as_uuid())
