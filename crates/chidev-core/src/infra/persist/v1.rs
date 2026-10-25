@@ -581,17 +581,21 @@ impl TryFrom<InterfaceDoc> for Interface {
                 lines(it.first, it.last)?,
             ));
         }
-        let (id, interface) = (&d.id, uuid(&d.id)?);
+        let InterfaceDoc {
+            id,
+            revision: rev,
+            source,
+            items: docs,
+        } = d;
         Interface::restore(
-            InterfaceId::from_uuid(interface),
-            revision(d.revision)?,
-            Source::new(d.source.clone()),
+            InterfaceId::from_uuid(uuid(&id)?),
+            revision(rev)?,
+            Source::new(source),
             items,
         )
         .map_err(|e| match e {
             InterfaceError::BlankItem { id: item } => {
-                let key = d
-                    .items
+                let key = docs
                     .iter()
                     .find(|it| it.id == item.as_uuid().to_string())
                     .and_then(|it| it.key.as_deref())
@@ -600,7 +604,7 @@ impl TryFrom<InterfaceDoc> for Interface {
                     "the interface {id} has the item {item} (`{key}`) on lines with nothing in them, so it declares nothing"
                 )
             }
-            other => bad(other),
+            other => format!("the interface {id}: {other}"),
         })
     }
 }

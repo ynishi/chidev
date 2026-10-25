@@ -4,8 +4,9 @@
 //!
 //! An Item is a declaration of the source, found by its **key** and the **lines** it is declared on. The lines
 //! point at the declaration alone: from its first token (after the doc comments and attributes) to the line that
-//! ends the signature, with the `;` or the `{` of its body. Two declarations on one line have lines that overlap,
-//! and that is a right answer.
+//! ends the signature, with the `;` or the `{` of its body. A `struct`, `enum` or `union` declares its fields or
+//! variants, so its lines go on to the closing `}`: a field added or retyped is a change of what the Item declares.
+//! Two declarations on one line have lines that overlap, and that is a right answer.
 //!
 //! # What is found
 //!
@@ -178,9 +179,10 @@ impl Walk {
                 f.to_token_stream(),
                 f.block.brace_token.span.open(),
             ),
+            // The fields and variants of a type are what it declares, so its lines go to the closing brace.
             syn::Item::Struct(s) => {
                 let end = match &s.fields {
-                    syn::Fields::Named(named) => named.brace_token.span.open(),
+                    syn::Fields::Named(named) => named.brace_token.span.close(),
                     _ => semi_or(s.semi_token.as_ref(), s.ident.span()),
                 };
                 self.keep(None, &s.ident.to_string(), s.to_token_stream(), end);
@@ -189,13 +191,13 @@ impl Walk {
                 None,
                 &e.ident.to_string(),
                 e.to_token_stream(),
-                e.brace_token.span.open(),
+                e.brace_token.span.close(),
             ),
             syn::Item::Union(u) => self.keep(
                 None,
                 &u.ident.to_string(),
                 u.to_token_stream(),
-                u.fields.brace_token.span.open(),
+                u.fields.brace_token.span.close(),
             ),
             syn::Item::Type(t) => self.keep(
                 None,
@@ -818,9 +820,9 @@ macro_rules! twice {
                 ("price".to_string(), [3, 5]),
                 ("Unit".to_string(), [9, 9]),
                 ("Tuple".to_string(), [10, 12]),
-                ("Named".to_string(), [13, 13]),
-                ("Kind".to_string(), [16, 16]),
-                ("Bits".to_string(), [19, 19]),
+                ("Named".to_string(), [13, 15]),
+                ("Kind".to_string(), [16, 18]),
+                ("Bits".to_string(), [19, 21]),
                 ("Shape".to_string(), [22, 22]),
                 ("Shape::area".to_string(), [23, 23]),
                 ("Alias".to_string(), [25, 25]),
@@ -844,6 +846,20 @@ macro_rules! twice {
         assert_eq!(
             found(source),
             [("f".to_string(), [1, 4]), ("Long".to_string(), [7, 8])]
+        );
+    }
+
+    #[test]
+    fn a_type_with_fields_or_variants_goes_on_to_its_closing_brace() {
+        let source = "pub struct P {\n    x: u8,\n}\npub enum Kind {\n    A,\n    B,\n}\nunion U {\n    a: u8,\n}\npub struct T(u8);\n";
+        assert_eq!(
+            found(source),
+            [
+                ("P".to_string(), [1, 3]),
+                ("Kind".to_string(), [4, 7]),
+                ("U".to_string(), [8, 10]),
+                ("T".to_string(), [11, 11]),
+            ]
         );
     }
 

@@ -512,7 +512,7 @@ static RULES: &[Rule] = &[
         kind: RuleKind::Input,
         summary: "A key is replaced by one Item of a put at most, and an Item replaces one key at most.",
         help: "`replaces` hands the id of one Item to one Item. Two Items that replace the same key would both take its id. Say `replaces` on one of them, and give the other no `replaces` (it is a new Item). The same holds for `renames`, where the provider finds the Items: a `from` named twice would hand one id to two Items, and a `to` named twice would give one Item two ids. `side` says which of `replaces`, `from` and `to` holds the key.",
-        message: "{s1} of {s0} has two renames with `{side}` set to the key `{key}`",
+        message: "{s1} of {s0} has `{side}` set to the key `{key}` twice",
         values: &["key", "side"],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn x();\nfn y();\n","items":[{"key":"x","lines":[1,1],"replaces":"a"},{"key":"y","lines":[2,2],"replaces":"a"}]}"#,
     },

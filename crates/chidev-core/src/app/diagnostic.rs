@@ -1202,10 +1202,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 }
 
-/// The diagnostic of an input rule about a key that a put of the Interface `interface` of the Context `context`
-/// replaces wrongly (`error` is the refusal, said as it was if the rule is not registered).
 /// The diagnostic of a rule about the put of an Interface (`at`: its Context and name). `values` are the keys the
-/// rule carries; one that is none is null, and empty in the sentence.
+/// rule carries; one that is none is null, and empty in the sentence. `error` is the refusal, said as it is when
+/// the rule is not registered.
 fn interface_put_rule(
     rule: RuleId,
     at: (&str, &str),

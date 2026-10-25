@@ -156,7 +156,7 @@ pub enum AppError {
         key: String,
     },
     /// Two Items of a put replace one key, or two renames of a put name one key.
-    #[error("the interface `{interface}` has two renames with `{side}` set to the key `{key}`")]
+    #[error("the interface `{interface}` has `{side}` set to the key `{key}` twice")]
     RenameConflict {
         /// The Context.
         context: String,

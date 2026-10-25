@@ -62,7 +62,8 @@ belong):
   - The declaration is not written: chidev takes it from the code. `lines` points
     at the declaration alone, from its first token (after a doc comment and an
     attribute) to the line that ends the signature, with `;` or the `{` of its
-    body; those lines, each without the white space at its end, are the Item's
+    body (for a `struct`, `enum` or `union`, the closing `}`: its fields and
+    variants are what it declares); those lines, each without the white space at its end, are the Item's
     signature. A doc comment inside `lines` is part of it, so editing the comment
     revises the Item. Lines with nothing in them are refused
     (`interface.blank-item`).
@@ -473,7 +474,8 @@ The bundled Rust provider is `chidev provider items-rust` (`rust = ["chidev",
 nothing in a function body is found. A declaration with no body
 (`fn price(total: u64) -> u64;`, the form the examples above use) is found as well. The
 `lines` of an Item run from its first token, after the doc comments and attributes, to
-the line that has the `;` or the `{` of its body.
+the line that has the `;` or the `{` of its body; a `struct`, `enum` or `union` runs on
+to its closing `}`, so a field or variant added, removed or retyped revises the Item.
 
 A key is a name and a path, not the text of the declaration:
 
