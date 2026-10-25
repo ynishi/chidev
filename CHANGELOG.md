@@ -320,6 +320,23 @@ and this project adheres to
 
 ### Changed
 
+- The project's settings are `chidev.toml` (was `checks.toml`), and the person's are
+  `.chidev/chidev.local.toml` (was `.chidev/checks.local.toml`); the old names are not
+  read, and a file under one of them in a directory on the way up to the root stops
+  `chidev exec` with status 2 and the name to give it (`ProjectError::Renamed`). The
+  project's root is the nearest directory, from the one `chidev` runs in and
+  then each parent, with a `chidev.toml` file (it may be empty); with none anywhere up,
+  `chidev exec` stops with exit status 2 before any operation, instead of taking the
+  current directory. The settings, the judged rules and the files a `source_file` or a
+  `code_file` names are read from that root. A new `[store]` table (`path`, relative to
+  the root) says where the store is, in either file, the person's first; `--store`
+  (relative to the current directory) still wins, and the default is
+  `<root>/.chidev/chidev.db` rather than `.chidev/chidev.db` under the current
+  directory. In Rust, `infra::project::find` reads both files once into a `Project`
+  (`root`, `file`, `store`), and `policy::load`, `external::load` and `runner::load`
+  take `&Project`; `policy::PROJECT_FILE` and `PERSON_FILE` are gone (`project::FILE`,
+  `PERSON_FILE`), `PolicyFileError` is a struct (`path`, `message`), and
+  `policy::parse` reads a text with only `[checks]`.
 - The public face of the SDK, for external checks: `ExternalModelView` is a newtype of
   `ModelSlice` and no longer has public fields, and `ExternalModelView` and
   `ExternalCall` no longer implement `Deserialize` (a program reads the document in
