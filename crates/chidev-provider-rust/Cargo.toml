@@ -9,6 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/chidev-provider-rust"
 readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 proc-macro2.workspace = true

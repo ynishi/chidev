@@ -8,6 +8,15 @@ chi is the project's name: the initials of Contract, Harness and Interface, and
 How a person or a coding agent works with it, from a request to pinned code, is in
 the [guide](docs/guide/README.md).
 
+## Install
+
+```sh
+cargo install chidev-cli
+```
+
+The package is `chidev-cli`, and the command it installs is `chidev`. A program that
+uses chidev as a library depends on `chidev` (see "Crates").
+
 ## Crates
 
 | crate | role |

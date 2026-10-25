@@ -11,6 +11,8 @@ repository = "https://github.com/ynishi/chidev"
 homepage = "https://github.com/ynishi/chidev"
 documentation = "https://docs.rs/chidev"
 readme = "README.md"
+keywords = ["contract", "specification", "testing", "traceability", "agent"]
+categories = ["development-tools", "development-tools::testing"]
 
 [workspace.dependencies]
 chidev-core = { path = "crates/chidev-core", version = "0.1.0" }
