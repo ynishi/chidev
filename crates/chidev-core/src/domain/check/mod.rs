@@ -18,17 +18,19 @@ pub mod builtin;
 pub mod descriptor;
 pub mod external;
 pub mod finding;
+pub mod introduced;
 pub mod judged;
 pub mod level;
 pub mod policy;
 pub mod view;
 
-pub use self::descriptor::{Descriptor, Executor, ParamDefault, ParamKind, ParamSpec};
-pub use self::finding::{Finding, FindingState, Mention};
+pub use self::descriptor::{CheckKind, Descriptor, Executor, ParamDefault, ParamKind, ParamSpec};
+pub use self::finding::{Finding, FindingState, Ground, LineState, Mention};
+pub use self::introduced::introduced;
 pub use self::judged::{JudgedDraft, JudgedRule, JudgedRuleError};
 pub use self::level::{Hook, Level};
 pub use self::policy::{Layer, Origin, ParamValue, Params, Policy, PolicyError, Selector, Setting};
-pub use self::view::CheckView;
+pub use self::view::{Change, CheckView};
 
 /// A check that runs in this process.
 pub trait Check: Send + Sync {

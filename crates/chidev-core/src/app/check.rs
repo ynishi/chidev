@@ -67,10 +67,9 @@ pub struct CheckInfo<'a> {
 pub struct Run {
     /// Every finding, at the level the policy gives, in the order of the checks. A check at `off` did not run.
     pub findings: Vec<Finding>,
-    /// One record per check that ran.
+    /// One record per check that ran. They count every finding of the run, whatever a use case goes on to report
+    /// of them.
     pub invocations: Vec<Invocation>,
-    /// The findings of mandatory checks at `error`: they refuse the use case.
-    pub refusing: Vec<Finding>,
 }
 
 impl Registry {
@@ -259,13 +258,28 @@ impl Registry {
                     Level::Off => {}
                 }
             }
-            if d.mandatory && resolved.level == Level::Error {
-                run.refusing.extend(found.iter().cloned());
-            }
             run.findings.extend(found);
             run.invocations.push(invocation);
         }
         run
+    }
+
+    /// The findings among `findings` that refuse the use case: those of a mandatory builtin check at `error`. The
+    /// one place that decides it. Which findings a use case hands it is the use case's: all of a run for a use
+    /// case that confirms, and what a change introduced for an edit.
+    pub fn refusing(&self, findings: &[Finding]) -> Vec<Finding> {
+        findings
+            .iter()
+            .filter(|f| {
+                f.level() == Level::Error
+                    && self
+                        .checks
+                        .iter()
+                        .map(|c| c.descriptor())
+                        .any(|d| d.mandatory && d.id == *f.rule())
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -311,11 +325,21 @@ pub struct Judgment {
     pub rule_digest: Option<crate::domain::vo::digest::Digest>,
 }
 
+/// What a check of the whole state found, perhaps narrowed to one Context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResult {
+    /// The findings: all of them, or those about the Context asked for.
+    pub findings: Vec<Found>,
+    /// How many findings the Context asked for left out; 0 when none was asked for. A finding about the Project as
+    /// a whole, or about a change request that names nothing of the Context, is about no Context in particular.
+    pub outside: usize,
+}
+
 /// What a use case did and what the checks found while it did it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked<T> {
     /// What the use case returns.
     pub value: T,
-    /// Every finding of the checks that ran at its hook, except those at `off`.
+    /// Every finding of the checks that ran at its hook, except those at `off`; for a put, those it introduced.
     pub findings: Vec<Found>,
 }

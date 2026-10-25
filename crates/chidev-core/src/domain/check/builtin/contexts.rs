@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 
+use super::CONFIRM_HOOKS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::Level;
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
@@ -20,7 +21,7 @@ static NO_INTERFACE: Descriptor = Descriptor {
         "A context starts as a name; its code is described by its interfaces. Put one once there is code, or \
            leave the note while the context is being drawn.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -33,7 +34,7 @@ impl Check for NoInterface {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        view.after
+        view.project
             .contexts()
             .filter(|c| c.interfaces().next().is_none())
             .map(|c| {
@@ -58,7 +59,7 @@ static NO_HARNESS: Descriptor = Descriptor {
         "Without a harness nothing checks the context's code, and nothing can be pinned. Put one once there are \
            cases to cite, or leave the note while the context is being drawn.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -71,7 +72,7 @@ impl Check for NoHarness {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        view.after
+        view.project
             .contexts()
             .filter(|c| c.harnesses().next().is_none())
             .map(|c| {

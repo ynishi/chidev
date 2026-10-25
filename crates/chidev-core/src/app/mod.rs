@@ -49,7 +49,9 @@ use std::fmt::Display;
 
 use thiserror::Error;
 
-pub use self::check::{CheckInfo, Checked, Found, Judgment, Registry, RegistryError, Run};
+pub use self::check::{
+    CheckInfo, CheckResult, Checked, Found, Judgment, Registry, RegistryError, Run,
+};
 pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
 };
@@ -58,7 +60,7 @@ use self::ports::{
     AssetKind, AssetName, Changes, Clock, IdSource, Invocation, PinCode, Store, StoreRevision,
 };
 pub use crate::domain::check::ParamValue;
-use crate::domain::check::{CheckView, Finding, Hook, Mention};
+use crate::domain::check::{Change, CheckView, Finding, Hook, Mention, introduced};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux,
 };
@@ -66,8 +68,8 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{
-    awaiting_decision, check_supersedes, decide, expectations_now, keep_moved, keep_progress,
-    out_of_frame, resolve, target_progress,
+    awaiting_decision, check_supersedes, contexts_in, decide, expectations_now, keep_moved,
+    keep_progress, out_of_frame, resolve, target_progress,
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
@@ -422,22 +424,31 @@ fn input(e: impl Display) -> AppError {
 static NO_SETTINGS: BTreeMap<InterfaceId, String> = BTreeMap::new();
 static NO_SIM_SETTINGS: BTreeMap<HarnessId, String> = BTreeMap::new();
 
-/// What the checks of a hook read.
+/// What the checks of a hook read: one state of the model.
 fn view<'a>(
-    before: Option<&'a Project>,
-    after: &'a Project,
+    project: &'a Project,
     pins: &'a [Pin],
     change_requests: &'a [ChangeRequest],
 ) -> CheckView<'a> {
     CheckView {
-        before,
-        after,
+        project,
         pins,
         change_requests,
         measurements: &[],
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
     }
+}
+
+/// Where a gate stands when it settles a run: the hook and the store revision it read at, the state it judges, and,
+/// for an edit, the state before it, which an external check is held to (see [`App::judged_externals`]). A
+/// confirmation has no state before it.
+#[derive(Clone, Copy)]
+struct Gating<'a> {
+    hook: Hook,
+    at: StoreRevision,
+    after: &'a CheckView<'a>,
+    before: Option<&'a CheckView<'a>>,
 }
 
 /// What the checks of a hook gave: the findings for the caller, the records to keep with the change.
@@ -1499,7 +1510,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         pins.push(pin.clone());
         let crs = self.store.change_requests().await?;
         let gate = self
-            .gate_with(Hook::Pin, at, &view(Some(&p), &p, &pins, &crs), &[])
+            .gate_with(Hook::Pin, at, &view(&p, &pins, &crs), &[])
             .await?;
         let changes = Changes {
             pins: vec![pin],
@@ -1741,7 +1752,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// Replaces the decision Policy of the Project with `lines`, whole. Its revision goes one up when they differ
     /// from the ones it has. The checks of the put hook run (`crux.policy-line-gone` notes a decision that rests
-    /// on a line that is now gone or reworded).
+    /// on a line that this put made gone or reworded).
     pub async fn put_policy(
         &mut self,
         lines: &[PolicyLineInput],
@@ -1758,7 +1769,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         p.put_policy(given)?;
         let revision = p.policy().revision();
-        let gate = self.gate(Hook::Put, at, Some(&before), &p, &[]).await?;
+        let pins = self.store.pins().await?;
+        let crs = self.store.change_requests().await?;
+        let gate = self
+            .gate_put(
+                at,
+                &Change {
+                    before: view(&before, &pins, &crs),
+                    after: view(&p, &pins, &crs),
+                },
+                &[],
+            )
+            .await?;
         let changes = Changes {
             project: Some(p),
             invocations: gate.invocations,
@@ -1814,7 +1836,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         crs.retain(|k| k.id() != cr.id());
         crs.push(cr.clone());
         let gate = self
-            .gate_with(Hook::Resolve, at, &view(Some(&p), &p, &pins, &crs), &[])
+            .gate_with(Hook::Resolve, at, &view(&p, &pins, &crs), &[])
             .await?;
         self.commit_change_request(at, cr, gate.invocations, gate.external)
             .await?;
@@ -1849,8 +1871,39 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// Runs every check on the state as it is: what the person would see if each check ran now, with what agents
     /// reported for the judged rules. Nothing is kept, and the runs are not recorded.
-    pub async fn check(&self) -> Result<Vec<Found>, AppError> {
-        Ok(self.checked().await?.0)
+    ///
+    /// With a `context`, the findings are narrowed to those about it: a finding about something the Context holds
+    /// (or the Context itself), and one about a change request that is about the Context (a target it revises,
+    /// retires or keeps is in it; see [`contexts_in`]). Whatever is left out is counted in `outside`: a finding
+    /// about the Project as a whole, about a change request that names nothing of the Context, or about something
+    /// that is gone. The whole run is made either way; only what is returned is narrowed. A name that is no
+    /// Context's is refused.
+    pub async fn check(&self, context: Option<&str>) -> Result<CheckResult, AppError> {
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
+        let crs = self.store.change_requests().await?;
+        let wanted = context.map(|name| context_id(&p, name)).transpose()?;
+        let (found, _, _) = self.checked_on(at, &p, &crs).await?;
+        let Some(wanted) = wanted else {
+            return Ok(CheckResult {
+                findings: found,
+                outside: 0,
+            });
+        };
+        let about = |f: &Found| match f.subject {
+            None => false,
+            Some(Subject::ChangeRequest(id)) => crs
+                .iter()
+                .find(|c| c.id() == id)
+                .is_some_and(|c| contexts_in(c, &p).contains(&wanted)),
+            Some(s) => p.context_of(s) == Some(wanted),
+        };
+        let total = found.len();
+        let findings: Vec<Found> = found.into_iter().filter(|f| about(f)).collect();
+        Ok(CheckResult {
+            outside: total - findings.len(),
+            findings,
+        })
     }
 
     /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read.
@@ -1859,25 +1912,34 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let pins = self.store.pins().await?;
         let crs = self.store.change_requests().await?;
-        let measured = self.measured(&p).await?;
+        self.checked_on(at, &p, &crs).await
+    }
+
+    /// [`App::checked`] on the Project `p` and the change requests `crs`, which the store held at `at`.
+    async fn checked_on(
+        &self,
+        at: StoreRevision,
+        p: &Project,
+        crs: &[ChangeRequest],
+    ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
+        let pins = self.store.pins().await?;
+        let measured = self.measured(p).await?;
         let run = self.registry.run(
             Hook::Check,
             at,
             &CheckView {
-                before: None,
-                after: &p,
+                project: p,
                 pins: &pins,
-                change_requests: &crs,
+                change_requests: crs,
                 measurements: &measured.measurements,
                 measure_settings: &measured.settings,
                 sim_settings: &measured.sim_settings,
             },
         );
-        let mut found = self.found(&run.findings, &p, &crs, &[]).await?;
-        found.extend(self.external_standing(&p, &crs, at).await?.0);
-        let (judged, standing) = self.judged_standing(&p, &crs, at).await?;
+        let mut found = self.found(&run.findings, p, crs, &[]).await?;
+        found.extend(self.external_standing(p, crs, at).await?.0);
+        let (judged, standing) = self.judged_standing(p, crs, at).await?;
         found.extend(judged);
         Ok((found, standing, measured))
     }
@@ -2120,25 +2182,30 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(self.store.commit(at, changes).await?)
     }
 
-    /// Runs the checks of `hook` on `after`, the Project as the use case would keep it, with the Pins and the
-    /// change requests as the store has them. `pending` are the names the use case is about to give, which the
-    /// store does not have yet.
-    async fn gate(
+    /// Runs the checks of the put hook on the two states of an edit: the model as the store has it, and as the
+    /// use case would keep it. `pending` are the names the use case is about to give, which the store does not
+    /// have yet. An edit is told only what it introduced (see [`Hook::Put`]), and a mandatory check refuses it
+    /// only for that.
+    async fn gate_put(
         &self,
-        hook: Hook,
         at: StoreRevision,
-        before: Option<&Project>,
-        after: &Project,
+        change: &Change<'_>,
         pending: &[AssetName],
     ) -> Result<Gate, AppError> {
-        let pins = self.store.pins().await?;
-        let crs = self.store.change_requests().await?;
-        self.gate_with(hook, at, &view(before, after, &pins, &crs), pending)
-            .await
+        let before = self.registry.run(Hook::Put, at, &change.before);
+        let run = self.registry.run(Hook::Put, at, &change.after);
+        let reported = introduced(&before.findings, &run.findings);
+        let gating = Gating {
+            hook: Hook::Put,
+            at,
+            after: &change.after,
+            before: Some(&change.before),
+        };
+        self.settle(&gating, run, reported, pending).await
     }
 
-    /// Runs the checks of `hook` on `after`, with the Pins and change requests the use case would leave. A finding
-    /// of a mandatory check at `error` refuses the use case before anything is kept.
+    /// Runs the checks of `hook`, a confirmation, on `view`: the model with the Pins and change requests the use
+    /// case would leave. A confirmation judges the whole of it, so everything the run found is reported.
     async fn gate_with(
         &self,
         hook: Hook,
@@ -2146,15 +2213,48 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         view: &CheckView<'_>,
         pending: &[AssetName],
     ) -> Result<Gate, AppError> {
-        let mut run = self.registry.run(hook, at, view);
-        let (after, crs) = (view.after, view.change_requests);
-        if !run.refusing.is_empty() {
+        let run = self.registry.run(hook, at, view);
+        let reported = run.findings.clone();
+        let gating = Gating {
+            hook,
+            at,
+            after: view,
+            before: None,
+        };
+        self.settle(&gating, run, reported, pending).await
+    }
+
+    /// What every gate does with a run of the builtin checks: a `reported` finding of a mandatory check at `error`
+    /// refuses the use case before anything is kept (and before an external program is run); then the external
+    /// checks of the hook run on the state after, and one that is a gate and has something to say refuses it; what
+    /// is left is the findings for the caller and the records to keep. The records are those of the whole `run`,
+    /// however much of it is `reported`.
+    async fn settle(
+        &self,
+        gating: &Gating<'_>,
+        mut run: Run,
+        reported: Vec<Finding>,
+        pending: &[AssetName],
+    ) -> Result<Gate, AppError> {
+        let Gating {
+            hook,
+            at,
+            after,
+            before,
+        } = *gating;
+        let (project, crs) = (after.project, after.change_requests);
+        let refusing = self.registry.refusing(&reported);
+        if !refusing.is_empty() {
             return Err(AppError::Refused(
-                self.found(&run.refusing, after, crs, pending).await?,
+                self.found(&refusing, project, crs, pending).await?,
             ));
         }
-        let external = self.run_external(hook, at, view, pending).await?;
-        if external.iter().any(|r| {
+        let external = self.run_external(hook, at, after, pending).await?;
+        let judged = match before {
+            Some(before) => self.judged_externals(before, &external).await?,
+            None => external.clone(),
+        };
+        if judged.iter().any(|r| {
             self.registry
                 .external()
                 .iter()
@@ -2162,7 +2262,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 && !r.findings.is_empty()
         }) {
             let refusing = self
-                .external_findings(&external, after, crs, pending, false)
+                .external_findings(&judged, project, crs, pending, false)
                 .await?;
             return Err(AppError::ExternalRefused {
                 findings: refusing,
@@ -2171,9 +2271,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         run.invocations
             .extend(self.external_invocations(&external, hook, at));
-        let mut found = self.found(&run.findings, after, crs, pending).await?;
+        let mut found = self.found(&reported, project, crs, pending).await?;
         found.extend(
-            self.external_findings(&external, after, crs, pending, false)
+            self.external_findings(&judged, project, crs, pending, false)
                 .await?,
         );
         Ok(Gate {
@@ -2219,11 +2319,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// The message of a finding, with the names of the things it mentions written after it
     /// (`the code was pinned against what has moved: contract `rounding` changed`).
     async fn worded(&self, f: &Finding, pending: &[AssetName]) -> Result<String, AppError> {
-        if f.mentions().is_empty() {
+        let mentions = f.mentions();
+        if mentions.is_empty() {
             return Ok(f.message().to_string());
         }
-        let mut said = Vec::with_capacity(f.mentions().len());
-        for m in f.mentions() {
+        let mut said = Vec::with_capacity(mentions.len());
+        for m in &mentions {
             let (kind, id) = match m {
                 Mention::Interface(id) => ("interface", id.as_uuid()),
                 Mention::Harness(id) => ("harness", id.as_uuid()),

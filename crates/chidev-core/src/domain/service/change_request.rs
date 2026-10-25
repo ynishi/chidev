@@ -18,7 +18,7 @@ use crate::domain::entity::change_request::{
 use crate::domain::entity::project::Project;
 use crate::domain::vo::answer::{Answer, Basis};
 use crate::domain::vo::footprint::Move;
-use crate::domain::vo::id::ChangeRequestId;
+use crate::domain::vo::id::{ChangeRequestId, ContextId};
 use crate::domain::vo::resolution::Resolution;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::{ExpectKind, Expectation, Target};
@@ -323,6 +323,15 @@ pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
         .collect()
 }
 
+/// The Contexts `cr` is about in `project`: the ones that hold a target it names to revise or retire (its frame) or
+/// one it keeps. The options of a question not yet decided name nothing: until one is chosen it is not settled which
+/// targets the request is about. A target the Project does not have now belongs to no Context.
+pub fn contexts_in(cr: &ChangeRequest, project: &Project) -> BTreeSet<ContextId> {
+    cr.expectations()
+        .filter_map(|(target, _)| project.context_of_target(target))
+        .collect()
+}
+
 /// An unresolved change request whose work moved targets outside its frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutOfFrame {
@@ -330,6 +339,10 @@ pub struct OutOfFrame {
     pub cr: ChangeRequestId,
     /// The targets it moved outside its frame, in order.
     pub moved: Vec<Target>,
+    /// Each target it moved outside its frame with the store revision of the change set that moved it, in order.
+    /// A target that several change sets moved is in it once for each. A footprint never changes, so the pair says
+    /// which work did it: the same target moved by a later change set is another pair.
+    pub by_work: Vec<(Target, u64)>,
 }
 
 /// Every unresolved change request in `crs` with work that moved a target outside its own frame (the frames of the
@@ -345,17 +358,22 @@ pub fn out_of_frame(crs: &[ChangeRequest]) -> Vec<OutOfFrame> {
             let inside = |m: &Move| frame.iter().any(|container| m.is_inside(*container));
             // Each change set on its own: a container is covered by what moved inside it in the same set.
             let mut moved = BTreeSet::new();
+            let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
                     covered.insert(m.target());
                     covered.extend(m.within().iter().copied());
                 }
-                moved.extend(footprint.targets().filter(|t| !covered.contains(t)));
+                for t in footprint.targets().filter(|t| !covered.contains(t)) {
+                    moved.insert(t);
+                    by_work.insert((t, footprint.store_revision()));
+                }
             }
             (!moved.is_empty()).then(|| OutOfFrame {
                 cr: cr.id(),
                 moved: moved.into_iter().collect(),
+                by_work: by_work.into_iter().collect(),
             })
         })
         .collect()
@@ -1124,6 +1142,56 @@ mod tests {
         assert_eq!(frame(&c), BTreeSet::from([clause(), detail()]));
     }
 
+    #[test]
+    fn a_request_is_about_the_contexts_of_its_frame_and_its_keeps_not_of_an_undecided_option() {
+        let mut p = project();
+        p.add_context(context(billing(), "billing")).unwrap();
+        let billing_context = Target::Context(billing());
+        // The frame is in core, the keep is billing itself.
+        let c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[
+                (clause(), ExpectKind::Target),
+                (billing_context, ExpectKind::Keep),
+            ],
+        );
+        assert_eq!(contexts_in(&c, &p), BTreeSet::from([core(), billing()]));
+        // A request that names nothing is about no Context.
+        let bare = open(&p, 2, Intent::ChangeBehavior, &[]);
+        assert!(contexts_in(&bare, &p).is_empty());
+        // An option names billing, but nothing is chosen: until it is, it is not settled what the request is about.
+        let crux = Crux::new(
+            CruxKind::Conflict,
+            vec![CruxOption::new(
+                choice("move it"),
+                None,
+                BTreeMap::from([(billing_context, ExpectKind::Target)]),
+                None,
+            )],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut asking = cr(&p, Some(crux));
+        assert_eq!(contexts_in(&asking, &p), BTreeSet::from([core()]));
+        decide(&mut asking, chosen("move it"), &p).unwrap();
+        assert_eq!(
+            contexts_in(&asking, &p),
+            BTreeSet::from([core(), billing()])
+        );
+        // The Project is no Context's.
+        let project_wide = open(
+            &p,
+            3,
+            Intent::ChangeBehavior,
+            &[(Target::Project, ExpectKind::Target)],
+        );
+        assert!(contexts_in(&project_wide, &p).is_empty());
+    }
+
     // Keep.
 
     #[test]
@@ -1248,8 +1316,32 @@ mod tests {
             found,
             [OutOfFrame {
                 cr: c.id(),
-                moved: vec![interface(), item()]
+                moved: vec![interface(), item()],
+                by_work: vec![(interface(), 3), (item(), 3)],
             }]
+        );
+    }
+
+    #[test]
+    fn a_target_moved_outside_the_frame_by_two_change_sets_is_listed_for_each() {
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        work(&mut p, &mut c, 3, |p| {
+            put_interface(p, 100, 10, "fn a(x: u8)")
+        });
+        work(&mut p, &mut c, 5, |p| {
+            put_interface(p, 100, 10, "fn a(x: u16)")
+        });
+        let found = out_of_frame(std::slice::from_ref(&c));
+        assert_eq!(found[0].moved, [interface(), item()]);
+        assert_eq!(
+            found[0].by_work,
+            [(interface(), 3), (interface(), 5), (item(), 3), (item(), 5)]
         );
     }
 

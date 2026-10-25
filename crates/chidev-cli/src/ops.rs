@@ -188,8 +188,14 @@ enum Op {
     Explain { rule: String },
     /// Where the project stands.
     Status,
-    /// Runs every check on the project as it is; nothing is kept.
-    Check,
+    /// Runs every check on the project as it is; nothing is kept. With a `context`, the findings are those about
+    /// that Context (what it holds, and the change requests that revise, retire or keep something in it), and
+    /// `outside` is how many findings were left out (the Project's own, and change requests that name nothing of
+    /// the Context). The whole run is made either way.
+    Check {
+        #[serde(default)]
+        context: Option<String>,
+    },
     /// Explicitly executes external check-hook programs and records this run.
     CheckRun,
     /// Lists every check with the level it runs at.
@@ -1511,6 +1517,9 @@ struct StatusOut<'a> {
 struct CheckOut<'a> {
     op: &'static str,
     findings: Vec<FindingOut<'a>>,
+    /// How many findings the `context` asked for left out; only when one was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outside: Option<usize>,
 }
 
 /// A parameter's value in a listing.
@@ -1531,6 +1540,9 @@ struct CheckEntryOut {
     default_level: &'static str,
     mandatory: bool,
     executor: &'static str,
+    /// `change` for a check that runs at `put` and speaks about what an edit made stale or out of place, `state`
+    /// for one that does not and speaks about the state of the model. It is read from the `hooks`.
+    kind: &'static str,
     hooks: Vec<&'static str>,
     params: std::collections::BTreeMap<String, ParamOut>,
 }
@@ -2615,11 +2627,12 @@ where
                     .collect(),
             })?
         }
-        Op::Check => {
-            let found = app.check().await?;
+        Op::Check { context } => {
+            let checked = app.check(context.as_deref()).await?;
             to_value(&CheckOut {
                 op: "check",
-                findings: findings_out(&found),
+                findings: findings_out(&checked.findings),
+                outside: context.as_ref().map(|_| checked.outside),
             })?
         }
         Op::CheckRules { hook, rule } => {
@@ -2679,6 +2692,7 @@ where
                     default_level: c.descriptor.default_level.word(),
                     mandatory: c.descriptor.mandatory,
                     executor: c.descriptor.executor.word(),
+                    kind: c.descriptor.kind().word(),
                     hooks: c.descriptor.hooks.iter().map(|h| h.word()).collect(),
                     params: c
                         .params

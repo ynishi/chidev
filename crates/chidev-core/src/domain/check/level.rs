@@ -43,9 +43,15 @@ impl fmt::Display for Level {
 
 /// The moment a check runs at: when a use case is about to keep a change (`Put`, `Pin`, `Resolve`), or when a
 /// person asks for every check on the state as it is (`Check`).
+///
+/// An edit and a confirmation are held to different things. `Put` is an edit, which cannot finish the model in one
+/// step: it reports, and a mandatory check refuses, only what the edit introduced (the findings of the model after
+/// it that the model before it did not have). A check that runs there is a change, one that does not is a state (see
+/// [`Descriptor::kind`](super::descriptor::Descriptor::kind)). `Pin`, `Resolve` and `Check` confirm or ask: they judge the
+/// whole model as it stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Hook {
-    /// An asset is made or revised.
+    /// An asset is made or revised. Reports only what the edit introduced.
     Put,
     /// The code of an Interface is pinned.
     Pin,

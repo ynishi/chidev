@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use super::ALL_HOOKS;
+use super::CONFIRM_HOOKS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
@@ -41,7 +41,7 @@ impl Sim<'_> {
         let m = self.run?;
         Some(sim_standing(
             m,
-            view.after,
+            view.project,
             view.pins,
             view.sim_settings
                 .get(&self.harness.id())
@@ -53,7 +53,7 @@ impl Sim<'_> {
 /// The sim Harnesses of the Project that have a sweep Case (one without is a fault of shape, found by
 /// `sim.shape-kept`), each with its latest simulation.
 fn sims<'a>(view: &'a CheckView<'a>) -> impl Iterator<Item = (&'a Context, Sim<'a>)> + 'a {
-    view.after.contexts().flat_map(move |c| {
+    view.project.contexts().flat_map(move |c| {
         sim_harnesses(c).filter_map(move |h| {
             Some((
                 c,
@@ -108,7 +108,7 @@ impl Check for SimShapeKept {
         // A problem of a Context comes with each of its sim Harnesses, and a Clause foreign to a Context may be
         // cited by several Cases: each is reported once.
         let mut foreign: BTreeSet<ClauseId> = BTreeSet::new();
-        for context in view.after.contexts() {
+        for context in view.project.contexts() {
             let mut seen: Vec<SimShapeProblem> = Vec::new();
             for harness in sim_harnesses(context) {
                 for problem in context.sim_problems(harness) {
@@ -162,7 +162,7 @@ static SIM_UNCITED_CLAUSE: Descriptor = Descriptor {
            finding if the clause is not for a simulation to check. A contract the sweep cites no clause of is \
            left to the tests, and is not reported.",
     ),
-    hooks: Cow::Borrowed(ALL_HOOKS),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -176,7 +176,7 @@ impl Check for SimUncitedClause {
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let mut out = Vec::new();
-        for c in view.after.contexts() {
+        for c in view.project.contexts() {
             let cited: BTreeSet<ClauseId> = sim_harnesses(c)
                 .flat_map(|h| h.cases())
                 .flat_map(|k| k.cites().clauses().keys().copied())
@@ -315,7 +315,7 @@ impl Check for SimFinding {
             let Some(outcome) = m.sim() else { continue };
             for f in outcome.found() {
                 // The record holds the Clause's id; a Clause the model has not any more is not reported.
-                let Some(label) = label_of(view.after, f.clause) else {
+                let Some(label) = label_of(view.project, f.clause) else {
                     continue;
                 };
                 out.push(Finding::new(
@@ -365,7 +365,7 @@ impl Check for SimUnreached {
             }
             let Some(outcome) = m.sim() else { continue };
             for u in outcome.unreached() {
-                let Some(label) = label_of(view.after, u.clause) else {
+                let Some(label) = label_of(view.project, u.clause) else {
                     continue;
                 };
                 out.push(Finding::new(
@@ -633,8 +633,7 @@ mod tests {
     ) -> Vec<Finding> {
         check.run(
             &CheckView {
-                before: None,
-                after: p,
+                project: p,
                 pins: &[],
                 change_requests: &[],
                 measurements: runs,
@@ -919,8 +918,7 @@ mod tests {
         // the Pin of the built Interface: pinning it (tests check it) moves the sim, as the code it ran is new
         let pins = [pin(&p)];
         let view = CheckView {
-            before: None,
-            after: &p,
+            project: &p,
             pins: &pins,
             change_requests: &[],
             measurements: runs,
@@ -1001,8 +999,7 @@ mod tests {
         let pins = [pin(&p)];
         let with_pin = SimStale.run(
             &CheckView {
-                before: None,
-                after: &p,
+                project: &p,
                 pins: &pins,
                 change_requests: &[],
                 measurements: runs,

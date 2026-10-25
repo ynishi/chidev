@@ -80,9 +80,9 @@ fn states(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     let (results, code) = run();
-    assert_eq!(results.len(), 28);
+    assert_eq!(results.len(), 29);
     assert!(
-        results[..27].iter().all(|r| r["ok"] == true),
+        results[..28].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
 
@@ -131,9 +131,9 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
         serde_json::json!([{ "target": "rounding C1", "progress": "not touched yet" }])
     );
 
-    // the clause changed (line 17), so both change requests resolve (lines 19, 20); then the interface changes
+    // the clause changed (line 17), so both change requests resolve (lines 20, 21); then the interface changes
     // too: the pins and the citations are behind, and the change requests stay resolved
-    let changed = at(&results, 22);
+    let changed = at(&results, 23);
     assert_eq!(changed["change_requests"][0]["state"], "resolved");
     assert_eq!(changed["change_requests"][1]["state"], "resolved");
     assert_eq!(
@@ -159,13 +159,14 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
     assert!(changed.get("unapplied").is_none());
     // the interface was revised, not replaced; its item kept its id across the change of its declaration (the same key),
-    // or line 21 would have been refused for orphaning the cases that cite it
-    assert_eq!(at(&results, 21)["revision"], 2);
-    assert_eq!(at(&results, 21)["id"], at(&results, 6)["id"]);
+    // or line 22 would have been refused for orphaning the cases that cite it
+    assert_eq!(at(&results, 22)["revision"], 2);
+    assert_eq!(at(&results, 22)["id"], at(&results, 6)["id"]);
 
-    // the new Clause C2 is cited by no Case when the contract is put (line 17): an open warning, with the name of
-    // the clause; the change request opened for it (line 18) makes it addressed from then on, and it stays so
-    // while that request is unresolved
+    // the new Clause C2 is cited by no Case once the contract is put (line 17), and the put does not say so (an
+    // edit does not finish the model); the check (line 18) does: an open warning, with the name of the clause. The
+    // change request opened for it (line 19) makes it addressed from then on, and it stays so while that request
+    // is unresolved
     let uncited = |r: &Value| -> Option<Value> {
         r["findings"]
             .as_array()
@@ -174,16 +175,19 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
             .find(|f| f["rule"] == "cite.uncited-clause" && f["about"] == "rounding C2")
             .cloned()
     };
-    let found = uncited(at(&results, 17)).expect("C2 is uncited");
+    assert!(uncited(at(&results, 17)).is_none());
+    let found = uncited(at(&results, 18)).expect("C2 is uncited");
     assert_eq!(found["level"], "warning");
     assert_eq!(found["state"], "open");
     assert_eq!(
-        uncited(at(&results, 22)).expect("still uncited")["state"],
+        uncited(at(&results, 23)).expect("still uncited")["state"],
         "addressed"
     );
-    // the harness put (line 24) cites it: the finding is gone
-    assert!(uncited(at(&results, 24)).is_none());
-    // a pin made against what has moved is reported while it lasts, and not once it is pinned again
+    // the harness put (line 24) cites it: the status after the pins (line 28) does not find it (a put never says
+    // it, so the put itself proves nothing here)
+    assert!(uncited(at(&results, 28)).is_none());
+    // a pin made against what has moved is reported by the put that moved it, while the status says so for as
+    // long as it lasts, and not once it is pinned again
     let pin_stale = |r: &Value| {
         r["findings"]
             .as_array()
@@ -193,10 +197,11 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
             .count()
     };
     assert_eq!(pin_stale(at(&results, 22)), 2);
-    assert_eq!(pin_stale(at(&results, 27)), 0);
+    assert_eq!(pin_stale(at(&results, 23)), 2);
+    assert_eq!(pin_stale(at(&results, 28)), 0);
 
     // the harnesses brought up to date and the code pinned again: everything is fresh
-    let again = at(&results, 27);
+    let again = at(&results, 28);
     assert_eq!(
         pin_states(again),
         states(&[("price", "fresh"), ("print", "fresh")])
@@ -204,7 +209,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(again["stale_cites"], serde_json::json!([]));
 
     // dropping the item the harnesses cite is refused, and the run reports the failure
-    let refused = at(&results, 28);
+    let refused = at(&results, 29);
     assert_eq!(refused["ok"], false);
     assert!(message(refused).contains("cannot reach"), "{refused:#?}");
     assert_eq!(diag(refused)["code"], "project.cite-unreachable");
@@ -519,10 +524,12 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         json!({"op":"change_set","for":"Reword C1","puts":[stock("a unit is reserved, at most once", false)]}),
         json!({"op":"cr_resolve","title":"Reword C1","resolution":"done",
             "reason":"C1 says at most once","by":{"person":"alice"}}),
-        // 16, 17: a set for a request that is resolved, and for one that is not there
+        // 16: what the set at 11 did is still found where the whole is checked
+        json!({"op":"check"}),
+        // 17, 18: a set for a request that is resolved, and for one that is not there
         json!({"op":"change_set","for":"Reword C1","puts":[stock("again", false)]}),
         json!({"op":"change_set","for":"No such request","puts":[stock("again", false)]}),
-        // 18, 19: a reference has to exist; "Unrelated" is replaced by "Reword C1"
+        // 19, 20: a reference has to exist; "Unrelated" is replaced by "Reword C1"
         json!({"op":"cr_resolve","title":"Unrelated","resolution":{"duplicate":"No such request"},
             "reason":"the same","by":{"person":"alice"}}),
         json!({"op":"cr_resolve","title":"Unrelated","resolution":{"superseded":"Reword C1"},
@@ -539,7 +546,7 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [16, 17, 18], "{results:#?}");
+    assert_eq!(failed, [17, 18, 19], "{results:#?}");
 
     let out_of_frame = |r: &Value| -> Vec<Value> {
         r["findings"]
@@ -586,11 +593,18 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
     // (a request that is not done is no claim of work)
     assert_eq!(at(&results, 12)["ok"], true, "{results:#?}");
     assert!(!finding(at(&results, 12), "cr.resolved-without-work"));
-    // opened again it takes its own work and is done; only the unrelated request is outside its frame
+    // opened again it takes its own work and is done; the set for it moves nothing outside its own frame, and
+    // the finding about the unrelated request, made at 11, is not this put's: it is not said again
     assert_eq!(at(&results, 13)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 14)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 15)["ok"], true, "{results:#?}");
-    let still = out_of_frame(at(&results, 14));
+    assert!(
+        out_of_frame(at(&results, 14)).is_empty(),
+        "{:#?}",
+        at(&results, 14)
+    );
+    // where the whole is checked, only the unrelated request is outside its frame
+    let still = out_of_frame(at(&results, 16));
     assert_eq!(still.len(), 1, "{still:#?}");
     assert!(
         still[0]["about"]
@@ -599,13 +613,13 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
             .contains("Unrelated")
     );
     // a resolved request takes no more work, a request has to exist, and so does the one a resolution points at
-    assert!(error_at(&results, 16).contains("resolved"));
-    assert!(error_at(&results, 17).contains("No such request"));
+    assert!(error_at(&results, 17).contains("resolved"));
     assert!(error_at(&results, 18).contains("No such request"));
-    assert_eq!(at(&results, 19)["ok"], true, "{results:#?}");
+    assert!(error_at(&results, 19).contains("No such request"));
+    assert_eq!(at(&results, 20)["ok"], true, "{results:#?}");
 
     // status: the footprints, and the move outside the frame, by name
-    let status = at(&results, 20);
+    let status = at(&results, 21);
     let cr = |title: &str| -> &Value {
         status["change_requests"]
             .as_array()
@@ -1393,6 +1407,9 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
     assert_eq!(entry("cite.stale")["level"], "warning");
     assert_eq!(entry("cite.stale")["mandatory"], false);
     assert_eq!(entry("cite.stale")["executor"], "builtin");
+    // what a check speaks about is listed beside where it runs
+    assert_eq!(entry("cite.stale")["kind"], "change");
+    assert_eq!(entry("cite.uncited-clause")["kind"], "state");
     assert!(listed["policy"].as_str().expect("policy").len() == 64);
 }
 

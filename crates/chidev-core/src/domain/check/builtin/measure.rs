@@ -22,7 +22,7 @@ use crate::domain::vo::measure::MeasureKind;
 fn pinned<'a>(
     view: &'a CheckView<'a>,
 ) -> impl Iterator<Item = (&'a Interface, &'a Pin, Option<&'a Measurement>)> + 'a {
-    view.after
+    view.project
         .contexts()
         .flat_map(|c| c.interfaces())
         .filter_map(|i| {
@@ -144,7 +144,7 @@ impl Check for Stale {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if m.failure().is_some()
-                    || standing(m, view.after, pin, settings(view, m)) == Standing::Current
+                    || standing(m, view.project, pin, settings(view, m)) == Standing::Current
                 {
                     return None;
                 }
@@ -187,7 +187,8 @@ impl Check for Capped {
         pinned(view)
             .filter_map(|(i, pin, m)| {
                 let m = m?;
-                if !m.capped() || standing(m, view.after, pin, settings(view, m)) == Standing::Stale
+                if !m.capped()
+                    || standing(m, view.project, pin, settings(view, m)) == Standing::Stale
                 {
                     return None;
                 }
@@ -230,7 +231,7 @@ impl Check for Survived {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if m.failure().is_some()
-                    || standing(m, view.after, pin, settings(view, m)) == Standing::Stale
+                    || standing(m, view.project, pin, settings(view, m)) == Standing::Stale
                 {
                     return None;
                 }
@@ -270,8 +271,7 @@ mod tests {
     ) -> Vec<Finding> {
         check.run(
             &CheckView {
-                before: None,
-                after: p,
+                project: p,
                 pins,
                 change_requests: &[],
                 measurements,

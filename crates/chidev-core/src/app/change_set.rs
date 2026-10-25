@@ -2,7 +2,8 @@
 //!
 //! A put or a retirement of one asset is a change set of one, so there is a single path that turns names into ids,
 //! lets the domain apply the whole and check its rules once, runs the put-hook gate once on the Project before and
-//! after, and commits once, with the names of the assets it made.
+//! after (so that it reports what the change set introduced), and commits once, with the names of the assets it
+//! made.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,7 +16,7 @@ use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RenameInput,
     RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired, view,
 };
-use crate::domain::check::Hook;
+use crate::domain::check::Change;
 use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
@@ -368,25 +369,25 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let moves = moves_between(&p_before, &after);
             cr.record_work(Footprint::new(at.0 + 1, moves))?;
         }
-        let gate = match &applied_for {
-            Some(cr) => {
-                let pins = self.store.pins().await?;
-                let mut crs = self.store.change_requests().await?;
-                crs.retain(|c| c.id() != cr.id());
-                crs.push(cr.clone());
-                self.gate_with(
-                    Hook::Put,
-                    at,
-                    &view(Some(&p_before), &after, &pins, &crs),
-                    &plan.names,
-                )
-                .await?
-            }
-            None => {
-                self.gate(Hook::Put, at, Some(&p_before), &after, &plan.names)
-                    .await?
-            }
-        };
+        // The state before has the change requests as the store has them; the one the change set is applied for
+        // gains the work in the state after, which is how an edit can introduce a finding about its request.
+        let pins = self.store.pins().await?;
+        let crs_before = self.store.change_requests().await?;
+        let mut crs_after = crs_before.clone();
+        if let Some(cr) = &applied_for {
+            crs_after.retain(|c| c.id() != cr.id());
+            crs_after.push(cr.clone());
+        }
+        let gate = self
+            .gate_put(
+                at,
+                &Change {
+                    before: view(&p_before, &pins, &crs_before),
+                    after: view(&after, &pins, &crs_after),
+                },
+                &plan.names,
+            )
+            .await?;
         let mut retired = Vec::new();
         for r in after.retired().iter().skip(p.retired().len()) {
             retired.push(self.retired_status(r, &plan.names).await?);
