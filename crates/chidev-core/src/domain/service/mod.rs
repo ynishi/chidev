@@ -6,4 +6,5 @@ pub mod cite;
 pub mod footprint;
 pub mod measure;
 pub mod pin;
+pub mod rekey;
 pub mod sim;

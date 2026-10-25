@@ -449,3 +449,349 @@ fn the_examples_of_the_rules_of_renames_are_refused_by_those_rules() {
     all.push(example);
     assert_eq!(one(&exec(&bare, &all)[2])["code"], "items.no-provider");
 }
+
+fn put_items(name: &str, source: &str, items: Value) -> Value {
+    json!({"op":"interface_put","context":"core","name":name,"source":source,"items":items})
+}
+
+fn rekey(name: &str) -> Value {
+    json!({"op":"items_rekey","context":"core","interface":name})
+}
+
+#[test]
+fn items_rekey_gives_the_provider_keys_and_keeps_the_ids_and_the_revisions() {
+    let dir = project("rekey-keys", 10);
+    let source = "pub fn price(total: u64) -> u64;\nfn tax() -> u64;\n";
+    let mut ops = setup();
+    ops.push(put_items(
+        "api",
+        source,
+        json!([
+            {"key":"pub fn price(total: u64) -> u64","lines":[1,1]},
+            {"key":"fn tax() -> u64","lines":[2,2]},
+        ]),
+    ));
+    assert_eq!(exec(&dir, &ops)[2]["ok"], true);
+    let (revision, before) = items_of(&dir, "api");
+
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":1,"items":[{"key":"price","lines":[1,1]},{"key":"tax","lines":[2,2]}]}"#,
+    );
+    let results = exec(&dir, &[rekey("api")]);
+    let r = &results[0];
+    assert_eq!(r["ok"], true, "{r:#?}");
+    assert_eq!(r["op"], "items_rekey");
+    assert_eq!(
+        r["rekeyed"],
+        json!([
+            {"from":"pub fn price(total: u64) -> u64","to":"price"},
+            {"from":"fn tax() -> u64","to":"tax"},
+        ])
+    );
+    assert_eq!(r["revised"], json!([]));
+    assert_eq!(r["unmatched"], json!([]));
+    assert_eq!(r["revision"], revision);
+    // the provider was sent the code the Interface keeps
+    let asked: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
+    assert_eq!(asked, json!({"protocol":1,"source":source}));
+    let (now, after) = items_of(&dir, "api");
+    assert_eq!(now, revision);
+    assert_eq!(
+        after
+            .iter()
+            .map(|i| (i.0.as_str(), i.2.as_str(), i.3))
+            .collect::<Vec<_>>(),
+        [
+            ("price", before[0].2.as_str(), 1),
+            ("tax", before[1].2.as_str(), 1)
+        ]
+    );
+
+    // again: nothing is left to change
+    let again = &exec(&dir, &[rekey("api")])[0];
+    assert_eq!(again["rekeyed"], json!([]));
+    assert_eq!(items_of(&dir, "api"), (now, after));
+}
+
+#[test]
+fn items_rekey_revises_an_item_whose_new_lines_declare_something_else_and_lists_it() {
+    let dir = project("rekey-revised", 10);
+    let source = "fn price(\n    total: u64,\n) -> u64;\nfn tax() -> u64;\n";
+    let mut ops = setup();
+    ops.push(put_items(
+        "api",
+        source,
+        json!([
+            {"key":"price","lines":[1,1]},
+            {"key":"tax","lines":[4,4]},
+        ]),
+    ));
+    assert_eq!(exec(&dir, &ops)[2]["ok"], true);
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":1,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}"#,
+    );
+    let r = &exec(&dir, &[rekey("api")])[0];
+    assert_eq!(r["ok"], true, "{r:#?}");
+    assert_eq!(r["rekeyed"], json!([]));
+    assert_eq!(r["revised"], json!([{"key":"price","from":1,"to":2}]));
+    assert_eq!(r["revision"], 2);
+    let (revision, items) = items_of(&dir, "api");
+    assert_eq!(revision, 2);
+    assert_eq!(
+        items.iter().map(|i| (i.1.clone(), i.3)).collect::<Vec<_>>(),
+        [(json!([1, 3]), 2), (json!([4, 4]), 1)]
+    );
+}
+
+#[test]
+fn items_rekey_leaves_an_item_with_no_single_declaration_as_it_is_and_lists_it() {
+    let dir = project("rekey-many", 10);
+    let mut ops = setup();
+    // one Item over the lines of two declarations
+    ops.push(put_items(
+        "api",
+        "fn a();\nfn b();\nfn c();\n",
+        json!([{"key":"a and b","lines":[1,2]}, {"key":"c","lines":[3,3]}]),
+    ));
+    assert_eq!(exec(&dir, &ops)[2]["ok"], true);
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":1,"items":[{"key":"a","lines":[1,1]},{"key":"b","lines":[2,2]},{"key":"C","lines":[3,3]}]}"#,
+    );
+    let (_, before) = items_of(&dir, "api");
+    let r = &exec(&dir, &[rekey("api")])[0];
+    assert_eq!(r["ok"], true, "{r:#?}");
+    assert_eq!(r["rekeyed"], json!([{"from":"c","to":"C"}]));
+    assert_eq!(r["unmatched"], json!(["a and b"]));
+    let (_, after) = items_of(&dir, "api");
+    assert_eq!(after[0], before[0]);
+    assert_eq!(after[1].0, "C");
+}
+
+#[test]
+fn items_rekey_that_would_give_one_key_twice_or_has_no_provider_changes_nothing() {
+    let dir = project("rekey-refused", 2);
+    let mut ops = setup();
+    ops.push(put_items(
+        "api",
+        "fn a();\nfn b();\n",
+        json!([{"key":"a","lines":[1,1]},{"key":"b","lines":[2,2]}]),
+    ));
+    ops.push(put_items(
+        "bare",
+        "fn a();\n",
+        json!([{"key":"a","lines":[1,1]}]),
+    ));
+    ops.push(put_items(
+        "other",
+        "fn a();\n",
+        json!([{"key":"a","lines":[1,1]}]),
+    ));
+    ops.push(put_items(
+        "nowhere",
+        "fn a();\n",
+        json!([{"key":"a","lines":[1,1]}]),
+    ));
+    let results = exec(&dir, &ops);
+    assert!(results[2..].iter().all(|r| r["ok"] == true), "{results:#?}");
+    let (revision, before) = items_of(&dir, "api");
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":1,"items":[{"key":"x","lines":[1,1]},{"key":"x","lines":[2,2]}]}"#,
+    );
+    let results = exec(
+        &dir,
+        &[
+            rekey("api"),
+            rekey("bare"),
+            rekey("other"),
+            rekey("nowhere"),
+            rekey("missing"),
+        ],
+    );
+    let d = one(&results[0]);
+    assert_eq!(d["code"], "interface.key-taken");
+    assert_eq!(items_of(&dir, "api"), (revision, before));
+    assert_eq!(one(&results[1])["code"], "input.items-required");
+    assert_eq!(one(&results[2])["code"], "items.no-provider");
+    assert_eq!(one(&results[3])["code"], "input.items-required");
+    // an Interface the Context does not have
+    one(&results[4]);
+
+    // a provider that fails on the code the Interface keeps
+    let results = exec(
+        &dir,
+        &[
+            put_items(
+                "api",
+                "fn a();\n// BOOM\n",
+                json!([{"key":"a","lines":[1,1]}]),
+            ),
+            rekey("api"),
+        ],
+    );
+    assert_eq!(results[0]["ok"], true, "{results:#?}");
+    let d = one(&results[1]);
+    assert_eq!(d["code"], "items.failed");
+    assert_eq!(d["values"]["lang"], "fake");
+    assert_eq!(items_of(&dir, "api").1[0].0, "a");
+}
+
+/// A project whose Interfaces in the Context `core` are laid out as Rust, with the Rust provider of this very
+/// binary (`chidev provider items-rust`) as the provider of items.
+fn rust_project(name: &str) -> PathBuf {
+    let dir = fresh_dir(name);
+    write(
+        &dir,
+        "checks.toml",
+        &format!(
+            r#"[measure]
+build = ["true"]
+timeout = 20
+
+[measure.items]
+rust = ['{bin}', "provider", "items-rust"]
+
+[[measure.layout]]
+context = "core"
+interface = "api"
+lang = "rust"
+path = "api.rs"
+"#,
+            bin = env!("CARGO_BIN_EXE_chidev")
+        ),
+    );
+    dir
+}
+
+const API: &str = "\
+/// The price of a basket.
+pub fn price(total: u64) -> u64;
+pub trait Clock {
+    fn now(&self) -> u64;
+}
+impl<T> Stock<T> {
+    pub fn new() -> Stock<T> {
+        Stock::default()
+    }
+}
+";
+
+#[test]
+fn the_rust_provider_finds_the_items_of_an_interface_put_without_them_end_to_end() {
+    let dir = rust_project("rust-found");
+    let mut ops = setup();
+    ops.push(put("api", API));
+    let results = exec(&dir, &ops);
+    assert_eq!(results[2]["ok"], true, "{results:#?}");
+    let (_, items) = items_of(&dir, "api");
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| (i.0.as_str(), i.1.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("price", json!([2, 2])),
+            ("Clock", json!([3, 3])),
+            ("Clock::now", json!([4, 4])),
+            ("Stock<T>::new", json!([7, 7])),
+        ]
+    );
+}
+
+/// `chidev provider items-rust` with `input` on its standard input: its exit code, standard output and error.
+fn items_rust(input: &str) -> (Option<i32>, String, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chidev"))
+        .args(["provider", "items-rust"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("chidev runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("the request is written");
+    let out = child.wait_with_output().expect("chidev ends");
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).expect("utf-8"),
+        String::from_utf8(out.stderr).expect("utf-8"),
+    )
+}
+
+#[test]
+fn the_items_rust_provider_answers_one_reply_on_standard_output_and_a_failure_with_an_exit_code() {
+    let (code, out, _) = items_rust(r#"{"protocol":1,"source":"fn price(total: u64) -> u64;\n"}"#);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out,
+        r#"{"protocol":1,"items":[{"key":"price","lines":[1,1]}]}"#
+    );
+    for (input, said) in [
+        ("not json", "not a chidev-items request"),
+        (r#"{"protocol":2,"source":""}"#, "protocol 2"),
+        (r#"{"protocol":1,"source":"fn ("}"#, "does not parse"),
+    ] {
+        let (code, out, err) = items_rust(input);
+        assert_eq!(code, Some(2), "{input}");
+        assert_eq!(out, "", "no half reply: {input}");
+        assert!(
+            err.contains("chidev provider items-rust:") && err.contains(said),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn items_rekey_with_the_rust_provider_replaces_the_keys_written_by_hand() {
+    let dir = rust_project("rust-rekey");
+    let mut ops = setup();
+    // the Items as someone wrote them before a provider found them: the signature as the key
+    ops.push(put_items(
+        "api",
+        API,
+        json!([
+            {"key":"pub fn price(total: u64) -> u64","lines":[2,2]},
+            {"key":"pub trait Clock","lines":[3,5]},
+            {"key":"pub fn new() -> Stock<T>","lines":[7,7]},
+        ]),
+    ));
+    assert_eq!(exec(&dir, &ops)[2]["ok"], true);
+    let (revision, before) = items_of(&dir, "api");
+    let r = &exec(&dir, &[rekey("api")])[0];
+    assert_eq!(r["ok"], true, "{r:#?}");
+    assert_eq!(
+        r["rekeyed"],
+        json!([
+            {"from":"pub fn price(total: u64) -> u64","to":"price"},
+            {"from":"pub fn new() -> Stock<T>","to":"Stock<T>::new"},
+        ])
+    );
+    // `trait Clock` was written over the lines of two declarations (the trait and `now`): it is not paired
+    assert_eq!(r["unmatched"], json!(["pub trait Clock"]));
+    // the lines of `new` were the declaration's already
+    assert_eq!(r["revised"], json!([]));
+    let (now, after) = items_of(&dir, "api");
+    assert_eq!(now, revision);
+    assert_eq!(
+        after.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+        ["price", "pub trait Clock", "Stock<T>::new"]
+    );
+    assert_eq!(
+        after.iter().map(|i| i.2.as_str()).collect::<Vec<_>>(),
+        before.iter().map(|i| i.2.as_str()).collect::<Vec<_>>(),
+        "the ids are the ones the Items had"
+    );
+}

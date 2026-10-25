@@ -29,6 +29,39 @@ and this project adheres to
   takes both. A project with no `[measure]` has no provider of items
   (`items.no-provider`), and a language with a command in `items` alone is stopped
   by `measure` naming that `mutants` has none.
+- `chidev provider items-rust`, the Rust provider of `chidev-items 1`, in
+  `chidev-provider-rust` (the new module `items`, a pure function of the request like
+  the provider of mutants; `quote` is a new direct dependency of that crate, already
+  in the graph under `syn`). It finds `fn`, `struct`, `enum`, `union`, `trait`,
+  `type`, `const`, `static` and `macro_rules!` (key `name!`) items and the `fn`,
+  `const` and `type` in an `impl` or a `trait`, and a declaration with no body
+  (`fn price(total: u64) -> u64;`), whose `lines` run from the first token past the
+  doc comments and attributes to the line with the `;` or the `{` of the body. A key
+  is a name and a path: `name`, `mod::name`, `Type<Args>::name` (inherent `impl`),
+  `Trait::name`, `<Type<Args> as Trait<Args>>::name` (trait `impl`). It is printed
+  from the syntax of the code, not by `syn`'s `Display`, by two rules: a list has its
+  `,` between the elements only (a trailing `,` is dropped; a tuple of one element
+  keeps it) and a space stands between two words and nowhere else. **A key is
+  therefore not written as rustdoc writes it** (`<Box<dyn Error>as From<&str>>::from`,
+  `fn()->u8`): copy it from `status` or the model. Keys of declarations that differ
+  only by namespace or `#[cfg]` are equal and are refused as `interface.key-taken`
+  (put such an Interface with `items` written); the names of the generics of an
+  `impl` are in the key, so renaming `T` to `U` in `impl<T> Foo<T>` is a new key
+  (`renames` carries the id); two declarations on one line have lines that overlap.
+  The keys of the mutants are made by another function and did not change.
+- `{"op":"items_rekey","context":..,"interface":..}` gives the Items an Interface
+  keeps the keys and lines its provider finds in the code the Interface keeps (not
+  the working tree), with their ids and so their citations kept: the way from the
+  keys of a store from before keys (the old signature) or of keys written by hand to
+  the provider's. An Item and a declaration are paired when their lines overlap and
+  each overlaps no other on the other side; the rest are listed in `unmatched` and
+  stay. A new key alone moves no revision; an Item whose new lines declare something
+  else goes to its next revision (and the Interface with it) and is listed in
+  `revised`, beside `rekeyed` and the Interface's `revision`. It is refused with
+  nothing changed on `interface.key-taken` and on the `items.*` rules; it is one
+  operation of its own, kept as the store stood when it began, not a `change_set`.
+  In Rust, `App::items_rekey` returns `Rekeyed`, and the domain has
+  `Interface::rekey` and `Project::rekey_interface`.
 - Six input rules, each with a diagnostic, for the Items of an Interface put
   without `items`: `input.items-required` (no layout, or no `lang`),
   `items.no-provider` (no command in `[measure.items]` for the language, or no

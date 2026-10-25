@@ -47,7 +47,7 @@ enum Command {
         store: PathBuf,
     },
     /// The providers that come with chidev: programs that speak a protocol on standard input and output, which a
-    /// project names in the `[measure]` table of `checks.toml` like any provider of its own.
+    /// project names in the `[measure]` table of `checks.toml` (`mutants`, `items`) like any provider of its own.
     Provider {
         #[command(subcommand)]
         provider: Provider,
@@ -59,29 +59,36 @@ enum Provider {
     /// Makes the mutants of a Rust source: reads one `chidev-mutants 1` request (JSON) on standard input and writes
     /// the reply (JSON) on standard output. Pure: it reads no file and runs nothing.
     MutantsRust,
+    /// Finds the Items of a Rust source: reads one `chidev-items 1` request (JSON) on standard input and writes the
+    /// reply (JSON) on standard output, a key and the lines of each declaration. Pure: it reads no file and runs
+    /// nothing.
+    ItemsRust,
 }
 
-/// Runs the provider `MutantsRust`: the protocol is the standard input and output, so a failure is a message on
-/// standard error and an exit code, never a half reply.
-fn mutants_rust() -> ExitCode {
+/// Runs the provider `name`, whose protocol is `handle`: the protocol is the standard input and output, so a failure
+/// is a message on standard error and an exit code, never a half reply.
+fn serve<E: std::fmt::Display>(
+    name: &str,
+    handle: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
+) -> ExitCode {
     let mut request = Vec::new();
     if let Err(e) = io::stdin().lock().read_to_end(&mut request) {
-        eprintln!("chidev provider mutants-rust: cannot read the request: {e}");
+        eprintln!("chidev provider {name}: cannot read the request: {e}");
         return ExitCode::from(2);
     }
-    match chidev_provider_rust::handle(&request) {
+    match handle(&request) {
         Ok(reply) => {
             let mut out = io::stdout().lock();
             match out.write_all(&reply).and_then(|()| out.flush()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("chidev provider mutants-rust: cannot write the reply: {e}");
+                    eprintln!("chidev provider {name}: cannot write the reply: {e}");
                     ExitCode::from(2)
                 }
             }
         }
         Err(e) => {
-            eprintln!("chidev provider mutants-rust: {e}");
+            eprintln!("chidev provider {name}: {e}");
             ExitCode::from(2)
         }
     }
@@ -93,7 +100,10 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Provider {
             provider: Provider::MutantsRust,
-        } => mutants_rust(),
+        } => serve("mutants-rust", chidev_provider_rust::handle),
+        Command::Provider {
+            provider: Provider::ItemsRust,
+        } => serve("items-rust", chidev_provider_rust::items::handle),
         Command::Exec { file, store } => {
             let reader: Box<dyn BufRead> = match file {
                 Some(path) => match File::open(&path) {

@@ -34,6 +34,8 @@ pub use self::measure::{
 use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
 mod model_view;
+mod rekey;
+pub use self::rekey::{ItemRevised, KeyChanged, Rekeyed};
 pub mod subject;
 pub use self::subject::SubjectInput;
 mod target;

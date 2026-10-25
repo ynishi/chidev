@@ -60,6 +60,12 @@ enum Op {
         #[serde(default)]
         renames: Vec<RenameDto>,
     },
+    /// Gives the Items of an Interface the keys and lines the provider of its language finds in the code the
+    /// Interface keeps (not the working tree). An Item is paired with a declaration when their lines overlap and each
+    /// overlaps no other of the other side; the rest stay as they are and are listed in `unmatched`. The ids stay, so
+    /// the citations do; `revised` lists the Items whose new lines declare something else, which go to their next
+    /// revision. Not a change set: nothing else is put, and a store that moved meanwhile refuses it.
+    ItemsRekey { context: String, interface: String },
     /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
     /// keeps its kind when none is given. `builds` (a sim only) names the Interfaces of the Context whose pinned
     /// code the program is built from; a put states all of it. A Case of tests cites an Item at least, a Case of a
@@ -1343,6 +1349,31 @@ struct RetireOut<'a> {
     findings: Vec<FindingOut<'a>>,
 }
 
+/// The result of `items_rekey`: the Items that were given another key, those whose revision went up, and the keys of
+/// those no declaration was paired with.
+#[derive(Debug, Serialize)]
+struct RekeyOut<'a> {
+    op: &'static str,
+    rekeyed: Vec<KeyChangedOut<'a>>,
+    revised: Vec<ItemRevisedOut<'a>>,
+    unmatched: &'a [String],
+    /// The revision of the Interface once it is done.
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct KeyChangedOut<'a> {
+    from: &'a str,
+    to: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ItemRevisedOut<'a> {
+    key: &'a str,
+    from: u64,
+    to: u64,
+}
+
 /// What one put of a `change_set` came to: the asset's name, id and revision (a setting of a Context has none).
 #[derive(Debug, Serialize)]
 struct PutOut<'a> {
@@ -2107,6 +2138,31 @@ where
         Op::ContractRetire { context, contract } => {
             let done = app.retire_contract(&context, &contract).await?;
             retire_out("contract_retire", &done)?
+        }
+        Op::ItemsRekey { context, interface } => {
+            let done = app.items_rekey(&context, &interface).await?;
+            to_value(&RekeyOut {
+                op: "items_rekey",
+                rekeyed: done
+                    .rekeyed
+                    .iter()
+                    .map(|k| KeyChangedOut {
+                        from: &k.from,
+                        to: &k.to,
+                    })
+                    .collect(),
+                revised: done
+                    .revised
+                    .iter()
+                    .map(|r| ItemRevisedOut {
+                        key: &r.key,
+                        from: r.from,
+                        to: r.to,
+                    })
+                    .collect(),
+                unmatched: &done.unmatched,
+                revision: done.revision,
+            })?
         }
         Op::InterfaceRetire { context, interface } => {
             let done = app.retire_interface(&context, &interface).await?;

@@ -16,6 +16,8 @@ use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
 };
+use crate::domain::vo::item_key::ItemKey;
+use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::policy::{Policy, PolicyError, PolicyLineId};
 use crate::domain::vo::prose::Prose;
@@ -402,6 +404,18 @@ impl Project {
         self.change(context, &BTreeSet::new(), |c| {
             c.put_interface(id, source, items)
         })
+    }
+
+    /// Gives Items of an Interface of a Context another key and other lines, in the code it has (see
+    /// [`Interface::rekey`] for the revisions). Nothing is changed when a rule of the Interface or of the Project
+    /// would break.
+    pub fn rekey_interface(
+        &mut self,
+        context: ContextId,
+        id: InterfaceId,
+        map: &BTreeMap<ItemId, (ItemKey, LineRange)>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, &BTreeSet::new(), |c| c.rekey_interface(id, map))
     }
 
     /// Makes or revises a Harness of a Context. A new one is of tests, and an existing one keeps its kind.

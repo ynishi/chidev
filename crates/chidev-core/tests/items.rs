@@ -1,6 +1,7 @@
 //! The Items an Interface is put with when `items` is left out: the provider of the language finds them, the use
 //! case turns a `renames` into the id an Item keeps, and every way this cannot be done is a rule of its own. The
-//! source of Items is a fake that answers what the test says (the process adapter is tested where it is, in
+//! same source of Items serves `items_rekey`, which gives the Items an Interface keeps the keys and lines the
+//! provider finds in its code. The source of Items is a fake that answers what the test says (the process adapter is tested where it is, in
 //! `infra/runner`, and end to end in `chidev-cli`); the store is the real one.
 
 use std::sync::{Arc, Mutex};
@@ -9,8 +10,8 @@ use chidev_core::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use chidev_core::app::ports::measure::BoxFuture;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, ChangeSetInput, ContractPut, Diagnostic, InterfacePut, ItemInput, PutInput,
-    RenameInput,
+    App, AppError, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut, ItemInput,
+    ItemRef, ItemRevised, KeyChanged, PutInput, RenameInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -640,4 +641,388 @@ async fn a_provider_that_fails_refuses_the_whole_change_set_and_names_each_inter
         before,
         "nothing kept"
     );
+}
+
+// ---- items_rekey ----
+
+/// A project with the Context `core` and its Interface `stock`, put with `source` and the Items written, over
+/// `fake`.
+async fn kept(name: &str, fake: Fake, source: &str, items: &[ItemInput]) -> Stock {
+    let mut app = open(&dir(name).join("chidev.db"), 0).await.with_items(fake);
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    app.put_interface("core", "stock", source, items)
+        .await
+        .unwrap();
+    app
+}
+
+fn keys_of(items: &[(String, Uuid, u64)]) -> Vec<&str> {
+    items.iter().map(|i| i.0.as_str()).collect()
+}
+
+fn changed(from: &str, to: &str) -> KeyChanged {
+    KeyChanged {
+        from: from.to_string(),
+        to: to.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn a_rekey_changes_the_keys_and_moves_no_revision_when_the_lines_declare_the_same() {
+    let fake = Fake::answering(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)]);
+    let mut app = stock("rekey-keys", fake.clone()).await;
+    let (revision, before) = stock_items(&app).await;
+    let store = app.store().revision().await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    assert_eq!(
+        done.rekeyed,
+        [
+            changed("reserve", "Stock::reserve"),
+            changed("release", "Stock::release")
+        ]
+    );
+    assert!(done.revised.is_empty() && done.unmatched.is_empty());
+    assert_eq!(done.revision, revision);
+    // the provider was asked for the code the Interface keeps
+    assert_eq!(fake.asked(), [("rust".to_string(), SOURCE.to_string())]);
+    let (now, after) = stock_items(&app).await;
+    assert_eq!(now, revision, "the Interface did not move");
+    assert_eq!(keys_of(&after), ["Stock::reserve", "Stock::release"]);
+    // the same ids and the same revisions: a new key is not a change of what an Item declares
+    assert_eq!(
+        after.iter().map(|i| (i.1, i.2)).collect::<Vec<_>>(),
+        before.iter().map(|i| (i.1, i.2)).collect::<Vec<_>>()
+    );
+    assert!(app.store().revision().await.unwrap() > store, "it is kept");
+}
+
+#[tokio::test]
+async fn a_rekey_to_lines_that_declare_something_else_revises_that_item_and_says_so() {
+    let source = "fn reserve(\n    n: u8)\nfn release()\n";
+    let fake = Fake::answering(&[("reserve", 1, 2), ("release", 3, 3)]);
+    let mut app = kept(
+        "rekey-lines",
+        fake,
+        source,
+        &[item("reserve", 1), item("release", 3)],
+    )
+    .await;
+    let (_, before) = stock_items(&app).await;
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    // the keys are the provider's already; only the lines of the first differ, and so does its declaration
+    assert!(done.rekeyed.is_empty());
+    assert_eq!(
+        done.revised,
+        [ItemRevised {
+            key: "reserve".to_string(),
+            from: 1,
+            to: 2
+        }]
+    );
+    assert_eq!(done.revision, 2);
+    let (revision, after) = stock_items(&app).await;
+    assert_eq!(revision, 2);
+    assert_eq!(
+        after.iter().map(|i| i.2).collect::<Vec<_>>(),
+        [2, 1],
+        "the first Item is at its next revision and the other stays"
+    );
+    assert_eq!(after[0].1, before[0].1, "the id is kept");
+    let p = app.store().project().await.unwrap().unwrap();
+    let signature = p
+        .contexts()
+        .flat_map(|c| c.interfaces())
+        .flat_map(|i| i.items())
+        .map(|it| it.signature().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(signature, ["fn reserve(\n    n: u8)", "fn release()"]);
+}
+
+#[tokio::test]
+async fn a_rekey_pairs_no_item_with_a_declaration_it_shares_lines_with_others_over() {
+    // one Item on two lines, where the provider finds two declarations: the Item is listed, not rekeyed
+    let source = "fn a();\nfn b();\nfn c();\n";
+    let fake = Fake::answering(&[("A", 1, 1), ("B", 2, 2), ("C", 3, 3)]);
+    let mut app = kept(
+        "rekey-many",
+        fake,
+        source,
+        &[
+            ItemInput {
+                key: "a and b".to_string(),
+                lines: (1, 2),
+                replaces: None,
+            },
+            item("c", 3),
+        ],
+    )
+    .await;
+    let (revision, before) = stock_items_of(&app, "fn a").await;
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    assert_eq!(done.rekeyed, [changed("c", "C")]);
+    assert_eq!(done.unmatched, ["a and b"]);
+    let (now, after) = stock_items_of(&app, "fn a").await;
+    assert_eq!(now, revision);
+    assert_eq!(keys_of(&after), ["a and b", "C"]);
+    assert_eq!(after[0], before[0], "the one left is as it was");
+
+    // the reverse: two Items on the lines of one declaration
+    let fake = Fake::answering(&[("AB", 1, 2)]);
+    let mut app = kept(
+        "rekey-many-kept",
+        fake,
+        "fn a();\nfn b();\n",
+        &[item("a", 1), item("b", 2)],
+    )
+    .await;
+    let store_before = app.store().revision().await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    assert!(done.rekeyed.is_empty());
+    assert_eq!(done.unmatched, ["a", "b"]);
+    assert_eq!(
+        app.store().revision().await.unwrap(),
+        store_before,
+        "nothing changed, so nothing is kept"
+    );
+}
+
+#[tokio::test]
+async fn a_rekey_that_gives_two_items_one_key_is_refused_naming_the_key_and_changes_nothing() {
+    // two paired Items taking one key
+    let fake = Fake::answering(&[("x", 1, 1), ("x", 2, 2)]);
+    let mut app = stock("rekey-twice", fake).await;
+    let before = (
+        stock_items(&app).await,
+        app.store().revision().await.unwrap(),
+    );
+    let err = app.items_rekey("core", "stock").await.unwrap_err();
+    let d = app.diagnose(&err).await;
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].code, "interface.key-taken");
+    assert_eq!(
+        (
+            stock_items(&app).await,
+            app.store().revision().await.unwrap()
+        ),
+        before
+    );
+
+    // a key an Item that is not paired keeps
+    let source = "fn reserve()\n\nfn release()\n";
+    let fake = Fake::answering(&[("release", 1, 1)]);
+    let mut app = kept(
+        "rekey-kept-key",
+        fake,
+        source,
+        &[item("reserve", 1), item("release", 3)],
+    )
+    .await;
+    let before = (
+        stock_items_of(&app, "reserve").await,
+        app.store().revision().await.unwrap(),
+    );
+    let err = app.items_rekey("core", "stock").await.unwrap_err();
+    let d = app.diagnose(&err).await;
+    assert_eq!(d[0].code, "interface.key-taken");
+    assert_eq!(
+        (
+            stock_items_of(&app, "reserve").await,
+            app.store().revision().await.unwrap()
+        ),
+        before
+    );
+}
+
+#[tokio::test]
+async fn a_rekey_with_no_provider_or_a_failing_one_is_refused_by_name_and_changes_nothing() {
+    for (error, code) in [
+        (ItemsError::Failed("exit 3".into()), "items.failed"),
+        (ItemsError::Protocol("lines".into()), "items.protocol"),
+        (ItemsError::NoProvider, "items.no-provider"),
+    ] {
+        let mut app = stock("rekey-provider", Fake::failing(error)).await;
+        let before = (
+            stock_items(&app).await,
+            app.store().revision().await.unwrap(),
+        );
+        let err = app.items_rekey("core", "stock").await.unwrap_err();
+        let d = app.diagnose(&err).await;
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].code, code);
+        assert_eq!(subjects(&d[0]), ["core", "stock"]);
+        assert_eq!(
+            (
+                stock_items(&app).await,
+                app.store().revision().await.unwrap()
+            ),
+            before
+        );
+    }
+    // no language laid out for the Interface
+    let fake = Fake::with(
+        Arc::new(|_, _| Err(ItemsError::NoLanguage)),
+        Arc::new(|_, _| Ok(Vec::new())),
+    );
+    let mut app = stock("rekey-language", fake).await;
+    let err = app.items_rekey("core", "stock").await.unwrap_err();
+    assert_eq!(app.diagnose(&err).await[0].code, "input.items-required");
+    // an application with no source of Items at all
+    let mut bare = open(&dir("rekey-bare").join("chidev.db"), 0).await;
+    bare.init().await.unwrap();
+    bare.add_context("core", &[]).await.unwrap();
+    bare.put_interface("core", "stock", SOURCE, &[item("reserve", 1)])
+        .await
+        .unwrap();
+    let err = bare.items_rekey("core", "stock").await.unwrap_err();
+    assert_eq!(bare.diagnose(&err).await[0].code, "items.no-provider");
+}
+
+#[tokio::test]
+async fn a_rekey_of_what_is_not_there_is_refused() {
+    let mut app = stock("rekey-unknown", Fake::answering(&[])).await;
+    assert!(matches!(
+        app.items_rekey("nowhere", "stock").await,
+        Err(AppError::UnknownContext(_))
+    ));
+    assert!(matches!(
+        app.items_rekey("core", "nothing").await,
+        Err(AppError::UnknownAsset { .. })
+    ));
+    app.retire_interface("core", "stock").await.unwrap();
+    assert!(matches!(
+        app.items_rekey("core", "stock").await,
+        Err(AppError::AssetRetired { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_rekey_is_kept_as_the_store_stood_and_a_store_that_moved_refuses_it() {
+    let path = dir("rekey-conflict").join("chidev.db");
+    let other = {
+        let mut other = open(&path, 1000).await;
+        other.init().await.unwrap();
+        other.add_context("core", &[]).await.unwrap();
+        other
+            .put_interface("core", "stock", SOURCE, &[item("reserve", 1)])
+            .await
+            .unwrap();
+        Arc::new(tokio::sync::Mutex::new(other))
+    };
+    let mut fake = Fake::answering(&[("Stock::reserve", 1, 1)]);
+    let writer = Arc::clone(&other);
+    fake.meanwhile = Some(Arc::new(move || {
+        let writer = Arc::clone(&writer);
+        Box::pin(async move {
+            writer
+                .lock()
+                .await
+                .add_context("elsewhere", &[])
+                .await
+                .unwrap();
+        })
+    }));
+    let mut app = open(&path, 0).await.with_items(fake);
+    let err = app.items_rekey("core", "stock").await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AppError::Store(chidev_core::domain::repository::StoreError::Conflict)
+        ),
+        "{err:?}"
+    );
+    let (_, items) = stock_items(&app).await;
+    assert_eq!(keys_of(&items), ["reserve"], "nothing was kept");
+}
+
+#[tokio::test]
+async fn a_store_of_schema_1_comes_to_the_providers_keys_with_the_ids_and_the_citations_kept() {
+    // an Interface whose Items are named by what their signatures were, and a Case that cites one
+    let path = dir("legacy").join("chidev.db");
+    {
+        let mut app = open(&path, 0).await;
+        app.init().await.unwrap();
+        app.add_context("core", &[]).await.unwrap();
+        app.put_interface(
+            "core",
+            "stock",
+            SOURCE,
+            &[item("fn reserve()", 1), item("fn release()", 2)],
+        )
+        .await
+        .unwrap();
+        app.put_harness(
+            "core",
+            "stock-tests",
+            "fn reserve_refuses() {}\n",
+            &[CaseInput {
+                name: "reserve_refuses".to_string(),
+                lines: (1, 1),
+                items: vec![ItemRef {
+                    context: None,
+                    interface: "stock".to_string(),
+                    key: "fn reserve()".to_string(),
+                }],
+                clauses: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap();
+        app.into_store().close().await.unwrap();
+    }
+    // write the Project as schema 1 did: an Item has its signature and no key
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let text: String = conn
+            .query_row("SELECT doc FROM project", [], |r| r.get(0))
+            .unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["schema"] = serde_json::json!(1);
+        for context in doc["contexts"].as_array_mut().unwrap() {
+            let Some(interfaces) = context["interfaces"].as_array_mut() else {
+                continue;
+            };
+            for item in interfaces
+                .iter_mut()
+                .flat_map(|i| i["items"].as_array_mut().unwrap())
+            {
+                let key = item.as_object_mut().unwrap().remove("key").unwrap();
+                item["signature"] = key;
+            }
+        }
+        conn.execute("UPDATE project SET schema = 1, doc = ?1", [doc.to_string()])
+            .unwrap();
+    }
+    let fake = Fake::answering(&[("reserve", 1, 1), ("release", 2, 2)]);
+    let mut app = open(&path, 5000).await.with_items(fake);
+    let (revision, before) = stock_items(&app).await;
+    // the decoded keys are the signatures
+    assert_eq!(keys_of(&before), ["fn reserve()", "fn release()"]);
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    assert_eq!(
+        done.rekeyed,
+        [
+            changed("fn reserve()", "reserve"),
+            changed("fn release()", "release")
+        ]
+    );
+    assert!(done.revised.is_empty() && done.unmatched.is_empty());
+    let (now, after) = stock_items(&app).await;
+    assert_eq!(now, revision);
+    assert_eq!(keys_of(&after), ["reserve", "release"]);
+    assert_eq!(
+        after.iter().map(|i| (i.1, i.2)).collect::<Vec<_>>(),
+        before.iter().map(|i| (i.1, i.2)).collect::<Vec<_>>(),
+        "the ids and the revisions are the ones the schema 1 store had"
+    );
+    // the Case still cites the Item, and no citation went stale
+    let p = app.store().project().await.unwrap().unwrap();
+    let cited: Vec<_> = p
+        .contexts()
+        .flat_map(|c| c.harnesses())
+        .flat_map(|h| h.cases())
+        .flat_map(|c| c.cites().items().keys().map(|id| id.as_uuid()))
+        .collect();
+    assert_eq!(cited, [before[0].1]);
+    assert!(chidev_core::domain::service::cite::stale_cites(&p).is_empty());
 }

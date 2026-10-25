@@ -38,8 +38,12 @@
 //! of the trimmed line. The two mutants of a string literal are told apart by the class in the key, `str-empty`
 //! and `str-marker`; their `operator` is `str`. An edit elsewhere in the file moves none of them, so a record of
 //! a mutant outlives unrelated changes.
+//!
+//! The Rust provider of Items, which speaks `chidev-items 1` the same way, is the module [`items`].
 
 #![warn(missing_docs)]
+
+pub mod items;
 
 use std::collections::BTreeMap;
 

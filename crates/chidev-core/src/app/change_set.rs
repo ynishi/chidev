@@ -555,11 +555,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let lang = self
             .items
             .language(&i.context, &i.name)
-            .map_err(|e| items_error(i, None, e))?;
+            .map_err(|e| items_error(&i.context, &i.name, None, e))?;
         self.items
             .items(&lang, &i.source)
             .await
-            .map_err(|e| items_error(i, Some(&lang), e))
+            .map_err(|e| items_error(&i.context, &i.name, Some(&lang), e))
     }
 
     /// An Interface to put. `found` is what the provider found for it, when it was put with no `items`.
@@ -933,9 +933,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 }
 
-/// The refusal that `e`, from the source of Items, is for the Interface put `i`; `lang` is its language once known.
-fn items_error(i: &InterfacePut, lang: Option<&str>, e: ItemsError) -> AppError {
-    let (context, interface) = (i.context.clone(), i.name.clone());
+/// The refusal that `e`, from the source of Items, is for the Interface `interface` of `context`; `lang` is its
+/// language once known.
+pub(super) fn items_error(
+    context: &str,
+    interface: &str,
+    lang: Option<&str>,
+    e: ItemsError,
+) -> AppError {
+    let (context, interface) = (context.to_string(), interface.to_string());
     let language = || lang.unwrap_or("?").to_string();
     match e {
         ItemsError::NoLanguage => AppError::ItemsRequired { context, interface },

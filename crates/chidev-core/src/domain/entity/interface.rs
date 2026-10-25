@@ -1,5 +1,7 @@
 //! The Interface: what a Context shows to the others, as code, and the Items declared in it.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 
 use crate::domain::vo::id::{InterfaceId, ItemId};
@@ -256,6 +258,27 @@ impl Interface {
         self.source = source;
         self.items = revised;
         Ok(())
+    }
+
+    /// Gives some of its Items another key and other lines, in the code it has: the Items of `map` (by id) take the
+    /// key and the lines given, and the others stay as they are. An id the Interface does not have is not used.
+    /// The revisions follow the rules of [`Interface::revise`]: an Item whose key alone changes keeps its revision
+    /// and so does the Interface, and an Item whose new lines declare something else (its derived signature
+    /// differs) goes to the next revision, and so does the Interface. A key another Item has is refused
+    /// ([`InterfaceError::KeyTaken`]), as are lines outside the code or blank, and nothing is changed.
+    pub fn rekey(
+        &mut self,
+        map: &BTreeMap<ItemId, (ItemKey, LineRange)>,
+    ) -> Result<(), InterfaceError> {
+        let items = self
+            .items
+            .iter()
+            .map(|it| match map.get(&it.id) {
+                Some((key, lines)) => (it.id, key.clone(), *lines),
+                None => (it.id, it.key.clone(), it.lines),
+            })
+            .collect();
+        self.revise(self.source.clone(), items)
     }
 }
 
@@ -556,6 +579,120 @@ mod tests {
         .unwrap();
         assert_eq!(i.revision().number(), 2);
         assert_eq!(revisions(&i), [2, 1]);
+    }
+
+    fn rekeyed(entries: &[(u128, &str, usize, usize)]) -> BTreeMap<ItemId, (ItemKey, LineRange)> {
+        entries
+            .iter()
+            .map(|(n, k, first, last)| (iid(*n), (key(k), at(*first, *last))))
+            .collect()
+    }
+
+    #[test]
+    fn a_rekey_of_the_key_alone_moves_no_revision_of_the_item_or_the_interface() {
+        let mut i = stack();
+        i.rekey(&rekeyed(&[(1, "Stack::push", 1, 1)])).unwrap();
+        assert_eq!(i.revision(), Revision::first());
+        assert_eq!(revisions(&i), [1, 1]);
+        assert_eq!(i.item(iid(1)).unwrap().key().as_str(), "Stack::push");
+        // the Item that is not in the map is as it was
+        assert_eq!(i.item(iid(2)).unwrap().key().as_str(), "pop");
+        assert_eq!(i.source().as_str(), CODE);
+    }
+
+    #[test]
+    fn a_rekey_to_lines_that_declare_something_else_goes_to_the_next_revision() {
+        let mut i = Interface::new(
+            InterfaceId::from_uuid(test_uuid(100)),
+            src("fn push(v: u8)\nfn pop() -> u8\nfn peek()\n"),
+            vec![
+                (iid(1), key("fn push(v: u8)"), at(1, 1)),
+                (iid(2), key("fn pop() -> u8"), at(2, 2)),
+                (iid(3), key("fn peek()"), at(3, 3)),
+            ],
+        )
+        .unwrap();
+        // the first now spans a line more (its signature differs); the second keeps the line it was on; the
+        // third is on the same line with another key
+        i.rekey(&rekeyed(&[
+            (1, "push", 1, 2),
+            (2, "pop", 2, 2),
+            (3, "peek", 3, 3),
+        ]))
+        .unwrap();
+        assert_eq!(i.revision().number(), 2);
+        assert_eq!(revisions(&i), [2, 1, 1]);
+        assert_eq!(i.item(iid(1)).unwrap().lines(), at(1, 2));
+        assert_eq!(
+            i.item(iid(1)).unwrap().signature().as_str(),
+            "fn push(v: u8)\nfn pop() -> u8"
+        );
+    }
+
+    #[test]
+    fn a_rekey_that_gives_a_key_another_item_has_is_refused_and_changes_nothing() {
+        let mut i = stack();
+        let before = i.clone();
+        assert_eq!(
+            i.rekey(&rekeyed(&[(1, "pop", 1, 1)])),
+            Err(InterfaceError::KeyTaken {
+                key: key("pop"),
+                id: iid(2)
+            })
+        );
+        assert_eq!(i, before);
+        // two Items that take one new key
+        assert_eq!(
+            i.rekey(&rekeyed(&[(1, "top", 1, 1), (2, "top", 2, 2)])),
+            Err(InterfaceError::KeyTaken {
+                key: key("top"),
+                id: iid(2)
+            })
+        );
+        assert_eq!(i, before);
+    }
+
+    #[test]
+    fn a_rekey_may_swap_two_keys_and_ignores_an_id_the_interface_does_not_have() {
+        let mut i = stack();
+        i.rekey(&rekeyed(&[
+            (1, "pop", 1, 1),
+            (2, "push", 2, 2),
+            (9, "other", 1, 1),
+        ]))
+        .unwrap();
+        assert_eq!(i.item(iid(1)).unwrap().key().as_str(), "pop");
+        assert_eq!(i.item(iid(2)).unwrap().key().as_str(), "push");
+        assert!(i.item(iid(9)).is_none());
+        assert_eq!(i.items().len(), 2);
+    }
+
+    #[test]
+    fn a_rekey_to_lines_outside_the_code_or_blank_is_refused_and_changes_nothing() {
+        let mut i = stack();
+        let before = i.clone();
+        assert_eq!(
+            i.rekey(&rekeyed(&[(1, "push", 1, 3)])),
+            Err(InterfaceError::RangeOutside {
+                id: iid(1),
+                first: 1,
+                last: 3,
+                total: 2
+            })
+        );
+        assert_eq!(i, before);
+        let mut blank = Interface::new(
+            InterfaceId::from_uuid(test_uuid(100)),
+            src("fn a()\n\n"),
+            vec![(iid(1), key("a"), at(1, 1))],
+        )
+        .unwrap();
+        let before = blank.clone();
+        assert_eq!(
+            blank.rekey(&rekeyed(&[(1, "a", 2, 2)])),
+            Err(InterfaceError::BlankItem { id: iid(1) })
+        );
+        assert_eq!(blank, before);
     }
 
     #[test]

@@ -12,6 +12,8 @@ use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
+use crate::domain::vo::item_key::ItemKey;
+use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::sim::role_of;
@@ -380,6 +382,24 @@ impl Context {
                 self.revision = self.revision.next();
             }
         }
+        Ok(())
+    }
+
+    /// Gives Items of the Interface with this id another key and other lines (see [`Interface::rekey`]). The
+    /// Context keeps its revision: no asset is added or removed.
+    pub(super) fn rekey_interface(
+        &mut self,
+        id: InterfaceId,
+        map: &BTreeMap<ItemId, (ItemKey, LineRange)>,
+    ) -> Result<(), ContextError> {
+        let interface = self
+            .interfaces
+            .get_mut(&id)
+            .ok_or(ContextError::NoSuchAsset {
+                kind: "interface",
+                id: id.as_uuid(),
+            })?;
+        interface.rekey(map)?;
         Ok(())
     }
 

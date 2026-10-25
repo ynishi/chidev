@@ -9,7 +9,7 @@ Contract, Interface and Harness as the assets of a codebase; the code is a cache
 | `chidev` | Umbrella: the name users depend on. Re-exports the core. |
 | `chidev-core` | Core (SDK): `domain` (pure rules and types), `app` (use cases and their ports), `infra` (adapters with real I/O). |
 | `chidev-cli` | The `chidev` command. |
-| `chidev-provider-rust` | The Rust mutant provider (`chidev provider mutants-rust`): a pure function from a source text to edits. Depended on by the CLI only; the core reaches a provider as a process. |
+| `chidev-provider-rust` | The Rust providers: of mutants (`chidev provider mutants-rust`, a pure function from a source text to edits) and of Items (`chidev provider items-rust`, from a source text to the keys and lines of its declarations). Depended on by the CLI only; the core reaches a provider as a process. |
 
 The layer rules are in `arch-lint.toml` and run with `cargo test`. A crate or layer
 that does not fit the project is deleted, together with its `arch-lint.toml` scope.
@@ -100,8 +100,32 @@ belong):
     keys is read with each Item's old signature as its key: the lines of the
     signature, each without the white space at its ends, joined by one space (a
     signature that an Interface has twice gets ` #2`, ` #3`, ... from the second
-    on). No revision moves, so nothing goes stale; put the Interface again with
-    the keys you want, and `replaces` (the old key) to keep an id.
+    on). No revision moves, so nothing goes stale; `items_rekey` (below) brings
+    them to the provider's keys, or put the Interface again with the keys you want,
+    and `replaces` (the old key) to keep an id.
+- `items_rekey` (`{"op":"items_rekey","context":..,"interface":..}`) gives the Items
+  an Interface already has the keys and lines its provider finds now, with their ids
+  and so their citations kept. It is how an Interface put by hand, or read from a
+  store from before keys, comes to the provider's keys.
+  - The provider is given the code the Interface **keeps**; the working tree is not
+    read. An Item and a declaration the provider found are paired when their lines
+    overlap and each overlaps no other on the other side. A paired Item takes the
+    provider's key *and* its lines. An Item that is not paired stays as it is and is
+    listed in `unmatched`: no declaration is on its lines, or it and the declarations
+    share lines with others (two declarations on one line; an Item written over the
+    lines of several).
+  - The result has `rekeyed` (`{"from","to"}` of each key that changed), `revised`
+    (`{"key","from","to"}` of each Item whose revision went up) and `unmatched` (keys),
+    and the Interface's `revision` after it. A new key alone moves no revision. The
+    signature is the text of the Item's lines, so an Item whose new lines declare
+    something else goes to its next revision, and the Interface with it, and the
+    Cases that cite it go stale; `revised` is that list.
+  - It is refused, with nothing changed, when two Items would have one key
+    (`interface.key-taken`: a key the provider gave twice, or one an Item that is not
+    paired still has), and when the provider cannot be asked (`input.items-required`,
+    `items.no-provider`, `items.protocol`, `items.failed`, as for a put). It is one
+    operation of its own, not a `change_set`, and it is kept as the store stood when
+    it began: a store that has moved since refuses it.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
   a new Harness) or `sim`. A Case of tests cites one Item at least and any Clauses;
   a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
@@ -441,6 +465,55 @@ cannot be started, exits with a failure, or does not answer within `timeout` is
 method on one line have the same `lines`, which is a right answer, and the Items
 that share a line are all revised when that line changes. The same key twice is
 refused by the Interface (`interface.key-taken`). The reply is capped at 4 MiB.
+
+The bundled Rust provider is `chidev provider items-rust` (`rust = ["chidev",
+"provider", "items-rust"]` in `[measure.items]`). It finds a `fn`, `struct`, `enum`,
+`union`, `trait`, `type`, `const`, `static` and `macro_rules!` item, and the `fn`,
+`const` and `type` inside an `impl` or a `trait`; an inline `mod` is entered, and
+nothing in a function body is found. A declaration with no body
+(`fn price(total: u64) -> u64;`, the form the examples above use) is found as well. The
+`lines` of an Item run from its first token, after the doc comments and attributes, to
+the line that has the `;` or the `{` of its body.
+
+A key is a name and a path, not the text of the declaration:
+
+| where | key |
+|---|---|
+| free, or in `mod m` | `price`, `m::price` |
+| a `macro_rules!` | `twice!` |
+| in an inherent `impl` | `Stock<T>::new` (the arguments of the type are in it: `impl Foo<u8>` and `impl Foo<u16>` differ) |
+| in a `trait Clock` | `Clock::now` |
+| in `impl Display for Money` | `<Money as Display>::fmt` |
+
+A type that is not a path is put in angle brackets (`<[u8]>::len`), and inside a `mod` the
+key is led by the path of the `mod` (`m::Stock::new`, `m::<Money as Display>::fmt`).
+
+A key is an identity, not a display, so it is **not written as rustdoc writes it**.
+It is printed from the syntax of the code by two rules with no exception: a list has
+its `,` between the elements only (a trailing `,`, and so a formatter, a line break
+or white space, moves no key; a tuple of one element, `(u8,)`, keeps its `,`, as
+`(u8)` is another type), and a space stands between two words (identifiers, keywords,
+lifetimes, literals) and nowhere else. A path is written as it is in the code, and a
+lifetime is kept. So `<Box<dyn Error> as From<&str>>::from` is the key
+`<Box<dyn Error>as From<&str>>::from`, `fn() -> u8` is `fn()->u8`, and `&'a mut T`
+stays `&'a mut T`. Do not type a key from memory or from rustdoc: copy it from
+`status` or the model, where chidev shows it. A key made some other way (by hand, or
+the signature of a store from before keys) is brought to this one by `items_rekey`.
+
+What to know about these keys:
+
+- Two declarations that the key cannot tell apart get one key and are refused
+  (`interface.key-taken`): the same name in two namespaces (`struct Foo` and
+  `fn Foo`), and declarations told apart only by `#[cfg]` (`#[cfg(unix)] fn f()`
+  and `#[cfg(windows)] fn f()`). Put such an Interface with its `items` written.
+- A key follows the name: a declaration that moves to another `mod` or is renamed has
+  a new key, so it is a new Item unless the put says otherwise (`renames`). The names
+  of the generics of an `impl` are in the key as well: `impl<T> Foo<T>` changed to
+  `impl<U> Foo<U>` is a new key, and a `renames` carries the id over.
+- Two declarations on one line (`pub trait Clock { fn now(&self) -> u64; }`) have
+  `lines` that overlap, which is a right answer. Both are revised when that line
+  changes, and `items_rekey` leaves them in `unmatched`. Put them on lines of their
+  own (a formatter does) or write the `items`.
 
 ### Simulation (blind, any language)
 
