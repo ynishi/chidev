@@ -19,6 +19,7 @@ use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{FindingState, Hook};
 use chidev_core::domain::repository::{ChangeRequestRepository, ProjectRepository};
 use chidev_core::domain::vo::finding::{RuleId, SubjectKind};
+use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::{judged, sqlite::SqliteStore};
@@ -489,7 +490,8 @@ struct CaseExecutor;
 
 impl ExternalExecutor for CaseExecutor {
     async fn execute(&self, rule: &RuleId, call: ExternalCall) -> ExternalAttempt {
-        let case = &call.model.contexts[0]["harnesses"][0]["cases"][0];
+        let model = serde_json::to_value(&call.model).unwrap();
+        let case = &model["contexts"][0]["harnesses"][0]["cases"][0];
         ExternalAttempt {
             evidence: ExecutionEvidence::default(),
             result: Ok(ExternalReply {
@@ -513,7 +515,7 @@ async fn an_external_case_finding_is_addressed_without_changing_its_staleness() 
     let rule = ExternalRule::new(
         RuleId::from_static("ext.case"),
         vec![Hook::Check],
-        vec!["harnesses".into()],
+        vec![ModelSection::Harnesses],
         false,
         "config".into(),
     )

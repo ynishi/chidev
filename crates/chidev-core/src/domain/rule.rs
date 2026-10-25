@@ -163,6 +163,8 @@ pub const INPUT_WRONG_TYPE: RuleId = RuleId::from_static("input.wrong-type");
 pub const INPUT_UNKNOWN_NAME: RuleId = RuleId::from_static("input.unknown-name");
 /// A value is not well formed.
 pub const INPUT_INVALID: RuleId = RuleId::from_static("input.invalid");
+/// A view is asked for no section.
+pub const INPUT_VIEW_SECTIONS_EMPTY: RuleId = RuleId::from_static("input.view-sections-empty");
 
 static RULES: &[Rule] = &[
     Rule {
@@ -569,6 +571,15 @@ static RULES: &[Rule] = &[
         message: "{s1} of {s0} is put with items and with renames",
         values: &[],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n","items":[{"key":"a","lines":[1,1]}],"renames":[{"from":"x","to":"a"}]}"#,
+    },
+    Rule {
+        id: INPUT_VIEW_SECTIONS_EMPTY,
+        kind: RuleKind::Input,
+        summary: "A view is asked for at least one section of the model.",
+        help: "`sections` lists the parts to read: `contracts`, `interfaces`, `harnesses` and `change_requests`. An empty list asks for nothing, and there is no default that reads every section: say which ones to read.",
+        message: "the field `{name}` of the view names no section",
+        values: &["name"],
+        example: r#"{"op":"view","sections":[]}"#,
     },
     Rule {
         id: UNMAPPED,

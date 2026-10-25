@@ -10,6 +10,23 @@ and this project adheres to
 
 ### Added
 
+- `{"op":"view","sections":[..],"contexts":[..]}` reads the part of the model that is
+  asked for: the `sections` named (`contracts`, `interfaces`, `harnesses`,
+  `change_requests`; at least one, and there is no default), of the Contexts named
+  (every Context when `contexts` is left out, none when it is `[]`). The result has
+  the `store_revision` it was read at and the `view`; a Context always comes with its
+  `id`, `name`, `basis` and `uses`, and a section that was not asked for has no key.
+  It is cut from the model a judged rule is given and an external check is sent, so
+  the entries are the same. In Rust, `App::view(&ViewInput)` returns `ViewRead`
+  (`store_revision`, `view: ModelSlice`); `ModelSection` (domain) names a section.
+- `chidev schema [ops|view]` prints a JSON Schema (2020-12) derived from the types
+  that read and write: `ops` for one line of `exec` (`title` `chidev-exec 1`, `$id`
+  `urn:chidev:schema:ops:1`), `view` for the `view` of the operation of that name
+  (`chidev-view 3`, `urn:chidev:schema:view:3`). Without a name it lists them. A schema is
+  a necessary condition: a rule that sets fields against each other (exactly one of
+  `source` and `source_file`) is not in it and is named when an operation breaks it.
+  `schemars` is a new dependency of `chidev-core` and `chidev-cli`.
+- The input rule `input.view-sections-empty`, for a `view` that names no section.
 - `items` of an `interface_put` (and of an `interface` entry of a `change_set`) can
   be left out: a provider finds the Items in the code, under the new protocol
   `chidev-items 1` (a request `{protocol, source}`, a reply `{protocol, items:[{key,
@@ -303,6 +320,16 @@ and this project adheres to
 
 ### Changed
 
+- The public face of the SDK, for external checks: `ExternalModelView` is a newtype of
+  `ModelSlice` and no longer has public fields, and `ExternalModelView` and
+  `ExternalCall` no longer implement `Deserialize` (a program reads the document in
+  another process; they still implement `Serialize`, `Debug` and `Clone`). The
+  `reads` of an `ExternalRule` are `Vec<ModelSection>` rather than `Vec<String>`, kept in
+  the order and with the repeats written; a word that is not a section is refused
+  when `checks.toml` is loaded, as before, now by `unknown section `..` in reads`.
+  What a program receives on stdin and the `input_stamp` and `config_stamp` that are
+  kept with its report are the same bytes and values as before, so no saved external
+  run goes stale.
 - An Item of an Interface is known by a **key**, not by its signature. The identity of an
   Item was a string a person wrote and had to write the same way every time; one
   space or one `;` different made a new Item (the old one retired, its citations

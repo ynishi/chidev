@@ -7,6 +7,7 @@
 //! file argument, not pasted into the command line.
 
 mod ops;
+mod schema;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -45,6 +46,14 @@ enum Command {
         /// The database that keeps the project.
         #[arg(long, value_name = "PATH", default_value = DEFAULT_STORE)]
         store: PathBuf,
+    },
+    /// Prints a JSON Schema (2020-12): `ops` for a line of `exec`, `view` for the `view` an operation of that name
+    /// returns. Without a name, lists the schemas. A schema says what a document must look like to be read; a rule
+    /// that sets fields against each other is not in it, and is named when an operation breaks it.
+    Schema {
+        /// Which schema to print.
+        #[arg(value_enum)]
+        name: Option<schema::Name>,
     },
     /// The providers that come with chidev: programs that speak a protocol on standard input and output, which a
     /// project names in the `[measure]` table of `checks.toml` (`mutants`, `items`) like any provider of its own.
@@ -98,6 +107,20 @@ fn serve<E: std::fmt::Display>(
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Schema { name } => {
+            let printed = match name {
+                Some(name) => name.schema(),
+                None => schema::list(),
+            };
+            // a document to read, not a line of a stream: indented
+            match writeln!(io::stdout().lock(), "{printed:#}") {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("chidev schema: cannot write the schema: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Command::Provider {
             provider: Provider::MutantsRust,
         } => serve("mutants-rust", chidev_provider_rust::handle),

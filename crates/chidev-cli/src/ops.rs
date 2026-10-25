@@ -11,18 +11,21 @@ use chidev_core::app::{
     ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
     DecisionInput, DecisionMakerInput, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput,
     Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef,
-    ItemsInput, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput,
-    PutDone, PutInput, ReasonedInput, RecommendedInput, RenameInput, ReportInput, ReportedFinding,
-    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding,
-    RuleToJudge, SubjectInput, TargetInput, TransitionStatus,
+    ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
+    PolicyLineInput, PutDone, PutInput, ReasonedInput, RecommendedInput, RenameInput, ReportInput,
+    ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Hook, Level};
 use chidev_core::domain::vo::measure::MeasureKind;
+use chidev_core::domain::vo::model_section::ModelSection;
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// One operation. `op` names it; the other fields are its arguments.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
     /// Makes the project.
@@ -201,10 +204,20 @@ enum Op {
     },
     /// What an agent judged of one rule: replaces every finding the rule had.
     FindingReport(Box<ReportDto>),
+    /// Reads the part of the model that is asked for: the `sections` named (at least one; nothing is read by
+    /// default), of the Contexts named in `contexts` (every Context when it is left out; none when it is `[]`). The
+    /// Contexts always come with their `id`, `name`, `basis` and `uses`; the change requests belong to the Project,
+    /// so they come when `change_requests` is a section, whatever `contexts` says. The result is the `view`, and the
+    /// `store_revision` it was read at.
+    View {
+        sections: Vec<SectionDto>,
+        #[serde(default)]
+        contexts: Option<Vec<String>>,
+    },
 }
 
 /// One entry of the `puts` of a `change_set`: the fields of the operation named by `put`, without `op`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "put", rename_all = "snake_case", deny_unknown_fields)]
 enum PutDto {
     /// As `context_add`.
@@ -254,7 +267,7 @@ enum PutDto {
 }
 
 /// One entry of the `retires` of a `change_set`: the fields of the retire operation named by `retire`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "retire", rename_all = "snake_case", deny_unknown_fields)]
 enum RetireDto {
     /// As `context_retire`.
@@ -499,8 +512,29 @@ fn harness_kind(kind: Option<&str>) -> Result<Option<HarnessKind>, AppError> {
     .transpose()
 }
 
+/// A part of the model a `view` reads.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SectionDto {
+    Contracts,
+    Interfaces,
+    Harnesses,
+    ChangeRequests,
+}
+
+impl From<SectionDto> for ModelSection {
+    fn from(s: SectionDto) -> ModelSection {
+        match s {
+            SectionDto::Contracts => ModelSection::Contracts,
+            SectionDto::Interfaces => ModelSection::Interfaces,
+            SectionDto::Harnesses => ModelSection::Harnesses,
+            SectionDto::ChangeRequests => ModelSection::ChangeRequests,
+        }
+    }
+}
+
 /// What a `measure` measures.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum MeasureKindDto {
     Mutate,
@@ -638,7 +672,7 @@ struct MeasurementOut<'a> {
 }
 
 /// The fields of `finding_report`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ReportDto {
     rule: String,
     /// The rule digest returned by check_rules, echoed back. Required: a missing or null one is refused.
@@ -652,7 +686,7 @@ struct ReportDto {
 }
 
 /// A finding in a report.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ReportedFindingDto {
     /// What it is about; none: the Project as a whole.
     #[serde(default)]
@@ -664,7 +698,7 @@ struct ReportedFindingDto {
 }
 
 /// What a finding is about, tagged by its kind: `{ "clause": { ... } }`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum SubjectDto {
     Context(String),
@@ -739,7 +773,7 @@ impl TryFrom<ReportDto> for ReportInput {
 }
 
 /// How a change request ended: a word, or a word that points at another change request by its title.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ResolutionDto {
     Done,
@@ -763,7 +797,7 @@ impl From<ResolutionDto> for ResolutionInput {
 
 /// The fields of `cr_open`, boxed: they are far larger than any other operation's. A field it does not know is
 /// refused, so a word it ignored would not be lost silently.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct OpenDto {
     title: String,
@@ -794,7 +828,7 @@ struct OpenDto {
 }
 
 /// An Assumption: what is assumed, why it holds, and what it stands on.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AssumptionDto {
     statement: String,
@@ -804,7 +838,7 @@ struct AssumptionDto {
 }
 
 /// What an Assumption stands on: a place in the repository, or general knowledge.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum EvidenceDto {
     Repo {
@@ -837,7 +871,7 @@ impl From<AssumptionDto> for AssumptionInput {
 }
 
 /// What a decision rests on: `{"policy": "P1"}` or `{"arbitrary": "<reason>"}`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum BasisDto {
     Policy(String),
@@ -854,7 +888,7 @@ impl From<BasisDto> for BasisInput {
 }
 
 /// Who decides: `{"role": "<name>"}` or `{"person": "<name>"}`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum MakerDto {
     Role(String),
@@ -871,7 +905,7 @@ impl From<MakerDto> for DecisionMakerInput {
 }
 
 /// One line of the decision Policy.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PolicyLineDto {
     id: String,
@@ -879,7 +913,7 @@ struct PolicyLineDto {
 }
 
 /// A finding a change request addresses. New and legacy input forms normalize at the CLI boundary.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(try_from = "AddressWire")]
 struct AddressDto {
     rule: String,
@@ -887,7 +921,7 @@ struct AddressDto {
 }
 
 /// Preserve presence separately from null so mixed selectors and duplicate null fields are refused.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddressWire {
     rule: String,
@@ -1545,6 +1579,14 @@ struct CheckRulesOut<'a> {
     model: &'a ModelView,
 }
 
+/// The result of `view`: the part of the model asked for (read at `store_revision`).
+#[derive(Debug, Serialize)]
+struct ViewOut<'a> {
+    op: &'static str,
+    store_revision: u64,
+    view: &'a ModelSlice,
+}
+
 /// The result of `finding_report`.
 #[derive(Debug, Serialize)]
 struct ReportOut<'a> {
@@ -1581,7 +1623,7 @@ fn standing_out(standing: &[RuleStanding]) -> Vec<StandingOut<'_>> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum IntentDto {
     ChangeBehavior,
@@ -1598,7 +1640,7 @@ impl From<IntentDto> for Intent {
 }
 
 /// The choice for a decision maker. There is no `default`: work that depends on the answer waits for it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CruxDto {
     kind: KindDto,
@@ -1613,7 +1655,7 @@ struct CruxDto {
 }
 
 /// The option recommended, why, and how sure (0 to 100).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RecommendedDto {
     choice: String,
@@ -1633,7 +1675,7 @@ impl From<RecommendedDto> for RecommendedInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ImportanceDto {
     Low,
@@ -1651,7 +1693,7 @@ impl From<ImportanceDto> for Importance {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum KindDto {
     Ambiguity,
@@ -1671,7 +1713,7 @@ impl From<KindDto> for CruxKind {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct OptionDto {
     choice: String,
@@ -1689,7 +1731,7 @@ struct OptionDto {
 }
 
 /// A reference to a target of any kind. The Project is `{"project": true}`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RefDto {
     Project(bool),
@@ -1702,28 +1744,28 @@ enum RefDto {
     Case(CaseRefDto),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ContractRefDto {
     context: String,
     contract: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InterfaceRefDto {
     context: String,
     interface: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HarnessRefDto {
     context: String,
     harness: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CaseRefDto {
     context: String,
@@ -1771,20 +1813,20 @@ fn targets_of(refs: Vec<RefDto>) -> Result<Vec<TargetInput>, AppError> {
     refs.into_iter().map(TargetInput::try_from).collect()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ClauseDto {
     label: String,
     text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RenameDto {
     from: String,
     to: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ItemDto {
     key: String,
     lines: [usize; 2],
@@ -1792,7 +1834,7 @@ struct ItemDto {
     replaces: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ItemRefDto {
     #[serde(default)]
@@ -1801,7 +1843,7 @@ struct ItemRefDto {
     key: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ClauseRefDto {
     #[serde(default)]
@@ -1810,7 +1852,7 @@ struct ClauseRefDto {
     label: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CaseDto {
     name: String,
     lines: [usize; 2],
@@ -1838,6 +1880,15 @@ impl From<ClauseRefDto> for ClauseRef {
             label: d.label,
         }
     }
+}
+
+/// The JSON Schema of one line `chidev exec` reads: an operation, derived from the types that read it, so the schema
+/// and the reading cannot differ.
+pub fn input_schema() -> schemars::Schema {
+    SchemaSettings::draft2020_12()
+        .for_deserialize()
+        .into_generator()
+        .into_root_schema_for::<Op>()
 }
 
 /// Runs every line of `input` against `app` and writes one result line per operation to `out`. A blank line is
@@ -2562,6 +2613,19 @@ where
                 store_revision: view.store_revision.0,
                 rules: view.rules.iter().map(RuleOut::of).collect(),
                 model: &view.model,
+            })?
+        }
+        Op::View { sections, contexts } => {
+            let read = app
+                .view(&ViewInput {
+                    contexts,
+                    sections: sections.into_iter().map(ModelSection::from).collect(),
+                })
+                .await?;
+            to_value(&ViewOut {
+                op: "view",
+                store_revision: read.store_revision.0,
+                view: &read.view,
             })?
         }
         Op::FindingReport(report) => {

@@ -40,6 +40,8 @@ pub mod subject;
 pub use self::subject::SubjectInput;
 mod target;
 pub use self::target::{OpenedExpect, TargetInput};
+mod view;
+pub use self::view::{ViewInput, ViewRead};
 pub mod ports;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,7 +53,7 @@ pub use self::check::{CheckInfo, Checked, Found, Judgment, Registry, RegistryErr
 pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
 };
-pub use self::model_view::{ModelView, VIEW_VERSION};
+pub use self::model_view::{ModelSlice, ModelView, VIEW_VERSION};
 use self::ports::{
     AssetKind, AssetName, Changes, Clock, IdSource, Invocation, PinCode, Store, StoreRevision,
 };
@@ -264,6 +266,9 @@ pub enum AppError {
     /// A citation outside a Harness does not say which Context it is in.
     #[error("a citation outside a harness names its context")]
     ContextNotGiven,
+    /// A view asked for no section of the model.
+    #[error("a view names at least one section to read")]
+    ViewSectionsEmpty,
     /// A value given is not well formed (a name, a label, a line range, ...).
     #[error("{0}")]
     Input(String),

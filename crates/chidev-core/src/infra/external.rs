@@ -41,6 +41,7 @@ use crate::domain::check::external::ExternalRule;
 use crate::domain::check::{Hook, ParamValue};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::RuleId;
+use crate::domain::vo::model_section::ModelSection;
 
 /// Maximum bytes accepted from the response pipe.
 const STDOUT_LIMIT: usize = 1024 * 1024;
@@ -136,7 +137,14 @@ pub fn load(root: &Path) -> Result<(Vec<ExternalRule>, ProcessExecutor), Externa
                 .iter()
                 .map(|h| Hook::from_word(h).ok_or_else(|| invalid(format!("unknown hook `{h}`"))))
                 .collect::<Result<Vec<_>, _>>()?;
-            let reads = registration.reads;
+            let reads = registration
+                .reads
+                .iter()
+                .map(|r| {
+                    ModelSection::from_word(r)
+                        .ok_or_else(|| invalid(format!("unknown section `{r}` in reads")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let params = registration
                 .params
                 .into_iter()
@@ -323,12 +331,23 @@ mod tests {
             rules: vec!["ext.test".into()],
             read_at: 0,
             params: BTreeMap::new(),
-            model: crate::app::ports::external::ExternalModelView {
-                version: 1,
-                contexts: vec![],
-                change_requests: None,
-            },
+            model: crate::app::ports::external::ExternalModelView::empty(1),
         }
+    }
+
+    #[test]
+    fn reads_keep_the_order_and_the_repeats_they_were_written_with() {
+        use crate::domain::vo::model_section::ModelSection::*;
+        let fixture = Fixture::new();
+        fixture.config(&REGISTRATION.replace(
+            "['contracts']",
+            "['harnesses', 'contracts', 'harnesses', 'change_requests']",
+        ));
+        let (rules, _) = load(&fixture.0).unwrap();
+        assert_eq!(
+            rules[0].reads(),
+            [Harnesses, Contracts, Harnesses, ChangeRequests]
+        );
     }
 
     #[test]
@@ -341,6 +360,11 @@ mod tests {
                 "positive",
             ),
             (REGISTRATION.replace("'contracts'", "'unknown'"), "reads"),
+            (
+                REGISTRATION.replace("'contracts'", "'contract'"),
+                "`contract`",
+            ),
+            (REGISTRATION.replace("'contracts'", ""), "reads"),
             (REGISTRATION.replace("'put', 'check'", "'unknown'"), "hook"),
             (format!("{REGISTRATION}\ntimeotu = 1"), "unknown field"),
             (
@@ -452,10 +476,10 @@ mod tests {
         fixture.program("echo waiting >&2; sleep 20");
         let (rules, executor) = load(&fixture.0).unwrap();
         let mut request = call();
+        // more than a pipe holds, so the write blocks while the program never reads
         request
-            .model
-            .contexts
-            .push(serde_json::json!({"source": "a".repeat(256 * 1024)}));
+            .params
+            .insert("pad".into(), serde_json::json!("a".repeat(256 * 1024)));
         let attempt = executor.execute(&rules[0].descriptor().id, request).await;
         assert_eq!(attempt.result.unwrap_err().kind, "timeout");
         assert_eq!(attempt.evidence.stderr, "waiting\n");

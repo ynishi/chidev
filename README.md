@@ -148,11 +148,63 @@ belong):
   are.
 - `status` lists the Pins and whether they hold, the citations behind their
   targets, the change requests, what was retired and the findings of every check.
+- `view` reads the part of the model you ask for, as the model holds it (the
+  Clauses' text, the Interfaces' source and Items, the Harnesses' source and Cases):
+
+  ```json
+  {"op":"view","sections":["contracts","interfaces"],"contexts":["ledger"]}
+  ```
+
+  - `sections` is required and names at least one of `contracts`, `interfaces`,
+    `harnesses` and `change_requests`. There is no default that reads every
+    section: leaving the field out is `input.missing-field` (`name` is
+    `sections`), `[]` is `input.view-sections-empty`, and a word that is not a
+    section is `input.invalid` (with `did_you_mean`).
+  - `contexts` names the Contexts to read. Leaving it out reads every Context, `[]`
+    reads none, and a name the Project does not have is `input.unknown-name`. The
+    change requests belong to the Project, not to a Context, so they come whenever
+    `change_requests` is a section, whatever `contexts` says.
+  - The result is the envelope of an operation (`ok`, `line`, `op`) with the
+    `store_revision` the model was read at and the `view`. `view` is
+    `{"version":3,"contexts":[..],"change_requests":[..]}`: a Context always comes with
+    its `id`, `name`, `basis` and `uses`, and with the sections asked for only. A
+    section that was not asked for has no key; one that was and is empty is `[]`.
+    `chidev schema view` describes this value of `view` (see "Protocol `chidev-exec 1`").
+  - It is the part of the model that `check_rules` gives a judged rule and that an
+    external check is sent, entry for entry, so a reader of a view sees what a rule
+    is judged on. Asking for fewer sections is how a role is kept from the rest: an
+    implementer that is to write code from the Contracts and Interfaces, and not
+    from the tests that will check it, is given `["contracts","interfaces"]`, and
+    nothing of the Harnesses (their source, Cases or citations) is in what it reads.
 
 A put or a retire does not need an open change request, but it belongs to none: it
 shows in the targets of no change request (only a `change_set` `for` the request
 does, see "Change requests"). A change that touches
 several assets and holds only as a whole is one `change_set` (next section).
+
+### Protocol `chidev-exec 1`
+
+`chidev exec` is the protocol `chidev-exec 1`: it reads one operation per line and
+prints one result per line, as above. `chidev schema` prints the JSON Schema
+(2020-12) of the parts of it a program writes or reads, derived from the types that
+read and write them, so a schema and the reading cannot differ:
+
+```text
+chidev schema          # lists the schemas, with the title and the id of each
+chidev schema ops      # one line of exec: an operation. title "chidev-exec 1", $id urn:chidev:schema:ops:1
+chidev schema view     # the `view` of the operation `view`. title "chidev-view 3", $id urn:chidev:schema:view:3
+```
+
+- **A schema is a necessary condition, not a sufficient one.** It says what a line
+  must look like to be read. A rule that sets fields against each other is not in it:
+  exactly one of `source` and `source_file`, exactly one of `choice`, `wording` and
+  `unspecified`, a subject, an item or a clause. An operation that breaks one is
+  read, and refused when it runs, by a rule with a name (see "Diagnostics").
+- The schema of the results of the other operations is not printed.
+- The version of the view (`chidev-view 3`, `version` in the view, `VIEW_VERSION` in
+  Rust) has its own promise: a field added does not change it, and only a change of
+  meaning or shape (a field removed or renamed) does. A reader ignores a field it does
+  not know and refuses a version it does not know.
 
 ## Change sets
 
@@ -272,8 +324,10 @@ commit, with no automatic process retry.
 Programs receive one JSON document on stdin and return one on stdout. For
 example, a response with no findings is `{"protocol":1,"findings":[]}`. Diagnostics
 go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`, and/or
-`change_requests`; unrequested sections are omitted. Context metadata is always
-sent. A program can name only the requested rule and subjects present in that
+`change_requests`; unrequested sections are omitted, and a word that is not one is
+refused when `checks.toml` is loaded. Context metadata is always sent. The model
+sent is the `view` of the operation of that name, for every Context and the
+sections read. A program can name only the requested rule and subjects present in that
 restricted view. See the RustDoc of `app::ports::external` for the wire types,
 and `infra::external` for process limits and platform support.
 
@@ -1097,7 +1151,8 @@ as a sentence to be parsed:
   another case.
 - A line that cannot be read as an operation is a diagnostic as well, under an
   `input.*` rule: `input.unknown-op`, `input.unknown-field`, `input.missing-field`,
-  `input.wrong-type`, `input.unknown-name`, `input.invalid`. An `interface_put` that
+  `input.wrong-type`, `input.unknown-name`, `input.invalid`, and for `view`
+  `input.view-sections-empty`. An `interface_put` that
   leaves `items` out has its own: `input.items-required`, `items.no-provider`,
   `items.protocol`, `items.failed`, and for `renames` `input.rename-unknown`,
   `input.rename-conflict`, `input.replaces-kept`, `input.renames-with-items`.

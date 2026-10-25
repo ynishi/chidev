@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
+use super::model_view::{ModelView, ViewSelection};
 use super::ports::external::*;
 use super::ports::{AssetName, Changes, IdSource, Invocation, Outcome, Store, StoreRevision};
-use super::{App, AppError, Found, ModelView, input};
+use super::{App, AppError, Found, input};
 use crate::domain::check::external::ExternalRule;
 use crate::domain::check::{CheckView, Executor, Finding, Hook, Level, ParamValue};
 use crate::domain::entity::{change_request::ChangeRequest, project::Project};
@@ -70,39 +71,16 @@ fn subject(s: &ExternalSubject) -> Option<Subject> {
 }
 
 impl ExternalModelView {
+    /// Whether the subject is at a typed position of the model the program was sent. An id is accepted only there.
     fn contains(&self, s: &ExternalSubject) -> bool {
-        // An id is accepted only at a typed subject position in the restricted model.
-        let matches = |v: &Value| v.get("id").and_then(Value::as_str) == Some(s.id.as_str());
+        let slice = self.slice();
         match s.kind.as_str() {
-            "change_request" => self
-                .change_requests
-                .as_ref()
-                .and_then(Value::as_array)
-                .is_some_and(|xs| xs.iter().any(matches)),
-            "context" => self.contexts.iter().any(matches),
-            "interface" | "item" | "clause" | "case" => self.contexts.iter().any(|c| {
-                let (section, children) = match s.kind.as_str() {
-                    "interface" => ("interfaces", None),
-                    "item" => ("interfaces", Some("items")),
-                    "clause" => ("contracts", Some("clauses")),
-                    _ => ("harnesses", Some("cases")),
-                };
-                c.get(section)
-                    .and_then(Value::as_array)
-                    .is_some_and(|assets| {
-                        assets.iter().any(|asset| {
-                            children.map_or_else(
-                                || matches(asset),
-                                |key| {
-                                    asset
-                                        .get(key)
-                                        .and_then(Value::as_array)
-                                        .is_some_and(|xs| xs.iter().any(matches))
-                                },
-                            )
-                        })
-                    })
-            }),
+            "change_request" => slice.has_change_request(&s.id),
+            "context" => slice.has_context(&s.id),
+            "interface" => slice.has_interface(&s.id),
+            "item" => slice.has_item(&s.id),
+            "clause" => slice.has_clause(&s.id),
+            "case" => slice.has_case(&s.id),
             _ => false,
         }
     }
@@ -116,43 +94,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         crs: &[ChangeRequest],
         pending: &[AssetName],
     ) -> Result<ExternalModelView, AppError> {
-        let mut names = BTreeMap::new();
-        for c in p.contexts() {
-            let ids = c
-                .contracts()
-                .map(|x| x.id().as_uuid())
-                .chain(c.interfaces().map(|x| x.id().as_uuid()))
-                .chain(c.harnesses().map(|x| x.id().as_uuid()));
-            for id in ids {
-                if let Some(n) = pending.iter().find(|n| n.id == id) {
-                    names.insert(id, n.name.clone());
-                } else if let Some(n) = self.store.asset_name(id).await? {
-                    names.insert(id, n);
-                }
-            }
-        }
-        let mut full = serde_json::to_value(ModelView::build(0, p, crs, &names)).map_err(input)?;
-        let contexts = full["contexts"]
-            .as_array_mut()
-            .ok_or_else(|| input("invalid internal model view"))?;
-        for c in contexts.iter_mut() {
-            for key in ["contracts", "interfaces", "harnesses"] {
-                if !rule.reads().iter().any(|r| r == key) {
-                    c.as_object_mut()
-                        .ok_or_else(|| input("invalid context view"))?
-                        .remove(key);
-                }
-            }
-        }
-        Ok(ExternalModelView {
-            version: super::VIEW_VERSION,
-            contexts: contexts.clone(),
-            change_requests: rule
-                .reads()
-                .iter()
-                .any(|r| r == "change_requests")
-                .then(|| full["change_requests"].clone()),
-        })
+        let names = self.names_in_model(p, pending).await?;
+        let selection = ViewSelection {
+            contexts: None,
+            sections: rule.reads().iter().copied().collect(),
+        };
+        Ok(ExternalModelView::new(
+            ModelView::build(0, p, crs, &names).select(&selection),
+        ))
     }
 
     fn external_config_stamp(&self, rule: &ExternalRule) -> Result<String, AppError> {
@@ -176,7 +125,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             })
             .unwrap_or_default();
         fingerprint(
-            &json!({"process":rule.config_digest(), "reads":rule.reads(), "gate":rule.gate(),
+            &json!({"process":rule.config_digest(), "reads":rule.reads().iter().map(|s|s.word()).collect::<Vec<_>>(), "gate":rule.gate(),
             "level":self.registry.level_of(&d.id).map(Level::word), "hooks":d.hooks.iter().map(|h|h.word()).collect::<Vec<_>>(), "params":params}),
         )
     }

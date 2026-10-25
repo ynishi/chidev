@@ -2,22 +2,24 @@
 
 use super::{Descriptor, Executor, Hook, Level};
 use crate::domain::vo::finding::RuleId;
+use crate::domain::vo::model_section::ModelSection;
 use std::borrow::Cow;
 
 /// A configured rule whose execution is supplied through an app port.
 #[derive(Debug, Clone)]
 pub struct ExternalRule {
     descriptor: Descriptor,
-    reads: Vec<String>,
+    reads: Vec<ModelSection>,
     config_digest: String,
 }
 
 impl ExternalRule {
-    /// Validates a rule's namespace, hooks and the sections it reads. A gate cannot be lowered by policy.
+    /// Validates a rule's namespace, hooks and the sections it reads (at least one). A gate cannot be lowered by
+    /// policy. `reads` is kept as written, in order and with repeats: a saved run stamps it as it was configured.
     pub fn new(
         id: RuleId,
         hooks: Vec<Hook>,
-        reads: Vec<String>,
+        reads: Vec<ModelSection>,
         gate: bool,
         config_digest: String,
     ) -> Result<Self, String> {
@@ -27,12 +29,8 @@ impl ExternalRule {
         if hooks.is_empty() {
             return Err(format!("{id} has no hooks"));
         }
-        if reads.is_empty()
-            || reads.iter().any(|r| {
-                !["contracts", "interfaces", "harnesses", "change_requests"].contains(&r.as_str())
-            })
-        {
-            return Err(format!("{id} has invalid reads"));
+        if reads.is_empty() {
+            return Err(format!("{id} has no reads"));
         }
         Ok(Self {
             descriptor: Descriptor {
@@ -79,8 +77,8 @@ impl ExternalRule {
     pub fn descriptor(&self) -> &Descriptor {
         &self.descriptor
     }
-    /// Model sections sent to the program.
-    pub fn reads(&self) -> &[String] {
+    /// Model sections sent to the program, as configured.
+    pub fn reads(&self) -> &[ModelSection] {
         &self.reads
     }
     /// Whether any finding or execution failure refuses a change.
@@ -90,5 +88,33 @@ impl ExternalRule {
     /// Identity of the configured process.
     pub fn config_digest(&self) -> &str {
         &self.config_digest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(reads: Vec<ModelSection>) -> Result<ExternalRule, String> {
+        ExternalRule::new(
+            RuleId::from_static("ext.test"),
+            vec![Hook::Check],
+            reads,
+            false,
+            "config".into(),
+        )
+    }
+
+    #[test]
+    fn a_rule_reads_at_least_one_section() {
+        let error = rule(vec![]).unwrap_err();
+        assert!(error.contains("reads"), "{error}");
+    }
+
+    #[test]
+    fn the_reads_are_kept_in_the_order_and_with_the_repeats_they_were_written() {
+        use ModelSection::*;
+        let reads = vec![Interfaces, Contracts, Interfaces];
+        assert_eq!(rule(reads.clone()).unwrap().reads(), reads);
     }
 }

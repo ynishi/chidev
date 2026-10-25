@@ -26,6 +26,9 @@ clap = { version = "4", features = ["derive"] }
 # rusqlite-isle 0.6 tracks rusqlite 0.40; the two move together (one libsqlite3-sys in the graph).
 rusqlite = { version = "0.40", default-features = false }
 rusqlite-isle = { version = "0.6", features = ["tokio"] }
+# The JSON Schema of what an agent writes (`chidev exec` operations) and reads (the view of the model), derived from the
+# types that read and write them. `preserve_order` stays off: the stamp of an external check's input depends on it.
+schemars = { version = "1.2", default-features = false, features = ["derive", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"

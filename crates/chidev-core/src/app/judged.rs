@@ -7,9 +7,6 @@
 //! store's one commit, with the record of the run.
 
 use std::cmp::min;
-use std::collections::BTreeMap;
-
-use uuid::Uuid;
 
 use super::check::{Found, Judgment};
 use super::model_view::ModelView;
@@ -433,19 +430,7 @@ where
         crs: &[ChangeRequest],
         at: StoreRevision,
     ) -> Result<ModelView, AppError> {
-        let mut names: BTreeMap<Uuid, String> = BTreeMap::new();
-        for c in p.contexts() {
-            let ids = c
-                .contracts()
-                .map(|k| k.id().as_uuid())
-                .chain(c.interfaces().map(|i| i.id().as_uuid()))
-                .chain(c.harnesses().map(|h| h.id().as_uuid()));
-            for id in ids {
-                if let Some(n) = self.store.asset_name(id).await? {
-                    names.insert(id, n);
-                }
-            }
-        }
+        let names = self.names_in_model(p, &[]).await?;
         Ok(ModelView::build(at.0, p, crs, &names))
     }
 }

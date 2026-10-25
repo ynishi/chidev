@@ -10,8 +10,8 @@ use chidev_core::app::ports::external::{
 };
 use chidev_core::app::ports::{Changes, IdSource, Store, StoreRevision};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, DecisionMakerInput, Intent,
-    ItemInput, ItemRef, Registry, ResolutionInput,
+    App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, DecisionMakerInput,
+    FindingInput, Intent, ItemInput, ItemRef, Registry, ResolutionInput, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{Executor, Hook, Level, Origin};
@@ -19,6 +19,7 @@ use chidev_core::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
 use chidev_core::domain::vo::finding::RuleId;
+use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -87,7 +88,7 @@ fn rule(hooks: Vec<Hook>, gate: bool, config: &str) -> ExternalRule {
     ExternalRule::new(
         RuleId::from_static("ext.contract"),
         hooks,
-        vec!["contracts".into()],
+        vec![ModelSection::Contracts],
         gate,
         config.into(),
     )
@@ -100,7 +101,7 @@ async fn app(
     gate: bool,
     executor: FakeExecutor,
 ) -> App<SqliteStore, Counter, FakeExecutor> {
-    app_with_reads(name, hooks, gate, executor, vec!["contracts".into()]).await
+    app_with_reads(name, hooks, gate, executor, vec![ModelSection::Contracts]).await
 }
 
 async fn app_with_reads(
@@ -108,7 +109,7 @@ async fn app_with_reads(
     hooks: Vec<Hook>,
     gate: bool,
     executor: FakeExecutor,
-    reads: Vec<String>,
+    reads: Vec<ModelSection>,
 ) -> App<SqliteStore, Counter, FakeExecutor> {
     let dir = std::env::temp_dir().join(format!("chidev-external-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -310,8 +311,10 @@ async fn only_requested_assets_are_sent_and_a_changed_input_makes_the_report_sta
     assert_eq!(call.protocol, 1);
     assert_eq!(call.hook, "check");
     assert_eq!(call.rules, vec!["ext.contract"]);
-    assert!(call.model.change_requests.is_none());
-    let context = &call.model.contexts[0];
+    // a program reads the model as JSON in another process, and so does this test
+    let model = serde_json::to_value(&call.model).unwrap();
+    assert!(model.get("change_requests").is_none());
+    let context = &model["contexts"][0];
     assert_eq!(
         context["contracts"][0]["clauses"][0]["text"],
         "push then pop"
@@ -659,7 +662,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
         vec![Hook::Resolve],
         true,
         executor.clone(),
-        vec!["change_requests".into()],
+        vec![ModelSection::ChangeRequests],
     )
     .await;
     let cr = app
@@ -695,7 +698,8 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert!(app.store().invocations().await.unwrap().is_empty());
     let call = executor.calls.lock().unwrap()[0].clone();
     assert_eq!(call.hook, "resolve");
-    let candidate = &call.model.change_requests.as_ref().unwrap()[0];
+    let model = serde_json::to_value(&call.model).unwrap();
+    let candidate = &model["change_requests"][0];
     assert_eq!(candidate["id"], cr.id.to_string());
     assert_eq!(candidate["state"], "resolved");
 
@@ -718,5 +722,207 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert_eq!(
         app.status().await.unwrap().external[0].state.word(),
         "current"
+    );
+}
+
+/// The reads of a rule, from the words a person writes in `checks.toml`.
+fn reads(words: &[&str]) -> Vec<ModelSection> {
+    words
+        .iter()
+        .map(|w| ModelSection::from_word(w).unwrap())
+        .collect()
+}
+
+/// A model with every kind of asset and two change requests, so that what a program is sent has something in each
+/// section: two Contexts, a Contract, an Interface with Items, a Harness with a Case that cites both.
+async fn populate(app: &mut App<SqliteStore, Counter, FakeExecutor>) {
+    app.add_context("util", &["core".to_string()])
+        .await
+        .unwrap();
+    app.put_contract(
+        "core",
+        "rules",
+        "Rules",
+        &[
+            ClauseInput {
+                label: "C1".into(),
+                text: "push then pop returns the value".into(),
+            },
+            ClauseInput {
+                label: "C2".into(),
+                text: "pop on empty is an error".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    app.put_contract(
+        "util",
+        "misc",
+        "Misc",
+        &clauses("a \"quoted\" <word> & more"),
+    )
+    .await
+    .unwrap();
+    let items = ["push", "pop"]
+        .iter()
+        .enumerate()
+        .map(|(k, key)| ItemInput {
+            key: (*key).into(),
+            lines: (k + 1, k + 1),
+            replaces: None,
+        })
+        .collect::<Vec<_>>();
+    app.put_interface("core", "stack", "fn push()\nfn pop()\n", &items)
+        .await
+        .unwrap();
+    app.put_harness(
+        "core",
+        "tests",
+        "fn pushes() {}\n",
+        &[CaseInput {
+            name: "pushes".into(),
+            lines: (1, 1),
+            items: vec![ItemRef {
+                context: None,
+                interface: "stack".into(),
+                key: "push".into(),
+            }],
+            clauses: vec![ClauseRef {
+                context: None,
+                contract: "rules".into(),
+                label: "C1".into(),
+            }],
+        }],
+    )
+    .await
+    .unwrap();
+    app.open_change_request(&ChangeRequestInput {
+        title: "keep push".into(),
+        situation: None,
+        intent: Intent::KeepBehavior,
+        parent: None,
+        issuer: None,
+        targets: vec![],
+        keep: vec![TargetInput::Item(ItemRef {
+            context: Some("core".into()),
+            interface: "stack".into(),
+            key: "push".into(),
+        })],
+        crux: None,
+        assumptions: vec![],
+        addresses: vec![FindingInput {
+            rule: "cite.uncited-clause".into(),
+            subject: Some(SubjectInput::Clause(ClauseRef {
+                context: Some("core".into()),
+                contract: "rules".into(),
+                label: "C2".into(),
+            })),
+        }],
+    })
+    .await
+    .unwrap();
+    app.open_change_request(&ChangeRequestInput {
+        title: "reword C2".into(),
+        situation: Some("it reads as two rules".into()),
+        intent: Intent::ChangeBehavior,
+        parent: None,
+        issuer: Some("alice".into()),
+        targets: vec![TargetInput::Clause(ClauseRef {
+            context: Some("core".into()),
+            contract: "rules".into(),
+            label: "C2".into(),
+        })],
+        keep: vec![],
+        crux: None,
+        assumptions: vec![],
+        addresses: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// What a program is sent on its standard input, and the two stamps kept with its report, for a rule that reads
+/// `words`.
+async fn sent_to(name: &str, words: &[&str]) -> (String, String, String) {
+    let executor = FakeExecutor::default();
+    let mut app = app_with_reads(
+        name,
+        vec![Hook::Check],
+        false,
+        executor.clone(),
+        reads(words),
+    )
+    .await;
+    populate(&mut app).await;
+    app.check_run().await.unwrap();
+    let call = executor.calls.lock().unwrap()[0].clone();
+    let report = app.store().external_reports().await.unwrap().remove(0);
+    (
+        String::from_utf8(serde_json::to_vec(&call).unwrap()).unwrap(),
+        report.input_stamp,
+        report.config_stamp,
+    )
+}
+
+/// The standard input of a program that reads every section, listed out of order and with one twice. A saved
+/// `input_stamp` is compared with this document's digest, so changing one byte of it makes every saved external
+/// run stale: these values were taken before the model was typed and are what it must keep writing.
+const SENT_ALL: &str = r#"{"protocol":1,"hook":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"harnesses":[{"cases":[{"cites":{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","revision":1}],"items":[{"id":"00000000-0000-0000-0000-00000000000a","revision":1}]},"id":"00000000-0000-0000-0000-00000000000d","lines":[1,1],"name":"pushes","revision":1}],"id":"00000000-0000-0000-0000-00000000000c","name":"tests","revision":1,"source":"fn pushes() {}\n"}],"id":"00000000-0000-0000-0000-000000000002","interfaces":[{"id":"00000000-0000-0000-0000-000000000009","items":[{"id":"00000000-0000-0000-0000-00000000000a","key":"push","lines":[1,1],"revision":1},{"id":"00000000-0000-0000-0000-00000000000b","key":"pop","lines":[2,2],"revision":1}],"name":"stack","revision":1,"source":"fn push()\nfn pop()\n"}],"name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"harnesses":[],"id":"00000000-0000-0000-0000-000000000003","interfaces":[],"name":"util","uses":["core"]}],"change_requests":[{"addresses":[{"rule":"cite.uncited-clause","subject":{"id":"00000000-0000-0000-0000-000000000006","kind":"clause"}}],"expects":[{"id":"00000000-0000-0000-0000-00000000000a","kind":"keep","recorded":1,"target":"item"}],"id":"00000000-0000-0000-0000-00000000000e","intent":"keep_behavior","state":"open","title":"keep push"},{"addresses":[],"expects":[{"id":"00000000-0000-0000-0000-000000000006","kind":"target","recorded":1,"target":"clause"}],"id":"00000000-0000-0000-0000-00000000000f","intent":"change_behavior","state":"open","title":"reword C2"}]}}"#;
+
+/// The standard input of a program that reads the contracts only: no other section, and no `change_requests`.
+const SENT_CONTRACTS: &str = r#"{"protocol":1,"hook":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"id":"00000000-0000-0000-0000-000000000002","name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"id":"00000000-0000-0000-0000-000000000003","name":"util","uses":["core"]}]}}"#;
+
+/// The whole view a judged rule is given (`check_rules`) for the same model: the declared order of the fields, every
+/// section of every Context.
+const WHOLE_VIEW: &str = r#"{"version":3,"store_revision":9,"contexts":[{"id":"00000000-0000-0000-0000-000000000002","name":"core","basis":"interface","uses":[],"contracts":[{"id":"00000000-0000-0000-0000-000000000004","name":"rules","title":"Rules","revision":1,"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","text":"push then pop returns the value","revision":1},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","text":"pop on empty is an error","revision":1}]}],"interfaces":[{"id":"00000000-0000-0000-0000-000000000009","name":"stack","revision":1,"source":"fn push()\nfn pop()\n","items":[{"id":"00000000-0000-0000-0000-00000000000a","key":"push","lines":[1,1],"revision":1},{"id":"00000000-0000-0000-0000-00000000000b","key":"pop","lines":[2,2],"revision":1}]}],"harnesses":[{"id":"00000000-0000-0000-0000-00000000000c","name":"tests","revision":1,"source":"fn pushes() {}\n","cases":[{"id":"00000000-0000-0000-0000-00000000000d","name":"pushes","lines":[1,1],"revision":1,"cites":{"items":[{"id":"00000000-0000-0000-0000-00000000000a","revision":1}],"clauses":[{"id":"00000000-0000-0000-0000-000000000005","revision":1}]}}]}]},{"id":"00000000-0000-0000-0000-000000000003","name":"util","basis":"interface","uses":["core"],"contracts":[{"id":"00000000-0000-0000-0000-000000000007","name":"misc","title":"Misc","revision":1,"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","text":"a \"quoted\" <word> & more","revision":1}]}],"interfaces":[],"harnesses":[]}],"change_requests":[{"id":"00000000-0000-0000-0000-00000000000e","title":"keep push","intent":"keep_behavior","state":"open","expects":[{"target":"item","id":"00000000-0000-0000-0000-00000000000a","kind":"keep","recorded":1}],"addresses":[{"rule":"cite.uncited-clause","subject":{"kind":"clause","id":"00000000-0000-0000-0000-000000000006"}}]},{"id":"00000000-0000-0000-0000-00000000000f","title":"reword C2","intent":"change_behavior","state":"open","expects":[{"target":"clause","id":"00000000-0000-0000-0000-000000000006","kind":"target","recorded":1}],"addresses":[]}]}"#;
+
+#[tokio::test]
+async fn the_view_a_judged_rule_is_given_is_the_whole_model_in_declared_order() {
+    let mut app = app_with_reads(
+        "pinned-view",
+        vec![Hook::Check],
+        false,
+        FakeExecutor::default(),
+        reads(&["contracts"]),
+    )
+    .await;
+    populate(&mut app).await;
+    let view = app.check_rules(None, None).await.unwrap();
+    assert_eq!(serde_json::to_string(&view.model).unwrap(), WHOLE_VIEW);
+}
+
+#[tokio::test]
+async fn what_a_program_is_sent_and_the_stamps_kept_are_what_they_always_were() {
+    let (sent, input, config) = sent_to(
+        "pinned-all",
+        &[
+            "interfaces",
+            "contracts",
+            "interfaces",
+            "harnesses",
+            "change_requests",
+        ],
+    )
+    .await;
+    assert_eq!(sent, SENT_ALL);
+    assert_eq!(
+        input,
+        "abf722d557b003bd1fe49d1d6514b7ca951e8202409215c4d82da52b292d233e"
+    );
+    assert_eq!(
+        config,
+        "4566f047cd0525e39c0c46f13779f46359eb367bf1ac7b94908a3a3cdfe91fa5"
+    );
+
+    let (sent, input, config) = sent_to("pinned-contracts", &["contracts"]).await;
+    assert_eq!(sent, SENT_CONTRACTS);
+    assert_eq!(
+        input,
+        "5fa726ce63f4753ae311d72d1e420f6124f49459e30e332cd7fd95490d7b8195"
+    );
+    assert_eq!(
+        config,
+        "213868a14489d87ad3161e0c80eb9307a3ede852fc99e75d01ac97b11f4b1bb3"
     );
 }

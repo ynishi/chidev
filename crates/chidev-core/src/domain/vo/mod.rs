@@ -17,6 +17,7 @@ pub mod intent;
 pub mod item_key;
 pub mod line_range;
 pub mod measure;
+pub mod model_section;
 pub mod name;
 pub mod pin_basis;
 pub mod policy;

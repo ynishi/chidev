@@ -3,12 +3,18 @@
 //! change requests. The types are the output (typed and versioned, so that what a reader may rely on is written
 //! once, here, and a later protocol for programs can send the same view): they are serialized as they are.
 //!
+//! Two types hold it. [`ModelView`] is the whole model, which stamps the entries of a judged finding; a
+//! [`ModelSlice`] is the part of it that was asked for (some sections, some Contexts), which is what an agent is
+//! given by `view` and what a program is sent by an external check. The slice carries no stamp, so nothing can
+//! stamp what only part of the model was read.
+//!
 //! The same entries decide whether a judged finding still holds. A finding is stamped with the fingerprint of the
 //! entry of its subject when it is reported, and is stale once the entry is not what it was, or is gone. One
 //! build serves both, so what the agent saw and what makes its finding stale cannot differ.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -16,6 +22,8 @@ use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{Subject, SubjectKind};
+use crate::domain::vo::id::ContextId;
+use crate::domain::vo::model_section::ModelSection;
 
 /// The version of the view. It is its own: the stored documents have a schema of their own, and the two change
 /// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
@@ -23,8 +31,8 @@ use crate::domain::vo::finding::{Subject, SubjectKind};
 /// `keep`; `change` and `remove` are gone.)
 pub const VIEW_VERSION: u32 = 3;
 
-/// The model as an agent is shown it, read when the store stood at `store_revision`.
-#[derive(Debug, Clone, Serialize)]
+/// The whole model as an agent is shown it, read when the store stood at `store_revision`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelView {
     version: u32,
     store_revision: u64,
@@ -33,7 +41,7 @@ pub struct ModelView {
 }
 
 /// A Context, with its assets.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ContextView {
     id: String,
     name: String,
@@ -47,7 +55,7 @@ pub struct ContextView {
 }
 
 /// A Contract and its Clauses.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ContractView {
     id: String,
     name: String,
@@ -57,7 +65,7 @@ pub struct ContractView {
 }
 
 /// A Clause.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ClauseView {
     id: String,
     label: String,
@@ -66,7 +74,7 @@ pub struct ClauseView {
 }
 
 /// An Interface, its source and its Items.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct InterfaceView {
     id: String,
     name: String,
@@ -76,7 +84,7 @@ pub struct InterfaceView {
 }
 
 /// An Item.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ItemView {
     id: String,
     /// The name the Item is cited by.
@@ -87,7 +95,7 @@ pub struct ItemView {
 }
 
 /// A Harness, its source and its Cases.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct HarnessView {
     id: String,
     name: String,
@@ -97,7 +105,7 @@ pub struct HarnessView {
 }
 
 /// A Case.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CaseView {
     id: String,
     name: String,
@@ -107,21 +115,21 @@ pub struct CaseView {
 }
 
 /// What a Case cites, each with the revision it recorded.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CitesView {
     items: Vec<CiteView>,
     clauses: Vec<CiteView>,
 }
 
 /// One citation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CiteView {
     id: String,
     revision: u64,
 }
 
 /// A change request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ChangeRequestView {
     id: String,
     title: String,
@@ -137,7 +145,7 @@ pub struct ChangeRequestView {
 }
 
 /// What a change request asks of a target.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ExpectView {
     /// The kind of the target: `project`, `context`, `contract`, `interface`, `harness`, `clause`, `item` or
     /// `case`.
@@ -151,7 +159,7 @@ pub struct ExpectView {
 }
 
 /// A finding a change request addresses.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AddressView {
     rule: String,
     /// `kind` and `id` of what it is about; none: the Project.
@@ -159,10 +167,58 @@ pub struct AddressView {
 }
 
 /// What a finding is about, by id.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct SubjectView {
     kind: &'static str,
     id: String,
+}
+
+/// The part of the model that was asked for: the Contexts asked for, each with its metadata and the sections asked
+/// for, and the change requests when they were. A section that was not asked for is left out, not empty: an absent
+/// key says "not requested", `[]` says "none".
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ModelSlice {
+    /// The version of the view format (`VIEW_VERSION`), its own and independent of the protocols that carry it.
+    version: u32,
+    /// The Contexts asked for.
+    contexts: Vec<ContextSlice>,
+    /// The change requests; present only when they were asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ChangeRequestView>")]
+    change_requests: Option<Vec<ChangeRequestView>>,
+}
+
+/// A Context in a [`ModelSlice`]: what names it, and the sections that were asked for.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ContextSlice {
+    id: String,
+    name: String,
+    /// `interface` or `contract`.
+    basis: &'static str,
+    /// The names of the Contexts it uses.
+    uses: Vec<String>,
+    /// Its Contracts; present only when they were asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ContractView>")]
+    contracts: Option<Vec<ContractView>>,
+    /// Its Interfaces; present only when they were asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<InterfaceView>")]
+    interfaces: Option<Vec<InterfaceView>>,
+    /// Its Harnesses; present only when they were asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<HarnessView>")]
+    harnesses: Option<Vec<HarnessView>>,
+}
+
+/// Which part of the model to take: the Contexts (all when none), and the sections. The names a person wrote are
+/// resolved by the use case that builds it, so a selection holds ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewSelection {
+    /// The Contexts to take; none: every Context.
+    pub(crate) contexts: Option<BTreeSet<ContextId>>,
+    /// The sections to take in each Context, and whether to take the change requests.
+    pub(crate) sections: BTreeSet<ModelSection>,
 }
 
 /// The fingerprint of anything the view holds. Serializing these types cannot fail; were it to, the fingerprint of
@@ -325,6 +381,38 @@ impl ModelView {
         self.store_revision
     }
 
+    /// The part of the model `selection` takes. The Contexts always keep their metadata; only the sections taken
+    /// are kept in them. The cut is made on the typed view, so what a reader is given is what a judged rule would
+    /// have been given, entry for entry.
+    pub(crate) fn select(&self, selection: &ViewSelection) -> ModelSlice {
+        let takes = |section| selection.sections.contains(&section);
+        let contexts = self
+            .contexts
+            .iter()
+            .filter(|c| {
+                selection
+                    .contexts
+                    .as_ref()
+                    .is_none_or(|ids| ids.iter().any(|id| id.to_string() == c.id))
+            })
+            .map(|c| ContextSlice {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                basis: c.basis,
+                uses: c.uses.clone(),
+                contracts: takes(ModelSection::Contracts).then(|| c.contracts.clone()),
+                interfaces: takes(ModelSection::Interfaces).then(|| c.interfaces.clone()),
+                harnesses: takes(ModelSection::Harnesses).then(|| c.harnesses.clone()),
+            })
+            .collect();
+        ModelSlice {
+            version: self.version,
+            contexts,
+            change_requests: takes(ModelSection::ChangeRequests)
+                .then(|| self.change_requests.clone()),
+        }
+    }
+
     /// The fingerprint of the entry of `subject` (of the whole model for a finding about the Project); none when
     /// the entry is gone.
     pub fn stamp_of(&self, subject: Option<Subject>) -> Option<Digest> {
@@ -383,5 +471,79 @@ impl ModelView {
             .iter()
             .flat_map(|c| c.harnesses.iter())
             .flat_map(|h| h.cases.iter())
+    }
+}
+
+impl ModelSlice {
+    /// A slice of no Context and no change request, for a test that needs a value to carry.
+    #[cfg(test)]
+    pub(super) fn empty(version: u32) -> ModelSlice {
+        ModelSlice {
+            version,
+            contexts: Vec::new(),
+            change_requests: None,
+        }
+    }
+
+    /// The version of the view format.
+    pub(super) fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The Contexts taken.
+    pub(super) fn contexts(&self) -> &[ContextSlice] {
+        &self.contexts
+    }
+
+    /// The change requests; none when they were not taken.
+    pub(super) fn change_requests(&self) -> Option<&[ChangeRequestView]> {
+        self.change_requests.as_deref()
+    }
+
+    /// Whether a Context with this id is in the slice.
+    pub(super) fn has_context(&self, id: &str) -> bool {
+        self.contexts.iter().any(|c| c.id == id)
+    }
+
+    /// Whether an Interface with this id is in the slice.
+    pub(super) fn has_interface(&self, id: &str) -> bool {
+        self.interfaces().any(|i| i.id == id)
+    }
+
+    /// Whether an Item with this id is in an Interface of the slice.
+    pub(super) fn has_item(&self, id: &str) -> bool {
+        self.interfaces()
+            .flat_map(|i| i.items.iter())
+            .any(|i| i.id == id)
+    }
+
+    /// Whether a Clause with this id is in a Contract of the slice.
+    pub(super) fn has_clause(&self, id: &str) -> bool {
+        self.contexts
+            .iter()
+            .flat_map(|c| c.contracts.iter().flatten())
+            .flat_map(|k| k.clauses.iter())
+            .any(|c| c.id == id)
+    }
+
+    /// Whether a Case with this id is in a Harness of the slice.
+    pub(super) fn has_case(&self, id: &str) -> bool {
+        self.contexts
+            .iter()
+            .flat_map(|c| c.harnesses.iter().flatten())
+            .flat_map(|h| h.cases.iter())
+            .any(|c| c.id == id)
+    }
+
+    /// Whether a change request with this id is in the slice.
+    pub(super) fn has_change_request(&self, id: &str) -> bool {
+        self.change_requests()
+            .is_some_and(|xs| xs.iter().any(|c| c.id == id))
+    }
+
+    fn interfaces(&self) -> impl Iterator<Item = &InterfaceView> {
+        self.contexts
+            .iter()
+            .flat_map(|c| c.interfaces.iter().flatten())
     }
 }

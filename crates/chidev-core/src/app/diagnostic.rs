@@ -22,8 +22,9 @@ use crate::domain::entity::project::Project;
 use crate::domain::rule::{
     self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_ITEMS_REQUIRED, INPUT_MISSING_FIELD,
     INPUT_RENAME_CONFLICT, INPUT_RENAME_UNKNOWN, INPUT_RENAMES_WITH_ITEMS, INPUT_REPLACES_KEPT,
-    INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP, INPUT_WRONG_TYPE, ITEMS_FAILED,
-    ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED, PROJECT_NONE, Rule, RuleKind,
+    INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP, INPUT_VIEW_SECTIONS_EMPTY,
+    INPUT_WRONG_TYPE, ITEMS_FAILED, ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED,
+    PROJECT_NONE, Rule, RuleKind,
 };
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
@@ -780,6 +781,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             AppError::ContextNotGiven => {
                 vec![Diagnostic::input(INPUT_MISSING_FIELD, None, "context")]
+            }
+            AppError::ViewSectionsEmpty => {
+                let mut d = Diagnostic::input(INPUT_VIEW_SECTIONS_EMPTY, None, "sections");
+                d.field = Some("sections".to_string());
+                vec![d]
             }
             AppError::Input(text) => match rule::rule(INPUT_INVALID.as_str()) {
                 Some(r) => vec![Diagnostic::of_rule(

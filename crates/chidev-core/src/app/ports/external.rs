@@ -3,23 +3,69 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 
+use crate::app::model_view::ModelSlice;
 use crate::domain::vo::finding::RuleId;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 
-/// A restricted, versioned view: omitted sections were not requested, not empty.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExternalModelView {
-    /// Model view format, independent of the process protocol.
-    pub version: u32,
-    /// Context metadata and the requested asset sections only.
-    pub contexts: Vec<serde_json::Value>,
-    /// Change requests, only when requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub change_requests: Option<serde_json::Value>,
+/// A restricted, versioned view: omitted sections were not requested, not empty. It is the [`ModelSlice`] of the
+/// sections a rule reads, written as an external program has always received it.
+///
+/// A program reads it as JSON in another process, so there is no way to read it back into this type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalModelView(ModelSlice);
+
+impl ExternalModelView {
+    /// The slice a program is sent.
+    pub(in crate::app) fn new(slice: ModelSlice) -> Self {
+        Self(slice)
+    }
+
+    /// The slice a program is sent.
+    pub(in crate::app) fn slice(&self) -> &ModelSlice {
+        &self.0
+    }
+
+    /// A model of no Context and no change request, for a test that needs a call to carry.
+    #[cfg(test)]
+    pub(crate) fn empty(version: u32) -> Self {
+        Self(ModelSlice::empty(version))
+    }
+}
+
+/// Writes the slice with the bytes it had before it was typed: the fields of the top level in the order they are
+/// declared (`version`, `contexts`, `change_requests`, the last only when it was requested), and each Context and the
+/// change requests through a JSON value, whose keys are in the order of their names.
+///
+/// The bytes are not for show. The digest of this document is kept with an external run as its `input_stamp` and
+/// compared with the digest of the document of the model now, so a different order of keys would make every saved
+/// run stale at once.
+impl Serialize for ExternalModelView {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let slice = &self.0;
+        let contexts = slice
+            .contexts()
+            .iter()
+            .map(by_name::<_, S::Error>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let len = 2 + usize::from(slice.change_requests().is_some());
+        let mut model = serializer.serialize_struct("ExternalModelView", len)?;
+        model.serialize_field("version", &slice.version())?;
+        model.serialize_field("contexts", &contexts)?;
+        if let Some(requests) = slice.change_requests() {
+            model.serialize_field("change_requests", &by_name::<_, S::Error>(requests)?)?;
+        }
+        model.end()
+    }
+}
+
+/// `value` as a JSON value, which keeps the keys of an object in the order of their names.
+fn by_name<T: Serialize + ?Sized, E: serde::ser::Error>(value: &T) -> Result<serde_json::Value, E> {
+    serde_json::to_value(value).map_err(E::custom)
 }
 
 /// One process request, also its stdin JSON format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExternalCall {
     /// Process protocol version.
     pub protocol: u32,
