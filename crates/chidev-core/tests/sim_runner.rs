@@ -40,7 +40,7 @@ env = {}
 
 [measure.sim.ctx]
 interpreter = ["sh"]
-program = ["{work}/prog.sh"]
+program = ["{tree}/prog.sh"]
 seeds = 3
 sample = 2
 timeout = 5

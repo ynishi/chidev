@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use self::config::{Config, WORK_DIR};
+use self::config::{Config, RunDirs, WORK_DIR};
 use super::process::{self, Capture, Over, Pipe};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
@@ -255,11 +255,9 @@ impl ProcessRunner {
                 request.run
             )));
         }
-        let work = self.root.join(WORK_DIR).join(&request.run);
         let job = Job {
             runner: self,
-            tree: work.join("tree"),
-            work: work.clone(),
+            dirs: RunDirs::of(self.root.join(WORK_DIR).join(&request.run)),
             deadline: match process::deadline_in(self.config.budget) {
                 Ok(d) => d,
                 Err(f) => return Err(config_error(f.message)),
@@ -321,8 +319,7 @@ struct Ran {
 /// One run in its directory.
 struct Job<'a> {
     runner: &'a ProcessRunner,
-    work: PathBuf,
-    tree: PathBuf,
+    dirs: RunDirs,
     deadline: tokio::time::Instant,
 }
 
@@ -335,14 +332,13 @@ impl Job<'_> {
         from_process(f, self.over_budget())
     }
 
-    /// The environment of the commands, with `{work}` made the run's directory.
+    /// The environment of the commands, with `{run}` made the run's directory and `{tree}` the root of the copy.
     fn env(&self) -> Vec<(String, String)> {
-        let work = self.work.to_string_lossy();
         self.runner
             .config
             .env
             .iter()
-            .map(|(k, v)| (k.clone(), v.replace("{work}", &work)))
+            .map(|(k, v)| (k.clone(), self.dirs.expand(v)))
             .collect()
     }
 
@@ -350,7 +346,7 @@ impl Job<'_> {
         let (program, args) = words
             .split_first()
             .ok_or_else(|| MeasureFailure::of(FailureKind::Io, "a command is empty"))?;
-        let executable = process::locate(&self.tree, program)
+        let executable = process::locate(&self.dirs.tree, program)
             .await
             .map_err(|f| self.fail(f))?;
         let digest = process::file_digest(&executable)
@@ -376,7 +372,7 @@ impl Job<'_> {
             &process::Spec {
                 executable: &command.executable,
                 args: &command.args,
-                cwd: &self.tree,
+                cwd: &self.dirs.tree,
                 env,
                 stdin: None,
                 deadline,
@@ -472,7 +468,7 @@ impl Job<'_> {
     }
 
     async fn write(&self, path: &Path, text: &str) -> Result<(), MeasureFailure> {
-        let target = self.tree.join(path);
+        let target = self.dirs.tree.join(path);
         if let Some(dir) = target.parent() {
             tokio::fs::create_dir_all(dir)
                 .await
@@ -494,7 +490,7 @@ impl Job<'_> {
         let config = &self.runner.config;
         let (root, tree, exclude) = (
             self.runner.root.clone(),
-            self.tree.clone(),
+            self.dirs.tree.clone(),
             config.copy_exclude.clone(),
         );
         tokio::task::spawn_blocking(move || copy_tree(&root, &tree, &exclude))
@@ -555,8 +551,8 @@ impl Job<'_> {
 
     /// Removes the run's directory. Failing to is not the run's failure: the measurement was made.
     async fn clean(&self) {
-        let work = self.work.clone();
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(work)).await;
+        let dir = self.dirs.dir.clone();
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
     }
 }
 

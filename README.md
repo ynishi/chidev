@@ -348,7 +348,7 @@ with fewer mutants than it was given and no failure is refused as a measurement.
 build = ["cargo", "build", "--quiet", "--tests"]   # a failure makes the mutant stillborn
 test  = ["cargo", "test", "--quiet"]               # all pass: survived; a failure: killed
 copy_exclude = [".git", "target", ".chidev"]       # relative to the root; the default
-env = { CARGO_TARGET_DIR = "{work}/target" }       # default; {work} is the run's directory
+env = { CARGO_TARGET_DIR = "{run}/target" }        # default; {run} is the run's directory
 timeout = 30            # seconds, one build or one test of a mutant
 baseline_timeout = 600  # the build and the test before any change
 budget = 900            # the whole run, at most 3600
@@ -382,6 +382,19 @@ from the code). A field that is not known is refused by name. A project with no
 `[measure]` has no runner: `measure` is refused, and the checks still judge what is
 kept. The settings digest covers the whole table and the provider's executable, so
 changing a command or upgrading the provider makes earlier runs stale.
+
+**Placeholders.** A run has two places, and each has a name of its own that means the
+same wherever it is taken: `{run}` is the run's directory (under `.chidev/measure/`,
+removed when the run ends), and `{tree}` is the root of the copy of the project the
+run works in, which is the `tree` directory inside it. A sim makes a second, fresh
+copy for the second runs of its cases (`rerun-tree`, in the same run directory), and
+there `{tree}` is the root of that copy while `{run}` stays the same. Only two kinds
+of field take a placeholder: the value of a variable of `env`, and a word of the
+`program` of a `[measure.sim.<context>]`. Any other `{...}` in them is left as it is.
+A `{run}` or `{tree}` in any other string of `[measure]` (a command, a layout `path`,
+`copy_exclude`, a key) is refused by name, and so is `{work}`, which was the name of
+both places before each had one: a configuration that still has it stops every
+command until it is rewritten.
 
 `operators` limits the classes of mutant the provider is asked for (the bundled one
 makes `rel`, `eq`, `arith`, `logic`, `bool`, `int` and `str`). Leave it out for all of
@@ -578,8 +591,8 @@ had findings once more, in a second, fresh copy.
 ```
 
 `<case>` is `seed-<n>` or `regress-<name>`; the working directory is the copy; the
-program argv is `program` of the configuration with `{work}` made the root of the
-copy. The script drives the program (standard input and output, arguments), writes
+program argv is `program` of the configuration with `{tree}` made the root of the
+copy (and `{run}` the run's directory; see "Placeholders"). The script drives the program (standard input and output, arguments), writes
 `<dir>/schedule` (the choices it made from the case) and `<dir>/trace` (what the
 program did under them), and prints, one per line:
 
@@ -646,7 +659,7 @@ build = ["python3", "-m", "py_compile", "bank.py"]   # a failure: the run fails 
 
 [measure.sim.ledger]
 interpreter = ["python3"]                  # argv prefix; the script path follows it
-program = ["python3", "{work}/bank.py"]    # the program under test; {work} = root of the copy
+program = ["python3", "{tree}/bank.py"]    # the program under test; {tree} = root of the copy
 seeds = 50       # seed-0 .. seed-49 (default 50, at most 10000)
 sample = 6       # cases with findings run again besides seed-0 (default 6, at most 1000)
 timeout = 60     # seconds, one case (default 60)
@@ -666,8 +679,7 @@ path = "sim.py"
 Every Interface a sim Harness builds needs a layout entry and a Pin (`pin` keeps
 the code text); the script needs one. `build` runs with `baseline_timeout`. The
 settings digest covers the whole `[measure]` table and the interpreter's
-executable. Note that `{work}` in `program` is the root of the copy, while in `env`
-it is the run's directory (its parent).
+executable.
 
 #### Rules
 

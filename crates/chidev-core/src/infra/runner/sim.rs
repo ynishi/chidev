@@ -9,10 +9,11 @@
 //! ```
 //!
 //! `<case>` is `seed-<n>` or `regress-<name>`, the working directory is the copy, and `<program argv...>` is the
-//! configured `program` with `{work}` made the root of the copy. The script drives the program as a black box
-//! (standard input and output, arguments) and writes two files into `<dir>`: `schedule`, the choices it made for
-//! this case from its seed, and `trace`, what the program did under them. chidev takes their SHA-256 digests; the
-//! script does not report them. On standard output the script prints, one per line:
+//! configured `program` with `{tree}` made the root of the copy (`rerun-tree` in the second copy) and `{run}` the
+//! directory of the run. The script drives the program as a black box (standard input and output, arguments) and
+//! writes two files into `<dir>`: `schedule`, the choices it made for this case from its seed, and `trace`, what the
+//! program did under them. chidev takes their SHA-256 digests; the script does not report them. On standard output
+//! the script prints, one per line:
 //!
 //! ```text
 //! FINDING <case> step <k> <contract>:<label>: <text>   a promise of the Clause did not hold after step k (k from 1)
@@ -49,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::super::process::{self, Capture, Over, Pipe};
-use super::config::{SimConfig, WORK_DIR};
+use super::config::{RunDirs, SimConfig, WORK_DIR};
 use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, config_error, io, millis, provider};
 use crate::app::ports::measure::{InterfaceText, RunnerError, SimulateReport, SimulateRequest};
 use crate::domain::vo::digest::Digest;
@@ -305,7 +306,6 @@ impl ProcessRunner {
             )));
         }
         let deadline = process::deadline_in(cfg.budget).map_err(|f| config_error(f.message))?;
-        let work = self.root.join(WORK_DIR).join(&request.run);
         let plan = Plan {
             request,
             cfg,
@@ -314,8 +314,7 @@ impl ProcessRunner {
         };
         let first = Job {
             runner: self,
-            tree: work.join("tree"),
-            work: work.clone(),
+            dirs: RunDirs::of(self.root.join(WORK_DIR).join(&request.run)),
             deadline,
         };
         let mut progress = SimProgress::default();
@@ -342,7 +341,7 @@ impl Job<'_> {
         let config = &self.runner.config;
         let (root, tree, exclude) = (
             self.runner.root.clone(),
-            self.tree.clone(),
+            self.dirs.tree.clone(),
             config.copy_exclude.clone(),
         );
         tokio::task::spawn_blocking(move || super::copy_tree(&root, &tree, &exclude))
@@ -408,18 +407,23 @@ impl Job<'_> {
             ));
         }
         let stem = case.to_string();
-        let dir: PathBuf = self.work.join(format!("out-{tag}")).join(&stem);
+        let dir: PathBuf = self.dirs.dir.join(format!("out-{tag}")).join(&stem);
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| io(&format!("cannot make {}", dir.display()), e))?;
-        let tree = self.tree.to_string_lossy().into_owned();
         let mut args = interpreter.args.clone();
-        args.push(self.tree.join(plan.script).to_string_lossy().into_owned());
+        args.push(
+            self.dirs
+                .tree
+                .join(plan.script)
+                .to_string_lossy()
+                .into_owned(),
+        );
         args.push(stem.clone());
         args.push("--out".to_string());
         args.push(dir.to_string_lossy().into_owned());
         args.push("--".to_string());
-        args.extend(plan.cfg.program.iter().map(|w| w.replace("{work}", &tree)));
+        args.extend(plan.cfg.program.iter().map(|w| self.dirs.expand(w)));
         let command = Command {
             executable: interpreter.executable.clone(),
             args,
@@ -435,7 +439,7 @@ impl Job<'_> {
             &process::Spec {
                 executable: &command.executable,
                 args: &command.args,
-                cwd: &self.tree,
+                cwd: &self.dirs.tree,
                 env: &env,
                 stdin: None,
                 deadline,
@@ -564,8 +568,7 @@ impl Job<'_> {
         // A second, fresh copy: what the first run left behind (files the program wrote, a cache) is not there.
         let second = Job {
             runner: self.runner,
-            work: self.work.clone(),
-            tree: self.work.join("rerun-tree"),
+            dirs: self.dirs.rerun(),
             deadline: self.deadline,
         };
         let interpreter = second.sim_prepare(plan, "rerun", out).await?;

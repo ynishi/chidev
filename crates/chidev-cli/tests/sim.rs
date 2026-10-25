@@ -60,7 +60,7 @@ fn exec(dir: &Path, ops: &[Value]) -> Vec<Value> {
 }
 
 fn project(name: &str) -> PathBuf {
-    project_running(name, r#"["python3", "{work}/bank.py"]"#)
+    project_running(name, r#"["python3", "{tree}/bank.py"]"#)
 }
 
 /// As [`project`], the program under test being the command `program` (a TOML array).
@@ -463,7 +463,7 @@ fn one_sim_over_two_contracts_with_a_label_in_common_puts_each_finding_on_its_ow
 #[test]
 fn a_program_that_cannot_be_started_is_a_failed_run_with_no_finding_and_only_sim_error_speaks() {
     // The program is a path that is not there: the script cannot start it in any case and says so.
-    let dir = project_running("sim-e2e-nostart", r#"["{work}/no-such-program"]"#);
+    let dir = project_running("sim-e2e-nostart", r#"["{tree}/no-such-program"]"#);
     let mut setup = vec![json!({"op":"init"})];
     setup.extend(model(SIM));
     setup.push(json!({"op":"pin","context":"ledger","interface":"bank","code":BANK}));

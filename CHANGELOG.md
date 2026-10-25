@@ -224,10 +224,20 @@ and this project adheres to
   program. See the README, "Simulation", which also says how a sim script is written
   (blind, from the Contracts and Interfaces only, citing every Clause it checks in the
   sweep, with no randomness but the seed).
-- `[measure.sim.<context>]` in `checks.toml`: `interpreter`, `program` (with `{work}`
+- `[measure.sim.<context>]` in `checks.toml`: `interpreter`, `program` (with `{tree}`
   for the root of the copy), `seeds` (50), `sample` (6), `timeout` and `budget`. A
   layout entry for an Interface needs a `lang` only for mutation, and `test` is
   needed only for mutation, so a project that is only simulated needs neither.
+- Placeholders in `[measure]`: `{run}` is the run's directory and `{tree}` the root of
+  the copy (`rerun-tree` in the second copy of a sim), the same in every field that
+  takes one. Only the value of an `env` variable and a word of `sim.<context>.program`
+  do (the default `env` is `CARGO_TARGET_DIR = "{run}/target"`); any other `{...}`
+  there is left as it is.
+  - `{work}`, and a `{run}` or `{tree}` in any field that takes no placeholder, is
+    refused as a configuration error naming the field, so every command stops until
+    the `checks.toml` is rewritten.
+  - Rewriting the table changes the settings digest, so the measurements and
+    simulations kept before are stale; measure again.
 - Eight builtin checks: `sim.shape-kept` (error, hook `check`),
   `sim.uncited-clause` (warning), `sim.unrun` (warning), `sim.stale` (warning),
   `sim.finding` (error, one per Clause, with the first case and step), `sim.unreached`

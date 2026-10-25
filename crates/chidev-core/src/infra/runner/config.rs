@@ -24,9 +24,77 @@ const MAX_SAMPLE: usize = 1_000;
 /// state (which holds the runs themselves).
 const DEFAULT_EXCLUDE: [&str; 3] = [".git", "target", ".chidev"];
 
+/// The placeholder for the directory of a run.
+const RUN: &str = "{run}";
+/// The placeholder for the root of the copy a run works in.
+const TREE: &str = "{tree}";
+/// The placeholder that named one of the two places before each had a name of its own. It is refused everywhere,
+/// so a configuration that still has it does not run with the text left as it is.
+const RETIRED: &str = "{work}";
+
 /// The target directory a run builds into when the file sets no environment: inside the run's own directory, so
 /// a mutant's artifacts never reach the project's or another run's.
-const DEFAULT_ENV: [(&str, &str); 1] = [("CARGO_TARGET_DIR", "{work}/target")];
+const DEFAULT_ENV: [(&str, &str); 1] = [("CARGO_TARGET_DIR", "{run}/target")];
+
+/// A value of the configuration that may name the places of a run: the value of an `env` variable and a word of
+/// the `program` of a sim. `{run}` is the run's directory and `{tree}` the root of the copy the run works in (the
+/// second copy of a sim, which its second runs are made in, is `rerun-tree` in the same directory, so there `{tree}`
+/// is its root); any other `{...}` stays as it is. Only [`RunDirs::expand`] reads the text, so the fields that are
+/// a `Template` are the ones that are expanded, and [`check_placeholders`] refuses a placeholder anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Template(String);
+
+/// The two places of one run: its directory, and the root of the copy of the project under it (`tree`, or
+/// `rerun-tree` for the second copy of a sim). The names `{run}` and `{tree}` of a [`Template`] stand for them.
+#[derive(Debug, Clone)]
+pub(super) struct RunDirs {
+    /// The directory of the run, where its output and its target directory go.
+    pub dir: PathBuf,
+    /// The root of the copy the run works in.
+    pub tree: PathBuf,
+}
+
+impl RunDirs {
+    /// The first copy of the run in `dir`.
+    pub(super) fn of(dir: PathBuf) -> Self {
+        Self {
+            tree: dir.join("tree"),
+            dir,
+        }
+    }
+
+    /// The same run with its second, fresh copy: `{tree}` is `rerun-tree` there.
+    pub(super) fn rerun(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            tree: self.dir.join("rerun-tree"),
+        }
+    }
+
+    /// `template` with `{run}` made the directory of the run and `{tree}` the root of the copy. Any other `{...}`
+    /// is left as it is: a script may need a brace in an argument.
+    pub(super) fn expand(&self, template: &Template) -> String {
+        let (dir, tree) = (self.dir.to_string_lossy(), self.tree.to_string_lossy());
+        let mut out = String::with_capacity(template.0.len());
+        let mut rest = template.0.as_str();
+        while let Some(at) = rest.find('{') {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            if let Some(after) = tail.strip_prefix(RUN) {
+                out.push_str(&dir);
+                rest = after;
+            } else if let Some(after) = tail.strip_prefix(TREE) {
+                out.push_str(&tree);
+                rest = after;
+            } else {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,8 +185,9 @@ pub(super) struct Layout {
 pub(super) struct SimConfig {
     /// The interpreter and its leading arguments (`["python3"]`); the script follows.
     pub interpreter: Vec<String>,
-    /// The program under test, as the script is to start it; `{work}` is the root of the copy.
-    pub program: Vec<String>,
+    /// The program under test, as the script is to start it; each word is a [`Template`], so `{tree}` is the root
+    /// of the copy.
+    pub program: Vec<Template>,
     /// The seeds run: `seed-0` to `seed-<seeds - 1>`.
     pub seeds: u32,
     /// The most cases with findings that are run a second time (besides `seed-0`).
@@ -133,8 +202,8 @@ pub(super) struct SimConfig {
 #[derive(Debug, Clone)]
 pub(super) struct Config {
     pub copy_exclude: Vec<PathBuf>,
-    /// Variable and value; the value may hold `{work}`.
-    pub env: Vec<(String, String)>,
+    /// Variable and value; the value is a [`Template`], so it may hold `{run}` (the run's directory) and `{tree}`.
+    pub env: Vec<(String, Template)>,
     pub build: Vec<String>,
     /// Without it nothing is mutated (a project that is only simulated).
     pub test: Option<Vec<String>>,
@@ -210,8 +279,91 @@ fn inside(what: &str, path: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// A step of the path to a value of the table.
+enum Step {
+    Key(String),
+    Index(usize),
+}
+
+/// The path as the file's reader would name the field: `layout[0].path`, `sim.ledger.program[1]`.
+fn named(trail: &[Step]) -> String {
+    let mut path = String::new();
+    for step in trail {
+        match step {
+            Step::Key(k) if path.is_empty() => path.push_str(k),
+            Step::Key(k) => {
+                path.push('.');
+                path.push_str(k);
+            }
+            Step::Index(i) => path.push_str(&format!("[{i}]")),
+        }
+    }
+    path
+}
+
+/// Whether the value at `trail` is a [`Template`]: the value of an `env` variable, or a word of the `program` of a
+/// sim. The one list of the places that take a placeholder; the types in [`Config`] are the other, and a test keeps
+/// them together.
+fn takes_placeholders(trail: &[Step]) -> bool {
+    match trail {
+        [Step::Key(env), Step::Key(_)] => env == "env",
+        [
+            Step::Key(sim),
+            Step::Key(_),
+            Step::Key(program),
+            Step::Index(_),
+        ] => sim == "sim" && program == "program",
+        _ => false,
+    }
+}
+
+/// The error for `text` at `trail`: `{work}` anywhere, or `{run}` or `{tree}` where no placeholder is taken.
+fn refuse_placeholder(text: &str, trail: &[Step], takes: bool) -> Result<(), String> {
+    if text.contains(RETIRED) {
+        return Err(format!(
+            "`{}` has `{RETIRED}`, which is not a placeholder any more: use `{RUN}` (the run's directory) or `{TREE}` (the root of the copy)",
+            named(trail)
+        ));
+    }
+    if !takes && (text.contains(RUN) || text.contains(TREE)) {
+        return Err(format!(
+            "`{}` takes no placeholder (`{RUN}`, `{TREE}`): only the value of an `env` variable and a word of `sim.<context>.program` do",
+            named(trail)
+        ));
+    }
+    Ok(())
+}
+
+/// Walks the table before it is read into its types, and refuses `{work}` anywhere and `{run}` or `{tree}` in any
+/// string or key but the values of [`takes_placeholders`]. A field added to the table is therefore refused a
+/// placeholder until it is listed there.
+fn check_placeholders(value: &toml::Value, trail: &mut Vec<Step>) -> Result<(), String> {
+    match value {
+        toml::Value::String(text) => refuse_placeholder(text, trail, takes_placeholders(trail)),
+        toml::Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                trail.push(Step::Index(i));
+                check_placeholders(item, trail)?;
+                trail.pop();
+            }
+            Ok(())
+        }
+        toml::Value::Table(table) => {
+            for (key, item) in table {
+                trail.push(Step::Key(key.clone()));
+                refuse_placeholder(key, trail, false)?;
+                check_placeholders(item, trail)?;
+                trail.pop();
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The configuration the table `value` (the `[measure]` of the file) states.
 pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
+    check_placeholders(value, &mut Vec::new())?;
     let raw: Raw = value
         .clone()
         .try_into()
@@ -275,11 +427,11 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
                     return Err(format!("`env` variable `{k}` is not a name and a value"));
                 }
             }
-            env.into_iter().collect()
+            env.into_iter().map(|(k, v)| (k, Template(v))).collect()
         }
         None => DEFAULT_ENV
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| (k.to_string(), Template(v.to_string())))
             .collect(),
     };
     let mut sim = BTreeMap::new();
@@ -313,7 +465,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             context,
             SimConfig {
                 interpreter: s.interpreter,
-                program: s.program,
+                program: s.program.into_iter().map(Template).collect(),
                 seeds,
                 sample,
                 timeout: sim_timeout,
@@ -424,7 +576,10 @@ path = "tests/stock.rs"
         );
         assert_eq!(
             config.env,
-            [("CARGO_TARGET_DIR".to_string(), "{work}/target".to_string())]
+            [(
+                "CARGO_TARGET_DIR".to_string(),
+                Template("{run}/target".to_string())
+            )]
         );
         let (place, lang) = config.interface("inventory", "stock").unwrap();
         assert_eq!(
@@ -538,7 +693,7 @@ path = "tests/stock.rs"
 build = ["python3", "-m", "py_compile", "prog.py"]
 [sim.inventory]
 interpreter = ["python3"]
-program = ["python3", "{work}/prog.py"]
+program = ["python3", "{tree}/prog.py"]
 [[layout]]
 context = "inventory"
 interface = "prog"
@@ -556,7 +711,10 @@ path = "sim.py"
         assert!(config.test.is_none());
         let sim = &config.sim["inventory"];
         assert_eq!(sim.interpreter, ["python3"]);
-        assert_eq!(sim.program, ["python3", "{work}/prog.py"]);
+        assert_eq!(
+            sim.program,
+            ["python3", "{tree}/prog.py"].map(|w| Template(w.to_string()))
+        );
         assert_eq!((sim.seeds, sim.sample), (50, 6));
         assert_eq!(sim.timeout, Duration::from_secs(60));
         assert_eq!(sim.budget, Duration::from_secs(600));
@@ -577,7 +735,7 @@ path = "sim.py"
                 "sim.inventory.interpreter",
             ),
             (
-                "program = [\"python3\", \"{work}/prog.py\"]",
+                "program = [\"python3\", \"{tree}/prog.py\"]",
                 "program = []",
                 "sim.inventory.program",
             ),
@@ -625,6 +783,215 @@ path = "sim.py"
         let one = parse(&table(SIM)).unwrap().digest;
         let other = SIM.replacen("[sim.inventory]", "[sim.inventory]\nseeds = 9", 1);
         assert_ne!(one, parse(&table(&other)).unwrap().digest);
+    }
+
+    fn dirs() -> RunDirs {
+        RunDirs::of(PathBuf::from("/p/.chidev/measure/r1"))
+    }
+
+    fn expanded(text: &str) -> String {
+        dirs().expand(&Template(text.to_string()))
+    }
+
+    #[test]
+    fn expand_makes_run_the_directory_and_tree_the_copy_and_leaves_other_braces() {
+        assert_eq!(expanded("{run}/target"), "/p/.chidev/measure/r1/target");
+        assert_eq!(
+            expanded("{tree}/bank.py"),
+            "/p/.chidev/measure/r1/tree/bank.py"
+        );
+        assert_eq!(
+            expanded("{tree}:{run}"),
+            "/p/.chidev/measure/r1/tree:/p/.chidev/measure/r1"
+        );
+        // any other brace stays as it is, and what was put in is not expanded again
+        assert_eq!(expanded("{x} {{ { {tree"), "{x} {{ { {tree");
+        let odd = RunDirs::of(PathBuf::from("/a{tree}b"));
+        assert_eq!(odd.expand(&Template("{run}".to_string())), "/a{tree}b");
+    }
+
+    #[test]
+    fn in_the_second_copy_of_a_sim_tree_is_rerun_tree_and_run_is_the_same_directory() {
+        let first = dirs();
+        let second = first.rerun();
+        assert_eq!(second.dir, first.dir);
+        let tree = |d: &RunDirs| d.expand(&Template("{tree}".to_string()));
+        assert_eq!(tree(&first), "/p/.chidev/measure/r1/tree");
+        assert_eq!(tree(&second), "/p/.chidev/measure/r1/rerun-tree");
+        assert_eq!(
+            second.expand(&Template("{run}/target".to_string())),
+            "/p/.chidev/measure/r1/target"
+        );
+    }
+
+    #[test]
+    fn work_is_refused_everywhere_with_the_field_and_the_two_names_that_replace_it() {
+        for (from, to, field) in [
+            (
+                "build = [",
+                "env = { CARGO_TARGET_DIR = \"{work}/target\" }\nbuild = [",
+                "env.CARGO_TARGET_DIR",
+            ),
+            (
+                "build = [\"cargo\", \"build\", \"--tests\"]",
+                "build = [\"cargo\", \"{work}\"]",
+                "build[1]",
+            ),
+            (
+                "path = \"src/stock.rs\"",
+                "path = \"{work}/s.rs\"",
+                "layout[0].path",
+            ),
+            (
+                "[mutants]",
+                "[mutants]\n\"{work}\" = [\"x\"]\n",
+                "mutants.{work}",
+            ),
+        ] {
+            let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
+            assert!(error.contains(&format!("`{field}`")), "{error} vs {field}");
+            assert!(
+                error.contains("`{run}`") && error.contains("`{tree}`"),
+                "{error}"
+            );
+            assert!(
+                error.contains("run's directory") && error.contains("root of the copy"),
+                "{error}"
+            );
+        }
+        let error = parse(&table(&SIM.replacen("{tree}", "{work}", 1))).unwrap_err();
+        assert!(error.contains("`sim.inventory.program[1]`"), "{error}");
+        assert!(
+            error.contains("`{run}`") && error.contains("`{tree}`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_is_refused_where_none_is_taken_and_the_field_is_named() {
+        for (from, to, field) in [
+            (
+                "\"build\", \"--tests\"]",
+                "\"build\", \"--tests\", \"{run}/x\"]",
+                "build[3]",
+            ),
+            (
+                "\"cargo\", \"test\"]",
+                "\"cargo\", \"test\", \"{tree}\"]",
+                "test[2]",
+            ),
+            (
+                "\"mutants-rust\"]",
+                "\"mutants-rust\", \"{run}\"]",
+                "mutants.rust[3]",
+            ),
+            (
+                "[mutants]",
+                "[items]\nrust = [\"chidev\", \"{tree}/p\"]\n[mutants]",
+                "items.rust[1]",
+            ),
+            (
+                "path = \"src/stock.rs\"",
+                "path = \"{run}/stock.rs\"",
+                "layout[0].path",
+            ),
+            (
+                "build = [",
+                "copy_exclude = [\".git\", \"{tree}\"]\nbuild = [",
+                "copy_exclude[1]",
+            ),
+            (
+                "[mutants]",
+                "[items]\n\"{run}\" = [\"x\"]\n[mutants]",
+                "items.{run}",
+            ),
+            (
+                "build = [",
+                "env = { \"{tree}\" = \"x\" }\nbuild = [",
+                "env.{tree}",
+            ),
+            (
+                "build = [",
+                "env = { K = [\"{run}\"] }\nbuild = [",
+                "env.K[0]",
+            ),
+        ] {
+            let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
+            assert!(error.contains(&format!("`{field}`")), "{error} vs {field}");
+            assert!(error.contains("takes no placeholder"), "{error}");
+            assert!(
+                error.contains("`env` variable") && error.contains("sim.<context>.program"),
+                "{error}"
+            );
+        }
+        let error = parse(&table(&SIM.replacen(
+            "interpreter = [\"python3\"]",
+            "interpreter = [\"python3\", \"{tree}\"]",
+            1,
+        )))
+        .unwrap_err();
+        assert!(error.contains("`sim.inventory.interpreter[1]`"), "{error}");
+        assert!(error.contains("takes no placeholder"), "{error}");
+        let error = parse(&table(&SIM.replacen(
+            "[sim.inventory]",
+            "[sim.\"{run}\"]\ninterpreter = [\"python3\"]\nprogram = [\"x\"]\n[sim.inventory]",
+            1,
+        )))
+        .unwrap_err();
+        assert!(error.contains("`sim.{run}`"), "{error}");
+    }
+
+    #[test]
+    fn a_table_without_env_has_the_digest_of_the_table_alone() {
+        // the default env is not in the table, so it is not in the digest either
+        let value = table(MINIMAL);
+        assert!(value.get("env").is_none());
+        assert_eq!(
+            parse(&value).unwrap().digest,
+            Digest::of(&serde_json::to_vec(&value).unwrap()).to_string()
+        );
+    }
+
+    #[test]
+    fn the_places_that_take_a_placeholder_are_the_ones_that_are_expanded() {
+        // the walk that allows a placeholder and the types that are expanded must name the same two places
+        let text = SIM
+            .replacen(
+                "build = ",
+                "env = { TARGET = \"{run}/t\", LINK = \"{tree}/l/{x}\" }\nbuild = ",
+                1,
+            )
+            .replace(
+                "\"{tree}/prog.py\"",
+                "\"{tree}/prog.py\", \"{run}/out\", \"{y}\"",
+            );
+        let config = parse(&table(&text)).unwrap();
+        let env: Vec<(&str, String)> = config
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), dirs().expand(v)))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("LINK", "/p/.chidev/measure/r1/tree/l/{x}".to_string()),
+                ("TARGET", "/p/.chidev/measure/r1/t".to_string()),
+            ]
+        );
+        let program: Vec<String> = config.sim["inventory"]
+            .program
+            .iter()
+            .map(|w| dirs().expand(w))
+            .collect();
+        assert_eq!(
+            program,
+            [
+                "python3",
+                "/p/.chidev/measure/r1/tree/prog.py",
+                "/p/.chidev/measure/r1/out",
+                "{y}"
+            ]
+        );
     }
 
     #[test]
