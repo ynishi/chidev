@@ -1,6 +1,9 @@
-# chidev
+# chi (知)
 
 Contract, Interface and Harness as the assets of a codebase; the code is a cache pinned to them
+
+chi is the project's name: the initials of Contract, Harness and Interface, and
+知 (knowledge). The crates, the command and the repository are named `chidev`.
 
 ## Crates
 

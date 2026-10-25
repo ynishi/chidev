@@ -15,28 +15,34 @@
 //!
 //! # Where the truth is
 //!
-//! chidev's store is the source of truth of both halves of what it handles:
+//! The model is the asset, and chidev's store is its source of truth. The model
+//! is everything [`domain`] holds: Contracts and their Clauses, Interfaces and
+//! their Items, Harnesses and their Cases, Pins, change requests and their
+//! decisions, measurements and judgments, with their ids and revisions. The text
+//! of a Contract or an Interface is part of it, not a half that could be kept
+//! somewhere else; a measurement cannot be rebuilt from anything outside it.
 //!
-//! - **the text of an asset**: a Contract and its Clauses, an Interface's
-//!   declarations, a Harness;
-//! - **the state**: ids, revisions, the revision a citation recorded, Pins,
-//!   measurements, judgments, change requests and their decisions. It is state
-//!   across time, and a measurement cannot be rebuilt from anything outside it.
+//! Files are outside the model. They are the user's, handled with whatever the
+//! user works with, and chidev does not manage them:
 //!
-//! Files are a way in and out, not a second home of the assets:
-//!
-//! - chidev reads the text it is given, inline or from a file, and gives its model
-//!   back on request (`view`). Moving text between files and the store is a thing
-//!   chidev does; the files are the user's.
-//! - chidev does not manage files outside its store. It records no path an asset
-//!   came from or went to, follows no file, and gives a file no id. Where the
-//!   files and the store are kept, how they are laid out, and whether they are in
-//!   Git, is the user's to choose; so is how the code's tree is tied to the
-//!   assets (`[[measure.layout]]` is written by the user, and chidev only reads
-//!   it). chidev depends on no Git and no Git host.
-//! - An asset is known by the names written in it (a Context, a name, a Clause's
-//!   label, an Item's key), not by a file. An Item that is renamed says so with
-//!   `replaces`.
+//! - chidev reads the text it is given, inline or from a file named relative to
+//!   the directory it runs in, and gives its model back on request (`view`). The
+//!   file is read once, when the operation runs.
+//! - It records no path an asset came from or went to, follows no file, and gives
+//!   a file no id. (The path an assumption cites as its evidence is kept as a
+//!   citation, and chidev does not open it.) Where the files and the store are
+//!   kept, how they are laid out, and whether they are in Git, is the user's to
+//!   choose. chidev depends on no Git and no Git host.
+//! - The project's settings (`checks.toml`) say where the adapters work: which
+//!   checkers run, how a measurement builds and tests, where an Interface's code
+//!   is written in the copy a measurement makes (`[[measure.layout]]`). The user
+//!   writes them and chidev only reads them. They hold no asset's identity: the
+//!   model means the same without them. chidev never writes them, uses a path in
+//!   them only as a place in that copy, and never takes an asset's text from one.
+//! - An asset is known by the names it is given when it is put (a Context, a name,
+//!   a Clause's label, an Item's key), not by a file. Only an Item keeps its id
+//!   when it is renamed (`replaces`); renaming anything else makes a new asset,
+//!   and what cited the old one still cites the old one.
 //! - chidev is a local command over a local store. A hosted service, when one is
 //!   needed, is another adapter of the same [`Store`](app::ports::Store) port over
 //!   this core; [`domain`] does not change with it.
