@@ -518,24 +518,44 @@ fn harness_kind(kind: Option<&str>) -> Result<Option<HarnessKind>, AppError> {
     .transpose()
 }
 
-/// A part of the model a `view` reads.
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum SectionDto {
-    Contracts,
-    Interfaces,
-    Harnesses,
-    ChangeRequests,
+/// A part of the model a `view` reads, written as its word. The words are the domain's (`ModelSection::word`), so a
+/// section added there can be asked for here without a second list to keep in step.
+#[derive(Debug, Clone, Copy)]
+struct SectionDto(ModelSection);
+
+impl<'de> Deserialize<'de> for SectionDto {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<SectionDto, D::Error> {
+        let word = String::deserialize(d)?;
+        ModelSection::from_word(&word)
+            .map(SectionDto)
+            .ok_or_else(|| {
+                // Serde's own wording, so the diagnostic reads it as an unknown variant and suggests the near word.
+                let expected = ModelSection::ALL
+                    .iter()
+                    .map(|s| format!("`{}`", s.word()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                serde::de::Error::custom(format!(
+                    "unknown variant `{word}`, expected one of {expected}"
+                ))
+            })
+    }
+}
+
+impl JsonSchema for SectionDto {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SectionDto".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let words: Vec<&str> = ModelSection::ALL.iter().map(|s| s.word()).collect();
+        schemars::json_schema!({ "type": "string", "enum": words })
+    }
 }
 
 impl From<SectionDto> for ModelSection {
     fn from(s: SectionDto) -> ModelSection {
-        match s {
-            SectionDto::Contracts => ModelSection::Contracts,
-            SectionDto::Interfaces => ModelSection::Interfaces,
-            SectionDto::Harnesses => ModelSection::Harnesses,
-            SectionDto::ChangeRequests => ModelSection::ChangeRequests,
-        }
+        s.0
     }
 }
 

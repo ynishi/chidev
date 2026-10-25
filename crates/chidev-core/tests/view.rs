@@ -210,7 +210,7 @@ async fn a_view_of_every_section_is_the_model_a_judged_rule_is_given() {
     let read_at = app
         .view(&ViewInput {
             contexts: None,
-            sections: sections(&ModelSection::ALL),
+            sections: sections(ModelSection::ALL),
         })
         .await
         .unwrap();

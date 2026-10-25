@@ -8,6 +8,7 @@
 use chidev_core::app::{ModelSlice, VIEW_VERSION};
 use clap::ValueEnum;
 use schemars::generate::SchemaSettings;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 /// The version of the protocol `chidev exec` speaks: the operations it reads and the shape of the lines it prints.
@@ -23,9 +24,6 @@ pub enum Name {
 }
 
 impl Name {
-    /// Every schema, in the order they are listed.
-    const ALL: [Name; 2] = [Name::Ops, Name::View];
-
     /// The name as it is typed on the command line.
     fn word(self) -> String {
         self.to_possible_value()
@@ -74,14 +72,33 @@ impl Name {
     }
 }
 
-/// The schemas there are, to choose from.
-pub fn list() -> Value {
-    json!({
-        "schemas": Name::ALL.map(|n| json!({
-            "name": n.word(),
-            "title": n.title(),
-            "$id": n.id(),
-            "about": n.about(),
-        })),
-    })
+/// The schemas there are, to choose from: what `chidev schema` prints without a name.
+#[derive(Debug, Serialize)]
+pub struct SchemaList {
+    schemas: Vec<SchemaEntry>,
+}
+
+/// One schema of the list.
+#[derive(Debug, Serialize)]
+struct SchemaEntry {
+    name: String,
+    title: String,
+    #[serde(rename = "$id")]
+    id: String,
+    about: &'static str,
+}
+
+/// The schemas there are, in the order clap lists the names.
+pub fn list() -> SchemaList {
+    SchemaList {
+        schemas: Name::value_variants()
+            .iter()
+            .map(|n| SchemaEntry {
+                name: n.word(),
+                title: n.title(),
+                id: n.id(),
+                about: n.about(),
+            })
+            .collect(),
+    }
 }

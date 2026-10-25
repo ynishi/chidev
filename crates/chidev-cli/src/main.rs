@@ -108,12 +108,19 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Schema { name } => {
-            let printed = match name {
-                Some(name) => name.schema(),
-                None => schema::list(),
-            };
             // a document to read, not a line of a stream: indented
-            match writeln!(io::stdout().lock(), "{printed:#}") {
+            let printed = match name {
+                Some(name) => serde_json::to_string_pretty(&name.schema()),
+                None => serde_json::to_string_pretty(&schema::list()),
+            };
+            let printed = match printed {
+                Ok(printed) => printed,
+                Err(e) => {
+                    eprintln!("chidev schema: cannot write the schema: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            match writeln!(io::stdout().lock(), "{printed}") {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("chidev schema: cannot write the schema: {e}");
