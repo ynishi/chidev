@@ -13,8 +13,8 @@
 mod change_set;
 use self::change_set::only_put;
 pub use self::change_set::{
-    ChangeSetDone, ChangeSetInput, ContractPut, HarnessPut, InterfacePut, PutDone, PutInput,
-    RetireInput,
+    ChangeSetDone, ChangeSetInput, ContractPut, HarnessPut, InterfacePut, ItemsInput, PutDone,
+    PutInput, RetireInput,
 };
 mod check;
 mod diagnostic;
@@ -1326,27 +1326,25 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         items: &[ItemInput],
     ) -> Result<Checked<Put<InterfaceId>>, AppError> {
-        self.put_interface_of(context, name, source, Some(items), &[])
+        self.put_interface_of(context, name, source, ItemsInput::Written(items.to_vec()))
             .await
     }
 
-    /// As [`App::put_interface`], and the Items may be left to the provider: with `items` none, the provider of the
-    /// language the Interface is laid out with finds them in `source`, and `renames` hand the id of an Item that had
-    /// the key `from` to the one found under the key `to`. `renames` go with the provider's Items only.
+    /// As [`App::put_interface`], and the Items may be left to the provider: with [`ItemsInput::Found`], the provider
+    /// of the language the Interface is laid out with finds them in `source`, and its `renames` hand the id of an
+    /// Item that had the key `from` to the one found under the key `to`.
     pub async fn put_interface_of(
         &mut self,
         context: &str,
         name: &str,
         source: &str,
-        items: Option<&[ItemInput]>,
-        renames: &[RenameInput],
+        items: ItemsInput,
     ) -> Result<Checked<Put<InterfaceId>>, AppError> {
         let put = PutInput::Interface(InterfacePut {
             context: context.to_string(),
             name: name.to_string(),
             source: source.to_string(),
-            items: items.map(<[ItemInput]>::to_vec),
-            renames: renames.to_vec(),
+            items,
         });
         let done = self.apply_one(put).await?;
         only_put(done, InterfaceId::from_uuid)

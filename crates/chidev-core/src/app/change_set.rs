@@ -60,15 +60,23 @@ pub struct InterfacePut {
     pub name: String,
     /// Its code.
     pub source: String,
-    /// Its Items; one keeps its id when its key (or the one it replaces) is one the Interface has. None: the
-    /// provider of the language the Interface is laid out with finds them in `source`, before the set is planned
-    /// and before the store is read, so a provider that fails leaves everything as it was. Given, they are all of
-    /// them and no provider is asked.
-    pub items: Option<Vec<ItemInput>>,
-    /// For the Items the provider finds: the Item that had the key `from` is the one found under `to`, and keeps
-    /// its id (what `replaces` is for Items that are written). Only the keys named are renamed. Given with `items`,
-    /// they are refused.
-    pub renames: Vec<RenameInput>,
+    /// Its Items, written or found.
+    pub items: ItemsInput,
+}
+
+/// Where the Items of an Interface put come from. One keeps its id when its key (or the one it replaces) is one the
+/// Interface has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemsInput {
+    /// They are all of them, and no provider is asked.
+    Written(Vec<ItemInput>),
+    /// The provider of the language the Interface is laid out with finds them in `source`, before the set is planned
+    /// and before the store is read, so a provider that fails leaves everything as it was.
+    Found {
+        /// The Item that had the key `from` is the one found under `to`, and keeps its id (what `replaces` is for
+        /// Items that are written). Only the keys named are renamed.
+        renames: Vec<RenameInput>,
+    },
 }
 
 /// A Harness to make or revise.
@@ -529,18 +537,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let PutInput::Interface(i) = put else {
                 continue;
             };
-            match (&i.items, i.renames.is_empty()) {
-                (Some(_), false) => problems.push(AppError::RenamesWithItems {
-                    context: i.context.clone(),
-                    interface: i.name.clone(),
-                }),
-                (Some(_), true) => {}
-                (None, _) => match self.find_items(i).await {
+            if let ItemsInput::Found { .. } = i.items {
+                match self.find_items(i).await {
                     Ok(items) => {
                         found.insert(n, items);
                     }
                     Err(e) => problems.push(e),
-                },
+                }
             }
         }
         if problems.is_empty() {
@@ -581,9 +584,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             old.and_then(|x| x.item_by_key(&key)).map(|it| it.id())
         };
         let items = match (&i.items, found) {
-            (Some(items), _) => items.clone(),
-            (None, Some(found)) => renamed(i, found, |key| find(key).is_some())?,
-            (None, None) => return Err(input("the items of the interface were not found")),
+            (ItemsInput::Written(items), _) => items.clone(),
+            (ItemsInput::Found { renames }, Some(found)) => {
+                renamed(i, renames, found, |key| find(key).is_some())?
+            }
+            (ItemsInput::Found { .. }, None) => {
+                return Err(input("the items of the interface were not found"));
+            }
         };
         // A rename is refused before any id is given: the domain would find an id twice, which only says that,
         // not which names are wrong.
@@ -971,12 +978,13 @@ pub(super) fn items_error(
 /// twice, a `to` the provider did not find, a `from` the Interface did not have, a `from` the provider still finds.
 fn renamed(
     i: &InterfacePut,
+    renames: &[RenameInput],
     found: &[FoundItem],
     had: impl Fn(&str) -> bool,
 ) -> Result<Vec<ItemInput>, AppError> {
     let mut problems = Vec::new();
-    for (n, r) in i.renames.iter().enumerate() {
-        let earlier = &i.renames[..n];
+    for (n, r) in renames.iter().enumerate() {
+        let earlier = &renames[..n];
         let (context, interface) = (i.context.clone(), i.name.clone());
         let conflict = |key: &str, side| AppError::RenameConflict {
             context: context.clone(),
@@ -1017,7 +1025,7 @@ fn renamed(
             key: f.key.clone(),
             lines: f.lines,
             replaces: if seen.insert(f.key.as_str()) {
-                i.renames
+                renames
                     .iter()
                     .find(|r| r.to == f.key)
                     .map(|r| r.from.clone())

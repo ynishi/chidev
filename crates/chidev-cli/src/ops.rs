@@ -11,10 +11,10 @@ use chidev_core::app::{
     ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
     DecisionInput, DecisionMakerInput, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput,
     Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef,
-    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
-    ReasonedInput, RecommendedInput, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
-    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
-    SubjectInput, TargetInput, TransitionStatus,
+    ItemsInput, ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput,
+    PutDone, PutInput, ReasonedInput, RecommendedInput, RenameInput, ReportInput, ReportedFinding,
+    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding,
+    RuleToJudge, SubjectInput, TargetInput, TransitionStatus,
 };
 use chidev_core::domain::check::{Hook, Level};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -318,12 +318,12 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
                 ("source_file", source_file),
             )
             .await?;
+            let items = items_input(&context, &name, items, renames)?;
             PutInput::Interface(InterfacePut {
                 context,
                 name,
                 source,
-                items: items.map(item_inputs),
-                renames: rename_inputs(renames),
+                items,
             })
         }
         PutDto::Harness {
@@ -444,6 +444,26 @@ fn item_inputs(items: Vec<ItemDto>) -> Vec<ItemInput> {
             replaces: i.replaces,
         })
         .collect()
+}
+
+/// The Items of an Interface put: the `items` written, or (left out) the ones the provider finds with the `renames`.
+/// Both given are refused here, since `renames` are for the Items that are found.
+fn items_input(
+    context: &str,
+    interface: &str,
+    items: Option<Vec<ItemDto>>,
+    renames: Vec<RenameDto>,
+) -> Result<ItemsInput, AppError> {
+    match items {
+        Some(_) if !renames.is_empty() => Err(AppError::RenamesWithItems {
+            context: context.to_string(),
+            interface: interface.to_string(),
+        }),
+        Some(items) => Ok(ItemsInput::Written(item_inputs(items))),
+        None => Ok(ItemsInput::Found {
+            renames: rename_inputs(renames),
+        }),
+    }
 }
 
 fn rename_inputs(renames: Vec<RenameDto>) -> Vec<RenameInput> {
@@ -2100,10 +2120,9 @@ where
                 ("source_file", source_file),
             )
             .await?;
-            let items = items.map(item_inputs);
-            let renames = rename_inputs(renames);
+            let items = items_input(&context, &name, items, renames)?;
             let done = app
-                .put_interface_of(&context, &name, &source, items.as_deref(), &renames)
+                .put_interface_of(&context, &name, &source, items)
                 .await?;
             json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }

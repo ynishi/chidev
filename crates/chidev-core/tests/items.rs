@@ -11,7 +11,7 @@ use chidev_core::app::ports::measure::BoxFuture;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut, ItemInput,
-    ItemRef, ItemRevised, KeyChanged, PutInput, RenameInput,
+    ItemRef, ItemRevised, ItemsInput, KeyChanged, PutInput, RenameInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -193,16 +193,18 @@ async fn stock_items_of(app: &Stock, word: &str) -> (u64, Vec<(String, Uuid, u64
     )
 }
 
-/// The one diagnostic of a put of `stock` through the provider that is refused, with nothing kept.
-async fn refused(
-    app: &mut Stock,
-    source: &str,
-    items: Option<&[ItemInput]>,
-    renames: &[RenameInput],
-) -> Diagnostic {
+/// The Items of a put that are left to the provider, with these renames.
+fn found(renames: &[RenameInput]) -> ItemsInput {
+    ItemsInput::Found {
+        renames: renames.to_vec(),
+    }
+}
+
+/// The one diagnostic of a put of `stock` that is refused, with nothing kept.
+async fn refused(app: &mut Stock, source: &str, items: ItemsInput) -> Diagnostic {
     let before = app.store().revision().await.unwrap();
     let err = app
-        .put_interface_of("core", "stock", source, items, renames)
+        .put_interface_of("core", "stock", source, items)
         .await
         .unwrap_err();
     assert_eq!(
@@ -229,7 +231,7 @@ async fn an_interface_put_without_items_is_given_the_keys_and_lines_the_provider
     app.add_context("core", &[]).await.unwrap();
     let source = "fn fits()\nfn spare(\n    n: u8)\n";
     let done = app
-        .put_interface_of("core", "stock", source, None, &[])
+        .put_interface_of("core", "stock", source, found(&[]))
         .await
         .unwrap();
     assert_eq!(done.value.revision.number(), 1);
@@ -267,7 +269,7 @@ async fn a_put_again_through_the_provider_keeps_what_it_found_before_and_moves_n
     let fake = Fake::answering(&[("reserve", 1, 1), ("release", 2, 2)]);
     let mut app = stock("again", fake).await;
     let before = stock_items(&app).await;
-    app.put_interface_of("core", "stock", SOURCE, None, &[])
+    app.put_interface_of("core", "stock", SOURCE, found(&[]))
         .await
         .unwrap();
     assert_eq!(stock_items(&app).await, before);
@@ -283,8 +285,7 @@ async fn a_rename_hands_the_id_over_and_moves_no_revision() {
         "core",
         "stock",
         SOURCE,
-        None,
-        &[rename("reserve", "Stock::reserve")],
+        found(&[rename("reserve", "Stock::reserve")]),
     )
     .await
     .unwrap();
@@ -306,8 +307,7 @@ async fn a_rename_is_for_the_keys_it_names_and_a_key_the_provider_changed_alone_
         "core",
         "stock",
         SOURCE,
-        None,
-        &[rename("reserve", "Stock::reserve")],
+        found(&[rename("reserve", "Stock::reserve")]),
     )
     .await
     .unwrap();
@@ -331,8 +331,7 @@ async fn a_rename_to_the_same_key_is_not_a_rename_that_is_kept() {
         "core",
         "stock",
         SOURCE,
-        None,
-        &[rename("reserve", "reserve")],
+        found(&[rename("reserve", "reserve")]),
     )
     .await
     .unwrap();
@@ -346,7 +345,7 @@ async fn a_put_without_items_in_a_language_the_layout_does_not_give_is_refused_b
         Arc::new(|_, _| Ok(Vec::new())),
     );
     let mut app = stock("required", fake.clone()).await;
-    let d = refused(&mut app, SOURCE, None, &[]).await;
+    let d = refused(&mut app, SOURCE, found(&[])).await;
     assert_eq!(d.code, "input.items-required");
     assert_eq!(d.level, "error");
     assert_eq!(subjects(&d), ["core", "stock"]);
@@ -360,7 +359,7 @@ async fn a_language_with_no_provider_and_a_project_without_a_measure_table_are_b
         Arc::new(|_, _| Err(ItemsError::NoProvider)),
     );
     let mut app = stock("no-provider", fake).await;
-    let d = refused(&mut app, SOURCE, None, &[]).await;
+    let d = refused(&mut app, SOURCE, found(&[])).await;
     assert_eq!(d.code, "items.no-provider");
     assert_eq!(d.values["lang"], "go");
     assert!(d.message.contains("no command for `go`"), "{}", d.message);
@@ -370,7 +369,7 @@ async fn a_language_with_no_provider_and_a_project_without_a_measure_table_are_b
     bare.init().await.unwrap();
     bare.add_context("core", &[]).await.unwrap();
     let err = bare
-        .put_interface_of("core", "stock", SOURCE, None, &[])
+        .put_interface_of("core", "stock", SOURCE, found(&[]))
         .await
         .unwrap_err();
     let d = bare.diagnose(&err).await.remove(0);
@@ -387,7 +386,7 @@ async fn a_provider_that_disagrees_or_cannot_run_is_refused_by_name_with_the_lan
         Fake::failing(ItemsError::Protocol("lines 4..=5 are past the last".into())),
     )
     .await;
-    let d = refused(&mut app, SOURCE, None, &[]).await;
+    let d = refused(&mut app, SOURCE, found(&[])).await;
     assert_eq!(d.code, "items.protocol");
     assert_eq!(d.values["lang"], "rust");
     assert_eq!(d.values["detail"], "lines 4..=5 are past the last");
@@ -400,7 +399,7 @@ async fn a_provider_that_disagrees_or_cannot_run_is_refused_by_name_with_the_lan
         )),
     )
     .await;
-    let d = refused(&mut app, SOURCE, None, &[]).await;
+    let d = refused(&mut app, SOURCE, found(&[])).await;
     assert_eq!(d.code, "items.failed");
     assert_eq!(d.values["lang"], "rust");
     assert_eq!(subjects(&d), ["core", "stock"]);
@@ -414,8 +413,7 @@ async fn a_rename_of_a_key_that_is_not_there_is_refused_whichever_side_it_is_on(
     let d = refused(
         &mut app,
         SOURCE,
-        None,
-        &[rename("reservee", "Stock::reserve")],
+        found(&[rename("reservee", "Stock::reserve")]),
     )
     .await;
     assert_eq!(d.code, "input.rename-unknown");
@@ -426,8 +424,7 @@ async fn a_rename_of_a_key_that_is_not_there_is_refused_whichever_side_it_is_on(
     let d = refused(
         &mut app,
         SOURCE,
-        None,
-        &[rename("reserve", "Stock::nothing")],
+        found(&[rename("reserve", "Stock::nothing")]),
     )
     .await;
     assert_eq!(d.code, "input.rename-unknown");
@@ -439,8 +436,7 @@ async fn a_rename_of_a_key_that_is_not_there_is_refused_whichever_side_it_is_on(
             "core",
             "fresh",
             SOURCE,
-            None,
-            &[rename("reserve", "release")],
+            found(&[rename("reserve", "release")]),
         )
         .await
         .unwrap_err();
@@ -452,30 +448,13 @@ async fn a_rename_of_a_key_that_is_not_there_is_refused_whichever_side_it_is_on(
 }
 
 #[tokio::test]
-async fn items_and_renames_together_are_refused_before_a_provider_is_asked() {
-    let fake = Fake::answering(&[("reserve", 1, 1)]);
-    let mut app = stock("with-items", fake.clone()).await;
-    let d = refused(
-        &mut app,
-        SOURCE,
-        Some(&[item("reserve", 1)]),
-        &[rename("reserve", "release")],
-    )
-    .await;
-    assert_eq!(d.code, "input.renames-with-items");
-    assert_eq!(subjects(&d), ["core", "stock"]);
-    assert!(fake.asked().is_empty());
-}
-
-#[tokio::test]
 async fn a_rename_named_twice_on_either_side_is_refused_naming_the_key_and_the_side() {
     let fake = Fake::answering(&[("x", 1, 1), ("y", 2, 2)]);
     let mut app = stock("rename-conflict", fake).await;
     let d = refused(
         &mut app,
         SOURCE,
-        None,
-        &[rename("reserve", "x"), rename("reserve", "y")],
+        found(&[rename("reserve", "x"), rename("reserve", "y")]),
     )
     .await;
     assert_eq!(d.code, "input.rename-conflict");
@@ -484,8 +463,7 @@ async fn a_rename_named_twice_on_either_side_is_refused_naming_the_key_and_the_s
     let d = refused(
         &mut app,
         SOURCE,
-        None,
-        &[rename("reserve", "x"), rename("release", "x")],
+        found(&[rename("reserve", "x"), rename("release", "x")]),
     )
     .await;
     assert_eq!(d.code, "input.rename-conflict");
@@ -495,7 +473,7 @@ async fn a_rename_named_twice_on_either_side_is_refused_naming_the_key_and_the_s
     let d = refused(
         &mut app,
         "fn x()\nfn y()\n",
-        Some(&[
+        ItemsInput::Written(vec![
             ItemInput {
                 replaces: Some("reserve".to_string()),
                 ..item("x", 1)
@@ -505,7 +483,6 @@ async fn a_rename_named_twice_on_either_side_is_refused_naming_the_key_and_the_s
                 ..item("y", 2)
             },
         ]),
-        &[],
     )
     .await;
     assert_eq!(d.code, "input.rename-conflict");
@@ -516,7 +493,7 @@ async fn a_rename_named_twice_on_either_side_is_refused_naming_the_key_and_the_s
 async fn a_rename_whose_from_the_provider_still_finds_is_refused_like_a_replaces_that_is_kept() {
     let fake = Fake::answering(&[("reserve", 1, 1), ("release", 2, 2)]);
     let mut app = stock("rename-kept", fake).await;
-    let d = refused(&mut app, SOURCE, None, &[rename("release", "reserve")]).await;
+    let d = refused(&mut app, SOURCE, found(&[rename("release", "reserve")])).await;
     assert_eq!(d.code, "input.replaces-kept");
     assert_eq!(d.values["key"], "release");
     assert_eq!(subjects(&d), ["core", "stock"]);
@@ -526,7 +503,7 @@ async fn a_rename_whose_from_the_provider_still_finds_is_refused_like_a_replaces
 async fn a_key_the_provider_gives_twice_is_the_domains_to_refuse_and_a_rename_does_not_hide_it() {
     let fake = Fake::answering(&[("x", 1, 1), ("x", 2, 2)]);
     let mut app = stock("key-twice", fake).await;
-    let d = refused(&mut app, SOURCE, None, &[rename("reserve", "x")]).await;
+    let d = refused(&mut app, SOURCE, found(&[rename("reserve", "x")])).await;
     assert_eq!(d.code, "interface.key-taken");
 }
 
@@ -555,7 +532,7 @@ async fn the_provider_is_asked_before_the_store_is_read_so_a_write_meanwhile_is_
         })
     }));
     let mut app = open(&path, 0).await.with_items(fake);
-    app.put_interface_of("core", "stock", SOURCE, None, &[])
+    app.put_interface_of("core", "stock", SOURCE, found(&[]))
         .await
         .expect("the store is read after the provider answered, so it is read as it stands");
     let p = app.store().project().await.unwrap().unwrap();
@@ -588,8 +565,7 @@ async fn a_provider_that_fails_refuses_the_whole_change_set_and_names_each_inter
             context: "core".to_string(),
             name: name.to_string(),
             source: source.to_string(),
-            items: None,
-            renames: Vec::new(),
+            items: found(&[]),
         })
     };
     let set = ChangeSetInput {

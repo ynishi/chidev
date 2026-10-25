@@ -4,7 +4,7 @@
 use chidev_core::app::ports::{AssetKind, AssetNames, IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, Diagnostic,
-    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, PutInput, RetireInput,
+    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, ItemsInput, PutInput, RetireInput,
 };
 use chidev_core::domain::entity::contract::Clause;
 use chidev_core::domain::repository::ProjectRepository;
@@ -337,8 +337,7 @@ fn removal() -> ChangeSetInput {
                 context: "core".to_string(),
                 name: "stock".to_string(),
                 source: "fn reserve()\n".to_string(),
-                items: Some(vec![item("reserve", 1)]),
-                renames: Vec::new(),
+                items: ItemsInput::Written(vec![item("reserve", 1)]),
             }),
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
@@ -720,8 +719,7 @@ async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
                 context: "billing".to_string(),
                 name: "invoice".to_string(),
                 source: "fn total()\n".to_string(),
-                items: Some(vec![item("total", 1)]),
-                renames: Vec::new(),
+                items: ItemsInput::Written(vec![item("total", 1)]),
             }),
             PutInput::Context {
                 name: "ledger".to_string(),
