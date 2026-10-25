@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::super::process::{self, Capture, Over, Pipe};
-use super::config::{RunDirs, SimConfig, WORK_DIR};
+use super::config::SimConfig;
 use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, config_error, io, millis, provider};
 use crate::app::ports::measure::{InterfaceText, RunnerError, SimulateReport, SimulateRequest};
 use crate::domain::vo::digest::Digest;
@@ -294,17 +294,7 @@ impl ProcessRunner {
                 })?;
             interfaces.push((place.path.as_path(), i));
         }
-        let safe = !request.run.is_empty()
-            && request
-                .run
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-');
-        if !safe {
-            return Err(config_error(format!(
-                "`{}` is not a name for a run's directory",
-                request.run
-            )));
-        }
+        let dirs = self.run_dirs(&request.run)?;
         let deadline = process::deadline_in(cfg.budget).map_err(|f| config_error(f.message))?;
         let plan = Plan {
             request,
@@ -314,7 +304,7 @@ impl ProcessRunner {
         };
         let first = Job {
             runner: self,
-            dirs: RunDirs::of(self.root.join(WORK_DIR).join(&request.run)),
+            dirs,
             deadline,
         };
         let mut progress = SimProgress::default();

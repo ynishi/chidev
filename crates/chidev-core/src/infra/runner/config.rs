@@ -46,6 +46,8 @@ pub(super) struct Template(String);
 
 /// The two places of one run: its directory, and the root of the copy of the project under it (`tree`, or
 /// `rerun-tree` for the second copy of a sim). The names `{run}` and `{tree}` of a [`Template`] stand for them.
+/// Both copies of a sim have the one directory, so what is under `{run}` (the build's target) is shared by the
+/// first runs and the second; state the second runs must not inherit belongs under `{tree}`.
 #[derive(Debug, Clone)]
 pub(super) struct RunDirs {
     /// The directory of the run, where its output and its target directory go.
@@ -363,11 +365,12 @@ fn check_placeholders(value: &toml::Value, trail: &mut Vec<Step>) -> Result<(), 
 
 /// The configuration the table `value` (the `[measure]` of the file) states.
 pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
-    check_placeholders(value, &mut Vec::new())?;
     let raw: Raw = value
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| e.to_string())?;
+    // After the shape is known: a misspelled field is reported as unknown, not as one that takes no placeholder.
+    check_placeholders(value, &mut Vec::new())?;
     command("build", &raw.build)?;
     if let Some(test) = &raw.test {
         command("test", test)?;
@@ -868,6 +871,18 @@ path = "sim.py"
     }
 
     #[test]
+    fn a_misspelled_field_with_a_placeholder_is_reported_as_unknown() {
+        let error = parse(&table(&MINIMAL.replacen(
+            "build = [",
+            "bulid = [\"{run}\"]\nbuild = [",
+            1,
+        )))
+        .unwrap_err();
+        assert!(error.contains("unknown field `bulid`"), "{error}");
+        assert!(!error.contains("takes no placeholder"), "{error}");
+    }
+
+    #[test]
     fn a_placeholder_is_refused_where_none_is_taken_and_the_field_is_named() {
         for (from, to, field) in [
             (
@@ -909,11 +924,6 @@ path = "sim.py"
                 "build = [",
                 "env = { \"{tree}\" = \"x\" }\nbuild = [",
                 "env.{tree}",
-            ),
-            (
-                "build = [",
-                "env = { K = [\"{run}\"] }\nbuild = [",
-                "env.K[0]",
             ),
         ] {
             let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();

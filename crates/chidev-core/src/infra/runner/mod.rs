@@ -215,6 +215,18 @@ impl ProcessRunner {
         items::ask(&self.root, command, source, deadline).await
     }
 
+    /// The places of the run `run`, under the project's [`WORK_DIR`]; a name that is not letters, digits and `-` is
+    /// refused, so a run never reaches outside its directory.
+    fn run_dirs(&self, run: &str) -> Result<RunDirs, RunnerError> {
+        let safe = !run.is_empty() && run.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        if !safe {
+            return Err(config_error(format!(
+                "`{run}` is not a name for a run's directory"
+            )));
+        }
+        Ok(RunDirs::of(self.root.join(WORK_DIR).join(run)))
+    }
+
     async fn mutate_run(&self, request: &MutateRequest) -> Result<MutateReport, RunnerError> {
         let (place, lang) = self
             .config
@@ -244,20 +256,10 @@ impl ProcessRunner {
                 })?;
             harnesses.push((place.path.as_path(), h.source.as_str()));
         }
-        let safe = !request.run.is_empty()
-            && request
-                .run
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-');
-        if !safe {
-            return Err(config_error(format!(
-                "`{}` is not a name for a run's directory",
-                request.run
-            )));
-        }
+        let dirs = self.run_dirs(&request.run)?;
         let job = Job {
             runner: self,
-            dirs: RunDirs::of(self.root.join(WORK_DIR).join(&request.run)),
+            dirs,
             deadline: match process::deadline_in(self.config.budget) {
                 Ok(d) => d,
                 Err(f) => return Err(config_error(f.message)),

@@ -388,7 +388,9 @@ same wherever it is taken: `{run}` is the run's directory (under `.chidev/measur
 removed when the run ends), and `{tree}` is the root of the copy of the project the
 run works in, which is the `tree` directory inside it. A sim makes a second, fresh
 copy for the second runs of its cases (`rerun-tree`, in the same run directory), and
-there `{tree}` is the root of that copy while `{run}` stays the same. Only two kinds
+there `{tree}` is the root of that copy while `{run}` stays the same: what is under
+`{run}` (the build's target) is shared by the first and the second runs, so state the
+second runs must not inherit goes under `{tree}`. Only two kinds
 of field take a placeholder: the value of a variable of `env`, and a word of the
 `program` of a `[measure.sim.<context>]`. Any other `{...}` in them is left as it is.
 A `{run}` or `{tree}` in any other string of `[measure]` (a command, a layout `path`,
@@ -592,9 +594,10 @@ had findings once more, in a second, fresh copy.
 
 `<case>` is `seed-<n>` or `regress-<name>`; the working directory is the copy; the
 program argv is `program` of the configuration with `{tree}` made the root of the
-copy (and `{run}` the run's directory; see "Placeholders"). The script drives the program (standard input and output, arguments), writes
-`<dir>/schedule` (the choices it made from the case) and `<dir>/trace` (what the
-program did under them), and prints, one per line:
+copy (and `{run}` the run's directory; see "Placeholders"). The script drives the
+program (standard input and output, arguments), writes `<dir>/schedule` (the
+choices it made from the case) and `<dir>/trace` (what the program did under them),
+and prints, one per line:
 
 ```text
 FINDING <case> step <k> <contract>:<label>: <text>
