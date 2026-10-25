@@ -33,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
-# Parses the policy files (`checks.toml`); the parser and its value type, none of the serializer.
+# Parses the settings files (`chidev.toml`, `.chidev/chidev.local.toml`); the parser and its value type, none of the serializer.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 uuid = { version = "1", default-features = false, features = ["std"] }
