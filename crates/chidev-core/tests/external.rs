@@ -298,7 +298,7 @@ async fn only_requested_assets_are_sent_and_a_changed_input_makes_the_report_sta
         "stack-api",
         "fn push()",
         &[ItemInput {
-            signature: "fn push()".into(),
+            key: "push".into(),
             lines: (1, 1),
             replaces: None,
         }],
@@ -327,9 +327,9 @@ async fn only_requested_assets_are_sent_and_a_changed_input_makes_the_report_sta
         "stack-api",
         "fn push(value: u32)",
         &[ItemInput {
-            signature: "fn push(value: u32)".into(),
+            key: "push".into(),
             lines: (1, 1),
-            replaces: Some("fn push()".into()),
+            replaces: None,
         }],
     )
     .await
@@ -399,7 +399,7 @@ async fn a_subject_that_exists_but_was_not_sent_is_refused() {
             "api",
             "fn push()",
             &[ItemInput {
-                signature: "fn push()".into(),
+                key: "push".into(),
                 lines: (1, 1),
                 replaces: None,
             }],
@@ -580,7 +580,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
             "api",
             "fn push()",
             &[ItemInput {
-                signature: "fn push()".into(),
+                key: "push".into(),
                 lines: (1, 1),
                 replaces: None,
             }],
@@ -597,7 +597,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
             items: vec![ItemRef {
                 context: None,
                 interface: "api".into(),
-                signature: "fn push()".into(),
+                key: "push".into(),
             }],
             clauses: vec![],
         }],

@@ -522,7 +522,7 @@ fn item_record(context: &ContextName, i: &Interface, it: &Item, at: Revision) ->
         Target::Item(it.id()),
         context.clone(),
         i.id().as_uuid(),
-        it.signature().to_string(),
+        it.key().to_string(),
         it.revision(),
         at,
     )
@@ -898,9 +898,9 @@ mod tests {
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseLabel, ClauseText};
     use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::revision::Revision;
-    use crate::domain::vo::signature::Signature;
 
     fn ctx_id(n: u128) -> ContextId {
         ContextId::from_uuid(test_uuid(n))
@@ -943,7 +943,7 @@ mod tests {
             Source::new("fn f()\n".to_string()),
             vec![(
                 item(item_id),
-                Signature::try_from("fn f()").unwrap(),
+                ItemKey::try_from("f").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )
@@ -1031,7 +1031,7 @@ mod tests {
             Source::new("fn g()\n".to_string()),
             vec![(
                 item(10),
-                Signature::try_from("fn g()").unwrap(),
+                ItemKey::try_from("g").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )
@@ -1111,7 +1111,7 @@ mod tests {
                 Source::new("fn g()\n".to_string()),
                 vec![(
                     item(20),
-                    Signature::try_from("fn g()").unwrap(),
+                    ItemKey::try_from("g").unwrap(),
                     LineRange::new(1, 1).unwrap()
                 )]
             ),
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(whole.context().as_str(), "core");
         let leaf = p.retired_of(Target::Item(item(10))).unwrap();
         assert_eq!(leaf.holder(), Some(test_uuid(101)));
-        assert_eq!(leaf.label(), Some("fn f()"));
+        assert_eq!(leaf.label(), Some("f"));
         assert_eq!(leaf.at(), after);
         // a Contract and a Harness retire the same way
         put_harness(&mut p, &[20], &[11]).unwrap();
@@ -1452,7 +1452,7 @@ mod tests {
                 Source::new("fn f()\n".to_string()),
                 vec![(
                     item(10),
-                    Signature::try_from("fn f()").unwrap(),
+                    ItemKey::try_from("f").unwrap(),
                     LineRange::new(1, 1).unwrap()
                 )]
             ),
@@ -1488,7 +1488,7 @@ mod tests {
         .unwrap();
         let r = p.retired_of(Target::Item(item(10))).unwrap();
         assert_eq!(r.holder(), Some(test_uuid(101)));
-        assert_eq!(r.label(), Some("fn f()"));
+        assert_eq!(r.label(), Some("f"));
         assert_eq!(r.last_revision(), Revision::first());
         assert_eq!(r.at(), at(&p));
         assert_eq!(p.retired().len(), 1);

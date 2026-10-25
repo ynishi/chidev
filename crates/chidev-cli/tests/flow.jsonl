@@ -3,10 +3,10 @@
 {"op":"context_add","name":"receipt","uses":["pricing"]}
 {"op":"contract_put","context":"pricing","name":"rounding","title":"Rounding of a total","clauses":[{"label":"C1","text":"a total is rounded half up to whole cents"}]}
 {"op":"base_on_contract","context":"pricing"}
-{"op":"interface_put","context":"pricing","name":"price","source":"pub fn total(lines: &[u64]) -> u64;\n","items":[{"signature":"fn total(lines: &[u64]) -> u64","lines":[1,1]}]}
-{"op":"harness_put","context":"pricing","name":"price_tests","source":"#[test] fn total_rounds() {}\n","cases":[{"name":"total_rounds","lines":[1,1],"items":[{"interface":"price","signature":"fn total(lines: &[u64]) -> u64"}],"clauses":[{"contract":"rounding","label":"C1"}]}]}
-{"op":"interface_put","context":"receipt","name":"print","source":"pub fn print(lines: &[u64]) -> String;\n","items":[{"signature":"fn print(lines: &[u64]) -> String","lines":[1,1]}]}
-{"op":"harness_put","context":"receipt","name":"print_tests","source":"#[test] fn prints_total() {}\n","cases":[{"name":"prints_total","lines":[1,1],"items":[{"interface":"print","signature":"fn print(lines: &[u64]) -> String"},{"context":"pricing","interface":"price","signature":"fn total(lines: &[u64]) -> u64"}]}]}
+{"op":"interface_put","context":"pricing","name":"price","source":"pub fn total(lines: &[u64]) -> u64;\n","items":[{"key":"total","lines":[1,1]}]}
+{"op":"harness_put","context":"pricing","name":"price_tests","source":"#[test] fn total_rounds() {}\n","cases":[{"name":"total_rounds","lines":[1,1],"items":[{"interface":"price","key":"total"}],"clauses":[{"contract":"rounding","label":"C1"}]}]}
+{"op":"interface_put","context":"receipt","name":"print","source":"pub fn print(lines: &[u64]) -> String;\n","items":[{"key":"print","lines":[1,1]}]}
+{"op":"harness_put","context":"receipt","name":"print_tests","source":"#[test] fn prints_total() {}\n","cases":[{"name":"prints_total","lines":[1,1],"items":[{"interface":"print","key":"print"},{"context":"pricing","interface":"price","key":"total"}]}]}
 {"op":"pin","context":"pricing","interface":"price","code":"pub fn total(lines: &[u64]) -> u64 { lines.iter().sum() }"}
 {"op":"pin","context":"receipt","interface":"print","code":"pub fn print(lines: &[u64]) -> String { total(lines).to_string() }"}
 {"op":"status"}
@@ -18,11 +18,11 @@
 {"op":"cr_open","title":"Check the empty total","intent":"keep_behavior","situation":"C2 is new and no case cites it yet.","addresses":[{"rule":"cite.uncited-clause","clause":{"context":"pricing","contract":"rounding","label":"C2"}}]}
 {"op":"cr_resolve","title":"How is a half cent rounded?","resolution":"done","reason":"C1 now rounds half to even","by":{"person":"alice"}}
 {"op":"cr_resolve","title":"Fair totals","resolution":"done","reason":"its only part is done","by":{"person":"alice"}}
-{"op":"interface_put","context":"pricing","name":"price","source":"pub fn total(lines: &[u64], rounding: Rounding) -> u64;\n","items":[{"signature":"fn total(lines: &[u64], rounding: Rounding) -> u64","lines":[1,1],"replaces":"fn total(lines: &[u64]) -> u64"}]}
+{"op":"interface_put","context":"pricing","name":"price","source":"pub fn total(lines: &[u64], rounding: Rounding) -> u64;\n","items":[{"key":"total","lines":[1,1]}]}
 {"op":"status"}
-{"op":"harness_put","context":"pricing","name":"price_tests","source":"#[test] fn total_rounds_to_even() {}\n#[test] fn empty_total_is_zero() {}\n","cases":[{"name":"total_rounds","lines":[1,1],"items":[{"interface":"price","signature":"fn total(lines: &[u64], rounding: Rounding) -> u64"}],"clauses":[{"contract":"rounding","label":"C1"}]},{"name":"empty_total_is_zero","lines":[2,2],"items":[{"interface":"price","signature":"fn total(lines: &[u64], rounding: Rounding) -> u64"}],"clauses":[{"contract":"rounding","label":"C2"}]}]}
-{"op":"harness_put","context":"receipt","name":"print_tests","source":"#[test] fn prints_total() { /* passes the rounding */ }\n","cases":[{"name":"prints_total","lines":[1,1],"items":[{"interface":"print","signature":"fn print(lines: &[u64]) -> String"},{"context":"pricing","interface":"price","signature":"fn total(lines: &[u64], rounding: Rounding) -> u64"}]}]}
+{"op":"harness_put","context":"pricing","name":"price_tests","source":"#[test] fn total_rounds_to_even() {}\n#[test] fn empty_total_is_zero() {}\n","cases":[{"name":"total_rounds","lines":[1,1],"items":[{"interface":"price","key":"total"}],"clauses":[{"contract":"rounding","label":"C1"}]},{"name":"empty_total_is_zero","lines":[2,2],"items":[{"interface":"price","key":"total"}],"clauses":[{"contract":"rounding","label":"C2"}]}]}
+{"op":"harness_put","context":"receipt","name":"print_tests","source":"#[test] fn prints_total() { /* passes the rounding */ }\n","cases":[{"name":"prints_total","lines":[1,1],"items":[{"interface":"print","key":"print"},{"context":"pricing","interface":"price","key":"total"}]}]}
 {"op":"pin","context":"pricing","interface":"price","code":"pub fn total(lines: &[u64], rounding: Rounding) -> u64 { round(lines.iter().sum(), rounding) }"}
 {"op":"pin","context":"receipt","interface":"print","code":"pub fn print(lines: &[u64]) -> String { total(lines, Rounding::HalfEven).to_string() }"}
 {"op":"status"}
-{"op":"interface_put","context":"pricing","name":"price","source":"pub fn other() -> u8;\n","items":[{"signature":"fn other() -> u8","lines":[1,1]}]}
+{"op":"interface_put","context":"pricing","name":"price","source":"pub fn other() -> u8;\n","items":[{"key":"other","lines":[1,1]}]}

@@ -15,10 +15,10 @@ use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET, CR_ALREADY_RESOLVED,
     CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN,
     CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN,
-    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
-    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
-    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
-    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE,
+    PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT,
+    SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
+    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
@@ -267,9 +267,16 @@ impl ContractError {
 }
 
 impl InterfaceError {
-    /// The violation this refusal is: not yet tied to a rule.
+    /// The violation this refusal is. The key is the application's to name: the violation holds the id of the Item
+    /// that has it.
     pub fn violation(&self) -> Violation {
         match self {
+            InterfaceError::KeyTaken { id, .. } => {
+                Violation::of(INTERFACE_KEY_TAKEN).about(Party::Target(Target::Item(*id)))
+            }
+            InterfaceError::BlankItem { id } => {
+                Violation::of(INTERFACE_BLANK_ITEM).about(Party::Target(Target::Item(*id)))
+            }
             InterfaceError::DuplicateId(_) | InterfaceError::RangeOutside { .. } => {
                 Violation::unmapped(self)
             }
@@ -378,6 +385,7 @@ mod tests {
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::ClauseLabel;
     use crate::domain::vo::id::{ClauseId, ContextId, InterfaceId, ItemId, test_uuid};
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::revision::Revision;
@@ -638,6 +646,21 @@ mod tests {
                 .violation(),
             ),
             (
+                "InterfaceError::KeyTaken",
+                InterfaceError::KeyTaken {
+                    key: ItemKey::try_from("push").unwrap(),
+                    id: ItemId::from_uuid(test_uuid(1)),
+                }
+                .violation(),
+            ),
+            (
+                "InterfaceError::BlankItem",
+                InterfaceError::BlankItem {
+                    id: ItemId::from_uuid(test_uuid(1)),
+                }
+                .violation(),
+            ),
+            (
                 "HarnessError::DuplicateId",
                 HarnessError::DuplicateId(CaseId::from_uuid(test_uuid(1))).violation(),
             ),
@@ -722,7 +745,7 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2);
+        assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
         assert_eq!(STILL_UNMAPPED.len(), 29);
     }
 
@@ -1029,6 +1052,21 @@ mod tests {
             let listed = rule(v.rule().as_str()).expect("registered").values;
             assert!(v.values().keys().all(|key| listed.contains(key)));
         }
+    }
+
+    #[test]
+    fn the_refusals_of_an_item_name_the_item() {
+        let item = ItemId::from_uuid(test_uuid(7));
+        let taken = InterfaceError::KeyTaken {
+            key: ItemKey::try_from("push").unwrap(),
+            id: item,
+        }
+        .violation();
+        assert_eq!(taken.rule().as_str(), "interface.key-taken");
+        assert_eq!(taken.subjects(), &[Party::Target(Target::Item(item))]);
+        let blank = InterfaceError::BlankItem { id: item }.violation();
+        assert_eq!(blank.rule().as_str(), "interface.blank-item");
+        assert_eq!(blank.subjects(), &[Party::Target(Target::Item(item))]);
     }
 
     #[test]

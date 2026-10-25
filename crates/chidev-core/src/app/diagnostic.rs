@@ -20,9 +20,9 @@ use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
 use crate::domain::rule::{
-    self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_MISSING_FIELD, INPUT_UNKNOWN_FIELD,
-    INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP, INPUT_WRONG_TYPE, PROJECT_ASSET_RETIRED, PROJECT_NONE,
-    Rule, RuleKind,
+    self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_MISSING_FIELD, INPUT_RENAME_CONFLICT,
+    INPUT_REPLACES_KEPT, INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP,
+    INPUT_WRONG_TYPE, PROJECT_ASSET_RETIRED, PROJECT_NONE, Rule, RuleKind,
 };
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
@@ -650,15 +650,31 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             AppError::UnknownItem {
                 context,
                 interface,
-                signature,
+                key,
             } => {
                 let names = self.member_names(context, "interface", interface).await;
                 let scope = vec![DiagSubject {
                     kind: "interface",
                     name: interface.clone(),
                 }];
-                vec![self.unknown_name("item", signature, &names, scope)]
+                vec![self.unknown_name("item", key, &names, scope)]
             }
+            AppError::ReplacesKept {
+                context,
+                interface,
+                key,
+            } => vec![item_rename(INPUT_REPLACES_KEPT, context, interface, key, e)],
+            AppError::RenameConflict {
+                context,
+                interface,
+                key,
+            } => vec![item_rename(
+                INPUT_RENAME_CONFLICT,
+                context,
+                interface,
+                key,
+                e,
+            )],
             AppError::UnknownClause {
                 context,
                 contract,
@@ -816,7 +832,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         out
     }
 
-    /// What the asset `asset` of `kind` in the Context `context` has in it: the signatures of an Interface, the
+    /// What the asset `asset` of `kind` in the Context `context` has in it: the keys of an Interface, the
     /// labels of a Contract, the names of the Cases of a Harness.
     async fn member_names(&self, context: &str, kind: &str, asset: &str) -> Vec<String> {
         let Ok(p) = self.project().await else {
@@ -832,7 +848,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             .await
                             .is_ok_and(|n| n == asset)
                         {
-                            out.extend(i.items().iter().map(|it| it.signature().to_string()));
+                            out.extend(i.items().iter().map(|it| it.key().to_string()));
                         }
                     }
                 }
@@ -1108,7 +1124,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     Ok(Some(TargetInput::Interface { context, interface })) => vec![suggest(
                         json!({"op": "harness_put", "context": context, "name": "<harness>",
                             "source": "<tests>", "cases": [{"name": "<case>", "lines": [1, 1],
-                                "items": [{"interface": interface, "signature": "<signature>"}]}]}),
+                                "items": [{"interface": interface, "key": "<key>"}]}]}),
                         how,
                     )],
                     _ => Vec::new(),
@@ -1119,6 +1135,35 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 vec![suggest(json!({"op": "context_add", "name": "<name>"}), how)]
             }
         }
+    }
+}
+
+/// The diagnostic of an input rule about a key that a put of the Interface `interface` of the Context `context`
+/// replaces wrongly (`error` is the refusal, said as it was if the rule is not registered).
+fn item_rename(
+    rule: RuleId,
+    context: &str,
+    interface: &str,
+    key: &str,
+    error: &AppError,
+) -> Diagnostic {
+    match rule::rule(rule.as_str()) {
+        Some(r) => Diagnostic::of_rule(
+            r,
+            vec![
+                DiagSubject {
+                    kind: "context",
+                    name: context.to_string(),
+                },
+                DiagSubject {
+                    kind: "interface",
+                    name: interface.to_string(),
+                },
+            ],
+            vec![("key", json!(key))],
+            &[("key", key.to_string())],
+        ),
+        None => Diagnostic::app_unmapped(&error.to_string()),
     }
 }
 

@@ -39,7 +39,7 @@ pub enum TargetInput {
         /// The Harness.
         harness: String,
     },
-    /// An Item, by the Interface's name and the signature.
+    /// An Item, by the Interface's name and the key.
     Item(ItemRef),
     /// A Clause, by the Contract's name and the label.
     Clause(ClauseRef),
@@ -169,13 +169,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let i = c.interface_of(id)?;
                     let it = i.item(id)?;
-                    Some((c.name().to_string(), i.id(), it.signature().to_string()))
+                    Some((c.name().to_string(), i.id(), it.key().to_string()))
                 });
                 match found {
-                    Some((context, interface, signature)) => Some(TargetInput::Item(ItemRef {
+                    Some((context, interface, key)) => Some(TargetInput::Item(ItemRef {
                         context: Some(context),
                         interface: asset(interface.as_uuid()).await?,
-                        signature,
+                        key,
                     })),
                     None => None,
                 }
@@ -218,7 +218,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// A target, in words, with the names a use case is about to give: for an Item or a Clause the asset's name and
-    /// the signature or the label, for any other the kind and the name. A target the Project does not have says so.
+    /// the key or the label, for any other the kind and the name. A target the Project does not have says so.
     pub(super) async fn describe_in(
         &self,
         p: &Project,
@@ -253,7 +253,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let i = c.interface_of(id)?;
                     let it = i.item(id)?;
-                    Some((i.id().as_uuid(), it.signature().to_string()))
+                    Some((i.id().as_uuid(), it.key().to_string()))
                 });
                 match found {
                     Some((asset, what)) => {
@@ -292,7 +292,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// A retired target in words, as a live one is worded and marked `(retired)`: the kind and name of a Context or
-    /// an asset, the asset's name and the label, signature or name for a part.
+    /// an asset, the asset's name and the label, key or name for a part.
     async fn retired_words(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
         let target = r.target();
         Ok(match (r.holder(), r.label(), target.as_uuid()) {

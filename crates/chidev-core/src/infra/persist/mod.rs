@@ -98,13 +98,13 @@ pub(crate) mod fixture {
         PinId, ProjectId,
     };
     use crate::domain::vo::intent::{Intent, Issuer};
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
     use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind};
     use crate::domain::vo::revision::Revision;
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::target::{ExpectKind, Target};
     use crate::domain::vo::timestamp::Timestamp;
@@ -165,25 +165,22 @@ pub(crate) mod fixture {
         .unwrap();
         p.base_on_contract(top).unwrap();
         let src = "pub fn push(v: u8)\npub fn pop() -> u8\n";
-        let items = |sig: &str| {
-            vec![
-                (
-                    ItemId::from_uuid(id(31)),
-                    Signature::try_from(sig).unwrap(),
-                    LineRange::new(1, 1).unwrap(),
-                ),
-                (
-                    ItemId::from_uuid(id(32)),
-                    Signature::try_from("pub fn pop() -> u8").unwrap(),
-                    LineRange::new(2, 2).unwrap(),
-                ),
-            ]
-        };
         p.put_interface(
             top,
             InterfaceId::from_uuid(id(IFACE)),
             Source::new(src.to_string()),
-            items("pub fn push(v: u8)"),
+            vec![
+                (
+                    ItemId::from_uuid(id(31)),
+                    ItemKey::try_from("push").unwrap(),
+                    LineRange::new(1, 1).unwrap(),
+                ),
+                (
+                    ItemId::from_uuid(id(32)),
+                    ItemKey::try_from("pop").unwrap(),
+                    LineRange::new(2, 2).unwrap(),
+                ),
+            ],
         )
         .unwrap();
         let cites = CaseCites::new(
@@ -875,6 +872,323 @@ mod tests {
         ));
     }
 
+    /// The document of `project()` as schema 1 wrote it, with the code of the Interface `IFACE` and its Items (id,
+    /// revision, the signature that was kept, the line it is on) replaced by those given: an Item has its signature
+    /// and no key.
+    fn schema_1(source: &str, items: &[(u128, u64, &str, usize)]) -> serde_json::Value {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_project(&project()).unwrap()).unwrap();
+        doc["schema"] = serde_json::json!(1);
+        let top = doc["contexts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|c| c["name"] == "top")
+            .unwrap();
+        let interface = &mut top["interfaces"][0];
+        interface["source"] = serde_json::json!(source);
+        interface["items"] = serde_json::json!(
+            items
+                .iter()
+                .map(|(n, revision, signature, line)| serde_json::json!({
+                    "id": id(*n).to_string(),
+                    "revision": revision,
+                    "signature": signature,
+                    "first": line,
+                    "last": line,
+                }))
+                .collect::<Vec<_>>()
+        );
+        doc
+    }
+
+    /// The Interface `IFACE` of a Project: its revision, and the key and revision of each Item.
+    fn interface_of(p: &Project) -> (u64, Vec<(String, u64)>) {
+        use crate::domain::vo::id::{ContextId, InterfaceId};
+        let i = p
+            .context(ContextId::from_uuid(id(11)))
+            .and_then(|c| c.interface(InterfaceId::from_uuid(id(IFACE))))
+            .unwrap();
+        (
+            i.revision().number(),
+            i.items()
+                .iter()
+                .map(|it| (it.key().to_string(), it.revision().number()))
+                .collect(),
+        )
+    }
+
+    fn owned(keys: &[(&str, u64)]) -> Vec<(String, u64)> {
+        keys.iter().map(|(k, r)| (k.to_string(), *r)).collect()
+    }
+
+    #[test]
+    fn a_document_of_schema_2_keeps_the_key_and_not_the_signature() {
+        let text = encode_project(&project()).unwrap();
+        assert!(text.contains("\"schema\":2"), "{text}");
+        assert!(text.contains("\"key\":\"push\""), "{text}");
+        assert!(!text.contains("signature"), "{text}");
+        let back = decode_project(2, &text).unwrap();
+        assert_eq!(back, project());
+        assert_eq!(
+            back.contexts()
+                .flat_map(|c| c.interfaces())
+                .flat_map(|i| i.items())
+                .map(|it| it.signature().to_string())
+                .collect::<Vec<_>>(),
+            ["pub fn push(v: u8)", "pub fn pop() -> u8"]
+        );
+    }
+
+    #[test]
+    fn a_document_of_schema_2_without_a_key_or_with_a_signature_is_corrupt() {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_project(&project()).unwrap()).unwrap();
+        let item = |doc: &mut serde_json::Value| -> serde_json::Value {
+            doc["contexts"][1]["interfaces"][0]["items"][0].take()
+        };
+        let mut lost = item(&mut doc);
+        lost.as_object_mut().unwrap().remove("key");
+        doc["contexts"][1]["interfaces"][0]["items"][0] = lost;
+        assert!(matches!(
+            decode_project(2, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("no key")
+        ));
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_project(&project()).unwrap()).unwrap();
+        doc["contexts"][1]["interfaces"][0]["items"][0]["signature"] = serde_json::json!("fn x()");
+        assert!(matches!(
+            decode_project(2, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("signature")
+        ));
+    }
+
+    #[test]
+    fn a_pin_and_a_change_request_of_schema_1_are_read_as_they_are() {
+        let p = project();
+        let pin = pin(&p);
+        let text = encode_pin(&pin)
+            .unwrap()
+            .replace("\"schema\":2", "\"schema\":1");
+        assert_eq!(decode_pin(1, &text).unwrap(), pin);
+        for cr in change_requests(&p) {
+            let text = encode_change_request(&cr)
+                .unwrap()
+                .replace("\"schema\":2", "\"schema\":1");
+            assert_eq!(decode_change_request(1, &text).unwrap(), cr);
+        }
+    }
+
+    #[test]
+    fn a_project_of_schema_1_names_its_items_by_their_signatures_on_one_line_and_moves_no_revision()
+    {
+        let code = "pub fn push(v: u8)\npub fn pop(\n    ) -> u8\n";
+        let doc = schema_1(
+            code,
+            &[
+                (31, 3, "pub fn push(v: u8)", 1),
+                (32, 2, "pub fn pop(\n    ) -> u8", 2),
+            ],
+        );
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        // the key is each line without the white space at its ends, joined by one space
+        assert_eq!(
+            interface_of(&p).1,
+            owned(&[("pub fn push(v: u8)", 3), ("pub fn pop( ) -> u8", 2)])
+        );
+        // nothing moved: the Interface keeps its revision (the fixture's, 1), and so does the Project
+        assert_eq!(interface_of(&p).0, 1);
+        assert_eq!(p.revision().number(), project().revision().number());
+        // the signature kept is dropped: the Interface derives it from its code and lines
+        let derived: Vec<String> = p
+            .contexts()
+            .flat_map(|c| c.interfaces())
+            .flat_map(|i| i.items())
+            .map(|it| it.signature().to_string())
+            .collect();
+        assert_eq!(derived, ["pub fn push(v: u8)", "pub fn pop("]);
+        // it is written as schema 2 next, and reads back as the same Project
+        let text = encode_project(&p).unwrap();
+        assert!(
+            text.contains("\"schema\":2") && !text.contains("signature"),
+            "{text}"
+        );
+        assert_eq!(decode_project(2, &text).unwrap(), p);
+    }
+
+    #[test]
+    fn a_signature_twice_in_an_interface_is_numbered_from_the_second_in_the_order_of_the_items() {
+        let code = "fn a()\nfn a()\nfn a()\nfn b()\n";
+        let doc = schema_1(
+            code,
+            &[
+                (31, 1, "fn a()", 1),
+                (32, 1, "fn a()", 2),
+                (33, 1, "fn a()", 3),
+                (34, 1, "fn b()", 4),
+            ],
+        );
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        assert_eq!(
+            interface_of(&p).1,
+            owned(&[
+                ("fn a()", 1),
+                ("fn a() #2", 1),
+                ("fn a() #3", 1),
+                ("fn b()", 1)
+            ])
+        );
+        // white space around the lines does not make two signatures two
+        let doc = schema_1(
+            "fn a()\n  fn a()  \n",
+            &[(31, 1, "fn a()", 1), (32, 1, "\n  fn a()  \n", 2)],
+        );
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        assert_eq!(
+            interface_of(&p).1,
+            owned(&[("fn a()", 1), ("fn a() #2", 1)])
+        );
+    }
+
+    #[test]
+    fn a_number_is_moved_on_until_it_is_no_other_items_key() {
+        // the third signature is the key the second would get, so the second goes on to `#3`
+        let code = "fn a()\nfn a()\nfn a() #2\n";
+        let doc = schema_1(
+            code,
+            &[
+                (31, 1, "fn a()", 1),
+                (32, 1, "fn a()", 2),
+                (33, 1, "fn a() #2", 3),
+            ],
+        );
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        assert_eq!(
+            interface_of(&p).1,
+            owned(&[("fn a()", 1), ("fn a() #3", 1), ("fn a() #2", 1)])
+        );
+        // the same when the signature that ends in `#2` comes first, and when the numbers pile up
+        let code = "fn a() #2\nfn a()\nfn a()\nfn a()\n";
+        let doc = schema_1(
+            code,
+            &[
+                (31, 1, "fn a() #2", 1),
+                (32, 1, "fn a()", 2),
+                (33, 1, "fn a()", 3),
+                (34, 1, "fn a()", 4),
+            ],
+        );
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        assert_eq!(
+            interface_of(&p).1,
+            owned(&[
+                ("fn a() #2", 1),
+                ("fn a()", 1),
+                ("fn a() #3", 1),
+                ("fn a() #4", 1)
+            ])
+        );
+    }
+
+    #[test]
+    fn the_first_put_after_the_conversion_changes_no_revision_when_the_content_is_the_same() {
+        use crate::domain::vo::id::{ContextId, InterfaceId, ItemId};
+        use crate::domain::vo::item_key::ItemKey;
+        use crate::domain::vo::line_range::LineRange;
+        use crate::domain::vo::source::Source;
+        let code = "pub fn push(v: u8)\npub fn pop(\n    ) -> u8\n";
+        let doc = schema_1(
+            code,
+            &[
+                (31, 3, "pub fn push(v: u8)", 1),
+                (32, 2, "pub fn pop(\n    ) -> u8", 2),
+            ],
+        );
+        let mut p = decode_project(1, &doc.to_string()).unwrap();
+        let before = p.clone();
+        // the put names the Items by their keys, as `status` shows them
+        let put = |p: &mut Project, code: &str| {
+            p.put_interface(
+                ContextId::from_uuid(id(11)),
+                InterfaceId::from_uuid(id(IFACE)),
+                Source::new(code.to_string()),
+                vec![
+                    (
+                        ItemId::from_uuid(id(31)),
+                        ItemKey::try_from("pub fn push(v: u8)").unwrap(),
+                        LineRange::new(1, 1).unwrap(),
+                    ),
+                    (
+                        ItemId::from_uuid(id(32)),
+                        ItemKey::try_from("pub fn pop( ) -> u8").unwrap(),
+                        LineRange::new(2, 2).unwrap(),
+                    ),
+                ],
+            )
+            .unwrap();
+        };
+        put(&mut p, code);
+        assert_eq!(p, before);
+        // a change of one declaration moves that Item and the Interface, and no other Item
+        put(&mut p, "pub fn push(v: u16)\npub fn pop(\n    ) -> u8\n");
+        assert_eq!(
+            interface_of(&p),
+            (
+                2,
+                owned(&[("pub fn push(v: u8)", 4), ("pub fn pop( ) -> u8", 2)])
+            )
+        );
+    }
+
+    #[test]
+    fn what_a_project_of_schema_1_retired_is_named_by_the_same_rule() {
+        use crate::domain::vo::id::ItemId;
+        use crate::domain::vo::target::Target;
+        let mut doc = schema_1("fn a()\n", &[(31, 1, "fn a()", 1)]);
+        let retired = doc["retired"].as_array_mut().unwrap();
+        retired.push(serde_json::json!({
+            "target": "interface", "id": id(91).to_string(), "context": "top",
+            "holder": null, "label": null, "last_revision": 1, "at": 2,
+        }));
+        retired.push(serde_json::json!({
+            "target": "item", "id": id(92).to_string(), "context": "top",
+            "holder": id(91).to_string(), "label": "  fn old(\n      x: u8)  \n",
+            "last_revision": 1, "at": 2,
+        }));
+        let p = decode_project(1, &doc.to_string()).unwrap();
+        let record = p
+            .retired_of(Target::Item(ItemId::from_uuid(id(92))))
+            .unwrap();
+        assert_eq!(record.label(), Some("fn old( x: u8)"));
+        assert_eq!(record.last_revision().number(), 1);
+        // a document of schema 2 names it as it was written
+        let mut now: serde_json::Value =
+            serde_json::from_str(&encode_project(&p).unwrap()).unwrap();
+        assert_eq!(now["retired"][1]["label"], "fn old( x: u8)");
+        now["retired"][1]["label"] = serde_json::json!("old  key");
+        let kept = decode_project(2, &now.to_string()).unwrap();
+        let record = kept
+            .retired_of(Target::Item(ItemId::from_uuid(id(92))))
+            .unwrap();
+        assert_eq!(record.label(), Some("old  key"));
+    }
+
+    #[test]
+    fn an_item_that_declares_nothing_in_a_project_of_schema_1_is_corrupt_naming_it() {
+        // the second line is empty: the Item's lines hold no declaration, so there is no signature to derive
+        let doc = schema_1(
+            "fn a()\n\n",
+            &[(31, 1, "fn a()", 1), (32, 1, "fn  b( )", 2)],
+        );
+        let named = match decode_project(1, &doc.to_string()) {
+            Err(StoreError::Corrupt(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(named.contains(&id(IFACE).to_string()), "{named}");
+        assert!(named.contains(&id(32).to_string()), "{named}");
+        assert!(named.contains("`fn  b( )`"), "{named}");
+    }
+
     #[test]
     fn a_newer_schema_is_refused() {
         let text = encode_project(&project()).unwrap();
@@ -888,7 +1202,7 @@ mod tests {
     fn a_document_that_disagrees_with_its_record_is_refused() {
         let text = encode_project(&project())
             .unwrap()
-            .replace("\"schema\":1", "\"schema\":0");
+            .replace("\"schema\":2", "\"schema\":0");
         assert!(matches!(
             decode_project(CURRENT, &text),
             Err(StoreError::Corrupt(_))

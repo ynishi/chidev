@@ -149,7 +149,7 @@ impl Check for UncitedItem {
                 Finding::new(
                     &UNCITED_ITEM,
                     Some(Subject::Item(it.id())),
-                    format!("no case cites `{}`", it.signature()),
+                    format!("no case cites `{}`", it.key()),
                 )
             })
             .collect()

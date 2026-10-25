@@ -6,9 +6,9 @@
 //! ports, never the file system, a process or the environment directly.
 //!
 //! The use cases speak in the names a person writes (a Context's name, an
-//! asset's name, a clause label, a signature, a case name) and turn them into
+//! asset's name, a clause label, an item key, a case name) and turn them into
 //! the ids the domain works with: a definition given again under the same
-//! label, signature or case name keeps its id, and a new one gets a fresh id.
+//! label, key or case name keeps its id, and a new one gets a fresh id.
 
 mod change_set;
 use self::change_set::only_put;
@@ -83,6 +83,7 @@ use crate::domain::vo::id::{
 };
 pub use crate::domain::vo::intent::Intent;
 use crate::domain::vo::intent::Issuer;
+use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::measure::MeasureError;
 use crate::domain::vo::name::ContextName;
@@ -129,15 +130,37 @@ pub enum AppError {
         /// The name.
         name: String,
     },
-    /// The Interface declares no Item with this signature.
-    #[error("the interface `{interface}` declares no `{signature}`")]
+    /// The Interface has no Item with this key.
+    #[error("the interface `{interface}` has no item `{key}`")]
     UnknownItem {
         /// The Context.
         context: String,
         /// The Interface.
         interface: String,
-        /// The signature looked for.
-        signature: String,
+        /// The key looked for.
+        key: String,
+    },
+    /// An Item of a put replaces a key that the same put still gives to an Item.
+    #[error(
+        "the interface `{interface}` replaces the key `{key}` and still has an item with that key"
+    )]
+    ReplacesKept {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The key replaced.
+        key: String,
+    },
+    /// Two Items of a put replace one key.
+    #[error("the interface `{interface}` has two items that replace the key `{key}`")]
+    RenameConflict {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The key replaced twice.
+        key: String,
     },
     /// The Contract has no Clause with this label.
     #[error("the contract `{contract}` has no clause {label}")]
@@ -347,27 +370,31 @@ pub struct ClauseInput {
     pub text: String,
 }
 
-/// An Item of an Interface, as found in the code.
+/// An Item of an Interface, as found in the code: the name it is known by and the lines it is declared on. Its
+/// declaration is not given: it is the text of those lines, which chidev takes from the code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemInput {
-    /// Its declaration.
-    pub signature: String,
-    /// The first and last line it is on, from 1.
+    /// Its key: the name the Item is matched by when the code is put again.
+    pub key: String,
+    /// The first and last line of its declaration, from 1: from its first token (after a doc comment and an
+    /// attribute) to the line that ends the signature, with `;` or the `{` of its body. A doc comment inside the
+    /// lines is part of the declaration, so that editing it revises the Item.
     pub lines: (usize, usize),
-    /// The signature it had before, when it changed: the Item keeps its id. Without it, an Item whose signature
-    /// matches one the Interface has keeps that id, and any other is new.
+    /// The key it had before, when it is renamed: the Item keeps its id. Without it, an Item whose key is one the
+    /// Interface has keeps that id, and any other is new. The key replaced must not be given to an Item of the
+    /// same put, and is replaced by one Item at most.
     pub replaces: Option<String>,
 }
 
-/// A citation of an Item: the Interface (by name) and the signature, in a Context.
+/// A citation of an Item: the Interface (by name) and the key, in a Context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemRef {
     /// The Context; within a Harness, its own when not given.
     pub context: Option<String>,
     /// The Interface.
     pub interface: String,
-    /// The signature of the Item.
-    pub signature: String,
+    /// The key of the Item.
+    pub key: String,
 }
 
 /// A citation of a Clause: the Contract (by name) and the label, in a Context.
@@ -887,7 +914,7 @@ pub struct RetiredStatus {
     /// The Context's name: its own for a retired Context, else the one the thing was in.
     pub context: String,
     /// Its name: the Context's, the asset's, or for a Clause, an Item or a Case the asset's name and its label,
-    /// signature or name.
+    /// key or name.
     pub name: String,
     /// The revision it had when it was retired.
     pub last_revision: u64,
@@ -1189,7 +1216,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// Makes or revises the Interface named `name` of the Context `context` from its code and the Items found in
-    /// it. An Item keeps its id when its signature (or the one it `replaces`) is one the Interface has.
+    /// it. An Item keeps its id when its key (or the one it `replaces`) is one the Interface has.
     pub async fn put_interface(
         &mut self,
         context: &str,
@@ -1312,7 +1339,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// The name of a retired thing: the Context's, the asset's, or the asset's with the label, signature or name.
+    /// The name of a retired thing: the Context's, the asset's, or the asset's with the label, key or name.
     /// A `pending` asset (named by the use case, not kept yet) is named first.
     async fn retired_name(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
         match (r.holder(), r.label(), r.target().as_uuid()) {
@@ -2184,18 +2211,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             self.asset(ctx, &ctx_name, AssetKind::Interface, &r.interface)
                 .await?,
         );
+        let key = ItemKey::try_from(r.key.as_str()).map_err(input)?;
         p.context(ctx)
             .and_then(|c| c.interface(iface))
-            .and_then(|i| {
-                i.items()
-                    .iter()
-                    .find(|it| it.signature().as_str() == r.signature)
-            })
+            .and_then(|i| i.item_by_key(&key))
             .map(|it| (it.id(), it.revision()))
             .ok_or_else(|| AppError::UnknownItem {
                 context: ctx_name.clone(),
                 interface: r.interface.clone(),
-                signature: r.signature.clone(),
+                key: r.key.clone(),
             })
     }
 
@@ -2263,7 +2287,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(said)
     }
 
-    /// A citation's target, in words: the asset's name and the signature or label.
+    /// A citation's target, in words: the asset's name and the key or label.
     async fn describe(&self, p: &Project, target: Target) -> Result<String, AppError> {
         self.describe_in(p, target, &[]).await
     }

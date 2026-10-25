@@ -1,6 +1,11 @@
-//! Schema 1 of the stored documents. These types are a versioned storage format, not a copy of the domain: they must
-//! stay readable as the domain changes (a later schema is a new module beside this one), and they reach the domain
-//! only through its `restore` functions, which re-check every rule.
+//! Schemas 1 and 2 of the stored documents. These types are a versioned storage format, not a copy of the domain: they
+//! must stay readable as the domain changes, and they reach the domain only through its `restore` functions, which
+//! re-check every rule.
+//!
+//! Schema 2 differs from schema 1 in the Items of a Project's Interfaces alone: an Item is kept by its key, not by
+//! its signature (the Interface derives the signature from its code and the Item's lines). The Pin and change
+//! request documents have the same shape in both. A Project document of schema 1 is converted on these types, in
+//! [`ProjectDoc::convert_schema_1`], before the domain is built from it: that is the one place the old shape is known.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +16,7 @@ use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, C
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
-use crate::domain::entity::interface::Interface;
+use crate::domain::entity::interface::{Interface, InterfaceError};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, DecisionMaker};
@@ -30,6 +35,7 @@ use crate::domain::vo::id::{
     PinId, ProjectId,
 };
 use crate::domain::vo::intent::{Intent, Issuer};
+use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::pin_basis::PinBasis;
@@ -38,14 +44,16 @@ use crate::domain::vo::prose::Prose;
 use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind, Transition};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
-use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::target::{ExpectKind, Expectation, Target};
 use crate::domain::vo::timestamp::Timestamp;
 use crate::domain::vo::title::Title;
 
-/// The schema number these documents carry.
-pub(crate) const SCHEMA: u32 = 1;
+/// The schema number these documents are written with.
+pub(crate) const SCHEMA: u32 = 2;
+
+/// The schema before an Item was kept by its key.
+const SCHEMA_1: u32 = 1;
 
 /// Why a stored document cannot be read as the model.
 pub(crate) type Bad = String;
@@ -253,11 +261,16 @@ struct InterfaceDoc {
     items: Vec<ItemDoc>,
 }
 
+/// An Item: a document of schema 2 has its `key`, and one of schema 1 its `signature` (which the conversion of
+/// [`ProjectDoc::convert_schema_1`] turns into the key). The signature is not kept any more: the Interface derives it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ItemDoc {
     id: String,
     revision: u64,
-    signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
     first: usize,
     last: usize,
 }
@@ -285,6 +298,73 @@ struct CaseDoc {
     last: usize,
     items: Vec<Rev>,
     clauses: Vec<Rev>,
+}
+
+/// An old declaration or label as a key: each line without the white space at its ends, joined by one space (a
+/// key is one line). A line with nothing in it is no line of the key, so a key never starts or ends with a space.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .flat_map(|line| line.split('\r'))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl ProjectDoc {
+    /// Turns a document of schema 1 into one of schema 2, in place. Schema 1 named an Item by its signature and kept
+    /// it; schema 2 names it by a key and derives the signature from the code and the Item's lines. The signature
+    /// that was kept is dropped, and no revision moves (the Item is the same, written another way, so no Pin or
+    /// citation goes stale). The key of an Item is its signature on one line (see [`one_line`]); an Interface that
+    /// had one signature twice keeps the first as it is and gives the next ones ` #2`, ` #3`, ... in the order of
+    /// the Items, each the least number that is not already the key of another Item of the Interface. What a Project
+    /// retired names an Item by the same rule. That an Item's lines still hold a declaration is the domain's to
+    /// say when the document is read.
+    fn convert_schema_1(&mut self) -> Result<(), Bad> {
+        for interface in self
+            .contexts
+            .iter_mut()
+            .flat_map(|c| c.interfaces.iter_mut())
+        {
+            let mut bases = Vec::with_capacity(interface.items.len());
+            for it in &mut interface.items {
+                let signature = it.signature.take().ok_or_else(|| {
+                    format!(
+                        "the item {} of the interface {} has no signature",
+                        it.id, interface.id
+                    )
+                })?;
+                if it.key.is_some() {
+                    return Err(format!(
+                        "the item {} of the interface {} has a key, which a document of schema 1 does not keep",
+                        it.id, interface.id
+                    ));
+                }
+                bases.push(one_line(&signature));
+            }
+            let everyone: BTreeSet<&str> = bases.iter().map(String::as_str).collect();
+            let mut used: BTreeSet<String> = BTreeSet::new();
+            for (it, base) in interface.items.iter_mut().zip(&bases) {
+                let key = if used.contains(base) {
+                    (2..)
+                        .map(|n| format!("{base} #{n}"))
+                        .find(|c| !used.contains(c) && !everyone.contains(c.as_str()))
+                        .unwrap_or_default()
+                } else {
+                    base.clone()
+                };
+                used.insert(key.clone());
+                it.key = Some(key);
+            }
+        }
+        for r in &mut self.retired {
+            if matches!(r.target, TargetDoc::Item) {
+                r.label = r.label.take().map(|l| one_line(&l));
+            }
+        }
+        self.schema = SCHEMA;
+        Ok(())
+    }
 }
 
 impl From<&Project> for ProjectDoc {
@@ -350,7 +430,8 @@ impl From<&Interface> for InterfaceDoc {
                 .map(|it| ItemDoc {
                     id: it.id().as_uuid().to_string(),
                     revision: it.revision().number(),
-                    signature: it.signature().to_string(),
+                    key: Some(it.key().to_string()),
+                    signature: None,
                     first: it.lines().first(),
                     last: it.lines().last(),
                 })
@@ -390,7 +471,10 @@ impl From<&Harness> for HarnessDoc {
 impl TryFrom<ProjectDoc> for Project {
     type Error = Bad;
 
-    fn try_from(d: ProjectDoc) -> Result<Project, Bad> {
+    fn try_from(mut d: ProjectDoc) -> Result<Project, Bad> {
+        if d.schema == SCHEMA_1 {
+            d.convert_schema_1()?;
+        }
         let contexts = d
             .contexts
             .into_iter()
@@ -481,20 +565,43 @@ impl TryFrom<InterfaceDoc> for Interface {
     fn try_from(d: InterfaceDoc) -> Result<Interface, Bad> {
         let mut items = Vec::with_capacity(d.items.len());
         for it in &d.items {
+            if it.signature.is_some() {
+                return Err(format!(
+                    "the item {} of the interface {} has a signature, which a document of this schema does not keep",
+                    it.id, d.id
+                ));
+            }
+            let key = it.key.as_deref().ok_or_else(|| {
+                format!("the item {} of the interface {} has no key", it.id, d.id)
+            })?;
             items.push((
                 ItemId::from_uuid(uuid(&it.id)?),
                 revision(it.revision)?,
-                Signature::try_from(it.signature.as_str()).map_err(bad)?,
+                ItemKey::try_from(key).map_err(bad)?,
                 lines(it.first, it.last)?,
             ));
         }
+        let (id, interface) = (&d.id, uuid(&d.id)?);
         Interface::restore(
-            InterfaceId::from_uuid(uuid(&d.id)?),
+            InterfaceId::from_uuid(interface),
             revision(d.revision)?,
-            Source::new(d.source),
+            Source::new(d.source.clone()),
             items,
         )
-        .map_err(bad)
+        .map_err(|e| match e {
+            InterfaceError::BlankItem { id: item } => {
+                let key = d
+                    .items
+                    .iter()
+                    .find(|it| it.id == item.as_uuid().to_string())
+                    .and_then(|it| it.key.as_deref())
+                    .unwrap_or_default();
+                format!(
+                    "the interface {id} has the item {item} (`{key}`) on lines with nothing in them, so it declares nothing"
+                )
+            }
+            other => bad(other),
+        })
     }
 }
 

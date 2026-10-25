@@ -120,10 +120,10 @@ mod tests {
     use crate::domain::vo::id::{
         CaseId, ContextId, ContractId, InterfaceId, ItemId, PinId, ProjectId, test_uuid,
     };
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::revision::Revision;
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::title::Title;
 
@@ -169,7 +169,7 @@ mod tests {
             Source::new("fn a()\n".to_string()),
             vec![(
                 ItemId::from_uuid(test_uuid(10)),
-                Signature::try_from("fn a()").unwrap(),
+                ItemKey::try_from("a").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )
@@ -415,7 +415,7 @@ mod tests {
             Source::new("fn b()\n".to_string()),
             vec![(
                 ItemId::from_uuid(test_uuid(11)),
-                Signature::try_from("fn b()").unwrap(),
+                ItemKey::try_from("b").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )
@@ -455,7 +455,7 @@ mod tests {
             Source::new("fn a(x: u8)\n".to_string()),
             vec![(
                 ItemId::from_uuid(test_uuid(10)),
-                Signature::try_from("fn a(x: u8)").unwrap(),
+                ItemKey::try_from("a").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )

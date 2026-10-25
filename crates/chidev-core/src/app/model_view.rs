@@ -79,7 +79,8 @@ pub struct InterfaceView {
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemView {
     id: String,
-    signature: String,
+    /// The name the Item is cited by.
+    key: String,
     /// The first and last line in the source.
     lines: [usize; 2],
     revision: u64,
@@ -233,7 +234,7 @@ impl ModelView {
                             .iter()
                             .map(|it| ItemView {
                                 id: it.id().to_string(),
-                                signature: it.signature().to_string(),
+                                key: it.key().to_string(),
                                 lines: [it.lines().first(), it.lines().last()],
                                 revision: it.revision().number(),
                             })

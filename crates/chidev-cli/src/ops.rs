@@ -423,7 +423,7 @@ fn item_inputs(items: Vec<ItemDto>) -> Vec<ItemInput> {
     items
         .into_iter()
         .map(|i| ItemInput {
-            signature: i.signature,
+            key: i.key,
             lines: (i.lines[0], i.lines[1]),
             replaces: i.replaces,
         })
@@ -965,7 +965,7 @@ enum TargetOut {
     Item {
         context: Option<String>,
         interface: String,
-        signature: String,
+        key: String,
     },
     Clause {
         context: Option<String>,
@@ -994,7 +994,7 @@ impl From<TargetInput> for TargetOut {
             TargetInput::Item(r) => TargetOut::Item {
                 context: r.context,
                 interface: r.interface,
-                signature: r.signature,
+                key: r.key,
             },
             TargetInput::Clause(r) => TargetOut::Clause {
                 context: r.context,
@@ -1708,7 +1708,7 @@ struct ClauseDto {
 
 #[derive(Debug, Deserialize)]
 struct ItemDto {
-    signature: String,
+    key: String,
     lines: [usize; 2],
     #[serde(default)]
     replaces: Option<String>,
@@ -1720,7 +1720,7 @@ struct ItemRefDto {
     #[serde(default)]
     context: Option<String>,
     interface: String,
-    signature: String,
+    key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1747,7 +1747,7 @@ impl From<ItemRefDto> for ItemRef {
         ItemRef {
             context: d.context,
             interface: d.interface,
-            signature: d.signature,
+            key: d.key,
         }
     }
 }

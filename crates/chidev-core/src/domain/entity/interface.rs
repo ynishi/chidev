@@ -3,17 +3,21 @@
 use thiserror::Error;
 
 use crate::domain::vo::id::{InterfaceId, ItemId};
+use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::revision::Revision;
-use crate::domain::vo::signature::Signature;
+use crate::domain::vo::signature::{Signature, SignatureError};
 use crate::domain::vo::source::Source;
 
-/// One declaration of an Interface. It is known by its id, so a citation of it survives a rename; its revision
-/// says whether the declaration changed since a citation was made. Where it is in the code (its lines) is shown
-/// but is not its content: moving it changes no revision.
+/// One declaration of an Interface. It is known by its id, so a citation of it survives a rename, and is matched by
+/// its key when the code is put again; its revision says whether the declaration changed since a citation was made.
+/// The declaration (its signature) is derived by the Interface from the code and the Item's lines, never given: it
+/// cannot differ from what the code says. Where it is in the code (its lines) is shown but is not its content:
+/// moving it changes no revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     id: ItemId,
+    key: ItemKey,
     revision: Revision,
     signature: Signature,
     lines: LineRange,
@@ -25,12 +29,17 @@ impl Item {
         self.id
     }
 
+    /// Its key: the name it is matched by, among the Items of its Interface.
+    pub fn key(&self) -> &ItemKey {
+        &self.key
+    }
+
     /// How many times its declaration has changed, from 1.
     pub fn revision(&self) -> Revision {
         self.revision
     }
 
-    /// Its declaration.
+    /// Its declaration, as the code says it on its lines (see [`Signature::of_lines`]).
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -44,6 +53,14 @@ impl Item {
 /// Why code and a list of Items are not an Interface. The Interface is not made or changed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InterfaceError {
+    /// Two Items have one key. `id` is the Item that came second.
+    #[error("the item key `{key}` is given twice")]
+    KeyTaken {
+        /// The key.
+        key: ItemKey,
+        /// The Item that has a key another Item has.
+        id: ItemId,
+    },
     /// Two Items have one id.
     #[error("the item id {0} is given twice")]
     DuplicateId(ItemId),
@@ -59,10 +76,16 @@ pub enum InterfaceError {
         /// How many lines the code has.
         total: usize,
     },
+    /// The lines of an Item are blank, so it declares nothing.
+    #[error("the item {id} is on lines with nothing in them")]
+    BlankItem {
+        /// The Item.
+        id: ItemId,
+    },
 }
 
 /// What a Context shows. The code is the content (it is what compiles); the Items are the declarations in it,
-/// found by the caller, who knows the language. The domain reads no language.
+/// found by the caller, who knows the language: a key and the lines each is on. The domain reads no language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interface {
     id: InterfaceId,
@@ -71,25 +94,41 @@ pub struct Interface {
     items: Vec<Item>,
 }
 
-/// An Item as the caller found it: its id, its declaration and its lines.
-pub type ItemFound = (ItemId, Signature, LineRange);
+/// An Item as the caller found it: its id, its key and its lines.
+pub type ItemFound = (ItemId, ItemKey, LineRange);
 
-/// The ids of `items` are each given once, and every Item's lines are inside `source`.
-fn check(source: &Source, items: &[ItemFound]) -> Result<(), InterfaceError> {
-    for (k, (id, _, lines)) in items.iter().enumerate() {
+/// An Item once its declaration is derived: id, key, signature and lines.
+type Derived = (ItemId, ItemKey, Signature, LineRange);
+
+/// The keys of `items` are each given once, then the ids are each given once, and every Item's lines are inside
+/// `source` and not blank; the signature of each is derived from them. The keys are checked first: two Items
+/// that are given one key have been matched to one id, and it is the key the caller has to mend.
+fn derive(source: &Source, items: &[ItemFound]) -> Result<Vec<Derived>, InterfaceError> {
+    for (k, (id, key, _)) in items.iter().enumerate() {
+        if items[..k].iter().any(|(_, other, _)| other == key) {
+            return Err(InterfaceError::KeyTaken {
+                key: key.clone(),
+                id: *id,
+            });
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (k, (id, key, lines)) in items.iter().enumerate() {
         if items[..k].iter().any(|(i, _, _)| i == id) {
             return Err(InterfaceError::DuplicateId(*id));
         }
-        if source.lines(*lines).is_none() {
-            return Err(InterfaceError::RangeOutside {
+        let signature = Signature::of_lines(source, *lines).map_err(|e| match e {
+            SignatureError::Outside => InterfaceError::RangeOutside {
                 id: *id,
                 first: lines.first(),
                 last: lines.last(),
                 total: source.line_count(),
-            });
-        }
+            },
+            SignatureError::Blank => InterfaceError::BlankItem { id: *id },
+        })?;
+        out.push((*id, key.clone(), signature, *lines));
     }
-    Ok(())
+    Ok(out)
 }
 
 impl Interface {
@@ -100,15 +139,16 @@ impl Interface {
         source: Source,
         items: Vec<ItemFound>,
     ) -> Result<Interface, InterfaceError> {
-        check(&source, &items)?;
+        let derived = derive(&source, &items)?;
         Ok(Interface {
             id,
             revision: Revision::first(),
             source,
-            items: items
+            items: derived
                 .into_iter()
-                .map(|(id, signature, lines)| Item {
+                .map(|(id, key, signature, lines)| Item {
                     id,
+                    key,
                     revision: Revision::first(),
                     signature,
                     lines,
@@ -117,26 +157,29 @@ impl Interface {
         })
     }
 
-    /// An Interface as a store kept it, revisions included. The rules of [`Interface::new`] hold on it.
+    /// An Interface as a store kept it, revisions included (the signatures are not kept: they are derived again).
+    /// The rules of [`Interface::new`] hold on it.
     pub(crate) fn restore(
         id: InterfaceId,
         revision: Revision,
         source: Source,
-        items: Vec<(ItemId, Revision, Signature, LineRange)>,
+        items: Vec<(ItemId, Revision, ItemKey, LineRange)>,
     ) -> Result<Interface, InterfaceError> {
         let found: Vec<ItemFound> = items
             .iter()
-            .map(|(i, _, s, l)| (*i, s.clone(), *l))
+            .map(|(i, _, k, l)| (*i, k.clone(), *l))
             .collect();
-        check(&source, &found)?;
+        let derived = derive(&source, &found)?;
         Ok(Interface {
             id,
             revision,
             source,
-            items: items
+            items: derived
                 .into_iter()
-                .map(|(id, revision, signature, lines)| Item {
+                .zip(items)
+                .map(|((id, key, signature, lines), (_, revision, _, _))| Item {
                     id,
+                    key,
                     revision,
                     signature,
                     lines,
@@ -170,16 +213,23 @@ impl Interface {
         self.items.iter().find(|i| i.id == id)
     }
 
+    /// The Item with this key.
+    pub fn item_by_key(&self, key: &ItemKey) -> Option<&Item> {
+        self.items.iter().find(|i| i.key == *key)
+    }
+
     /// Gives the Interface new code and Items. An Item whose id was there keeps its revision when its declaration
-    /// is the same (wherever it now is) and goes to the next one when it differs; a new id starts at the first; an
-    /// id left out is gone. The Interface goes to its next revision when the code or its Items (which ones, in
-    /// what order, declaring what) differ, and stays when nothing does. Content that breaks a rule changes
-    /// nothing.
+    /// (the signature derived from its lines in the new code) is the same, wherever it now is, and goes to the next
+    /// one when it differs; a new id starts at the first; an id left out is gone. The Interface goes to its next
+    /// revision when the code or its Items (which ones, in what order, declaring what) differ, and stays when
+    /// nothing does. The key is the identity, not the content: an Item given another key (a rename) keeps its
+    /// revision, and the Interface keeps its, when the code and the declarations are the same, so that a citation
+    /// of it, which is by id, stays. Content that breaks a rule changes nothing.
     pub fn revise(&mut self, source: Source, items: Vec<ItemFound>) -> Result<(), InterfaceError> {
-        check(&source, &items)?;
-        let revised: Vec<Item> = items
+        let derived = derive(&source, &items)?;
+        let revised: Vec<Item> = derived
             .into_iter()
-            .map(|(id, signature, lines)| {
+            .map(|(id, key, signature, lines)| {
                 let revision = match self.item(id) {
                     None => Revision::first(),
                     Some(old) if old.signature == signature => old.revision,
@@ -187,6 +237,7 @@ impl Interface {
                 };
                 Item {
                     id,
+                    key,
                     revision,
                     signature,
                     lines,
@@ -217,8 +268,8 @@ mod tests {
         ItemId::from_uuid(test_uuid(n))
     }
 
-    fn sig(s: &str) -> Signature {
-        Signature::try_from(s).unwrap()
+    fn key(s: &str) -> ItemKey {
+        ItemKey::try_from(s).unwrap()
     }
 
     fn at(first: usize, last: usize) -> LineRange {
@@ -236,8 +287,8 @@ mod tests {
             InterfaceId::from_uuid(test_uuid(100)),
             src(CODE),
             vec![
-                (iid(1), sig("fn push(v: u8)"), at(1, 1)),
-                (iid(2), sig("fn pop() -> u8"), at(2, 2)),
+                (iid(1), key("push"), at(1, 1)),
+                (iid(2), key("pop"), at(2, 2)),
             ],
         )
         .unwrap()
@@ -253,38 +304,109 @@ mod tests {
         assert_eq!(i.revision(), Revision::first());
         assert_eq!(i.source().as_str(), CODE);
         assert_eq!(revisions(&i), [1, 1]);
+        assert_eq!(i.item(iid(2)).unwrap().key().as_str(), "pop");
         assert_eq!(
             i.item(iid(2)).unwrap().signature().as_str(),
-            "fn pop() -> u8"
+            "pub fn pop() -> u8"
         );
+        assert_eq!(i.item_by_key(&key("push")).unwrap().id(), iid(1));
         assert!(i.item(iid(9)).is_none());
+        assert!(i.item_by_key(&key("peek")).is_none());
     }
 
     #[test]
-    fn two_items_may_declare_the_same_name_but_not_have_one_id() {
+    fn the_signature_is_derived_from_the_lines_of_the_code() {
+        let i = Interface::new(
+            InterfaceId::from_uuid(test_uuid(100)),
+            src("/// Adds.\npub fn add(\n    a: u8,  \n) -> u8 {\n    a\n}\n"),
+            vec![
+                (iid(1), key("add"), at(2, 4)),
+                (iid(2), key("add with doc"), at(1, 4)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            i.item(iid(1)).unwrap().signature().as_str(),
+            "pub fn add(\n    a: u8,\n) -> u8 {"
+        );
+        assert_eq!(
+            i.item(iid(2)).unwrap().signature().as_str(),
+            "/// Adds.\npub fn add(\n    a: u8,\n) -> u8 {"
+        );
+    }
+
+    #[test]
+    fn two_items_may_declare_the_same_name_but_not_have_one_key_or_one_id() {
         let id = InterfaceId::from_uuid(test_uuid(100));
         let code = src("fn a()\nfn a()\n");
-        assert!(
+        let made = Interface::new(
+            id,
+            code.clone(),
+            vec![
+                (iid(1), key("a"), at(1, 1)),
+                (iid(2), key("a #2"), at(2, 2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            made.item(iid(1)).unwrap().signature(),
+            made.item(iid(2)).unwrap().signature()
+        );
+        assert_eq!(
             Interface::new(
                 id,
                 code.clone(),
-                vec![
-                    (iid(1), sig("fn a()"), at(1, 1)),
-                    (iid(2), sig("fn a()"), at(2, 2))
-                ]
-            )
-            .is_ok()
+                vec![(iid(1), key("a"), at(1, 1)), (iid(2), key("a"), at(2, 2))]
+            ),
+            Err(InterfaceError::KeyTaken {
+                key: key("a"),
+                id: iid(2)
+            })
         );
         assert_eq!(
             Interface::new(
                 id,
                 code,
-                vec![
-                    (iid(1), sig("fn a()"), at(1, 1)),
-                    (iid(1), sig("fn a()"), at(2, 2))
-                ]
+                vec![(iid(1), key("a"), at(1, 1)), (iid(1), key("b"), at(2, 2))]
             ),
             Err(InterfaceError::DuplicateId(iid(1)))
+        );
+    }
+
+    #[test]
+    fn a_key_given_twice_is_refused_before_an_id_given_twice() {
+        // the same existing key twice in one put: both are matched to one id, and it is the key that is named
+        let id = InterfaceId::from_uuid(test_uuid(100));
+        let twice = vec![
+            (iid(1), key("push"), at(1, 1)),
+            (iid(1), key("push"), at(2, 2)),
+        ];
+        let expected = InterfaceError::KeyTaken {
+            key: key("push"),
+            id: iid(1),
+        };
+        assert_eq!(
+            Interface::new(id, src(CODE), twice.clone()),
+            Err(expected.clone())
+        );
+        let mut i = stack();
+        assert_eq!(i.revise(src(CODE), twice), Err(expected));
+        // an id given twice under keys that differ is still an id given twice, and a key given twice wins over it
+        // wherever it stands in the list
+        assert_eq!(
+            Interface::new(
+                id,
+                src(CODE),
+                vec![
+                    (iid(1), key("push"), at(1, 1)),
+                    (iid(1), key("pop"), at(2, 2)),
+                    (iid(2), key("pop"), at(2, 2)),
+                ]
+            ),
+            Err(InterfaceError::KeyTaken {
+                key: key("pop"),
+                id: iid(2)
+            })
         );
     }
 
@@ -294,7 +416,7 @@ mod tests {
             Interface::new(
                 InterfaceId::from_uuid(test_uuid(100)),
                 src("fn a()\n"),
-                vec![(iid(1), sig("fn a()"), at(1, 2))]
+                vec![(iid(1), key("a"), at(1, 2))]
             ),
             Err(InterfaceError::RangeOutside {
                 id: iid(1),
@@ -306,14 +428,66 @@ mod tests {
     }
 
     #[test]
+    fn an_item_on_blank_lines_is_refused_whether_it_is_new_revised_or_restored() {
+        let id = InterfaceId::from_uuid(test_uuid(100));
+        let blank = || vec![(iid(1), key("a"), at(2, 3))];
+        let code = "fn a()\n  \n\t\n";
+        assert_eq!(
+            Interface::new(id, src(code), blank()),
+            Err(InterfaceError::BlankItem { id: iid(1) })
+        );
+        let mut i = stack();
+        let before = i.clone();
+        assert_eq!(
+            i.revise(src(code), blank()),
+            Err(InterfaceError::BlankItem { id: iid(1) })
+        );
+        assert_eq!(i, before);
+        assert_eq!(
+            Interface::restore(
+                id,
+                Revision::first(),
+                src(code),
+                vec![(iid(1), Revision::first(), key("a"), at(2, 3))]
+            ),
+            Err(InterfaceError::BlankItem { id: iid(1) })
+        );
+    }
+
+    #[test]
+    fn a_restored_interface_derives_the_signatures_and_keeps_the_revisions() {
+        let mut i = stack();
+        i.revise(
+            src("pub fn push(v: u16)\npub fn pop() -> u8\n"),
+            vec![
+                (iid(1), key("push"), at(1, 1)),
+                (iid(2), key("pop"), at(2, 2)),
+            ],
+        )
+        .unwrap();
+        let back = Interface::restore(
+            i.id(),
+            i.revision(),
+            i.source().clone(),
+            i.items()
+                .iter()
+                .map(|it| (it.id(), it.revision(), it.key().clone(), it.lines()))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(back, i);
+        assert_eq!(revisions(&back), [2, 1]);
+    }
+
+    #[test]
     fn the_same_code_and_items_again_change_no_revision() {
         let mut i = stack();
         let before = i.clone();
         i.revise(
             src(CODE),
             vec![
-                (iid(1), sig("fn push(v: u8)"), at(1, 1)),
-                (iid(2), sig("fn pop() -> u8"), at(2, 2)),
+                (iid(1), key("push"), at(1, 1)),
+                (iid(2), key("pop"), at(2, 2)),
             ],
         )
         .unwrap();
@@ -326,8 +500,8 @@ mod tests {
         i.revise(
             src("// stack\npub fn push(v: u8)\npub fn pop() -> u8\n"),
             vec![
-                (iid(1), sig("fn push(v: u8)"), at(2, 2)),
-                (iid(2), sig("fn pop() -> u8"), at(3, 3)),
+                (iid(1), key("push"), at(2, 2)),
+                (iid(2), key("pop"), at(3, 3)),
             ],
         )
         .unwrap();
@@ -342,8 +516,41 @@ mod tests {
         i.revise(
             src("pub fn push(v: u16)\npub fn pop() -> u8\n"),
             vec![
-                (iid(1), sig("fn push(v: u16)"), at(1, 1)),
-                (iid(2), sig("fn pop() -> u8"), at(2, 2)),
+                (iid(1), key("push"), at(1, 1)),
+                (iid(2), key("pop"), at(2, 2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(i.revision().number(), 2);
+        assert_eq!(revisions(&i), [2, 1]);
+    }
+
+    #[test]
+    fn a_rename_alone_changes_no_revision_of_the_item_or_the_interface() {
+        let mut i = stack();
+        i.revise(
+            src(CODE),
+            vec![
+                (iid(1), key("Stack::push"), at(1, 1)),
+                (iid(2), key("Stack::pop"), at(2, 2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(i.revision(), Revision::first());
+        assert_eq!(revisions(&i), [1, 1]);
+        assert_eq!(i.item(iid(1)).unwrap().key().as_str(), "Stack::push");
+        assert!(i.item_by_key(&key("push")).is_none());
+        assert_eq!(i.item_by_key(&key("Stack::pop")).unwrap().id(), iid(2));
+    }
+
+    #[test]
+    fn a_rename_with_a_changed_declaration_goes_to_the_next_revision() {
+        let mut i = stack();
+        i.revise(
+            src("pub fn push(v: u16)\npub fn pop() -> u8\n"),
+            vec![
+                (iid(1), key("Stack::push"), at(1, 1)),
+                (iid(2), key("pop"), at(2, 2)),
             ],
         )
         .unwrap();
@@ -356,7 +563,7 @@ mod tests {
         let mut i = stack();
         let before = i.clone();
         assert!(
-            i.revise(src("fn a()\n"), vec![(iid(1), sig("fn a()"), at(1, 3))])
+            i.revise(src("fn a()\n"), vec![(iid(1), key("a"), at(1, 3))])
                 .is_err()
         );
         assert_eq!(i, before);

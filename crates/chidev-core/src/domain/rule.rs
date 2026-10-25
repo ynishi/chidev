@@ -131,6 +131,14 @@ pub const CONTEXT_LAST_CONTRACT: RuleId = RuleId::from_static("context.last-cont
 pub const CONTEXT_NO_SUCH_ASSET: RuleId = RuleId::from_static("context.no-such-asset");
 /// The code of an Interface is pinned only when a Case checks it.
 pub const PIN_UNCHECKED: RuleId = RuleId::from_static("pin.unchecked");
+/// Two Items of an Interface have one key.
+pub const INTERFACE_KEY_TAKEN: RuleId = RuleId::from_static("interface.key-taken");
+/// An Item of an Interface is on lines with nothing in them.
+pub const INTERFACE_BLANK_ITEM: RuleId = RuleId::from_static("interface.blank-item");
+/// An Item replaces a key that the same put still gives to an Item.
+pub const INPUT_REPLACES_KEPT: RuleId = RuleId::from_static("input.replaces-kept");
+/// Two Items of a put replace one key.
+pub const INPUT_RENAME_CONFLICT: RuleId = RuleId::from_static("input.rename-conflict");
 /// An operation is not one chidev knows.
 pub const INPUT_UNKNOWN_OP: RuleId = RuleId::from_static("input.unknown-op");
 /// An operation has a field it does not take.
@@ -314,7 +322,7 @@ static RULES: &[Rule] = &[
         help: "A simulation checks Clauses. The Interfaces whose pinned code the script drives are the ones the Harness names in `builds`; naming one is not citing it, and puts the Harness on no Pin's basis. Cite Clauses only, and name the Interfaces in `builds`.",
         message: "{s0} of a sim harness cites an item; a sim case cites clauses only",
         values: &[],
-        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"items":[{"interface":"api","signature":"fn price()"}]}]}"#,
+        example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["api"],"source":"fn sim() {}\n","cases":[{"name":"sweep","lines":[1,1],"items":[{"interface":"api","key":"price"}]}]}"#,
     },
     Rule {
         id: SIM_BUILDS_OF_TESTS,
@@ -323,7 +331,7 @@ static RULES: &[Rule] = &[
         help: "A Harness of tests checks the code of the Interfaces its Cases cite. Only a sim Harness builds the program it drives. Remove `builds`, or put the Harness with `kind` `sim`.",
         message: "{s0} is a harness of tests and names interfaces to build",
         values: &[],
-        example: r#"{"op":"harness_put","context":"core","name":"tests","builds":["api"],"source":"fn t() {}\n","cases":[{"name":"t","lines":[1,1],"items":[{"interface":"api","signature":"fn price()"}]}]}"#,
+        example: r#"{"op":"harness_put","context":"core","name":"tests","builds":["api"],"source":"fn t() {}\n","cases":[{"name":"t","lines":[1,1],"items":[{"interface":"api","key":"price"}]}]}"#,
     },
     Rule {
         id: PROJECT_RETIRE_CITED,
@@ -398,6 +406,24 @@ static RULES: &[Rule] = &[
         example: r#"{"op":"harness_retire","context":"core","harness":"gone"}"#,
     },
     Rule {
+        id: INTERFACE_KEY_TAKEN,
+        kind: RuleKind::Invariant,
+        summary: "The Items of an Interface each have a key of their own.",
+        help: "An Item is matched by its key when the code is put again, so two Items with one key are one Item to the matching and would be given one id. Give each Item a key of its own (`status` shows the keys an Interface has), and put the Interface again.",
+        message: "{s0} has a key that another item of its interface has",
+        values: &[],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\nfn b();\n","items":[{"key":"a","lines":[1,1]},{"key":"a","lines":[2,2]}]}"#,
+    },
+    Rule {
+        id: INTERFACE_BLANK_ITEM,
+        kind: RuleKind::Invariant,
+        summary: "An Item is on lines that hold a declaration.",
+        help: "The declaration of an Item is the text of its lines, so lines with nothing in them declare nothing. Point `lines` at the declaration, or leave the Item out, and put the Interface again.",
+        message: "{s0} is on lines with nothing in them, so it declares nothing",
+        values: &[],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n\n","items":[{"key":"a","lines":[2,2]}]}"#,
+    },
+    Rule {
         id: PIN_UNCHECKED,
         kind: RuleKind::Invariant,
         summary: "Code is pinned only when a Case checks one of the Items of its Interface.",
@@ -445,7 +471,7 @@ static RULES: &[Rule] = &[
     Rule {
         id: INPUT_UNKNOWN_NAME,
         kind: RuleKind::Input,
-        summary: "A name an operation uses (a Context, an asset, a clause label, a signature, a case, a change request title) exists.",
+        summary: "A name an operation uses (a Context, an asset, a clause label, an item key, a case, a change request title) exists.",
         help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does.",
         message: "no {kind} is named `{name}`",
         values: &["kind", "name"],
@@ -459,6 +485,24 @@ static RULES: &[Rule] = &[
         message: "{detail}",
         values: &["detail"],
         example: r#"{"op":"context_add","name":""}"#,
+    },
+    Rule {
+        id: INPUT_REPLACES_KEPT,
+        kind: RuleKind::Input,
+        summary: "An Item replaces a key that no Item of the same put has.",
+        help: "`replaces` renames: the Item takes the id of the Item that had the key it replaces, and the old key goes. Another Item of the same put that still has that key would be matched to the same id. Remove `replaces` if the key stays, or give the other Item another key.",
+        message: "{s1} of {s0} replaces the key `{key}`, which an item of the same put still has",
+        values: &["key"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\nfn b();\n","items":[{"key":"a","lines":[1,1],"replaces":"b"},{"key":"b","lines":[2,2]}]}"#,
+    },
+    Rule {
+        id: INPUT_RENAME_CONFLICT,
+        kind: RuleKind::Input,
+        summary: "A key is replaced by one Item of a put at most.",
+        help: "`replaces` hands the id of one Item to one Item. Two Items that replace the same key would both take its id. Say `replaces` on one of them, and give the other no `replaces` (it is a new Item).",
+        message: "{s1} of {s0} has two items that replace the key `{key}`",
+        values: &["key"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn x();\nfn y();\n","items":[{"key":"x","lines":[1,1],"replaces":"a"},{"key":"y","lines":[2,2],"replaces":"a"}]}"#,
     },
     Rule {
         id: UNMAPPED,

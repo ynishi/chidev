@@ -1520,7 +1520,7 @@ mod tests {
         store.commit(at, changes()).await.unwrap();
         store.close().await.unwrap();
         let conn = Connection::open(&path).unwrap();
-        conn.execute("UPDATE project SET schema = 2", []).unwrap();
+        conn.execute("UPDATE project SET schema = 3", []).unwrap();
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
         assert!(matches!(store.project().await, Err(StoreError::Corrupt(_))));

@@ -13,7 +13,7 @@ pub enum RetiredError {
     /// The Project itself cannot be retired.
     #[error("the project cannot be retired")]
     Project,
-    /// A Clause, an Item or a Case is named by the asset that held it and by its own label, signature or name.
+    /// A Clause, an Item or a Case is named by the asset that held it and by its own label, key or name.
     #[error("a retired {0} is named by the asset that held it and by its own text")]
     LeafNeedsHolder(&'static str),
     /// A Context or an asset is named by itself alone (the store names the assets).
@@ -27,7 +27,7 @@ pub enum RetiredError {
 ///
 /// The names an asset has live beside the model (see `AssetNames`), so the record holds only what the model can
 /// say: the name of the Context (its own, or the one the thing was in), and for a Clause, an Item or a Case the id of
-/// the asset that held it with its label, signature or name. Ids are reserved for good: a retired id is never
+/// the asset that held it with its label, key or name. Ids are reserved for good: a retired id is never
 /// given again, and a thing is not brought back (make it again, with a new id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retired {
@@ -59,7 +59,7 @@ impl Retired {
     }
 
     /// The record of a Clause, an Item or a Case: `holder` is the id of the Contract, Interface or Harness that
-    /// held it, `label` its label, signature or name.
+    /// held it, `label` its label, key or name.
     pub(crate) fn leaf(
         target: Target,
         context: ContextName,
@@ -127,7 +127,7 @@ impl Retired {
         self.holder
     }
 
-    /// For a Clause, an Item or a Case, its label, signature or name.
+    /// For a Clause, an Item or a Case, its label, key or name.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }

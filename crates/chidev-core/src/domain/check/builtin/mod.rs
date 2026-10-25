@@ -85,10 +85,10 @@ mod fixture {
         PinId, ProjectId, test_uuid,
     };
     use crate::domain::vo::intent::Intent;
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::revision::Revision;
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::target::{ExpectKind, Target};
     use crate::domain::vo::title::Title;
@@ -164,7 +164,7 @@ mod fixture {
         .unwrap();
     }
 
-    /// Revises the Interface: item 10 with signature `first`, item 11 `fn b()`.
+    /// Revises the Interface: item 10 (key `a`) declared as `first`, item 11 (key `b`) as `fn b()`.
     pub(super) fn put_interface(p: &mut Project, first: &str) {
         p.put_interface(
             ctx(),
@@ -173,12 +173,12 @@ mod fixture {
             vec![
                 (
                     item(10),
-                    Signature::try_from(first).unwrap(),
+                    ItemKey::try_from("a").unwrap(),
                     LineRange::new(1, 1).unwrap(),
                 ),
                 (
                     item(11),
-                    Signature::try_from("fn b()").unwrap(),
+                    ItemKey::try_from("b").unwrap(),
                     LineRange::new(2, 2).unwrap(),
                 ),
             ],

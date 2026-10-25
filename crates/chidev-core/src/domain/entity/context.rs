@@ -415,8 +415,8 @@ mod tests {
     use super::*;
     use crate::domain::vo::clause::{ClauseLabel, ClauseText};
     use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
-    use crate::domain::vo::signature::Signature;
 
     fn ctx() -> Context {
         Context::new(
@@ -542,7 +542,7 @@ mod tests {
             Source::new("fn f()\n".to_string()),
             vec![(
                 item,
-                Signature::try_from("fn f()").unwrap(),
+                ItemKey::try_from("f").unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )

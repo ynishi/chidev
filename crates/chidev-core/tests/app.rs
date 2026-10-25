@@ -130,7 +130,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
     app.put_contract("base", "rules", "Rules", &clauses(&["C2"]))
         .await
         .unwrap();
-    app.put_interface("core", "api", "fn a()\n", &[item("fn a()", 1)])
+    app.put_interface("core", "api", "fn a()\n", &[item("a", 1)])
         .await
         .unwrap();
 
@@ -249,7 +249,7 @@ async fn an_asset_and_its_name_are_kept_together() {
     assert!(p.context(ctx).unwrap().contract(put.value.id).is_some());
 }
 
-/// `stock` with Clauses C1 and C7, its Interface with `fn reserve()` and `fn release()`, and a Harness `stock-tests`
+/// `stock` with Clauses C1 and C7, its Interface with the Items `reserve` and `release`, and a Harness `stock-tests`
 /// whose Case `reserve_refuses` cites the first of each and `release_frees` the second.
 async fn stock(name: &str) -> App<SqliteStore, Counter> {
     let mut app = app(name).await;
@@ -262,7 +262,7 @@ async fn stock(name: &str) -> App<SqliteStore, Counter> {
         "core",
         "stock",
         "fn reserve()\nfn release()\n",
-        &[item("fn reserve()", 1), item("fn release()", 2)],
+        &[item("reserve", 1), item("release", 2)],
     )
     .await
     .unwrap();
@@ -287,16 +287,16 @@ fn clauses(labels: &[&str]) -> Vec<ClauseInput> {
         .collect()
 }
 
-fn item(signature: &str, line: usize) -> ItemInput {
+fn item(key: &str, line: usize) -> ItemInput {
     ItemInput {
-        signature: signature.to_string(),
+        key: key.to_string(),
         lines: (line, line),
         replaces: None,
     }
 }
 
-/// The Cases for the words `reserve` and `release`: `reserve_refuses` cites `fn reserve()` and C1, and
-/// `release_frees` cites `fn release()` and C7.
+/// The Cases for the words `reserve` and `release`: `reserve_refuses` cites the Item `reserve` and C1, and
+/// `release_frees` cites the Item `release` and C7.
 fn cases(words: &[&str]) -> Vec<CaseInput> {
     words
         .iter()
@@ -311,7 +311,7 @@ fn cases(words: &[&str]) -> Vec<CaseInput> {
             items: vec![ItemRef {
                 context: None,
                 interface: "stock".to_string(),
-                signature: format!("fn {w}()"),
+                key: (*w).to_string(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
@@ -337,7 +337,7 @@ fn removal() -> ChangeSetInput {
                 context: "core".to_string(),
                 name: "stock".to_string(),
                 source: "fn reserve()\n".to_string(),
-                items: vec![item("fn reserve()", 1)],
+                items: vec![item("reserve", 1)],
             }),
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
@@ -374,11 +374,7 @@ async fn a_change_set_removes_what_cases_cite_with_the_harness_in_one_commit() {
     let gone: Vec<&str> = done.value.retired.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(
         gone,
-        [
-            "stock C7",
-            "stock fn release()",
-            "stock-tests release_frees"
-        ]
+        ["stock C7", "stock release", "stock-tests release_frees"]
     );
 }
 
@@ -403,6 +399,263 @@ async fn the_same_removal_as_a_single_put_is_refused_naming_the_case_and_the_cla
     );
 }
 
+/// The keys, ids and revisions of the Items of the Interface `stock` of `core`, and the revision of the Interface.
+async fn stock_items(app: &App<SqliteStore, Counter>) -> (u64, Vec<(String, Uuid, u64)>) {
+    let p = app.store().project().await.unwrap().unwrap();
+    let i = p
+        .contexts()
+        .flat_map(|c| c.interfaces())
+        .next()
+        .expect("the Interface");
+    (
+        i.revision().number(),
+        i.items()
+            .iter()
+            .map(|it| {
+                (
+                    it.key().to_string(),
+                    it.id().as_uuid(),
+                    it.revision().number(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The one diagnostic of a put of `stock` that is refused, and that nothing was kept.
+async fn refused_stock_put(
+    name: &str,
+    source: &str,
+    items: &[ItemInput],
+) -> (Diagnostic, App<SqliteStore, Counter>) {
+    let mut app = stock(name).await;
+    let before = app.store().revision().await.unwrap();
+    let err = app
+        .put_interface("core", "stock", source, items)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        app.store().revision().await.unwrap(),
+        before,
+        "nothing kept"
+    );
+    let mut all = app.diagnose(&err).await;
+    assert_eq!(all.len(), 1, "{all:#?}");
+    (all.remove(0), app)
+}
+
+#[tokio::test]
+async fn a_rename_alone_keeps_the_id_the_citation_and_every_revision() {
+    let mut app = stock("rename").await;
+    let (revision, before) = stock_items(&app).await;
+    let renamed = ItemInput {
+        replaces: Some("reserve".to_string()),
+        ..item("Stock::reserve", 1)
+    };
+    app.put_interface(
+        "core",
+        "stock",
+        "fn reserve()\nfn release()\n",
+        &[renamed, item("release", 2)],
+    )
+    .await
+    .unwrap();
+    let (now_revision, after) = stock_items(&app).await;
+    assert_eq!(now_revision, revision);
+    assert_eq!(after[0].0, "Stock::reserve");
+    // the same id and revision, so the Case that cites it by id is not stale
+    assert_eq!((after[0].1, after[0].2), (before[0].1, before[0].2));
+    assert_eq!(after[1], before[1]);
+    // the old key is gone, the new one is cited, and the Case still reaches the Item
+    app.put_harness(
+        "core",
+        "stock-tests",
+        "fn reserve_refuses() {}\nfn release_frees() {}\n",
+        &[
+            CaseInput {
+                items: vec![ItemRef {
+                    context: None,
+                    interface: "stock".to_string(),
+                    key: "Stock::reserve".to_string(),
+                }],
+                ..cases(&["reserve"]).remove(0)
+            },
+            CaseInput {
+                lines: (2, 2),
+                ..cases(&["release"]).remove(0)
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let found = app.check().await.unwrap();
+    assert!(found.iter().all(|f| f.rule.as_str() != "cite.stale"));
+}
+
+#[tokio::test]
+async fn a_declaration_that_changes_moves_the_item_and_the_interface_and_a_key_that_changes_alone_does_not()
+ {
+    let mut app = stock("revise").await;
+    let (_, before) = stock_items(&app).await;
+    app.put_interface(
+        "core",
+        "stock",
+        "fn reserve(n: u8)\nfn release()\n",
+        &[item("reserve", 1), item("release", 2)],
+    )
+    .await
+    .unwrap();
+    let (revision, after) = stock_items(&app).await;
+    assert_eq!(revision, 2);
+    assert_eq!(
+        after.iter().map(|i| i.2).collect::<Vec<_>>(),
+        [before[0].2 + 1, before[1].2]
+    );
+    assert_eq!(after[0].1, before[0].1);
+}
+
+#[tokio::test]
+async fn a_replaces_that_the_put_still_has_is_refused_naming_the_key() {
+    let (d, _) = refused_stock_put(
+        "replaces-kept",
+        "fn reserve()\nfn release()\n",
+        &[
+            ItemInput {
+                replaces: Some("release".to_string()),
+                ..item("reserve", 1)
+            },
+            item("release", 2),
+        ],
+    )
+    .await;
+    assert_eq!(d.code, "input.replaces-kept");
+    assert_eq!(d.level, "error");
+    assert_eq!(d.values["key"], "release");
+    let named: Vec<&str> = d.subjects.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(named, ["core", "stock"]);
+    assert!(d.message.contains("`release`"), "{}", d.message);
+}
+
+#[tokio::test]
+async fn a_replaces_to_itself_is_not_a_rename_that_is_kept() {
+    let mut app = stock("replaces-itself").await;
+    let (_, before) = stock_items(&app).await;
+    let same = ItemInput {
+        replaces: Some("reserve".to_string()),
+        ..item("reserve", 1)
+    };
+    app.put_interface(
+        "core",
+        "stock",
+        "fn reserve()\nfn release()\n",
+        &[same, item("release", 2)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(stock_items(&app).await.1, before);
+}
+
+#[tokio::test]
+async fn two_items_that_replace_one_key_are_refused_naming_the_key() {
+    let (d, _) = refused_stock_put(
+        "rename-conflict",
+        "fn x()\nfn y()\n",
+        &[
+            ItemInput {
+                replaces: Some("reserve".to_string()),
+                ..item("x", 1)
+            },
+            ItemInput {
+                replaces: Some("reserve".to_string()),
+                ..item("y", 2)
+            },
+        ],
+    )
+    .await;
+    assert_eq!(d.code, "input.rename-conflict");
+    assert_eq!(d.values["key"], "reserve");
+    assert!(d.message.contains("`reserve`"), "{}", d.message);
+}
+
+#[tokio::test]
+async fn a_replaces_of_a_key_the_interface_does_not_have_is_an_unknown_name() {
+    let (d, _) = refused_stock_put(
+        "replaces-unknown",
+        "fn x()\n",
+        &[ItemInput {
+            replaces: Some("reservee".to_string()),
+            ..item("x", 1)
+        }],
+    )
+    .await;
+    assert_eq!(d.code, "input.unknown-name");
+    assert_eq!(d.values["kind"], "item");
+    assert_eq!(d.did_you_mean, ["reserve"]);
+}
+
+#[tokio::test]
+async fn the_same_existing_key_twice_is_refused_as_a_key_and_not_as_an_id() {
+    let (d, _) = refused_stock_put(
+        "key-twice",
+        "fn reserve()\nfn release()\n",
+        &[item("reserve", 1), item("reserve", 2)],
+    )
+    .await;
+    assert_eq!(d.code, "interface.key-taken");
+    assert_eq!(d.level, "error");
+    assert_eq!(
+        d.subjects
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["stock reserve"]
+    );
+    assert!(d.message.contains("stock reserve"), "{}", d.message);
+}
+
+#[tokio::test]
+async fn an_item_on_blank_lines_is_refused_naming_it() {
+    let (d, _) = refused_stock_put(
+        "blank-item",
+        "fn reserve()\n\n",
+        &[item("reserve", 1), item("release", 2)],
+    )
+    .await;
+    assert_eq!(d.code, "interface.blank-item");
+    assert_eq!(
+        d.subjects
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["stock release"]
+    );
+}
+
+#[tokio::test]
+async fn a_citation_of_a_key_the_interface_does_not_have_is_an_unknown_name_with_the_close_keys() {
+    let mut app = stock("cite-unknown").await;
+    let err = app
+        .put_harness(
+            "core",
+            "stock-tests",
+            "fn reserve_refuses() {}\n",
+            &[CaseInput {
+                items: vec![ItemRef {
+                    context: None,
+                    interface: "stock".to_string(),
+                    key: "reserv".to_string(),
+                }],
+                ..cases(&["reserve"]).remove(0)
+            }],
+        )
+        .await
+        .unwrap_err();
+    let all = app.diagnose(&err).await;
+    assert_eq!(all[0].code, "input.unknown-name");
+    assert_eq!(all[0].values["name"], "reserv");
+    assert_eq!(all[0].did_you_mean, ["reserve"]);
+}
+
 #[tokio::test]
 async fn a_refused_change_set_names_every_problem_and_keeps_nothing() {
     let mut app = stock("refused-set").await;
@@ -417,7 +670,7 @@ async fn a_refused_change_set_names_every_problem_and_keeps_nothing() {
     assert_eq!(all.len(), 2);
     let text = said(&app, &err).await;
     assert!(text.contains("case stock-tests release_frees"), "{text}");
-    assert!(text.contains("the item `stock fn release()`"), "{text}");
+    assert!(text.contains("the item `stock release`"), "{text}");
     assert!(text.contains("the clause `stock C7`"), "{text}");
     assert_eq!(app.store().revision().await.unwrap(), before);
 }
@@ -466,7 +719,7 @@ async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
                 context: "billing".to_string(),
                 name: "invoice".to_string(),
                 source: "fn total()\n".to_string(),
-                items: vec![item("fn total()", 1)],
+                items: vec![item("total", 1)],
             }),
             PutInput::Context {
                 name: "ledger".to_string(),
@@ -512,14 +765,9 @@ async fn a_pin_with_nothing_that_checks_it_names_the_interface_not_its_id() {
     let mut app = app("pin-name").await;
     app.init().await.unwrap();
     app.add_context("core", &[]).await.unwrap();
-    app.put_interface(
-        "core",
-        "stock",
-        "fn reserve()\n",
-        &[item("fn reserve()", 1)],
-    )
-    .await
-    .unwrap();
+    app.put_interface("core", "stock", "fn reserve()\n", &[item("reserve", 1)])
+        .await
+        .unwrap();
     let err = app.pin("core", "stock", "code").await.unwrap_err();
     assert_eq!(
         said(&app, &err).await,
@@ -1228,7 +1476,7 @@ mod judged {
             "stack-api",
             "fn push(v: u8)\n",
             &[chidev_core::app::ItemInput {
-                signature: "fn push(v: u8)".to_string(),
+                key: "push".to_string(),
                 lines: (1, 1),
                 replaces: None,
             }],
@@ -1241,7 +1489,7 @@ mod judged {
             items: vec![chidev_core::app::ItemRef {
                 context: Some("core".to_string()),
                 interface: "stack-api".to_string(),
-                signature: "fn push(v: u8)".to_string(),
+                key: "push".to_string(),
             }],
             clauses: vec![ClauseRef {
                 context: Some("core".to_string()),

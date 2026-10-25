@@ -108,9 +108,9 @@ path = "sim.py"
 /// its Items (which is what lets the Interface be pinned), and the sim Harness whose script is `script`, with a
 /// sweep citing both Clauses and a regress case citing C2. The sim cites no Item; it builds the Interface.
 fn model(script: &str) -> Vec<Value> {
-    let deposit = json!({"interface":"bank","signature":"deposit N"});
-    let withdraw = json!({"interface":"bank","signature":"withdraw N"});
-    let balance = json!({"interface":"bank","signature":"balance"});
+    let deposit = json!({"interface":"bank","key":"deposit"});
+    let withdraw = json!({"interface":"bank","key":"withdraw"});
+    let balance = json!({"interface":"bank","key":"balance"});
     vec![
         json!({"op":"context_add","name":"ledger"}),
         json!({"op":"contract_put","context":"ledger","name":"account","title":"Account",
@@ -118,9 +118,9 @@ fn model(script: &str) -> Vec<Value> {
                           {"label":"C2","text":"a withdrawal of more than the balance is refused and leaves the balance as it was"}]}),
         json!({"op":"interface_put","context":"ledger","name":"bank",
                "source":"deposit N\nwithdraw N\nbalance\n",
-               "items":[{"signature":"deposit N","lines":[1,1]},
-                        {"signature":"withdraw N","lines":[2,2]},
-                        {"signature":"balance","lines":[3,3]}]}),
+               "items":[{"key":"deposit","lines":[1,1]},
+                        {"key":"withdraw","lines":[2,2]},
+                        {"key":"balance","lines":[3,3]}]}),
         json!({"op":"harness_put","context":"ledger","name":"bank-tests","source":"tests\n","cases":[
             {"name":"bank_basics","lines":[1,1],"items":[deposit, withdraw, balance]}]}),
         harness_put(script),
@@ -527,7 +527,7 @@ fn a_sim_harness_builds_only_interfaces_the_context_has_and_a_tests_harness_buil
     ghost["builds"] = json!(["bank", "ghost"]);
     let mut tests = json!({"op":"harness_put","context":"ledger","name":"bank-tests","builds":["bank"],
         "source":"tests\n","cases":[{"name":"bank_basics","lines":[1,1],
-        "items":[{"interface":"bank","signature":"balance"}]}]});
+        "items":[{"interface":"bank","key":"balance"}]}]});
     tests["kind"] = json!("tests");
     let (refused, _) = run_ops(&dir, &[ghost, tests]);
     assert_eq!(refused[0]["ok"], false, "{refused:#?}");
@@ -536,7 +536,7 @@ fn a_sim_harness_builds_only_interfaces_the_context_has_and_a_tests_harness_buil
     assert!(refused[1].to_string().contains("builds"), "{refused:#?}");
     // a sim Case cites no Item
     let mut cites_item = harness_put(SIM);
-    cites_item["cases"][0]["items"] = json!([{"interface":"bank","signature":"balance"}]);
+    cites_item["cases"][0]["items"] = json!([{"interface":"bank","key":"balance"}]);
     let (refused, _) = run_ops(&dir, &[cites_item]);
     assert_eq!(refused[0]["ok"], false, "{refused:#?}");
     assert!(

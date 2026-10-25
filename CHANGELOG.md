@@ -10,6 +10,13 @@ and this project adheres to
 
 ### Added
 
+- Four rules for the Items of an Interface, each with a diagnostic: the invariants
+  `interface.key-taken` (two Items have one key; checked before the id of the
+  Items, so an Item given twice under one key is a key to mend, not a uuid) and
+  `interface.blank-item` (an Item's lines hold nothing), and the input rules
+  `input.replaces-kept` (an Item `replaces` a key that an Item of the same put has)
+  and `input.rename-conflict` (two Items `replaces` one key). The app refuses the
+  last two before it gives an id, naming the Context, the Interface and the key.
 - Diagnostics: a refusal is a violation of a rule, as structure, from the domain to
   the output. One registry holds the rules: the checks (as before), the
   *invariants* an operation is refused for (`cr.already-resolved`,
@@ -29,7 +36,7 @@ and this project adheres to
   `machine`, `review`, `placeholder`); the app gives `Diagnostic { code, level,
   message, subjects, field, values, help, suggestions, did_you_mean }` with the
   names the store has. A name that does not exist (a Context, an asset, a clause
-  label, a signature, a case, a change request title) is `input.unknown-name` with
+  label, an item key, a case, a change request title) is `input.unknown-name` with
   the close names that do (a match that differs only in case first, then an edit
   distance of at most a third of the length, as rustc does) and, where it helps, the
   operation that makes it (`cr_open` for a change request title). Error variants
@@ -224,6 +231,36 @@ and this project adheres to
 
 ### Changed
 
+- An Item of an Interface is known by a **key**, not by its signature. The identity of an
+  Item was a string a person wrote and had to write the same way every time; one
+  space or one `;` different made a new Item (the old one retired, its citations
+  gone). Now an Item has a `key` (`ItemKey`: not empty, one line, never read by
+  the domain), is matched by it when the Interface is put again, and the declaration
+  (the signature) is derived by the Interface from the code and the Item's `lines`
+  (`Signature::of_lines`: those lines, each without the white space at its end, joined
+  by a line break) and is no longer given or stored. `interface_put` and the
+  `interface` entries of a `change_set` take items `{"key","lines","replaces"?}` (it was
+  `signature`); `replaces` names the key an Item had before, to keep its id when it
+  is renamed. A citation of an Item is `{"interface":..,"key":..}` (a Case, and the
+  `item` of a subject, an address or a target); `status`, the model view, a retired
+  Item and the messages name an Item by its key. An Item's revision goes to the
+  next only when the declaration derived from its lines changes; a rename alone
+  moves no revision of the Item or the Interface, so a Case that cites it by id stays
+  current. `AppError::UnknownItem` carries `key`; `app::ItemInput` and `app::ItemRef`
+  have `key` in place of `signature`; `domain::entity::interface::ItemFound` is
+  `(ItemId, ItemKey, LineRange)`. There is no compatibility for the old fields (an
+  `items` entry with `signature` is refused: no `key`).
+- The store is schema 2: an Item is kept as `(id, key, lines, revision)`, with no
+  signature. A Project of schema 1 is read, in one place (the decode of the Project), as
+  schema 2: the key of an Item is its old signature, each line without the white
+  space at its ends joined by one space; a signature an Interface has twice gets
+  ` #2`, ` #3`, ... from the second, in the order of the Items, moved on to the
+  least number that is not the key of another Item; a retired Item keeps its name
+  by the same rule. No revision moves, so no Pin goes stale and no citation with
+  it. An Item whose lines hold no declaration makes the document corrupt, naming the
+  Interface and the Item. Pins and change requests have the same shape in both
+  schemas. The first put after the conversion changes no revision if the content
+  is the same.
 - A put of a sim Harness that is not the shape the protocol runs is refused (it was
   kept, and `sim.shape` reported an `error` that refused nothing: only a mandatory
   check at `error`, an invariant or a gate refuses, and the level of any other check

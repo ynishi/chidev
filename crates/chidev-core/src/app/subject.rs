@@ -20,7 +20,7 @@ pub enum SubjectInput {
         /// The Interface.
         interface: String,
     },
-    /// An Item, by the Interface's name and the signature.
+    /// An Item, by the Interface's name and the key.
     Item(ItemRef),
     /// A Clause, by the Contract's name and the label.
     Clause(ClauseRef),

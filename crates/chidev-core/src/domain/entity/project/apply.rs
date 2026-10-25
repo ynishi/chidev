@@ -353,9 +353,9 @@ mod tests {
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::title::Title;
 
@@ -397,13 +397,13 @@ mod tests {
             .collect()
     }
 
-    fn items(ids: &[(u128, &str)]) -> Vec<(ItemId, Signature, LineRange)> {
+    fn items(ids: &[(u128, &str)]) -> Vec<(ItemId, ItemKey, LineRange)> {
         ids.iter()
             .enumerate()
-            .map(|(k, (n, sig))| {
+            .map(|(k, (n, key))| {
                 (
                     item(*n),
-                    Signature::try_from(*sig).unwrap(),
+                    ItemKey::try_from(*key).unwrap(),
                     LineRange::new(k + 1, k + 1).unwrap(),
                 )
             })

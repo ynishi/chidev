@@ -153,7 +153,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     );
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
     assert!(changed.get("unapplied").is_none());
-    // the interface was revised, not replaced; its item kept its id across the signature change (`replaces`),
+    // the interface was revised, not replaced; its item kept its id across the change of its declaration (the same key),
     // or line 21 would have been refused for orphaning the cases that cite it
     assert_eq!(at(&results, 21)["revision"], 2);
     assert_eq!(at(&results, 21)["id"], at(&results, 6)["id"]);
@@ -457,22 +457,22 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         json!({"put":"contract","context":"core","name":"stock","title":"Stock","clauses":clauses})
     };
     let interface = |with_release: bool| {
-        let mut items = vec![json!({"signature":"fn reserve()","lines":[1,1]})];
+        let mut items = vec![json!({"key":"reserve","lines":[1,1]})];
         let mut source = "fn reserve()\n";
         if with_release {
-            items.push(json!({"signature":"fn release()","lines":[2,2]}));
+            items.push(json!({"key":"release","lines":[2,2]}));
             source = "fn reserve()\nfn release()\n";
         }
         json!({"put":"interface","context":"core","name":"stock","source":source,"items":items})
     };
     let harness = |with_release: bool| {
         let mut cases = vec![json!({"name":"reserve_refuses","lines":[1,1],
-            "items":[{"interface":"stock","signature":"fn reserve()"}],
+            "items":[{"interface":"stock","key":"reserve"}],
             "clauses":[{"contract":"stock","label":"C1"}]})];
         let mut source = "fn reserve_refuses() {}\n";
         if with_release {
             cases.push(json!({"name":"release_frees","lines":[2,2],
-                "items":[{"interface":"stock","signature":"fn release()"}],
+                "items":[{"interface":"stock","key":"release"}],
                 "clauses":[{"contract":"stock","label":"C7"}]}));
             source = "fn reserve_refuses() {}\nfn release_frees() {}\n";
         }
@@ -489,7 +489,7 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         // 5: the part names the three things that are release
         json!({"op":"cr_open","title":"Drop release","intent":"change_behavior","parent":"Remove release",
             "targets":[clause("C7"),
-                      {"item":{"context":"core","interface":"stock","signature":"fn release()"}},
+                      {"item":{"context":"core","interface":"stock","key":"release"}},
                       {"case":{"context":"core","harness":"stock-tests","name":"release_frees"}}]}),
         // 6, 7: two requests that have nothing to do with it
         json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior","targets":[clause("C1")]}),
@@ -620,7 +620,7 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         .collect();
     for target in [
         "stock C7 (retired)",
-        "stock fn release() (retired)",
+        "stock release (retired)",
         "case stock-tests release_frees (retired)",
         "contract stock",
         "interface stock",
@@ -634,7 +634,7 @@ fn work_is_attributed_to_the_request_it_was_applied_for_and_stays_in_its_frame()
         cr("Drop release")["targets"],
         json!([
             { "target": "stock C7 (retired)", "progress": "retired" },
-            { "target": "stock fn release() (retired)", "progress": "retired" },
+            { "target": "stock release (retired)", "progress": "retired" },
             { "target": "case stock-tests release_frees (retired)", "progress": "retired" }
         ])
     );
@@ -1110,14 +1110,14 @@ fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
         "{\"op\":\"init\"}\n",
         "{\"op\":\"context_add\",\"name\":\"core\"}\n",
         "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a value is returned\"}]}\n",
-        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"signature\":\"fn value()\",\"lines\":[1,1]}]}\n",
-        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
+        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"key\":\"value\",\"lines\":[1,1]}]}\n",
+        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"key\":\"value\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
         // 6: one of each kind, in the two lists (the Context is kept; a Case is a target)
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Everything\",\"intent\":\"change_behavior\",",
             "\"targets\":[{\"project\":true},{\"contract\":{\"context\":\"core\",\"contract\":\"rules\"}},",
             "{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}},{\"case\":{\"context\":\"core\",\"harness\":\"tests\",\"name\":\"checks_value\"}},",
-            "{\"item\":{\"context\":\"core\",\"interface\":\"api\",\"signature\":\"fn value()\"}}],",
+            "{\"item\":{\"context\":\"core\",\"interface\":\"api\",\"key\":\"value\"}}],",
             "\"keep\":[{\"context\":\"core\"},{\"harness\":{\"context\":\"core\",\"harness\":\"tests\"}},",
             "{\"clause\":{\"context\":\"core\",\"contract\":\"rules\",\"label\":\"C1\"}}]}\n"
         ),
@@ -1154,7 +1154,7 @@ fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
             { "kind": "target", "target": { "interface": core(serde_json::json!({ "interface": "api" })) }, "recorded": 1 },
             { "kind": "keep", "target": { "harness": core(serde_json::json!({ "harness": "tests" })) }, "recorded": 1 },
             { "kind": "keep", "target": { "clause": core(serde_json::json!({ "contract": "rules", "label": "C1" })) }, "recorded": 1 },
-            { "kind": "target", "target": { "item": core(serde_json::json!({ "interface": "api", "signature": "fn value()" })) }, "recorded": 1 },
+            { "kind": "target", "target": { "item": core(serde_json::json!({ "interface": "api", "key": "value" })) }, "recorded": 1 },
             { "kind": "target", "target": { "case": core(serde_json::json!({ "harness": "tests", "name": "checks_value" })) }, "recorded": 1 }
         ])
     );
@@ -1599,8 +1599,8 @@ fn address_setup() -> String {
         json!({"op":"init"}),
         json!({"op":"context_add","name":"core"}),
         json!({"op":"contract_put","context":"core","name":"rules","title":"Rules","clauses":[{"label":"C1","text":"a value is returned"}]}),
-        json!({"op":"interface_put","context":"core","name":"api","source":"fn value();\n","items":[{"signature":"fn value()","lines":[1,1]}]}),
-        json!({"op":"harness_put","context":"core","name":"tests","source":"fn checks_value() {}\n","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]}),
+        json!({"op":"interface_put","context":"core","name":"api","source":"fn value();\n","items":[{"key":"value","lines":[1,1]}]}),
+        json!({"op":"harness_put","context":"core","name":"tests","source":"fn checks_value() {}\n","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","key":"value"}],"clauses":[{"contract":"rules","label":"C1"}]}]}),
         json!({"op":"cr_open","title":"Existing request","intent":"keep_behavior"}),
     ]
     .into_iter()
@@ -1612,7 +1612,7 @@ fn address_setup() -> String {
 fn addresses_accept_every_subject_and_legacy_inputs_refer_to_the_same_finding() {
     use serde_json::json;
     let dir = fresh_dir("addresses-all-subjects");
-    let item = json!({"context":"core","interface":"api","signature":"fn value()"});
+    let item = json!({"context":"core","interface":"api","key":"value"});
     let clause = json!({"context":"core","contract":"rules","label":"C1"});
     let subjects = [
         json!({"context":"core"}),
@@ -1697,18 +1697,18 @@ fn malformed_address_selectors_never_fall_back_to_the_project_or_write_a_request
         r#"{"rule":"future.rule","subject":{"context":"core","change_request":"Existing request"}}"#,
         r#"{"rule":"future.rule","subject":{"interface":{"context":"core","interface":"api","extra":null}}}"#,
         r#"{"rule":"future.rule","subject":{"case":{"context":"core","harness":"tests","name":"checks_value","extra":null}}}"#,
-        r#"{"rule":"future.rule","subject":{"item":{"context":"core","interface":"api","signature":"fn value()","extra":null}}}"#,
+        r#"{"rule":"future.rule","subject":{"item":{"context":"core","interface":"api","key":"value","extra":null}}}"#,
         r#"{"rule":"future.rule","subject":{"clause":{"context":"core","contract":"rules","label":"C1","extra":null}}}"#,
         r#"{"rule":"future.rule","subject":null,"item":null}"#,
         r#"{"rule":"future.rule","subject":null,"clause":null}"#,
         r#"{"rule":"future.rule","item":null,"clause":null}"#,
         r#"{"rule":"future.rule","subject":{"context":"core"},"item":null}"#,
-        r#"{"rule":"future.rule","subject":null,"item":{"context":"core","interface":"api","signature":"fn value()"}}"#,
+        r#"{"rule":"future.rule","subject":null,"item":{"context":"core","interface":"api","key":"value"}}"#,
         r#"{"rule":"future.rule","subject":null,"subject":null}"#,
         r#"{"rule":"future.rule","item":null,"item":null}"#,
         r#"{"rule":"future.rule","clause":null,"clause":null}"#,
         r#"{"rule":"future.rule","rule":"future.other"}"#,
-        r#"{"rule":"future.rule","item":{"context":"core","interface":"api","signature":"fn value()","extra":null}}"#,
+        r#"{"rule":"future.rule","item":{"context":"core","interface":"api","key":"value","extra":null}}"#,
         r#"{"rule":"future.rule","clause":{"context":"core","contract":"rules","label":"C1","extra":null}}"#,
     ];
     for (k, address) in invalid.iter().enumerate() {
@@ -1739,7 +1739,7 @@ fn missing_address_targets_are_rejected_before_the_request_is_saved() {
     let invalid = [
         json!({"context":"missing"}),
         json!({"interface":{"context":"core","interface":"missing"}}),
-        json!({"item":{"context":"core","interface":"api","signature":"fn missing()"}}),
+        json!({"item":{"context":"core","interface":"api","key":"missing"}}),
         json!({"clause":{"context":"core","contract":"rules","label":"C2"}}),
         json!({"case":{"context":"core","harness":"tests","name":"missing"}}),
         json!({"change_request":"missing"}),
@@ -1976,8 +1976,8 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         "{\"op\":\"context_add\",\"name\":\"core\"}\n",
         "{\"op\":\"context_add\",\"name\":\"scratch\"}\n",
         "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"rules\",\"title\":\"Rules\",\"clauses\":[{\"label\":\"C1\",\"text\":\"a value is returned\"}]}\n",
-        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"signature\":\"fn value()\",\"lines\":[1,1]}]}\n",
-        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"signature\":\"fn value()\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
+        "{\"op\":\"interface_put\",\"context\":\"core\",\"name\":\"api\",\"source\":\"fn value();\\n\",\"items\":[{\"key\":\"value\",\"lines\":[1,1]}]}\n",
+        "{\"op\":\"harness_put\",\"context\":\"core\",\"name\":\"tests\",\"source\":\"fn checks_value() {}\\n\",\"cases\":[{\"name\":\"checks_value\",\"lines\":[1,1],\"items\":[{\"interface\":\"api\",\"key\":\"value\"}],\"clauses\":[{\"contract\":\"rules\",\"label\":\"C1\"}]}]}\n",
         "{\"op\":\"pin\",\"context\":\"core\",\"interface\":\"api\",\"code\":\"fn value() {}\"}\n",
         // 8: the request asks for the Interface to go
         "{\"op\":\"cr_open\",\"title\":\"Drop api\",\"intent\":\"change_behavior\",\"targets\":[{\"interface\":{\"context\":\"core\",\"interface\":\"api\"}}]}\n",
@@ -2036,7 +2036,7 @@ fn a_retired_asset_leaves_the_model_but_its_pin_its_request_and_its_name_stay() 
         at(&results, 12)["retired"],
         serde_json::json!([
             line("interface", "api", 1, 6),
-            line("item", "api fn value()", 1, 6)
+            line("item", "api value", 1, 6)
         ])
     );
     assert_eq!(at(&results, 13)["ok"], true);
@@ -2110,11 +2110,11 @@ fn store_revision(dir: &Path) -> u64 {
     })
 }
 
-fn case_json(name: &str, line: usize, signature: &str, label: &str) -> Value {
+fn case_json(name: &str, line: usize, key: &str, label: &str) -> Value {
     serde_json::json!({
         "name": name,
         "lines": [line, line],
-        "items": [{ "interface": "stock", "signature": signature }],
+        "items": [{ "interface": "stock", "key": key }],
         "clauses": [{ "contract": "stock", "label": label }]
     })
 }
@@ -2137,12 +2137,12 @@ fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_comm
             json!({ "op": "context_add", "name": "core" }),
             json!({ "op": "contract_put", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(8) }),
             json!({ "op": "interface_put", "context": "core", "name": "stock", "source": "fn reserve();\nfn release();\n",
-                    "items": [{ "signature": "fn reserve()", "lines": [1, 1] }, { "signature": "fn release()", "lines": [2, 2] }] }),
+                    "items": [{ "key": "reserve", "lines": [1, 1] }, { "key": "release", "lines": [2, 2] }] }),
             json!({ "op": "harness_put", "context": "core", "name": "stock-tests", "source": tests_source,
                     "cases": [
-                        case_json("reserve_refuses", 1, "fn reserve()", "C1"),
-                        case_json("release_frees", 2, "fn release()", "C7"),
-                        case_json("release_twice", 3, "fn release()", "C8"),
+                        case_json("reserve_refuses", 1, "reserve", "C1"),
+                        case_json("release_frees", 2, "release", "C7"),
+                        case_json("release_twice", 3, "release", "C8"),
                     ] }),
         ],
     );
@@ -2151,9 +2151,9 @@ fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_comm
 
     let contract = json!({ "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(6) });
     let interface = json!({ "put": "interface", "context": "core", "name": "stock", "source": "fn reserve();\n",
-                            "items": [{ "signature": "fn reserve()", "lines": [1, 1] }] });
+                            "items": [{ "key": "reserve", "lines": [1, 1] }] });
     let harness = json!({ "put": "harness", "context": "core", "name": "stock-tests", "source": "fn reserve_refuses() {}\n",
-                          "cases": [case_json("reserve_refuses", 1, "fn reserve()", "C1")] });
+                          "cases": [case_json("reserve_refuses", 1, "reserve", "C1")] });
     let (results, code, err) = run_values(
         &dir,
         &[
@@ -2181,7 +2181,7 @@ fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_comm
         "case stock-tests release_twice",
         "the clause `stock C7`",
         "the clause `stock C8`",
-        "the item `stock fn release()`",
+        "the item `stock release`",
     ] {
         assert!(refused.contains(named), "{named} not in {refused}");
     }
@@ -2212,7 +2212,7 @@ fn a_change_set_removes_cited_clauses_and_an_item_with_their_harness_in_one_comm
         [
             "stock C7",
             "stock C8",
-            "stock fn release()",
+            "stock release",
             "stock-tests release_frees",
             "stock-tests release_twice"
         ]
@@ -2241,10 +2241,10 @@ fn a_change_set_makes_what_its_harness_cites_and_retires_in_the_same_change() {
             // 3: a Contract, an Interface and the Harness that cites both, none of which exists yet
             json!({ "op": "change_set", "puts": [
                 { "put": "harness", "context": "core", "name": "stock-tests", "source": "fn reserve_refuses() {}\n",
-                  "cases": [case_json("reserve_refuses", 1, "fn reserve()", "C1")] },
+                  "cases": [case_json("reserve_refuses", 1, "reserve", "C1")] },
                 { "put": "contract", "context": "core", "name": "stock", "title": "Stock", "clauses": stock_clauses(1) },
                 { "put": "interface", "context": "core", "name": "stock", "source": "fn reserve();\n",
-                  "items": [{ "signature": "fn reserve()", "lines": [1, 1] }] },
+                  "items": [{ "key": "reserve", "lines": [1, 1] }] },
                 { "put": "base_on_contract", "context": "core" }
             ], "retires": [{ "retire": "context", "context": "scratch" }] }),
             // 4: a thing named twice is refused
@@ -2300,11 +2300,11 @@ fn a_change_set_for_a_request_that_adds_a_context_meets_the_change_of_the_projec
                 {"put":"contract","context":"billing","name":"invoice","title":"Invoice",
                  "clauses":[{"label":"C1","text":"an invoice has a total"}]},
                 {"put":"interface","context":"ledger","name":"entries","source":"fn post()\n",
-                 "items":[{"signature":"fn post()","lines":[1,1]}]},
+                 "items":[{"key":"post","lines":[1,1]}]},
                 {"put":"harness","context":"billing","name":"invoice-tests",
                  "source":"fn totals() {}\n",
                  "cases":[{"name":"totals","lines":[1,1],
-                    "items":[{"context":"ledger","interface":"entries","signature":"fn post()"}],
+                    "items":[{"context":"ledger","interface":"entries","key":"post"}],
                     "clauses":[{"contract":"invoice","label":"C1"}]}]}
             ]}),
             // 6: now it reads revised, and it is resolved as done
@@ -2366,11 +2366,11 @@ fn file_setup() -> Vec<Value> {
 }
 
 fn api_from_file(file: &str) -> Value {
-    serde_json::json!({"op":"interface_put","context":"core","name":"api","source_file":file,"items":[{"signature":"fn value()","lines":[1,1]}]})
+    serde_json::json!({"op":"interface_put","context":"core","name":"api","source_file":file,"items":[{"key":"value","lines":[1,1]}]})
 }
 
 fn tests_from_file(file: &str) -> Value {
-    serde_json::json!({"op":"harness_put","context":"core","name":"tests","source_file":file,"cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]})
+    serde_json::json!({"op":"harness_put","context":"core","name":"tests","source_file":file,"cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","key":"value"}],"clauses":[{"contract":"rules","label":"C1"}]}]})
 }
 
 #[test]
@@ -2418,8 +2418,8 @@ fn a_change_set_takes_the_text_of_its_interface_and_harness_entries_from_files()
             json!({"op":"change_set","puts":[
                 {"put":"context","name":"core"},
                 {"put":"contract","context":"core","name":"rules","title":"Rules","clauses":[{"label":"C1","text":"a value is returned"}]},
-                {"put":"interface","context":"core","name":"api","source_file":"src/api.rs","items":[{"signature":"fn value()","lines":[1,1]}]},
-                {"put":"harness","context":"core","name":"tests","source_file":"tests/api_tests.rs","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","signature":"fn value()"}],"clauses":[{"contract":"rules","label":"C1"}]}]}]}),
+                {"put":"interface","context":"core","name":"api","source_file":"src/api.rs","items":[{"key":"value","lines":[1,1]}]},
+                {"put":"harness","context":"core","name":"tests","source_file":"tests/api_tests.rs","cases":[{"name":"checks_value","lines":[1,1],"items":[{"interface":"api","key":"value"}],"clauses":[{"contract":"rules","label":"C1"}]}]}]}),
             json!({"op":"pin","context":"core","interface":"api","code_file":"code/api_impl.rs"}),
             json!({"op":"status"}),
         ],

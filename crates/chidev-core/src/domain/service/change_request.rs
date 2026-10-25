@@ -387,12 +387,12 @@ mod tests {
         test_uuid,
     };
     use crate::domain::vo::intent::Intent;
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
     use crate::domain::vo::resolution::{Reopening, ResolutionKind, Transition};
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::timestamp::Timestamp;
     use crate::domain::vo::title::Title;
@@ -492,7 +492,7 @@ mod tests {
             Source::new(format!("{sig}\n")),
             vec![(
                 ItemId::from_uuid(test_uuid(item_id)),
-                Signature::try_from(sig).unwrap(),
+                ItemKey::try_from(sig.split('(').next().unwrap()).unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )

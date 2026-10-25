@@ -29,10 +29,10 @@ use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
+use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::name::ContextName;
 use crate::domain::vo::revision::Revision;
-use crate::domain::vo::signature::Signature;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::target::Target;
 use crate::domain::vo::title::Title;
@@ -59,7 +59,7 @@ pub struct InterfacePut {
     pub name: String,
     /// Its code.
     pub source: String,
-    /// Its Items; one keeps its id when its signature (or the one it replaces) is one the Interface has.
+    /// Its Items; one keeps its id when its key (or the one it replaces) is one the Interface has.
     pub items: Vec<ItemInput>,
 }
 
@@ -188,7 +188,7 @@ struct Plan {
     ids: BTreeMap<(ContextId, AssetKind, String), Uuid>,
     /// The names to keep with the Project, one for each asset put.
     names: Vec<AssetName>,
-    /// The Items of each Interface put: signature and id.
+    /// The Items of each Interface put: key and id.
     items: BTreeMap<InterfaceId, Vec<(String, ItemId)>>,
     /// The Clauses of each Contract put: label and id.
     clauses: BTreeMap<ContractId, Vec<(ClauseLabel, ClauseId)>>,
@@ -513,37 +513,60 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .await?,
         );
         let old = p.context(ctx).and_then(|x| x.interface(id));
-        let find = |sig: &str| {
-            old.and_then(|x| x.items().iter().find(|it| it.signature().as_str() == sig))
-                .map(|it| it.id())
+        let find = |key: &str| {
+            let key = ItemKey::try_from(key).ok()?;
+            old.and_then(|x| x.item_by_key(&key)).map(|it| it.id())
         };
+        // A rename is refused before any id is given: the domain would find an id twice, which only says that,
+        // not which names are wrong.
+        let mut replaced: Vec<&str> = Vec::new();
+        for it in &i.items {
+            let Some(was) = it.replaces.as_deref() else {
+                continue;
+            };
+            if replaced.contains(&was) {
+                return Err(AppError::RenameConflict {
+                    context: i.context.clone(),
+                    interface: i.name.clone(),
+                    key: was.to_string(),
+                });
+            }
+            if it.key != was && i.items.iter().any(|other| other.key == was) {
+                return Err(AppError::ReplacesKept {
+                    context: i.context.clone(),
+                    interface: i.name.clone(),
+                    key: was.to_string(),
+                });
+            }
+            replaced.push(was);
+        }
         let mut given = Vec::with_capacity(i.items.len());
         for it in &i.items {
-            let signature = Signature::try_from(it.signature.as_str()).map_err(input)?;
+            let key = ItemKey::try_from(it.key.as_str()).map_err(input)?;
             let lines = LineRange::new(it.lines.0, it.lines.1).map_err(input)?;
             let item = match &it.replaces {
                 Some(was) => find(was).ok_or_else(|| AppError::UnknownItem {
                     context: i.context.clone(),
                     interface: i.name.clone(),
-                    signature: was.clone(),
+                    key: was.clone(),
                 })?,
-                None => match find(&it.signature) {
+                None => match find(&it.key) {
                     Some(item) => item,
                     None => ItemId::from_uuid(self.ids.next_uuid()),
                 },
             };
-            given.push((item, signature, lines));
+            given.push((item, key, lines));
         }
         plan.items.insert(
             id,
             given
                 .iter()
-                .map(|(item, signature, _)| (signature.as_str().to_string(), *item))
+                .map(|(item, key, _)| (key.as_str().to_string(), *item))
                 .collect(),
         );
-        for (item, signature, _) in &given {
+        for (item, key, _) in &given {
             plan.words
-                .insert(Target::Item(*item), format!("{} {signature}", i.name));
+                .insert(Target::Item(*item), format!("{} {key}", i.name));
         }
         Ok(AssetPut::Interface {
             context: ctx,
@@ -701,22 +724,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let found = match plan.items.get(&iface) {
             Some(items) => items
                 .iter()
-                .find(|(sig, _)| *sig == r.signature)
+                .find(|(key, _)| *key == r.key)
                 .map(|(_, id)| *id),
-            None => p
-                .context(ctx)
-                .and_then(|c| c.interface(iface))
-                .and_then(|i| {
-                    i.items()
-                        .iter()
-                        .find(|it| it.signature().as_str() == r.signature)
-                })
-                .map(|it| it.id()),
+            None => {
+                let key = ItemKey::try_from(r.key.as_str()).map_err(input)?;
+                p.context(ctx)
+                    .and_then(|c| c.interface(iface))
+                    .and_then(|i| i.item_by_key(&key))
+                    .map(|it| it.id())
+            }
         };
         found.ok_or_else(|| AppError::UnknownItem {
             context: ctx_name.clone(),
             interface: r.interface.clone(),
-            signature: r.signature.clone(),
+            key: r.key.clone(),
         })
     }
 
@@ -803,7 +824,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// A refusal of the domain in the names a person knows: every Case that cites what it cannot reach by its
-    /// Harness and name and what it cites by its Contract or Interface and label or signature, the Cases and
+    /// Harness and name and what it cites by its Contract or Interface and label or key, the Cases and
     /// Contexts that stand in the way of a retirement, the thing named twice. `before` is the Project as it was.
     async fn set_error(
         &self,

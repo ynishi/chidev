@@ -37,7 +37,7 @@ fn run(name: &str, ops: &[Value]) -> Vec<Value> {
 }
 
 /// A project with the Context `core`, a Contract `rounding` (C1), an Interface `api` and a Harness `tests` whose
-/// Case cites C1 and the Item `fn price()`.
+/// Case cites C1 and the Item `price`.
 fn setup() -> Vec<Value> {
     vec![
         json!({"op":"init"}),
@@ -45,10 +45,10 @@ fn setup() -> Vec<Value> {
         json!({"op":"contract_put","context":"core","name":"rounding","title":"Rounding",
             "clauses":[{"label":"C1","text":"a half rounds up"}]}),
         json!({"op":"interface_put","context":"core","name":"api","source":"fn price()\n",
-            "items":[{"signature":"fn price()","lines":[1,1]}]}),
+            "items":[{"key":"price","lines":[1,1]}]}),
         json!({"op":"harness_put","context":"core","name":"tests","source":"fn t() {}\n",
             "cases":[{"name":"t","lines":[1,1],
-                "items":[{"interface":"api","signature":"fn price()"}],
+                "items":[{"interface":"api","key":"price"}],
                 "clauses":[{"contract":"rounding","label":"C1"}]}]}),
     ]
 }
@@ -268,9 +268,9 @@ fn an_input_that_cannot_be_read_is_a_rule_of_its_own_with_the_names_that_would_b
             json!({"op":"cr_open","title":"T","intent":"change_behavior","situaton":"x"}),
             json!({"op":"contract_put","context":"cor","name":"x","title":"X","clauses":[]}),
             json!({"op":"harness_put","context":"core","name":"h","source":"x\n",
-                "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"ap","signature":"fn price()"}]}]}),
+                "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"ap","key":"price"}]}]}),
             json!({"op":"harness_put","context":"core","name":"h","source":"x\n",
-                "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"api","signature":"fn pric()"}]}]}),
+                "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"api","key":"pric"}]}]}),
             json!({"op":"cr_decide","title":"Nobody","choice":"a","basis":{"arbitrary":"x"},"by":by_alice()}),
         ],
     );
@@ -305,10 +305,10 @@ fn an_input_that_cannot_be_read_is_a_rule_of_its_own_with_the_names_that_would_b
     assert_eq!(interface["field"], "cases[0].items[0].interface");
     assert_eq!(strings(&interface["did_you_mean"]), ["api"]);
 
-    let signature = one(&r[6]);
-    assert_eq!(signature["values"]["kind"], "item");
-    assert_eq!(strings(&signature["did_you_mean"]), ["fn price()"]);
-    assert_eq!(signature["subjects"][0]["name"], "api");
+    let key = one(&r[6]);
+    assert_eq!(key["values"]["kind"], "item");
+    assert_eq!(strings(&key["did_you_mean"]), ["price"]);
+    assert_eq!(key["subjects"][0]["name"], "api");
 
     let title = one(&r[7]);
     assert_eq!(title["values"]["kind"], "change request");
@@ -388,6 +388,34 @@ fn the_example_of_each_rule_is_an_operation_chidev_reads_or_refuses_by_its_rule(
             );
         }
     }
+}
+
+#[test]
+fn the_example_of_each_rule_of_the_items_of_an_interface_is_refused_by_that_rule() {
+    let ids = [
+        "interface.key-taken",
+        "interface.blank-item",
+        "input.replaces-kept",
+        "input.rename-conflict",
+    ];
+    let ops: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"op":"explain","rule":id}))
+        .collect();
+    let examples: Vec<Value> = run("diag-item-rules-explain", &ops)
+        .iter()
+        .map(|e| serde_json::from_str(e["example"].as_str().unwrap()).expect("an operation"))
+        .collect();
+    let refused = after_setup("diag-item-rules", &examples);
+    for (id, result) in ids.iter().zip(&refused) {
+        assert_eq!(one(result)["code"], *id, "{result:#?}");
+    }
+    // the sentences name the key and the Interface, not an id
+    let kept = one(&refused[2]);
+    assert_eq!(kept["values"]["key"], "b");
+    assert_eq!(kept["subjects"][1]["name"], "api");
+    let taken = one(&refused[0]);
+    assert_eq!(taken["subjects"][0]["name"], "api a");
 }
 
 #[test]

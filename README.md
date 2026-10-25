@@ -21,7 +21,7 @@ operation, and prints one result line per operation (`"ok"`, the `line` it came
 from, and its fields). A line that fails gets `"ok":false` and `diagnostics` (see
 "Diagnostics"), and the run goes on; the exit status is 1 if any line failed. Things are named, never
 given by id: a Context by its name, an asset by its name within its Context, a
-Clause by its label (`C1`), an Item by its signature, a Case by its name. These are
+Clause by its label (`C1`), an Item by its key, a Case by its name. These are
 the operations that build the model (the others are described below, where they
 belong):
 
@@ -33,10 +33,10 @@ belong):
 {"op":"contract_put","context":"pricing","name":"discount","title":"Discount",
  "clauses":[{"label":"C1","text":"a discount over 100% is refused"}]}
 {"op":"interface_put","context":"pricing","name":"price","source":"fn price(total: u64) -> u64;\n",
- "items":[{"signature":"fn price(total: u64) -> u64","lines":[1,1]}]}
+ "items":[{"key":"price","lines":[1,1]}]}
 {"op":"harness_put","context":"pricing","name":"price-tests","source":"#[test] fn refuses() {}\n",
  "cases":[{"name":"refuses","lines":[1,1],
-   "items":[{"interface":"price","signature":"fn price(total: u64) -> u64"}],
+   "items":[{"interface":"price","key":"price"}],
    "clauses":[{"contract":"discount","label":"C1"}]}]}
 {"op":"pin","context":"pricing","interface":"price","code":"fn price(total: u64) -> u64 { total }"}
 {"op":"status"}
@@ -51,8 +51,35 @@ belong):
   did not have is new, and one left out is removed. A label is `C` and a number.
   The answer has the asset's `id` and `revision`.
 - `interface_put` is the same for an Interface: `source` is its code, and each
-  item has its `signature`, the first and last `lines` it is on (from 1) and,
-  when its signature changed, `replaces` (the signature it had) to keep its id.
+  item has its `key`, the first and last `lines` it is on (from 1) and, when it is
+  renamed, `replaces` (the key it had) to keep its id.
+  - The `key` is the name the Item is known by: a path such as `price` or
+    `Stack::push`, one line, written by you (chidev does not read it). It is the
+    Item's identity: an Item whose key is one the Interface has keeps its id, and
+    a citation of it (`{"interface":..,"key":..}`) names it. Two Items of an
+    Interface do not have one key (`interface.key-taken`); give them keys that
+    tell them apart.
+  - The declaration is not written: chidev takes it from the code. `lines` points
+    at the declaration alone, from its first token (after a doc comment and an
+    attribute) to the line that ends the signature, with `;` or the `{` of its
+    body; those lines, each without the white space at its end, are the Item's
+    signature. A doc comment inside `lines` is part of it, so editing the comment
+    revises the Item. Lines with nothing in them are refused
+    (`interface.blank-item`).
+  - A declaration that changes goes to the Item's next revision (and the
+    Interface's), which makes the citations of it stale. A rename alone does not:
+    an Item given another key by `replaces`
+    (`{"key":"Stack::push","lines":[1,1],"replaces":"push"}`) keeps its id and its
+    revision, and so does the Interface, if the code is the same, so the Cases that
+    cite it stay current. The key replaced must not be the key of an Item in the same put
+    (`input.replaces-kept`) and is replaced by one Item at most
+    (`input.rename-conflict`).
+  - `status` shows the keys; write a key as it shows it. A store from before
+    keys is read with each Item's old signature as its key: the lines of the
+    signature, each without the white space at its ends, joined by one space (a
+    signature that an Interface has twice gets ` #2`, ` #3`, ... from the second
+    on). No revision moves, so nothing goes stale; put the Interface again with
+    the keys you want, and `replaces` (the old key) to keep an id.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
   a new Harness) or `sim`. A Case of tests cites one Item at least and any Clauses;
   a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
@@ -95,10 +122,10 @@ checked once, on the state it ends in, and all of it is applied or none of it.
  "puts":[
   {"put":"contract","context":"core","name":"stock","title":"Stock","clauses":[{"label":"C1","text":".."}]},
   {"put":"interface","context":"core","name":"stock","source":"fn reserve();\n",
-   "items":[{"signature":"fn reserve()","lines":[1,1]}]},
+   "items":[{"key":"reserve","lines":[1,1]}]},
   {"put":"harness","context":"core","name":"stock-tests","source":"..","cases":[
    {"name":"reserve_refuses","lines":[1,1],
-    "items":[{"interface":"stock","signature":"fn reserve()"}],
+    "items":[{"interface":"stock","key":"reserve"}],
     "clauses":[{"contract":"stock","label":"C1"}]}]}],
  "retires":[{"retire":"harness","context":"core","harness":"old-tests"}]}
 ```
@@ -572,7 +599,7 @@ Project
 A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
 `{"contract":{"context":"pricing","contract":"discount"}}`,
 `{"interface":{"context":..,"interface":..}}`, `{"harness":{"context":..,"harness":..}}`,
-`{"item":{"context":..,"interface":..,"signature":..}}`,
+`{"item":{"context":..,"interface":..,"key":..}}`,
 `{"clause":{"context":..,"contract":..,"label":..}}` and
 `{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
 the request opens, and a target is in one list, once. `cr_open` refuses a field it
@@ -817,7 +844,7 @@ without them; what a put drops is recorded as retired too.
   had in its Context cannot be put again (`interface_put` of a retired name is
   refused); make it again under another name. There is no way back.
 - **The record keeps names and revisions, not the text**: for each thing its kind,
-  names (the Context, the asset, and for a part the label, signature or case
+  names (the Context, the asset, and for a part the label, key or case
   name), the revision it had (`last_revision`) and `at`, the revision of what held
   it once it was retired (the Project's for a Context, the Context's for an asset
   and what went with it, the asset's for a part a put dropped). `status.retired`
@@ -857,7 +884,7 @@ It uses the same `subject` form as `finding_report`:
 [
   {"rule":"context.no-harness","subject":{"context":"pricing"}},
   {"rule":"pin.unpinned","subject":{"interface":{"context":"pricing","interface":"rounding"}}},
-  {"rule":"cite.uncited-item","subject":{"item":{"context":"pricing","interface":"rounding","signature":"fn round()"}}},
+  {"rule":"cite.uncited-item","subject":{"item":{"context":"pricing","interface":"rounding","key":"round"}}},
   {"rule":"cite.uncited-clause","subject":{"clause":{"context":"pricing","contract":"totals","label":"C1"}}},
   {"rule":"judged.case-review","subject":{"case":{"context":"pricing","harness":"rounding-tests","name":"half rounds up"}}},
   {"rule":"cr.keep-moved","subject":{"change_request":"change rounding"}},

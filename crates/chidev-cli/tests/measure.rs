@@ -108,13 +108,13 @@ path = "tests/stock.rs"
 fn harness_put(source: &str) -> Value {
     json!({"op":"harness_put","context":"inventory","name":"stock-tests","source":source,"cases":[
         {"name":"a_load_under_the_limit_fits","lines":[3,6],
-         "items":[{"interface":"stock","signature":"fn fits(used: u32, limit: u32) -> bool"}],
+         "items":[{"interface":"stock","key":"fits"}],
          "clauses":[{"contract":"capacity","label":"C1"}]},
         {"name":"a_load_over_the_limit_does_not_fit","lines":[8,11],
-         "items":[{"interface":"stock","signature":"fn fits(used: u32, limit: u32) -> bool"}],
+         "items":[{"interface":"stock","key":"fits"}],
          "clauses":[{"contract":"capacity","label":"C1"}]},
         {"name":"spare_is_the_limit_less_the_used","lines":[13,16],
-         "items":[{"interface":"stock","signature":"fn spare(limit: u32, used: u32) -> u32"}],
+         "items":[{"interface":"stock","key":"spare"}],
          "clauses":[{"contract":"capacity","label":"C2"}]}]})
 }
 
@@ -143,8 +143,8 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
                               {"label":"C2","text":"spare is the limit less the used"}]}),
             json!({"op":"interface_put","context":"inventory","name":"stock",
                    "source":"pub fn fits(used: u32, limit: u32) -> bool;\npub fn spare(limit: u32, used: u32) -> u32;\n",
-                   "items":[{"signature":"fn fits(used: u32, limit: u32) -> bool","lines":[1,1]},
-                            {"signature":"fn spare(limit: u32, used: u32) -> u32","lines":[2,2]}]}),
+                   "items":[{"key":"fits","lines":[1,1]},
+                            {"key":"spare","lines":[2,2]}]}),
             harness_put(HARNESS),
             json!({"op":"pin","context":"inventory","interface":"stock","code":PINNED}),
         ],
@@ -344,7 +344,7 @@ path = "tests/message.rs"
 }
 
 fn message_setup(dir: &Path) {
-    let signature = "fn check(n: u32) -> Result<u32, String>";
+    let key = "check";
     exec(
         dir,
         &[
@@ -355,14 +355,14 @@ fn message_setup(dir: &Path) {
                               {"label":"C2","text":"a positive quantity passes"}]}),
             json!({"op":"interface_put","context":"inventory","name":"message",
                    "source":"pub fn check(n: u32) -> Result<u32, String>;\n",
-                   "items":[{"signature":signature,"lines":[1,1]}]}),
+                   "items":[{"key":key,"lines":[1,1]}]}),
             json!({"op":"harness_put","context":"inventory","name":"message-tests",
                    "source":MESSAGE_TESTS,"cases":[
                 {"name":"zero_is_refused","lines":[3,6],
-                 "items":[{"interface":"message","signature":signature}],
+                 "items":[{"interface":"message","key":key}],
                  "clauses":[{"contract":"quantity","label":"C1"}]},
                 {"name":"a_positive_quantity_passes","lines":[8,11],
-                 "items":[{"interface":"message","signature":signature}],
+                 "items":[{"interface":"message","key":key}],
                  "clauses":[{"contract":"quantity","label":"C2"}]}]}),
             json!({"op":"pin","context":"inventory","interface":"message","code":MESSAGE}),
         ],
@@ -449,8 +449,8 @@ fn a_run_limited_by_max_mutants_says_how_many_sites_it_left_out() {
                               {"label":"C2","text":"spare is the limit less the used"}]}),
             json!({"op":"interface_put","context":"inventory","name":"stock",
                    "source":"pub fn fits(used: u32, limit: u32) -> bool;\npub fn spare(limit: u32, used: u32) -> u32;\n",
-                   "items":[{"signature":"fn fits(used: u32, limit: u32) -> bool","lines":[1,1]},
-                            {"signature":"fn spare(limit: u32, used: u32) -> u32","lines":[2,2]}]}),
+                   "items":[{"key":"fits","lines":[1,1]},
+                            {"key":"spare","lines":[2,2]}]}),
             harness_put(HARNESS),
             json!({"op":"pin","context":"inventory","interface":"stock","code":PINNED}),
         ],
@@ -506,8 +506,8 @@ fn a_baseline_that_fails_is_a_failed_measurement_and_a_failed_finding() {
                               {"label":"C2","text":"spare is the limit less the used"}]}),
             json!({"op":"interface_put","context":"inventory","name":"stock",
                    "source":"pub fn fits(used: u32, limit: u32) -> bool;\npub fn spare(limit: u32, used: u32) -> u32;\n",
-                   "items":[{"signature":"fn fits(used: u32, limit: u32) -> bool","lines":[1,1]},
-                            {"signature":"fn spare(limit: u32, used: u32) -> u32","lines":[2,2]}]}),
+                   "items":[{"key":"fits","lines":[1,1]},
+                            {"key":"spare","lines":[2,2]}]}),
             harness_put(
                 &HARNESS.replace("assert_eq!(spare(5, 2), 3);", "assert_eq!(spare(5, 2), 4);"),
             ),

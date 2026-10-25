@@ -77,7 +77,7 @@ fn item() -> ItemRef {
     ItemRef {
         context: Some("core".into()),
         interface: "stack".into(),
-        signature: "fn push()".into(),
+        key: "push".into(),
     }
 }
 
@@ -153,7 +153,7 @@ async fn fixture(registry: Registry) -> (App<SqliteStore, Counter>, PathBuf) {
         "stack",
         "fn push()",
         &[ItemInput {
-            signature: "fn push()".into(),
+            key: "push".into(),
             lines: (1, 1),
             replaces: None,
         }],
@@ -301,7 +301,7 @@ async fn nonexistent_targets_and_invalid_rule_ids_keep_nothing() {
             interface: "missing".into(),
         }),
         Some(SubjectInput::Item(ItemRef {
-            signature: "fn missing()".into(),
+            key: "missing".into(),
             ..item()
         })),
         Some(SubjectInput::Clause(ClauseRef {

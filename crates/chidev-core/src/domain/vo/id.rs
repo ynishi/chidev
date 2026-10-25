@@ -59,7 +59,7 @@ uuid_id!(
     ClauseId
 );
 uuid_id!(
-    /// The identity of an Item of an Interface; it stays when the Item is renamed or its signature changes.
+    /// The identity of an Item of an Interface; it stays when the Item is renamed or its declaration changes.
     ItemId
 );
 uuid_id!(

@@ -102,9 +102,9 @@ mod tests {
     use crate::domain::vo::id::{
         ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId, test_uuid,
     };
+    use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
-    use crate::domain::vo::signature::Signature;
     use crate::domain::vo::source::Source;
     use crate::domain::vo::title::Title;
 
@@ -115,7 +115,7 @@ mod tests {
             Source::new(format!("{sig}\n")),
             vec![(
                 ItemId::from_uuid(test_uuid(10)),
-                Signature::try_from(sig).unwrap(),
+                ItemKey::try_from(sig.split('(').next().unwrap()).unwrap(),
                 LineRange::new(1, 1).unwrap(),
             )],
         )
