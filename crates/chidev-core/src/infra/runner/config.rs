@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::Operator;
@@ -40,9 +41,59 @@ const DEFAULT_ENV: [(&str, &str); 1] = [("CARGO_TARGET_DIR", "{run}/target")];
 /// the `program` of a sim. `{run}` is the run's directory and `{tree}` the root of the copy the run works in (the
 /// second copy of a sim, which its second runs are made in, is `rerun-tree` in the same directory, so there `{tree}`
 /// is its root); any other `{...}` stays as it is. Only [`RunDirs::expand`] reads the text, so the fields that are
-/// a `Template` are the ones that are expanded, and [`check_placeholders`] refuses a placeholder anywhere else.
+/// a `Template` are the ones that are expanded; every other string of the table is a [`Plain`], which refuses a
+/// placeholder. The types of the table are therefore the one statement of where a placeholder is taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Template(String);
+
+impl<'de> Deserialize<'de> for Template {
+    /// Refuses `{work}`, the retired name; `{run}` and `{tree}` are taken.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.contains(RETIRED) {
+            return Err(D::Error::custom(retired()));
+        }
+        Ok(Self(text))
+    }
+}
+
+/// A string of the table that takes no placeholder: a key, a command word, a path, a name. It refuses `{run}` and
+/// `{tree}`, and `{work}` too, so a field that is not a [`Template`] is never left with a placeholder in it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Plain(String);
+
+impl<'de> Deserialize<'de> for Plain {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.contains(RETIRED) {
+            return Err(D::Error::custom(retired()));
+        }
+        if text.contains(RUN) || text.contains(TREE) {
+            return Err(D::Error::custom(no_placeholder()));
+        }
+        Ok(Self(text))
+    }
+}
+
+/// What is wrong with `{work}`. The error of the table says in which field (`in `layout.path``) after it.
+fn retired() -> String {
+    format!(
+        "this has `{RETIRED}`, which is not a placeholder any more: use `{RUN}` (the run's directory) or `{TREE}` (the root of the copy)"
+    )
+}
+
+/// What is wrong with `{run}` or `{tree}` where no placeholder is taken. The error of the table says in which field
+/// after it; a map that has such a key is named, not the key.
+fn no_placeholder() -> String {
+    format!(
+        "this takes no placeholder (`{RUN}`, `{TREE}`): only the value of an `env` variable and a word of `sim.<context>.program` do"
+    )
+}
+
+/// The strings of a list of [`Plain`] ones.
+fn strings(list: Vec<Plain>) -> Vec<String> {
+    list.into_iter().map(|w| w.0).collect()
+}
 
 /// The two places of one run: its directory, and the root of the copy of the project under it (`tree`, or
 /// `rerun-tree` for the second copy of a sim). The names `{run}` and `{tree}` of a [`Template`] stand for them.
@@ -102,18 +153,18 @@ impl RunDirs {
 #[serde(deny_unknown_fields)]
 struct Raw {
     #[serde(default)]
-    copy_exclude: Option<Vec<String>>,
+    copy_exclude: Option<Vec<Plain>>,
     #[serde(default)]
-    env: Option<BTreeMap<String, String>>,
-    build: Vec<String>,
+    env: Option<BTreeMap<Plain, Template>>,
+    build: Vec<Plain>,
     #[serde(default)]
-    test: Option<Vec<String>>,
+    test: Option<Vec<Plain>>,
     #[serde(default)]
-    mutants: BTreeMap<String, Vec<String>>,
+    mutants: BTreeMap<Plain, Vec<Plain>>,
     #[serde(default)]
-    items: BTreeMap<String, Vec<String>>,
+    items: BTreeMap<Plain, Vec<Plain>>,
     #[serde(default)]
-    sim: BTreeMap<String, RawSim>,
+    sim: BTreeMap<Plain, RawSim>,
     #[serde(default)]
     layout: Vec<RawLayout>,
     #[serde(default)]
@@ -127,15 +178,15 @@ struct Raw {
     #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
-    operators: Option<Vec<String>>,
+    operators: Option<Vec<Plain>>,
 }
 
 /// `[measure.sim.<context>]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSim {
-    interpreter: Vec<String>,
-    program: Vec<String>,
+    interpreter: Vec<Plain>,
+    program: Vec<Template>,
     #[serde(default)]
     seeds: Option<u32>,
     #[serde(default)]
@@ -149,14 +200,14 @@ struct RawSim {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLayout {
-    context: String,
+    context: Plain,
     #[serde(default)]
-    interface: Option<String>,
+    interface: Option<Plain>,
     #[serde(default)]
-    harness: Option<String>,
+    harness: Option<Plain>,
     #[serde(default)]
-    lang: Option<String>,
-    path: String,
+    lang: Option<Plain>,
+    path: Plain,
 }
 
 /// What a layout entry places.
@@ -281,107 +332,35 @@ fn inside(what: &str, path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// A step of the path to a value of the table.
-enum Step {
-    Key(String),
-    Index(usize),
-}
-
-/// The path as the file's reader would name the field: `layout[0].path`, `sim.ledger.program[1]`.
-fn named(trail: &[Step]) -> String {
-    let mut path = String::new();
-    for step in trail {
-        match step {
-            Step::Key(k) if path.is_empty() => path.push_str(k),
-            Step::Key(k) => {
-                path.push('.');
-                path.push_str(k);
-            }
-            Step::Index(i) => path.push_str(&format!("[{i}]")),
-        }
-    }
-    path
-}
-
-/// Whether the value at `trail` is a [`Template`]: the value of an `env` variable, or a word of the `program` of a
-/// sim. The one list of the places that take a placeholder; the types in [`Config`] are the other, and a test keeps
-/// them together.
-fn takes_placeholders(trail: &[Step]) -> bool {
-    match trail {
-        [Step::Key(env), Step::Key(_)] => env == "env",
-        [
-            Step::Key(sim),
-            Step::Key(_),
-            Step::Key(program),
-            Step::Index(_),
-        ] => sim == "sim" && program == "program",
-        _ => false,
-    }
-}
-
-/// The error for `text` at `trail`: `{work}` anywhere, or `{run}` or `{tree}` where no placeholder is taken.
-fn refuse_placeholder(text: &str, trail: &[Step], takes: bool) -> Result<(), String> {
-    if text.contains(RETIRED) {
-        return Err(format!(
-            "`{}` has `{RETIRED}`, which is not a placeholder any more: use `{RUN}` (the run's directory) or `{TREE}` (the root of the copy)",
-            named(trail)
-        ));
-    }
-    if !takes && (text.contains(RUN) || text.contains(TREE)) {
-        return Err(format!(
-            "`{}` takes no placeholder (`{RUN}`, `{TREE}`): only the value of an `env` variable and a word of `sim.<context>.program` do",
-            named(trail)
-        ));
-    }
-    Ok(())
-}
-
-/// Walks the table before it is read into its types, and refuses `{work}` anywhere and `{run}` or `{tree}` in any
-/// string or key but the values of [`takes_placeholders`]. A field added to the table is therefore refused a
-/// placeholder until it is listed there.
-fn check_placeholders(value: &toml::Value, trail: &mut Vec<Step>) -> Result<(), String> {
-    match value {
-        toml::Value::String(text) => refuse_placeholder(text, trail, takes_placeholders(trail)),
-        toml::Value::Array(items) => {
-            for (i, item) in items.iter().enumerate() {
-                trail.push(Step::Index(i));
-                check_placeholders(item, trail)?;
-                trail.pop();
-            }
-            Ok(())
-        }
-        toml::Value::Table(table) => {
-            for (key, item) in table {
-                trail.push(Step::Key(key.clone()));
-                refuse_placeholder(key, trail, false)?;
-                check_placeholders(item, trail)?;
-                trail.pop();
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// The configuration the table `value` (the `[measure]` of the file) states.
+/// The configuration the table `value` (the `[measure]` of the file) states. A placeholder is refused as the table is
+/// read into its types, by the [`Plain`] and [`Template`] each string is.
 pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     let raw: Raw = value
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| e.to_string())?;
-    // After the shape is known: a misspelled field is reported as unknown, not as one that takes no placeholder.
-    check_placeholders(value, &mut Vec::new())?;
-    command("build", &raw.build)?;
-    if let Some(test) = &raw.test {
+    let build = strings(raw.build);
+    let test = raw.test.map(strings);
+    let commands = |table: BTreeMap<Plain, Vec<Plain>>| -> BTreeMap<String, Vec<String>> {
+        table
+            .into_iter()
+            .map(|(lang, command)| (lang.0, strings(command)))
+            .collect()
+    };
+    let mutants = commands(raw.mutants);
+    let items = commands(raw.items);
+    let operators = raw.operators.map(strings);
+    command("build", &build)?;
+    if let Some(test) = &test {
         command("test", test)?;
     }
-    for (lang, words) in &raw.mutants {
+    for (lang, words) in &mutants {
         if lang.trim().is_empty() {
             return Err("a language in `mutants` has a name".to_string());
         }
         command(&format!("mutants.{lang}"), words)?;
     }
-    for (lang, words) in &raw.items {
+    for (lang, words) in &items {
         if lang.trim().is_empty() {
             return Err("a language in `items` has a name".to_string());
         }
@@ -403,7 +382,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         Some(n) => n,
         None => 40,
     };
-    if let Some(operators) = &raw.operators {
+    if let Some(operators) = &operators {
         if operators.is_empty() {
             return Err("`operators` names at least one class (leave it out for all)".to_string());
         }
@@ -419,18 +398,18 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     let copy_exclude = match raw.copy_exclude {
         Some(list) => list
             .iter()
-            .map(|p| inside("`copy_exclude` entry", p))
+            .map(|p| inside("`copy_exclude` entry", &p.0))
             .collect::<Result<Vec<_>, _>>()?,
         None => DEFAULT_EXCLUDE.iter().map(PathBuf::from).collect(),
     };
     let env = match raw.env {
         Some(env) => {
-            for (k, v) in &env {
+            for (Plain(k), Template(v)) in &env {
                 if k.is_empty() || k.contains(['=', '\0']) || v.contains('\0') {
                     return Err(format!("`env` variable `{k}` is not a name and a value"));
                 }
             }
-            env.into_iter().map(|(k, v)| (k, Template(v))).collect()
+            env.into_iter().map(|(k, v)| (k.0, v)).collect()
         }
         None => DEFAULT_ENV
             .iter()
@@ -438,12 +417,14 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             .collect(),
     };
     let mut sim = BTreeMap::new();
-    for (context, s) in raw.sim {
+    for (Plain(context), s) in raw.sim {
         if context.trim().is_empty() {
             return Err("a context in `sim` has a name".to_string());
         }
-        command(&format!("sim.{context}.interpreter"), &s.interpreter)?;
-        command(&format!("sim.{context}.program"), &s.program)?;
+        let interpreter = strings(s.interpreter);
+        command(&format!("sim.{context}.interpreter"), &interpreter)?;
+        let program: Vec<String> = s.program.iter().map(|w| w.0.clone()).collect();
+        command(&format!("sim.{context}.program"), &program)?;
         let seeds = match s.seeds {
             Some(0) => return Err(format!("`sim.{context}.seeds` must be at least 1")),
             Some(n) if n > MAX_SEEDS => {
@@ -467,8 +448,8 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         sim.insert(
             context,
             SimConfig {
-                interpreter: s.interpreter,
-                program: s.program.into_iter().map(Template).collect(),
+                interpreter,
+                program: s.program,
                 seeds,
                 sample,
                 timeout: sim_timeout,
@@ -479,10 +460,15 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     let mut layout = Vec::with_capacity(raw.layout.len());
     let mut seen = BTreeSet::new();
     for l in raw.layout {
-        let path = inside("`layout` path", &l.path)?;
-        let (name, place) = match (l.interface, l.harness, l.lang) {
+        let path = inside("`layout` path", &l.path.0)?;
+        let context = l.context.0;
+        let (name, place) = match (
+            l.interface.map(|n| n.0),
+            l.harness.map(|n| n.0),
+            l.lang.map(|n| n.0),
+        ) {
             (Some(name), None, Some(lang)) => {
-                if !raw.mutants.contains_key(&lang) && !raw.items.contains_key(&lang) {
+                if !mutants.contains_key(&lang) && !items.contains_key(&lang) {
                     return Err(format!(
                         "the layout of interface `{name}` has lang `{lang}`, which neither `mutants` nor `items` has a command for"
                     ));
@@ -506,14 +492,13 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         } else {
             "interface"
         };
-        if !seen.insert((l.context.clone(), kind, name.clone())) {
+        if !seen.insert((context.clone(), kind, name.clone())) {
             return Err(format!(
-                "the {kind} `{name}` of `{}` is laid out twice",
-                l.context
+                "the {kind} `{name}` of `{context}` is laid out twice"
             ));
         }
         layout.push(Layout {
-            context: l.context,
+            context,
             name,
             place,
             path,
@@ -526,10 +511,10 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     Ok(Config {
         copy_exclude,
         env,
-        build: raw.build,
-        test: raw.test,
-        mutants: raw.mutants,
-        items: raw.items,
+        build,
+        test,
+        mutants,
+        items,
         sim,
         layout,
         timeout,
@@ -537,7 +522,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         budget,
         max_mutants,
         seed: raw.seed.unwrap_or(0),
-        operators: raw.operators,
+        operators,
         digest,
     })
 }
@@ -838,21 +823,21 @@ path = "sim.py"
             (
                 "build = [\"cargo\", \"build\", \"--tests\"]",
                 "build = [\"cargo\", \"{work}\"]",
-                "build[1]",
+                "build",
             ),
             (
                 "path = \"src/stock.rs\"",
                 "path = \"{work}/s.rs\"",
-                "layout[0].path",
+                "layout.path",
             ),
-            (
-                "[mutants]",
-                "[mutants]\n\"{work}\" = [\"x\"]\n",
-                "mutants.{work}",
-            ),
+            // a key is named by the map that has it
+            ("[mutants]", "[mutants]\n\"{work}\" = [\"x\"]\n", "mutants"),
         ] {
             let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
-            assert!(error.contains(&format!("`{field}`")), "{error} vs {field}");
+            assert!(
+                error.contains(&format!("in `{field}`")),
+                "{error} vs {field}"
+            );
             assert!(
                 error.contains("`{run}`") && error.contains("`{tree}`"),
                 "{error}"
@@ -863,7 +848,7 @@ path = "sim.py"
             );
         }
         let error = parse(&table(&SIM.replacen("{tree}", "{work}", 1))).unwrap_err();
-        assert!(error.contains("`sim.inventory.program[1]`"), "{error}");
+        assert!(error.contains("in `sim.inventory.program`"), "{error}");
         assert!(
             error.contains("`{run}`") && error.contains("`{tree}`"),
             "{error}"
@@ -888,46 +873,50 @@ path = "sim.py"
             (
                 "\"build\", \"--tests\"]",
                 "\"build\", \"--tests\", \"{run}/x\"]",
-                "build[3]",
+                "build",
             ),
             (
                 "\"cargo\", \"test\"]",
                 "\"cargo\", \"test\", \"{tree}\"]",
-                "test[2]",
+                "test",
             ),
             (
                 "\"mutants-rust\"]",
                 "\"mutants-rust\", \"{run}\"]",
-                "mutants.rust[3]",
+                "mutants.rust",
             ),
             (
                 "[mutants]",
                 "[items]\nrust = [\"chidev\", \"{tree}/p\"]\n[mutants]",
-                "items.rust[1]",
+                "items.rust",
             ),
             (
                 "path = \"src/stock.rs\"",
                 "path = \"{run}/stock.rs\"",
-                "layout[0].path",
+                "layout.path",
             ),
             (
                 "build = [",
                 "copy_exclude = [\".git\", \"{tree}\"]\nbuild = [",
-                "copy_exclude[1]",
+                "copy_exclude",
             ),
+            // a key is named by the map that has it
             (
                 "[mutants]",
                 "[items]\n\"{run}\" = [\"x\"]\n[mutants]",
-                "items.{run}",
+                "items",
             ),
             (
                 "build = [",
                 "env = { \"{tree}\" = \"x\" }\nbuild = [",
-                "env.{tree}",
+                "env",
             ),
         ] {
             let error = parse(&table(&MINIMAL.replacen(from, to, 1))).unwrap_err();
-            assert!(error.contains(&format!("`{field}`")), "{error} vs {field}");
+            assert!(
+                error.contains(&format!("in `{field}`")),
+                "{error} vs {field}"
+            );
             assert!(error.contains("takes no placeholder"), "{error}");
             assert!(
                 error.contains("`env` variable") && error.contains("sim.<context>.program"),
@@ -940,7 +929,7 @@ path = "sim.py"
             1,
         )))
         .unwrap_err();
-        assert!(error.contains("`sim.inventory.interpreter[1]`"), "{error}");
+        assert!(error.contains("in `sim.inventory.interpreter`"), "{error}");
         assert!(error.contains("takes no placeholder"), "{error}");
         let error = parse(&table(&SIM.replacen(
             "[sim.inventory]",
@@ -948,7 +937,7 @@ path = "sim.py"
             1,
         )))
         .unwrap_err();
-        assert!(error.contains("`sim.{run}`"), "{error}");
+        assert!(error.contains("in `sim`"), "{error}");
     }
 
     #[test]
@@ -964,7 +953,8 @@ path = "sim.py"
 
     #[test]
     fn the_places_that_take_a_placeholder_are_the_ones_that_are_expanded() {
-        // the walk that allows a placeholder and the types that are expanded must name the same two places
+        // the types alone say where a placeholder is taken: the `Template` fields are accepted and expanded, and
+        // nothing else is
         let text = SIM
             .replacen(
                 "build = ",
