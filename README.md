@@ -5,6 +5,9 @@ Contract, Interface and Harness as the assets of a codebase; the code is a cache
 chi is the project's name: the initials of Contract, Harness and Interface, and
 知 (knowledge). The crates, the command and the repository are named `chidev`.
 
+How a person or a coding agent works with it, from a request to pinned code, is in
+the [guide](docs/guide/README.md).
+
 ## Crates
 
 | crate | role |
