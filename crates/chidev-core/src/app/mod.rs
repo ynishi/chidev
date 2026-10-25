@@ -31,6 +31,7 @@ pub use self::measure::{
     CaseLine, Coverage, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding, MutantLine,
     RerunLine, SimSummary, UnreachedLine,
 };
+use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
 mod model_view;
 pub mod subject;
@@ -152,15 +153,85 @@ pub enum AppError {
         /// The key replaced.
         key: String,
     },
-    /// Two Items of a put replace one key.
-    #[error("the interface `{interface}` has two items that replace the key `{key}`")]
+    /// Two Items of a put replace one key, or two renames of a put name one key.
+    #[error("the interface `{interface}` has two renames with `{side}` set to the key `{key}`")]
     RenameConflict {
         /// The Context.
         context: String,
         /// The Interface.
         interface: String,
-        /// The key replaced twice.
+        /// The key named twice.
         key: String,
+        /// Where it is named: `replaces` (an Item), `from` or `to` (a rename).
+        side: &'static str,
+    },
+    /// An Interface is put with no items, and its layout gives no language to find them by.
+    #[error(
+        "the items of the interface `{interface}` are left out, and no language is laid out for it to find them by"
+    )]
+    ItemsRequired {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
+    /// An Interface is put with no items, and no provider is configured to find them.
+    #[error("the items of the interface `{interface}` are left out, and no provider finds them: {}", no_provider(.lang.as_deref()))]
+    ItemsNoProvider {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The language its layout gives; none when there is no `[measure]` table to say.
+        lang: Option<String>,
+    },
+    /// The provider of items answered what the protocol or the code does not allow.
+    #[error(
+        "the provider of items for `{lang}` did not answer as the protocol and the code of the interface `{interface}` allow: {message}"
+    )]
+    ItemsProtocol {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The language.
+        lang: String,
+        /// What is wrong with the answer.
+        message: String,
+    },
+    /// The provider of items could not be run to its end.
+    #[error(
+        "the provider of items for `{lang}` could not be run for the interface `{interface}`: {message}"
+    )]
+    ItemsFailed {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The language.
+        lang: String,
+        /// Why it could not.
+        message: String,
+    },
+    /// An Interface is put with items and with renames.
+    #[error("the interface `{interface}` is put with items and with renames")]
+    RenamesWithItems {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
+    /// A rename names a key that is not there: a `from` the Interface did not have, a `to` the provider did not find.
+    #[error("the interface `{interface}` renames the key `{key}` (`{field}`), which is not there")]
+    RenameUnknown {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+        /// The key.
+        key: String,
+        /// `from` or `to`.
+        field: &'static str,
     },
     /// The Contract has no Clause with this label.
     #[error("the contract `{contract}` has no clause {label}")]
@@ -302,6 +373,14 @@ impl AppError {
     }
 }
 
+/// Why no provider finds the items: for a language, or for the project.
+fn no_provider(lang: Option<&str>) -> String {
+    match lang {
+        Some(lang) => format!("`[measure.items]` has no command for `{lang}`"),
+        None => "the project has no `[measure]` table in checks.toml".to_string(),
+    }
+}
+
 /// The rule ids of `violations`, for a message.
 fn rules_in(violations: &[Violation]) -> String {
     violations
@@ -371,7 +450,8 @@ pub struct ClauseInput {
 }
 
 /// An Item of an Interface, as found in the code: the name it is known by and the lines it is declared on. Its
-/// declaration is not given: it is the text of those lines, which chidev takes from the code.
+/// declaration is not given: it is the text of those lines, which chidev takes from the code. Written by the caller,
+/// or found by the provider of the Interface's language (see [`InterfacePut`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemInput {
     /// Its key: the name the Item is matched by when the code is put again.
@@ -384,6 +464,16 @@ pub struct ItemInput {
     /// Interface has keeps that id, and any other is new. The key replaced must not be given to an Item of the
     /// same put, and is replaced by one Item at most.
     pub replaces: Option<String>,
+}
+
+/// A rename of an Item the provider finds: the Item that had the key `from` in the Interface as it is kept now is the
+/// one the provider found under the key `to`, and keeps its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameInput {
+    /// The key the Item had.
+    pub from: String,
+    /// The key the provider gives it.
+    pub to: String,
 }
 
 /// A citation of an Item: the Interface (by name) and the key, in a Context.
@@ -1079,6 +1169,7 @@ pub struct App<S, G, E = NoExternal> {
     registry: Registry,
     external: E,
     runner: Box<dyn Runner>,
+    items: Box<dyn ItemSource>,
     clock: Box<dyn Clock>,
 }
 
@@ -1103,6 +1194,7 @@ impl<S: Store, G: IdSource> App<S, G, NoExternal> {
             registry,
             external: NoExternal,
             runner: Box::new(NoRunner),
+            items: Box::new(NoItems),
             clock: Box::new(clock),
         }
     }
@@ -1117,6 +1209,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             registry: self.registry,
             external,
             runner: self.runner,
+            items: self.items,
             clock: self.clock,
         }
     }
@@ -1125,6 +1218,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// what is already kept.
     pub fn with_runner(mut self, runner: impl Runner + 'static) -> Self {
         self.runner = Box::new(runner);
+        self
+    }
+
+    /// Supplies the source of Items: the language of an Interface and the provider that finds its Items from its
+    /// code. Without one, an Interface put with no `items` is refused (`items.no-provider`).
+    pub fn with_items(mut self, items: impl ItemSource + 'static) -> Self {
+        self.items = Box::new(items);
         self
     }
 
@@ -1224,11 +1324,27 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         items: &[ItemInput],
     ) -> Result<Checked<Put<InterfaceId>>, AppError> {
+        self.put_interface_of(context, name, source, Some(items), &[])
+            .await
+    }
+
+    /// As [`App::put_interface`], and the Items may be left to the provider: with `items` none, the provider of the
+    /// language the Interface is laid out with finds them in `source`, and `renames` hand the id of an Item that had
+    /// the key `from` to the one found under the key `to`. `renames` go with the provider's Items only.
+    pub async fn put_interface_of(
+        &mut self,
+        context: &str,
+        name: &str,
+        source: &str,
+        items: Option<&[ItemInput]>,
+        renames: &[RenameInput],
+    ) -> Result<Checked<Put<InterfaceId>>, AppError> {
         let put = PutInput::Interface(InterfacePut {
             context: context.to_string(),
             name: name.to_string(),
             source: source.to_string(),
-            items: items.to_vec(),
+            items: items.map(<[ItemInput]>::to_vec),
+            renames: renames.to_vec(),
         });
         let done = self.apply_one(put).await?;
         only_put(done, InterfaceId::from_uuid)

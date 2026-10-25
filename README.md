@@ -54,11 +54,11 @@ belong):
   item has its `key`, the first and last `lines` it is on (from 1) and, when it is
   renamed, `replaces` (the key it had) to keep its id.
   - The `key` is the name the Item is known by: a path such as `price` or
-    `Stack::push`, one line, written by you (chidev does not read it). It is the
-    Item's identity: an Item whose key is one the Interface has keeps its id, and
-    a citation of it (`{"interface":..,"key":..}`) names it. Two Items of an
-    Interface do not have one key (`interface.key-taken`); give them keys that
-    tell them apart.
+    `Stack::push`, one line, written by you or found by a provider (chidev does not
+    read it; see `items` below). It is the Item's identity: an Item whose key is one
+    the Interface has keeps its id, and a citation of it
+    (`{"interface":..,"key":..}`) names it. Two Items of an Interface do not have
+    one key (`interface.key-taken`); give them keys that tell them apart.
   - The declaration is not written: chidev takes it from the code. `lines` points
     at the declaration alone, from its first token (after a doc comment and an
     attribute) to the line that ends the signature, with `;` or the `{` of its
@@ -74,6 +74,28 @@ belong):
     cite it stay current. The key replaced must not be the key of an Item in the same put
     (`input.replaces-kept`) and is replaced by one Item at most
     (`input.rename-conflict`).
+  - `items` can be left out. A provider for the language of the Interface then
+    finds them in `source` (see "Provider protocol `chidev-items 1`"): the language
+    is the `lang` of the Interface's `[[measure.layout]]`, and the command is
+    `[measure.items]` of `checks.toml`. The keys and lines are the provider's, so
+    nothing is written by hand, and a provider that fails or disagrees refuses the
+    put before anything is read or kept. With `items` written, no provider is
+    started. A put that leaves `items` out is refused when the Interface has no layout
+    or no `lang` (`input.items-required`), when `[measure.items]` has no command for
+    the language (`items.no-provider`), when the provider answers what the protocol
+    or the code does not allow (`items.protocol`), and when it cannot be run to its
+    end or does not answer within `timeout` (`items.failed`).
+  - A key the provider gives differently (a path that moved, a renamed function) is
+    a new Item, and the old one goes, unless the put says it is the same one:
+    `renames` (only when `items` is left out) is a list of `{"from":"price",
+    "to":"pricing::price"}`, and the Item that had the key `from` keeps its id, its
+    revision and its citations under the key `to` the provider found. Only the keys
+    named are renamed. It is refused when `from` is not a key the Interface had or
+    `to` is not a key the provider found (`input.rename-unknown`), when a `from` or a
+    `to` is named twice (`input.rename-conflict`), when `from` is still a key the
+    provider found (`input.replaces-kept`), and when `items` is written as well
+    (`input.renames-with-items`; with written `items`, `replaces` is how a key is
+    renamed).
   - `status` shows the keys; write a key as it shows it. A store from before
     keys is read with each Item's old signature as its key: the lines of the
     signature, each without the white space at its ends, joined by one space (a
@@ -312,10 +334,13 @@ operators = ["rel", "eq", "arith", "logic", "bool", "int", "str"]  # optional; d
 [measure.mutants]       # language -> the provider command
 rust = ["chidev", "provider", "mutants-rust"]
 
+[measure.items]         # language -> the command that finds the Items of an Interface
+rust = ["chidev", "provider", "items-rust"]
+
 [[measure.layout]]      # where an Interface's code is in the tree
 context = "inventory"
 interface = "stock"
-lang = "rust"           # selects the provider
+lang = "rust"           # selects the providers (of mutants, and of items)
 path = "src/stock.rs"
 
 [[measure.layout]]      # where a Harness's source is written
@@ -337,6 +362,21 @@ changing a command or upgrading the provider makes earlier runs stale.
 makes `rel`, `eq`, `arith`, `logic`, `bool`, `int` and `str`). Leave it out for all of
 them; an empty list is refused. It is part of the settings digest, so changing it
 makes earlier runs stale. Leave `str` out to skip the mutants of string literals.
+
+`[measure.items]` is read by the same loader as `[measure.mutants]`: a language and
+the command that finds the Items of an Interface of that language (see "Provider
+protocol `chidev-items 1`"). The language of an Interface is the `lang` of its
+`[[measure.layout]]` entry, and a `lang` is valid when `mutants` or `items` (or both)
+has a command for it. Three things follow from the table being `[measure]`'s:
+
+- A project with no `[measure]` table has no provider of items: `interface_put`
+  and a `change_set` cannot leave `items` out there (`items.no-provider`), and write
+  them. A `checks.toml` with other tables but no `[measure]` is the same.
+- A language with a command in `items` alone is valid, and it can be measured by
+  nothing: `measure` stops, naming it, with "`mutants` has no command for `<lang>`".
+- The provider is started in the project's root, as the provider of mutants is, and
+  must answer within `timeout`. The settings digest covers the whole table, so a
+  changed `items` command makes earlier runs stale too.
 
 ### Provider protocol `chidev-mutants 1`
 
@@ -377,6 +417,30 @@ arguments of `include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!`
 `concat!`, `stringify!`, `compile_error!`, `cfg!`, `asm!` and `macro_rules!`. The
 point of the class is the message no test reads (a wrong number or an empty text
 in an error): such a mutant survives.
+
+### Provider protocol `chidev-items 1`
+
+The provider of items is a program that finds the declarations of an Interface in
+its code and nothing else: a pure function of a source text. Like the provider of
+mutants it gets one JSON document on stdin, answers one on stdout, and writes its
+diagnostics to stderr:
+
+```json
+{"protocol":1,"source":"pub fn price(\n    total: u64,\n) -> u64;\nfn tax() -> u64;\n"}
+{"protocol":1,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}
+```
+
+An Item is a `key` (the name the Item is matched by when the code is put again: not
+empty, one line, opaque to chidev) and the first and last of its `lines`, from 1,
+that point at the declaration alone, from its first token to the line that ends the
+signature. There is no `kind`. chidev checks the reply against the code before it
+puts anything: a protocol other than 1, a field the protocol does not have, an empty
+key, and `lines` that are not lines of the code are `items.protocol`; a command that
+cannot be started, exits with a failure, or does not answer within `timeout` is
+`items.failed`. Whether the declarations are apart is not checked: a trait and its
+method on one line have the same `lines`, which is a right answer, and the Items
+that share a line are all revised when that line changes. The same key twice is
+refused by the Interface (`interface.key-taken`). The reply is capped at 4 MiB.
 
 ### Simulation (blind, any language)
 
@@ -943,7 +1007,10 @@ as a sentence to be parsed:
   another case.
 - A line that cannot be read as an operation is a diagnostic as well, under an
   `input.*` rule: `input.unknown-op`, `input.unknown-field`, `input.missing-field`,
-  `input.wrong-type`, `input.unknown-name`, `input.invalid`.
+  `input.wrong-type`, `input.unknown-name`, `input.invalid`. An `interface_put` that
+  leaves `items` out has its own: `input.items-required`, `items.no-provider`,
+  `items.protocol`, `items.failed`, and for `renames` `input.rename-unknown`,
+  `input.rename-conflict`, `input.replaces-kept`, `input.renames-with-items`.
 - A change refused by checks keeps its `findings` beside the diagnostics, and a
   finding in any result has the same fields (`code` is its rule, `help` its rule's).
   A refusal that has no rule of its own yet is `domain.unmapped` (or `app.unmapped`),

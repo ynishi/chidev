@@ -137,8 +137,20 @@ pub const INTERFACE_KEY_TAKEN: RuleId = RuleId::from_static("interface.key-taken
 pub const INTERFACE_BLANK_ITEM: RuleId = RuleId::from_static("interface.blank-item");
 /// An Item replaces a key that the same put still gives to an Item.
 pub const INPUT_REPLACES_KEPT: RuleId = RuleId::from_static("input.replaces-kept");
-/// Two Items of a put replace one key.
+/// Two Items of a put replace one key, or two renames name one key.
 pub const INPUT_RENAME_CONFLICT: RuleId = RuleId::from_static("input.rename-conflict");
+/// An Interface is put with no items, and nothing says which language to find them by.
+pub const INPUT_ITEMS_REQUIRED: RuleId = RuleId::from_static("input.items-required");
+/// A rename names a key that is not there.
+pub const INPUT_RENAME_UNKNOWN: RuleId = RuleId::from_static("input.rename-unknown");
+/// An Interface is put with items and with renames.
+pub const INPUT_RENAMES_WITH_ITEMS: RuleId = RuleId::from_static("input.renames-with-items");
+/// An Interface is put with no items, and no provider is configured to find them.
+pub const ITEMS_NO_PROVIDER: RuleId = RuleId::from_static("items.no-provider");
+/// The provider of items answered what the protocol or the code does not allow.
+pub const ITEMS_PROTOCOL: RuleId = RuleId::from_static("items.protocol");
+/// The provider of items could not be run to its end.
+pub const ITEMS_FAILED: RuleId = RuleId::from_static("items.failed");
 /// An operation is not one chidev knows.
 pub const INPUT_UNKNOWN_OP: RuleId = RuleId::from_static("input.unknown-op");
 /// An operation has a field it does not take.
@@ -490,7 +502,7 @@ static RULES: &[Rule] = &[
         id: INPUT_REPLACES_KEPT,
         kind: RuleKind::Input,
         summary: "An Item replaces a key that no Item of the same put has.",
-        help: "`replaces` renames: the Item takes the id of the Item that had the key it replaces, and the old key goes. Another Item of the same put that still has that key would be matched to the same id. Remove `replaces` if the key stays, or give the other Item another key.",
+        help: "`replaces` renames: the Item takes the id of the Item that had the key it replaces, and the old key goes. Another Item of the same put that still has that key would be matched to the same id. Remove `replaces` if the key stays, or give the other Item another key. A `renames` entry is the same for the Items a provider finds: its `from` must not be a key the provider found.",
         message: "{s1} of {s0} replaces the key `{key}`, which an item of the same put still has",
         values: &["key"],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\nfn b();\n","items":[{"key":"a","lines":[1,1],"replaces":"b"},{"key":"b","lines":[2,2]}]}"#,
@@ -498,11 +510,65 @@ static RULES: &[Rule] = &[
     Rule {
         id: INPUT_RENAME_CONFLICT,
         kind: RuleKind::Input,
-        summary: "A key is replaced by one Item of a put at most.",
-        help: "`replaces` hands the id of one Item to one Item. Two Items that replace the same key would both take its id. Say `replaces` on one of them, and give the other no `replaces` (it is a new Item).",
-        message: "{s1} of {s0} has two items that replace the key `{key}`",
-        values: &["key"],
+        summary: "A key is replaced by one Item of a put at most, and an Item replaces one key at most.",
+        help: "`replaces` hands the id of one Item to one Item. Two Items that replace the same key would both take its id. Say `replaces` on one of them, and give the other no `replaces` (it is a new Item). The same holds for `renames`, where the provider finds the Items: a `from` named twice would hand one id to two Items, and a `to` named twice would give one Item two ids. `side` says which of `replaces`, `from` and `to` holds the key.",
+        message: "{s1} of {s0} has two renames with `{side}` set to the key `{key}`",
+        values: &["key", "side"],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn x();\nfn y();\n","items":[{"key":"x","lines":[1,1],"replaces":"a"},{"key":"y","lines":[2,2],"replaces":"a"}]}"#,
+    },
+    Rule {
+        id: INPUT_ITEMS_REQUIRED,
+        kind: RuleKind::Input,
+        summary: "An Interface put with no items is laid out with a language, to find them by.",
+        help: "`items` may be left out when a provider finds the Items in the code. Which provider is the language of the Interface in `[[measure.layout]]` of `checks.toml` (`lang`). Lay the Interface out with a `lang`, or write `items` (a key and the `lines` of each).",
+        message: "the items of {s1} of {s0} are left out, and its layout names no language to find them by",
+        values: &[],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n"}"#,
+    },
+    Rule {
+        id: ITEMS_NO_PROVIDER,
+        kind: RuleKind::Input,
+        summary: "An Interface put with no items has a provider configured for its language.",
+        help: "`items` may be left out when a command in `[measure.items]` of `checks.toml` finds them (`<lang> = [\"chidev\", \"provider\", \"items-rust\"]`). The command is read from the `[measure]` table, so a project without one cannot leave the items out. Add the command, or write `items` (a key and the `lines` of each).",
+        message: "the items of {s1} of {s0} are left out, and no provider finds them: {reason}",
+        values: &["lang", "reason"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n"}"#,
+    },
+    Rule {
+        id: ITEMS_PROTOCOL,
+        kind: RuleKind::Input,
+        summary: "The provider of items answers as the protocol `chidev-items 1` says and as the code is.",
+        help: "A reply is `{\"protocol\":1,\"items\":[{\"key\":..,\"lines\":[first,last]}]}`: a key that is not empty and is one line, and lines that are lines of the code. The provider's own diagnostics go to standard error. Nothing was put. Fix the provider, or write `items` and leave it out of this put.",
+        message: "the provider of items for `{lang}` did not answer as the protocol and the code of {s1} of {s0} allow: {detail}",
+        values: &["lang", "detail"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n"}"#,
+    },
+    Rule {
+        id: ITEMS_FAILED,
+        kind: RuleKind::Input,
+        summary: "The provider of items runs to its end.",
+        help: "The command of `[measure.items]` could not be found or started, exited with a failure, or did not answer within the `timeout` of `[measure]`. Nothing was put. Run the command by hand with a request on its standard input, or write `items` and leave it out of this put.",
+        message: "the provider of items for `{lang}` could not be run for {s1} of {s0}: {detail}",
+        values: &["lang", "detail"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n"}"#,
+    },
+    Rule {
+        id: INPUT_RENAME_UNKNOWN,
+        kind: RuleKind::Input,
+        summary: "A rename names a key that the Interface had (`from`) and a key that the provider found (`to`).",
+        help: "`renames` hands the id of the Item that had the key `from` to the Item the provider found with the key `to`. A `from` that the Interface did not have has no id to hand over, and a `to` that the provider did not find has no Item to take it. Nothing is ignored silently; read the keys from `status` (before) and from what the provider finds (after).",
+        message: "{s1} of {s0} renames the key `{key}` (`{field}`), which is not there",
+        values: &["key", "field"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n","renames":[{"from":"x","to":"a"}]}"#,
+    },
+    Rule {
+        id: INPUT_RENAMES_WITH_ITEMS,
+        kind: RuleKind::Input,
+        summary: "`renames` goes with the Items a provider finds, and `items` is the Items written.",
+        help: "When `items` is given, nothing is found and `replaces` of an item is how a key is renamed. Leave `items` out to have the provider find them and to rename with `renames`, or keep `items` and use `replaces`.",
+        message: "{s1} of {s0} is put with items and with renames",
+        values: &[],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n","items":[{"key":"a","lines":[1,1]}],"renames":[{"from":"x","to":"a"}]}"#,
     },
     Rule {
         id: UNMAPPED,

@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use super::ports::external::ExternalExecutor;
+use super::ports::items::{FoundItem, ItemsError};
 use super::ports::{AssetKind, AssetName, Changes, IdSource, Store};
 use super::{
-    App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RetiredStatus,
-    Retirement, context_id, context_ids, input, refuse_retired, view,
+    App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RenameInput,
+    RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired, view,
 };
 use crate::domain::check::Hook;
 use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
@@ -59,8 +60,15 @@ pub struct InterfacePut {
     pub name: String,
     /// Its code.
     pub source: String,
-    /// Its Items; one keeps its id when its key (or the one it replaces) is one the Interface has.
-    pub items: Vec<ItemInput>,
+    /// Its Items; one keeps its id when its key (or the one it replaces) is one the Interface has. None: the
+    /// provider of the language the Interface is laid out with finds them in `source`, before the set is planned
+    /// and before the store is read, so a provider that fails leaves everything as it was. Given, they are all of
+    /// them and no provider is asked.
+    pub items: Option<Vec<ItemInput>>,
+    /// For the Items the provider finds: the Item that had the key `from` is the one found under `to`, and keeps
+    /// its id (what `replaces` is for Items that are written). Only the keys named are renamed. Given with `items`,
+    /// they are refused.
+    pub renames: Vec<RenameInput>,
 }
 
 /// A Harness to make or revise.
@@ -199,7 +207,11 @@ struct Plan {
 impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// Applies a change set: all the puts and retirements together, or nothing.
     ///
-    /// Names are turned into ids first (a Case may cite a Clause or an Item that the same change set makes), then
+    /// The Items of an Interface put with none are found first, by the provider of its language, and before the
+    /// store is read: the input is settled (and a provider that fails or disagrees refuses the set) before anything
+    /// that depends on the store's revision, and what is applied then is a function of the input and the store.
+    ///
+    /// Names are turned into ids next (a Case may cite a Clause or an Item that the same change set makes), then
     /// the domain applies the whole to a copy of the Project and checks the rules of the Project once, on the state
     /// it ends in; the put hook runs once on the Project before and after; and one commit keeps the Project and
     /// the names of the assets made. When it is refused nothing is kept, and the error names every problem found
@@ -217,6 +229,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         if set.puts.is_empty() && set.retires.is_empty() {
             return Err(input("the change set has nothing to put or retire"));
         }
+        let found = self.found_items(set).await?;
         let at = self.store.revision().await?;
         let mut applied_for = match &set.change_request {
             Some(title) => {
@@ -291,14 +304,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let p = named;
 
         // The definitions first: a Case that cites one finds the ids and labels of the change set's own.
-        for put in &set.puts {
+        for (n, put) in set.puts.iter().enumerate() {
             match put {
                 PutInput::Contract(c) => {
                     let done = self.contract_put(&p, &mut plan, c).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
                 PutInput::Interface(i) => {
-                    let done = self.interface_put(&p, &mut plan, i).await;
+                    let found = found.get(&n).map(Vec::as_slice);
+                    let done = self.interface_put(&p, &mut plan, i, found).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
                 PutInput::Context { .. }
@@ -501,11 +515,60 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
+    /// The Items the provider finds for each Interface put that gives none, by the index of the put in the set. It
+    /// asks nothing of the store: it is the first step of a set, so that a provider that fails refuses the set
+    /// before the store is read, and the Items are input like any other when the set is planned. An Interface put
+    /// with its Items asks no provider. Every Interface that cannot be given its Items is named.
+    async fn found_items(
+        &self,
+        set: &ChangeSetInput,
+    ) -> Result<BTreeMap<usize, Vec<FoundItem>>, AppError> {
+        let mut found = BTreeMap::new();
+        let mut problems = Vec::new();
+        for (n, put) in set.puts.iter().enumerate() {
+            let PutInput::Interface(i) = put else {
+                continue;
+            };
+            match (&i.items, i.renames.is_empty()) {
+                (Some(_), false) => problems.push(AppError::RenamesWithItems {
+                    context: i.context.clone(),
+                    interface: i.name.clone(),
+                }),
+                (Some(_), true) => {}
+                (None, _) => match self.find_items(i).await {
+                    Ok(items) => {
+                        found.insert(n, items);
+                    }
+                    Err(e) => problems.push(e),
+                },
+            }
+        }
+        if problems.is_empty() {
+            Ok(found)
+        } else {
+            Err(one_or_many(problems))
+        }
+    }
+
+    /// The Items of `i.source`, from the provider of the language `i` is laid out with.
+    async fn find_items(&self, i: &InterfacePut) -> Result<Vec<FoundItem>, AppError> {
+        let lang = self
+            .items
+            .language(&i.context, &i.name)
+            .map_err(|e| items_error(i, None, e))?;
+        self.items
+            .items(&lang, &i.source)
+            .await
+            .map_err(|e| items_error(i, Some(&lang), e))
+    }
+
+    /// An Interface to put. `found` is what the provider found for it, when it was put with no `items`.
     async fn interface_put(
         &mut self,
         p: &Project,
         plan: &mut Plan,
         i: &InterfacePut,
+        found: Option<&[FoundItem]>,
     ) -> Result<AssetPut, AppError> {
         let ctx = context_id(p, &i.context)?;
         let id = InterfaceId::from_uuid(
@@ -517,10 +580,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let key = ItemKey::try_from(key).ok()?;
             old.and_then(|x| x.item_by_key(&key)).map(|it| it.id())
         };
+        let items = match (&i.items, found) {
+            (Some(items), _) => items.clone(),
+            (None, Some(found)) => renamed(i, found, |key| find(key).is_some())?,
+            (None, None) => return Err(input("the items of the interface were not found")),
+        };
         // A rename is refused before any id is given: the domain would find an id twice, which only says that,
         // not which names are wrong.
         let mut replaced: Vec<&str> = Vec::new();
-        for it in &i.items {
+        for it in &items {
             let Some(was) = it.replaces.as_deref() else {
                 continue;
             };
@@ -529,9 +597,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     context: i.context.clone(),
                     interface: i.name.clone(),
                     key: was.to_string(),
+                    side: "replaces",
                 });
             }
-            if it.key != was && i.items.iter().any(|other| other.key == was) {
+            if it.key != was && items.iter().any(|other| other.key == was) {
                 return Err(AppError::ReplacesKept {
                     context: i.context.clone(),
                     interface: i.name.clone(),
@@ -540,8 +609,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             replaced.push(was);
         }
-        let mut given = Vec::with_capacity(i.items.len());
-        for it in &i.items {
+        let mut given = Vec::with_capacity(items.len());
+        for it in &items {
             let key = ItemKey::try_from(it.key.as_str()).map_err(input)?;
             let lines = LineRange::new(it.lines.0, it.lines.1).map_err(input)?;
             let item = match &it.replaces {
@@ -862,6 +931,95 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         Ok(AppError::Violated { violations, names })
     }
+}
+
+/// The refusal that `e`, from the source of Items, is for the Interface put `i`; `lang` is its language once known.
+fn items_error(i: &InterfacePut, lang: Option<&str>, e: ItemsError) -> AppError {
+    let (context, interface) = (i.context.clone(), i.name.clone());
+    let language = || lang.unwrap_or("?").to_string();
+    match e {
+        ItemsError::NoLanguage => AppError::ItemsRequired { context, interface },
+        ItemsError::NoProvider => AppError::ItemsNoProvider {
+            context,
+            interface,
+            lang: lang.map(str::to_string),
+        },
+        ItemsError::Protocol(message) => AppError::ItemsProtocol {
+            context,
+            interface,
+            lang: language(),
+            message,
+        },
+        ItemsError::Failed(message) => AppError::ItemsFailed {
+            context,
+            interface,
+            lang: language(),
+            message,
+        },
+    }
+}
+
+/// The Items the provider found, as Items that are written: the one found under the `to` of a rename replaces its
+/// `from`, so it takes that Item's id, and no other does. `had` says whether the Interface had an Item with a key.
+/// A rename that cannot be carried out is named, whichever it is, and none is ignored: a `from` or a `to` named
+/// twice, a `to` the provider did not find, a `from` the Interface did not have, a `from` the provider still finds.
+fn renamed(
+    i: &InterfacePut,
+    found: &[FoundItem],
+    had: impl Fn(&str) -> bool,
+) -> Result<Vec<ItemInput>, AppError> {
+    let mut problems = Vec::new();
+    for (n, r) in i.renames.iter().enumerate() {
+        let earlier = &i.renames[..n];
+        let (context, interface) = (i.context.clone(), i.name.clone());
+        let conflict = |key: &str, side| AppError::RenameConflict {
+            context: context.clone(),
+            interface: interface.clone(),
+            key: key.to_string(),
+            side,
+        };
+        let unknown = |key: &str, field| AppError::RenameUnknown {
+            context: context.clone(),
+            interface: interface.clone(),
+            key: key.to_string(),
+            field,
+        };
+        if earlier.iter().any(|e| e.from == r.from) {
+            problems.push(conflict(&r.from, "from"));
+        } else if earlier.iter().any(|e| e.to == r.to) {
+            problems.push(conflict(&r.to, "to"));
+        } else if !found.iter().any(|f| f.key == r.to) {
+            problems.push(unknown(&r.to, "to"));
+        } else if !had(&r.from) {
+            problems.push(unknown(&r.from, "from"));
+        } else if r.from != r.to && found.iter().any(|f| f.key == r.from) {
+            problems.push(AppError::ReplacesKept {
+                context: context.clone(),
+                interface: interface.clone(),
+                key: r.from.clone(),
+            });
+        }
+    }
+    if !problems.is_empty() {
+        return Err(one_or_many(problems));
+    }
+    // A key the provider gave twice is the domain's to refuse (`interface.key-taken`); only the first is renamed.
+    let mut seen = BTreeSet::new();
+    Ok(found
+        .iter()
+        .map(|f| ItemInput {
+            key: f.key.clone(),
+            lines: f.lines,
+            replaces: if seen.insert(f.key.as_str()) {
+                i.renames
+                    .iter()
+                    .find(|r| r.to == f.key)
+                    .map(|r| r.from.clone())
+            } else {
+                None
+            },
+        })
+        .collect())
 }
 
 /// The error of several problems: the one, or all of them.

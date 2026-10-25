@@ -1,6 +1,7 @@
 //! The `[measure]` table of `checks.toml`: what to run to build and test a project, where each Interface and Harness
-//! lives in the working tree, which command makes mutants for a language, and (`[measure.sim.<context>]`) how to
-//! run the sim script of a Context against its program. Nothing here is guessed from the project's files; a field
+//! lives in the working tree, which command makes mutants for a language (`[measure.mutants]`), which command finds
+//! the Items of an Interface from its code (`[measure.items]`), and (`[measure.sim.<context>]`) how to run the sim
+//! script of a Context against its program. Nothing here is guessed from the project's files; a field
 //! that is not known is refused by name, so a typo does not silently measure nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +40,8 @@ struct Raw {
     test: Option<Vec<String>>,
     #[serde(default)]
     mutants: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    items: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     sim: BTreeMap<String, RawSim>,
     #[serde(default)]
@@ -89,10 +92,10 @@ struct RawLayout {
 /// What a layout entry places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Place {
-    /// An Interface's code. The language selects the provider that makes its mutants; an Interface that is only
-    /// simulated has none.
+    /// An Interface's code. The language selects the provider that makes its mutants and the one that finds its
+    /// Items; an Interface that is only simulated, and whose Items are written, has none.
     Interface {
-        /// The language, when the Interface is mutated.
+        /// The language, when the Interface is mutated or its Items are found from the code.
         lang: Option<String>,
     },
     /// A Harness's source.
@@ -137,6 +140,8 @@ pub(super) struct Config {
     pub test: Option<Vec<String>>,
     /// Language to the command that makes its mutants.
     pub mutants: BTreeMap<String, Vec<String>>,
+    /// Language to the command that finds the Items of an Interface from its code.
+    pub items: BTreeMap<String, Vec<String>>,
     /// Context name to how its sim script is run.
     pub sim: BTreeMap<String, SimConfig>,
     pub layout: Vec<Layout>,
@@ -220,6 +225,12 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             return Err("a language in `mutants` has a name".to_string());
         }
         command(&format!("mutants.{lang}"), words)?;
+    }
+    for (lang, words) in &raw.items {
+        if lang.trim().is_empty() {
+            return Err("a language in `items` has a name".to_string());
+        }
+        command(&format!("items.{lang}"), words)?;
     }
     let seconds = |what: &str, v: Option<u64>, default: u64| match v {
         Some(0) => Err(format!("`{what}` must be positive seconds")),
@@ -316,9 +327,9 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         let path = inside("`layout` path", &l.path)?;
         let (name, place) = match (l.interface, l.harness, l.lang) {
             (Some(name), None, Some(lang)) => {
-                if !raw.mutants.contains_key(&lang) {
+                if !raw.mutants.contains_key(&lang) && !raw.items.contains_key(&lang) {
                     return Err(format!(
-                        "the layout of interface `{name}` has lang `{lang}`, which `mutants` has no command for"
+                        "the layout of interface `{name}` has lang `{lang}`, which neither `mutants` nor `items` has a command for"
                     ));
                 }
                 (name, Place::Interface { lang: Some(lang) })
@@ -363,6 +374,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         build: raw.build,
         test: raw.test,
         mutants: raw.mutants,
+        items: raw.items,
         sim,
         layout,
         timeout,
@@ -428,6 +440,34 @@ path = "tests/stock.rs"
     }
 
     #[test]
+    fn a_language_with_a_command_in_items_alone_is_a_language_and_one_in_neither_is_not() {
+        // the provider of items is read by the same loader, and is part of the digest
+        let both = MINIMAL.replacen(
+            "[mutants]",
+            "[items]\nrust = [\"chidev\", \"provider\", \"items-rust\"]\n[mutants]",
+            1,
+        );
+        let config = parse(&table(&both)).unwrap();
+        assert_eq!(config.items["rust"], ["chidev", "provider", "items-rust"]);
+        assert_ne!(config.digest, parse(&table(MINIMAL)).unwrap().digest);
+        assert!(parse(&table(MINIMAL)).unwrap().items.is_empty());
+        // a language that only `items` has a command for is a language of a layout
+        let only_items = both.replacen(
+            "[mutants]\nrust = [\"chidev\", \"provider\", \"mutants-rust\"]\n",
+            "",
+            1,
+        );
+        let config = parse(&table(&only_items)).unwrap();
+        assert!(config.mutants.is_empty());
+        let (_, lang) = config.interface("inventory", "stock").unwrap();
+        assert_eq!(lang, Some("rust"));
+        // and one that neither has a command for is refused
+        let neither = only_items.replace("lang = \"rust\"", "lang = \"go\"");
+        let error = parse(&table(&neither)).unwrap_err();
+        assert!(error.contains("neither `mutants` nor `items`"), "{error}");
+    }
+
+    #[test]
     fn the_digest_follows_the_table_as_written() {
         let one = parse(&table(MINIMAL)).unwrap().digest;
         assert_eq!(one, parse(&table(MINIMAL)).unwrap().digest);
@@ -468,7 +508,13 @@ path = "tests/stock.rs"
                 "path = \"/etc/passwd\"",
                 "relative",
             ),
-            ("lang = \"rust\"", "lang = \"go\"", "no command for"),
+            ("lang = \"rust\"", "lang = \"go\"", "neither `mutants` nor"),
+            ("[mutants]", "[items]\nrust = []\n[mutants]", "items.rust"),
+            (
+                "[mutants]",
+                "[items]\n\" \" = [\"x\"]\n[mutants]",
+                "`items`",
+            ),
             ("[mutants]", "timeout = 0\n[mutants]", "positive"),
             ("[mutants]", "budget = 7200\n[mutants]", "3600"),
             ("[mutants]", "max_mutants = 0\n[mutants]", "at least 1"),

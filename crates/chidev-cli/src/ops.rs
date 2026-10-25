@@ -12,7 +12,7 @@ use chidev_core::app::{
     DecisionInput, DecisionMakerInput, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput,
     Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef,
     ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
-    ReasonedInput, RecommendedInput, ReportInput, ReportedFinding, ResolutionInput,
+    ReasonedInput, RecommendedInput, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
     ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
     SubjectInput, TargetInput, TransitionStatus,
 };
@@ -45,7 +45,9 @@ enum Op {
         clauses: Vec<ClauseDto>,
     },
     /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
-    /// project's root); exactly one is given.
+    /// project's root); exactly one is given. `items` may be left out: the provider of the language its
+    /// `[[measure.layout]]` gives finds them in the code, and `renames` (`{"from","to"}`) hand the id of the Item
+    /// that had the key `from` to the one found under `to`. With `items`, nothing is found and `renames` is refused.
     InterfacePut {
         context: String,
         name: String,
@@ -53,7 +55,10 @@ enum Op {
         source: Option<String>,
         #[serde(default)]
         source_file: Option<String>,
-        items: Vec<ItemDto>,
+        #[serde(default)]
+        items: Option<Vec<ItemDto>>,
+        #[serde(default)]
+        renames: Vec<RenameDto>,
     },
     /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
     /// keeps its kind when none is given. `builds` (a sim only) names the Interfaces of the Context whose pinned
@@ -221,7 +226,10 @@ enum PutDto {
         source: Option<String>,
         #[serde(default)]
         source_file: Option<String>,
-        items: Vec<ItemDto>,
+        #[serde(default)]
+        items: Option<Vec<ItemDto>>,
+        #[serde(default)]
+        renames: Vec<RenameDto>,
     },
     /// As `harness_put`.
     Harness {
@@ -294,6 +302,7 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             source,
             source_file,
             items,
+            renames,
         } => {
             let label = format!("the put of the interface `{name}`");
             let source = text_of(
@@ -307,7 +316,8 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
                 context,
                 name,
                 source,
-                items: item_inputs(items),
+                items: items.map(item_inputs),
+                renames: rename_inputs(renames),
             })
         }
         PutDto::Harness {
@@ -426,6 +436,16 @@ fn item_inputs(items: Vec<ItemDto>) -> Vec<ItemInput> {
             key: i.key,
             lines: (i.lines[0], i.lines[1]),
             replaces: i.replaces,
+        })
+        .collect()
+}
+
+fn rename_inputs(renames: Vec<RenameDto>) -> Vec<RenameInput> {
+    renames
+        .into_iter()
+        .map(|r| RenameInput {
+            from: r.from,
+            to: r.to,
         })
         .collect()
 }
@@ -1707,6 +1727,13 @@ struct ClauseDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameDto {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ItemDto {
     key: String,
     lines: [usize; 2],
@@ -2032,6 +2059,7 @@ where
             source,
             source_file,
             items,
+            renames,
         } => {
             let label = format!("interface `{name}`");
             let source = text_of(
@@ -2041,8 +2069,11 @@ where
                 ("source_file", source_file),
             )
             .await?;
-            let items = item_inputs(items);
-            let done = app.put_interface(&context, &name, &source, &items).await?;
+            let items = items.map(item_inputs);
+            let renames = rename_inputs(renames);
+            let done = app
+                .put_interface_of(&context, &name, &source, items.as_deref(), &renames)
+                .await?;
             json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::HarnessPut {

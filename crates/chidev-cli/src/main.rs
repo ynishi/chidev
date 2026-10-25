@@ -143,7 +143,8 @@ async fn main() -> ExitCode {
             let mut app =
                 App::with_registry(sqlite, UuidV7, registry, SystemClock).with_external(executor);
             if let Some(measure) = measure {
-                app = app.with_runner(measure);
+                // one table answers both: how to measure, and how to find the Items of an Interface
+                app = app.with_items(measure.clone()).with_runner(measure);
             }
             let mut out = io::stdout().lock();
             let code = match ops::run(&mut app, &root, reader, &mut out).await {

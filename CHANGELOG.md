@@ -10,6 +10,35 @@ and this project adheres to
 
 ### Added
 
+- `items` of an `interface_put` (and of an `interface` entry of a `change_set`) can
+  be left out: a provider finds the Items in the code, under the new protocol
+  `chidev-items 1` (a request `{protocol, source}`, a reply `{protocol, items:[{key,
+  lines}]}`, no `kind`). The language is the `lang` of the Interface's
+  `[[measure.layout]]` and the command is the new `[measure.items]` table
+  (`rust = ["chidev", "provider", "items-rust"]`), read by the loader of
+  `[measure.mutants]`; a layout `lang` is now valid when either has a command for it.
+  The provider is asked before the change set is planned and before the store is
+  read, so a provider that fails refuses the set and the apply stays a function of
+  its input; a reply is checked against the code (lines inside it, a key that is
+  not empty). With `items` written no provider is started. The new `renames`
+  (`[{"from","to"}]`, only without `items`) hands the id of the Item that had the key
+  `from` to the Item found under `to`, with no revision moving; only the keys named
+  are renamed. In Rust, `App::with_items` takes the port `ports::items::ItemSource`
+  (the process adapter is `ProcessRunner`), `InterfacePut::items` is an `Option`,
+  `InterfacePut::renames` and `RenameInput` are new, and `App::put_interface_of`
+  takes both. A project with no `[measure]` has no provider of items
+  (`items.no-provider`), and a language with a command in `items` alone is stopped
+  by `measure` naming that `mutants` has none.
+- Six input rules, each with a diagnostic, for the Items of an Interface put
+  without `items`: `input.items-required` (no layout, or no `lang`),
+  `items.no-provider` (no command in `[measure.items]` for the language, or no
+  `[measure]`), `items.protocol` (a reply that does not match the protocol or the
+  code), `items.failed` (the command could not be run to its end, or timed out),
+  `input.rename-unknown` (`from` is not a key the Interface had, or `to` not one the
+  provider found), `input.renames-with-items` (`items` and `renames` together). The
+  rules `input.rename-conflict` (now also a `from` or a `to` named twice, with the
+  new value `side`) and `input.replaces-kept` (now also a `from` the provider still
+  finds) cover `renames` too.
 - Four rules for the Items of an Interface, each with a diagnostic: the invariants
   `interface.key-taken` (two Items have one key; checked before the id of the
   Items, so an Item given twice under one key is a key to mend, not a uuid) and

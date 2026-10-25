@@ -15,14 +15,15 @@ use serde_json::{Value as Json, json};
 
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetName, IdSource, Store};
-use super::{App, AppError, Found, TargetInput};
+use super::{App, AppError, Found, TargetInput, no_provider};
 use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
 use crate::domain::rule::{
-    self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_MISSING_FIELD, INPUT_RENAME_CONFLICT,
-    INPUT_REPLACES_KEPT, INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP,
-    INPUT_WRONG_TYPE, PROJECT_ASSET_RETIRED, PROJECT_NONE, Rule, RuleKind,
+    self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_ITEMS_REQUIRED, INPUT_MISSING_FIELD,
+    INPUT_RENAME_CONFLICT, INPUT_RENAME_UNKNOWN, INPUT_RENAMES_WITH_ITEMS, INPUT_REPLACES_KEPT,
+    INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP, INPUT_WRONG_TYPE, ITEMS_FAILED,
+    ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED, PROJECT_NONE, Rule, RuleKind,
 };
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
@@ -663,16 +664,79 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 context,
                 interface,
                 key,
-            } => vec![item_rename(INPUT_REPLACES_KEPT, context, interface, key, e)],
+            } => vec![interface_put_rule(
+                INPUT_REPLACES_KEPT,
+                (context, interface),
+                &[("key", Some(key))],
+                e,
+            )],
             AppError::RenameConflict {
                 context,
                 interface,
                 key,
-            } => vec![item_rename(
+                side,
+            } => vec![interface_put_rule(
                 INPUT_RENAME_CONFLICT,
+                (context, interface),
+                &[("key", Some(key)), ("side", Some(side))],
+                e,
+            )],
+            AppError::RenameUnknown {
                 context,
                 interface,
                 key,
+                field,
+            } => vec![interface_put_rule(
+                INPUT_RENAME_UNKNOWN,
+                (context, interface),
+                &[("key", Some(key)), ("field", Some(field))],
+                e,
+            )],
+            AppError::RenamesWithItems { context, interface } => vec![interface_put_rule(
+                INPUT_RENAMES_WITH_ITEMS,
+                (context, interface),
+                &[],
+                e,
+            )],
+            AppError::ItemsRequired { context, interface } => vec![interface_put_rule(
+                INPUT_ITEMS_REQUIRED,
+                (context, interface),
+                &[],
+                e,
+            )],
+            AppError::ItemsNoProvider {
+                context,
+                interface,
+                lang,
+            } => vec![interface_put_rule(
+                ITEMS_NO_PROVIDER,
+                (context, interface),
+                &[
+                    ("lang", lang.as_deref()),
+                    ("reason", Some(&no_provider(lang.as_deref()))),
+                ],
+                e,
+            )],
+            AppError::ItemsProtocol {
+                context,
+                interface,
+                lang,
+                message,
+            } => vec![interface_put_rule(
+                ITEMS_PROTOCOL,
+                (context, interface),
+                &[("lang", Some(lang)), ("detail", Some(message))],
+                e,
+            )],
+            AppError::ItemsFailed {
+                context,
+                interface,
+                lang,
+                message,
+            } => vec![interface_put_rule(
+                ITEMS_FAILED,
+                (context, interface),
+                &[("lang", Some(lang)), ("detail", Some(message))],
                 e,
             )],
             AppError::UnknownClause {
@@ -1140,11 +1204,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
 /// The diagnostic of an input rule about a key that a put of the Interface `interface` of the Context `context`
 /// replaces wrongly (`error` is the refusal, said as it was if the rule is not registered).
-fn item_rename(
+/// The diagnostic of a rule about the put of an Interface (`at`: its Context and name). `values` are the keys the
+/// rule carries; one that is none is null, and empty in the sentence.
+fn interface_put_rule(
     rule: RuleId,
-    context: &str,
-    interface: &str,
-    key: &str,
+    at: (&str, &str),
+    values: &[(&'static str, Option<&str>)],
     error: &AppError,
 ) -> Diagnostic {
     match rule::rule(rule.as_str()) {
@@ -1153,15 +1218,18 @@ fn item_rename(
             vec![
                 DiagSubject {
                     kind: "context",
-                    name: context.to_string(),
+                    name: at.0.to_string(),
                 },
                 DiagSubject {
                     kind: "interface",
-                    name: interface.to_string(),
+                    name: at.1.to_string(),
                 },
             ],
-            vec![("key", json!(key))],
-            &[("key", key.to_string())],
+            values.iter().map(|(k, v)| (*k, json!(v))).collect(),
+            &values
+                .iter()
+                .map(|(k, v)| (*k, v.unwrap_or_default().to_string()))
+                .collect::<Vec<_>>(),
         ),
         None => Diagnostic::app_unmapped(&error.to_string()),
     }

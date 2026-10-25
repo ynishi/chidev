@@ -337,7 +337,8 @@ fn removal() -> ChangeSetInput {
                 context: "core".to_string(),
                 name: "stock".to_string(),
                 source: "fn reserve()\n".to_string(),
-                items: vec![item("reserve", 1)],
+                items: Some(vec![item("reserve", 1)]),
+                renames: Vec::new(),
             }),
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
@@ -719,7 +720,8 @@ async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
                 context: "billing".to_string(),
                 name: "invoice".to_string(),
                 source: "fn total()\n".to_string(),
-                items: vec![item("total", 1)],
+                items: Some(vec![item("total", 1)]),
+                renames: Vec::new(),
             }),
             PutInput::Context {
                 name: "ledger".to_string(),

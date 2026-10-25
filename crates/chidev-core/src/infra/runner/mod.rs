@@ -17,8 +17,14 @@
 //! of the Interfaces the sim Harness builds and the script are written over it, the build command runs, and the
 //! script is started once per case under the protocol `chidev-sim 2`. The sampled cases are then run a second time
 //! in a second, fresh copy.
+//!
+//! The same configuration answers a second question for the use cases, as the [`ItemSource`] port: the language of an
+//! Interface (its layout's `lang`) and the Items a provider of that language finds in its code (`items.rs`, which
+//! holds the protocol `chidev-items 1`). That provider is started in the project's root, not in a copy, under the
+//! `timeout` of the table.
 
 mod config;
+mod items;
 mod provider;
 mod sim;
 
@@ -30,6 +36,7 @@ use thiserror::Error;
 
 use self::config::{Config, WORK_DIR};
 use super::process::{self, Capture, Over, Pipe};
+use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
     BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
 };
@@ -55,7 +62,7 @@ pub struct MeasureConfigError {
     pub message: String,
 }
 
-/// The process implementation of [`Runner`].
+/// The process implementation of [`Runner`], and of [`ItemSource`] over the same table.
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
     root: PathBuf,
@@ -113,6 +120,23 @@ impl Runner for ProcessRunner {
         request: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         Box::pin(self.simulate_run(request))
+    }
+}
+
+impl ItemSource for ProcessRunner {
+    fn language(&self, context: &str, interface: &str) -> Result<String, ItemsError> {
+        match self.config.interface(context, interface) {
+            Some((_, Some(lang))) => Ok(lang.to_string()),
+            _ => Err(ItemsError::NoLanguage),
+        }
+    }
+
+    fn items<'a>(
+        &'a self,
+        lang: &'a str,
+        source: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<FoundItem>, ItemsError>> {
+        Box::pin(self.items_of(lang, source))
     }
 }
 
@@ -175,6 +199,20 @@ impl ProcessRunner {
             .map(Vec::as_slice)
             .filter(|c| !c.is_empty())
             .ok_or_else(|| config_error(format!("`mutants` has no command for `{lang}`")))
+    }
+
+    /// The Items the provider of `lang` finds in `source`.
+    async fn items_of(&self, lang: &str, source: &str) -> Result<Vec<FoundItem>, ItemsError> {
+        let command = self
+            .config
+            .items
+            .get(lang)
+            .map(Vec::as_slice)
+            .filter(|c| !c.is_empty())
+            .ok_or(ItemsError::NoProvider)?;
+        let deadline =
+            process::deadline_in(self.config.timeout).map_err(|f| ItemsError::Failed(f.message))?;
+        items::ask(&self.root, command, source, deadline).await
     }
 
     async fn mutate_run(&self, request: &MutateRequest) -> Result<MutateReport, RunnerError> {
@@ -605,6 +643,7 @@ printf '%s' '{"protocol":1,"sites":3,"mutants":[
         fn table(&self, table: &str) {
             let text = table
                 .replace("[mutants]", "[measure.mutants]")
+                .replace("[items]", "[measure.items]")
                 .replace("[[layout]]", "[[measure.layout]]");
             std::fs::write(self.0.join("checks.toml"), format!("[measure]\n{text}")).unwrap();
         }
@@ -842,6 +881,147 @@ path = "check.txt"
         assert_ne!(two, three);
         // an interface with no layout has none
         assert!(project.runner().settings_of("ctx", "other").await.is_err());
+    }
+
+    /// A table whose `api` is a text laid out with a language that only `items` has a command for, and whose
+    /// `bare` has no language.
+    const ITEMS_TABLE: &str = r#"
+build = ["true"]
+timeout = 5
+env = {}
+[items]
+text = ["./items.sh"]
+[[layout]]
+context = "ctx"
+interface = "api"
+lang = "text"
+path = "code.txt"
+[[layout]]
+context = "ctx"
+interface = "bare"
+path = "bare.txt"
+"#;
+
+    /// A provider that keeps what it was asked and answers two Items on the one line.
+    const ITEMS: &str = r#"#!/bin/sh
+cat > request.json
+printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f","lines":[1,1]}]}'
+"#;
+
+    impl Project {
+        /// Writes the provider of items `script`, executable.
+        fn items_script(&self, script: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(self.0.join("items.sh"), script).unwrap();
+            std::fs::set_permissions(
+                self.0.join("items.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_items_of_a_language_are_asked_of_its_provider_in_the_root_and_taken_as_given() {
+        let project = Project::new(ITEMS_TABLE);
+        project.items_script(ITEMS);
+        let runner = project.runner();
+        // the language is the layout's, and an interface with none (or none laid out) has no language
+        assert_eq!(runner.language("ctx", "api"), Ok("text".to_string()));
+        assert_eq!(runner.language("ctx", "bare"), Err(ItemsError::NoLanguage));
+        assert_eq!(
+            runner.language("ctx", "nowhere"),
+            Err(ItemsError::NoLanguage)
+        );
+        let found = runner.items_of("text", "fn api() { f() }\n").await.unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|i| (i.key.as_str(), i.lines))
+                .collect::<Vec<_>>(),
+            [("api", (1, 1)), ("api::f", (1, 1))]
+        );
+        // the request is the protocol, and the provider ran where the table is
+        let asked: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project.0.join("request.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            asked,
+            serde_json::json!({"protocol": 1, "source": "fn api() { f() }\n"})
+        );
+        // a language `items` has no command for has no provider
+        assert_eq!(
+            runner.items_of("go", "x\n").await,
+            Err(ItemsError::NoProvider)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_cannot_be_run_to_its_end_has_failed_and_one_that_disagrees_has_not_kept_the_protocol()
+     {
+        let project = Project::new(ITEMS_TABLE);
+        let failed = |e: Result<Vec<FoundItem>, ItemsError>| match e {
+            Err(ItemsError::Failed(m)) => m,
+            other => panic!("not a failure to run: {other:?}"),
+        };
+        // not found
+        let said = failed(project.runner().items_of("text", "x\n").await);
+        assert!(said.contains("spawn"), "{said}");
+        // exits with a failure, and says why on standard error
+        project.items_script("#!/bin/sh\ncat > /dev/null\necho 'cannot parse' >&2\nexit 3\n");
+        let said = failed(project.runner().items_of("text", "x\n").await);
+        assert!(said.contains("cannot parse"), "{said}");
+        // does not answer in time
+        project.table(&ITEMS_TABLE.replace("timeout = 5", "timeout = 1"));
+        project.items_script("#!/bin/sh\nsleep 30\n");
+        let started = Instant::now();
+        let said = failed(project.runner().items_of("text", "x\n").await);
+        assert!(said.contains("in time"), "{said}");
+        assert!(started.elapsed().as_secs() < 20);
+        // answers what is not a reply, or a reply that disagrees with the code
+        project.table(ITEMS_TABLE);
+        for (answer, expected) in [
+            ("not json", "not a chidev-items reply"),
+            (
+                r#"{"protocol":1,"items":[{"key":"a","lines":[1,2]}]}"#,
+                "past the last",
+            ),
+        ] {
+            project.items_script(&format!(
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{answer}'\n"
+            ));
+            match project.runner().items_of("text", "x\n").await {
+                Err(ItemsError::Protocol(m)) => assert!(m.contains(expected), "{m}"),
+                other => panic!("not a protocol failure: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_language_only_items_has_a_command_for_is_stopped_by_name_when_mutating() {
+        let project = Project::new(ITEMS_TABLE);
+        project.items_script(ITEMS);
+        let mut r = request("run-items");
+        r.interface = "api".to_string();
+        let error = project.runner().mutate_run(&r).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("`mutants` has no command for `text`"),
+            "{error}"
+        );
+        let error = project
+            .runner()
+            .settings_of("ctx", "api")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("`mutants` has no command for `text`"),
+            "{error}"
+        );
+        assert!(!project.0.join(WORK_DIR).exists());
     }
 
     #[test]
