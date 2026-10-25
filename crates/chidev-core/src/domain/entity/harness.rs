@@ -336,7 +336,7 @@ impl Harness {
     /// that cites no Clause, and no Interface to build. A Harness of tests has none. What needs the Context (one
     /// sim Harness, the Clauses the Cases cite) is asked of [`Context::sim_problems`].
     ///
-    /// These are not rules of [`Harness::new`] or [`Harness::restore`]: a Harness a store kept before they held is
+    /// These are not rules of [`Harness::new`] or of reading a stored Harness: a Harness a store kept before they held is
     /// read as it is, and only a Harness put again is held to them (see `Project::apply`).
     ///
     /// [`Context::sim_problems`]: crate::domain::entity::context::Context::sim_problems
