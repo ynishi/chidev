@@ -8,6 +8,59 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- A put answers with what the put introduced, not with everything the checks find
+  in the Project it leaves. The put hook runs the checks on the Project before the
+  edit and on the Project after it, and a finding is introduced when the state
+  before has no finding of the same rule and subject, or has one that stands on
+  fewer grounds. A mandatory check refuses a put only for what it introduced; a
+  finding the Project already had no longer refuses an edit that did not make it.
+  The invocations recorded still count every finding of the run on the state
+  after. The decision, and the measurement behind it (a first Contract answered
+  with five `cite.uncited-clause` warnings, and the next put with the same five),
+  are in `docs/adr/0001-edit-reports-introduced-confirm-judges-whole.md`.
+- The checks that say the model is not finished or not settled no longer run at
+  `put`: `cite.uncited-clause`, `cite.uncited-item`, `pin.unpinned` and
+  `sim.uncited-clause` run at `pin`, `resolve` and `check`;
+  `context.no-interface` and `context.no-harness` likewise; and
+  `cr.awaiting-decision` and `cr.intent-mismatch` run at `resolve` and `check`.
+  What the whole model lacks is said by `check`, `status`, `pin` and
+  `cr_resolve`. The checks that say an edit made something stale or out of place
+  (`cite.stale`, `pin.stale`, `cr.keep-moved`, `cr.out-of-frame`,
+  `crux.policy-line-gone`) keep their put hook and fill in their grounds, the typed
+  marks of what makes a finding true that tell one put's finding from the last
+  one's. `check_list` shows the `kind` of each check (`change` or `state`) beside
+  its `hooks`.
+- External checks at `put` are held to what the put introduced when the saved
+  result of the rule describes the model before the put (the same input stamp and
+  configuration stamp): a finding with a subject that result already had neither
+  refuses a gate nor is reported again. Without such a result every finding
+  counts, and a failed run refuses a gate whatever was saved. `pin` and `resolve`
+  are as before.
+- In Rust (`chidev-core`, a public API change): `CheckView` is one state, so
+  `CheckView.before` (read by no check) is removed and `CheckView.after` is renamed
+  `project`; `Change { before, after }` holds the two states of an edit.
+  `Finding.mentions` is replaced by `Finding::grounds()` (`Ground`, `LineState`) and
+  `Finding::mentions()` is derived from the grounds; `Descriptor` gains `kind()`
+  (`CheckKind`), read from its hooks: a check that runs at `put` is a change; `introduced(before, after)` is new; `Run.refusing` is removed
+  and `Registry::refusing` decides what refuses; `ALL_HOOKS` is replaced by a
+  confirmation set of hooks inside the builtin checks; `OutOfFrame` carries the
+  change set each moved target came from; `Project::context_of`,
+  `Project::context_of_target` and `contexts_in` are new.
+
+### Added
+
+- `{"op":"check","context":"<name>"}` answers with the findings about one Context:
+  those about it and about what it holds, and those about a change request with
+  a target it revises, retires or keeps in the Context. `outside` counts the
+  findings left out (about the Project as a whole, about a change request that
+  names nothing of the Context, or about something that is gone) and is in the
+  answer only when a `context` is given. A name that is no Context's is
+  `input.unknown-name`. In Rust, `App::check(Option<&str>)` returns
+  `CheckResult { findings, outside }`.
+- `check_list` entries have a `kind`.
+
 ## [0.1.0] - 2026-10-25
 
 The first release. Everything below was written while chidev was unreleased; an

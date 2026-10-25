@@ -118,9 +118,10 @@ async fn report(app: &App<SqliteStore, Counter>, labels: &[&str]) -> ReportInput
 async fn finding_states(
     app: &App<SqliteStore, Counter>,
 ) -> Vec<(String, bool, FindingState, Level)> {
-    app.check()
+    app.check(None)
         .await
         .unwrap()
+        .findings
         .into_iter()
         .filter(|f| f.rule.as_str() == RULE)
         .map(|f| (f.message, f.stale, f.state, f.level))
@@ -170,9 +171,10 @@ async fn the_supplied_rule_version_is_saved_with_the_judgment_and_invocation() {
         Some(digest)
     );
     assert!(
-        app.check()
+        app.check(None)
             .await
             .unwrap()
+            .findings
             .iter()
             .filter(|f| f.rule.as_str() == RULE)
             .all(|f| f.judgment.as_ref().unwrap().rule_digest == Some(digest) && !f.stale)

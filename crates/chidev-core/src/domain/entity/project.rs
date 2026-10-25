@@ -12,6 +12,7 @@ use super::contract::{Clause, Contract};
 use super::harness::{Case, CaseFound, Harness, SimShapeProblem};
 use super::interface::{Interface, Item, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
+use crate::domain::vo::finding::Subject;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
@@ -247,6 +248,36 @@ impl Project {
     /// The Context with this id.
     pub fn context(&self, id: ContextId) -> Option<&Context> {
         self.contexts.get(&id)
+    }
+
+    /// The Context that holds what `subject` is, or that it is: a Context, an Interface, an Item, a Clause or a
+    /// Case. `None` for a change request, which no Context holds, and for what the Project does not have now.
+    pub fn context_of(&self, subject: Subject) -> Option<ContextId> {
+        match subject {
+            Subject::Context(id) => self.context(id).map(Context::id),
+            Subject::Interface(id) => self.context_of_target(Target::Interface(id)),
+            Subject::Item(id) => self.context_of_target(Target::Item(id)),
+            Subject::Clause(id) => self.context_of_target(Target::Clause(id)),
+            Subject::Case(id) => self.context_of_target(Target::Case(id)),
+            Subject::ChangeRequest(_) => None,
+        }
+    }
+
+    /// The Context that holds `target`, or that it is. `None` for the Project itself, and for what the Project does
+    /// not have now (a retired target is no longer in any Context).
+    pub fn context_of_target(&self, target: Target) -> Option<ContextId> {
+        let held =
+            |has: &dyn Fn(&Context) -> bool| self.contexts().find(|c| has(c)).map(Context::id);
+        match target {
+            Target::Project => None,
+            Target::Context(id) => self.context(id).map(Context::id),
+            Target::Contract(id) => held(&|c| c.contract(id).is_some()),
+            Target::Interface(id) => held(&|c| c.interface(id).is_some()),
+            Target::Harness(id) => held(&|c| c.harness(id).is_some()),
+            Target::Clause(id) => held(&|c| c.contract_of(id).is_some()),
+            Target::Item(id) => held(&|c| c.interface_of(id).is_some()),
+            Target::Case(id) => held(&|c| c.harness_of(id).is_some()),
+        }
     }
 
     /// The Context with this name.
@@ -1013,6 +1044,59 @@ mod tests {
         let base = ContextName::try_from("base").unwrap();
         assert_eq!(p.context_by_name(&base).unwrap().id(), ctx_id(2));
         assert_eq!(p.contexts().count(), 2);
+    }
+
+    #[test]
+    fn what_a_subject_or_a_target_belongs_to_is_the_context_that_holds_it() {
+        use crate::domain::vo::id::ChangeRequestId;
+
+        let mut p = project();
+        put_harness(&mut p, &[10], &[11]).unwrap();
+        let core = Some(ctx_id(1));
+        let base = Some(ctx_id(2));
+        // Every kind of subject a Context holds, and the Context itself.
+        assert_eq!(p.context_of(Subject::Context(ctx_id(2))), base);
+        assert_eq!(
+            p.context_of(Subject::Interface(InterfaceId::from_uuid(test_uuid(201)))),
+            base
+        );
+        assert_eq!(p.context_of(Subject::Item(item(10))), core);
+        assert_eq!(p.context_of(Subject::Clause(clause(30))), base);
+        assert_eq!(
+            p.context_of(Subject::Case(CaseId::from_uuid(test_uuid(50)))),
+            core
+        );
+        // A change request is held by no Context, and neither is what is not there.
+        assert_eq!(
+            p.context_of(Subject::ChangeRequest(ChangeRequestId::from_uuid(
+                test_uuid(1)
+            ))),
+            None
+        );
+        assert_eq!(p.context_of(Subject::Item(item(99))), None);
+        assert_eq!(p.context_of(Subject::Context(ctx_id(9))), None);
+        // The targets: the assets too, and the Project, which no Context holds.
+        assert_eq!(p.context_of_target(Target::Context(ctx_id(1))), core);
+        assert_eq!(
+            p.context_of_target(Target::Contract(ContractId::from_uuid(test_uuid(202)))),
+            base
+        );
+        assert_eq!(
+            p.context_of_target(Target::Interface(InterfaceId::from_uuid(test_uuid(101)))),
+            core
+        );
+        assert_eq!(
+            p.context_of_target(Target::Harness(HarnessId::from_uuid(test_uuid(103)))),
+            core
+        );
+        assert_eq!(p.context_of_target(Target::Clause(clause(11))), core);
+        assert_eq!(p.context_of_target(Target::Item(item(20))), base);
+        assert_eq!(
+            p.context_of_target(Target::Case(CaseId::from_uuid(test_uuid(50)))),
+            core
+        );
+        assert_eq!(p.context_of_target(Target::Project), None);
+        assert_eq!(p.context_of_target(Target::Clause(clause(99))), None);
     }
 
     #[test]

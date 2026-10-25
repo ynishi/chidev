@@ -2,15 +2,16 @@
 
 use std::borrow::Cow;
 
-use super::ALL_HOOKS;
+use super::CONFIRM_HOOKS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::finding::Mention;
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
-use crate::domain::check::{Check, Finding};
+use crate::domain::check::{Check, Finding, Ground};
+use crate::domain::service::cite::revision_of;
 use crate::domain::service::pin::{StaleReason, Staleness, staleness};
 use crate::domain::vo::finding::{RuleId, Subject};
+use crate::domain::vo::id::InterfaceId;
 use crate::domain::vo::target::Target;
 
 /// A Pin whose basis moved.
@@ -40,12 +41,12 @@ impl Check for StalePin {
         view.pins
             .iter()
             .filter_map(|pin| {
-                let (message, mentions) = match staleness(pin, view.after) {
+                let (message, grounds) = match staleness(pin, view.project) {
                     Staleness::Fresh => return None,
                     // A retired Interface is gone on purpose and nothing can fix the Pin: no finding.
                     Staleness::InterfaceGone
                         if view
-                            .after
+                            .project
                             .retired_of(Target::Interface(pin.interface()))
                             .is_some() =>
                     {
@@ -54,15 +55,14 @@ impl Check for StalePin {
                     Staleness::InterfaceGone => {
                         ("the pinned interface is gone".to_string(), Vec::new())
                     }
-                    // What moved is named by whoever has the names (the use case), after the message.
+                    // What moved is a ground, with the revision it has now (none when it is gone); the use case
+                    // names it after the message.
                     Staleness::Stale(why) => (
                         "the code was pinned against what has moved".to_string(),
-                        why.iter()
-                            .map(|r| match r {
-                                StaleReason::Interface => Mention::Interface(pin.interface()),
-                                StaleReason::Harness(id) => Mention::Harness(*id),
-                                StaleReason::Contract(id) => Mention::Contract(*id),
-                                StaleReason::UsedInterface(id) => Mention::Interface(*id),
+                        why.into_iter()
+                            .map(|reason| Ground::Pin {
+                                now: revision_of(view.project, target_of(pin.interface(), &reason)),
+                                reason,
                             })
                             .collect(),
                     ),
@@ -73,10 +73,20 @@ impl Check for StalePin {
                         Some(Subject::Interface(pin.interface())),
                         message,
                     )
-                    .mentioning(mentions),
+                    .grounded(grounds),
                 )
             })
             .collect()
+    }
+}
+
+/// The target a Pin stands on that `reason` says moved: the pinned Interface for `pinned`.
+fn target_of(pinned: InterfaceId, reason: &StaleReason) -> Target {
+    match reason {
+        StaleReason::Interface => Target::Interface(pinned),
+        StaleReason::Harness(id) => Target::Harness(*id),
+        StaleReason::Contract(id) => Target::Contract(*id),
+        StaleReason::UsedInterface(id) => Target::Interface(*id),
     }
 }
 
@@ -90,7 +100,7 @@ static UNPINNED: Descriptor = Descriptor {
     help: Cow::Borrowed(
         "Nothing records which code the harness checked. Pin the code once a case checks the interface.",
     ),
-    hooks: Cow::Borrowed(ALL_HOOKS),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -103,7 +113,7 @@ impl Check for Unpinned {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        view.after
+        view.project
             .contexts()
             .flat_map(|c| c.interfaces())
             .filter(|i| !view.pins.iter().any(|p| p.interface() == i.id()))

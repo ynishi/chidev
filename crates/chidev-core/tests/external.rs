@@ -265,7 +265,7 @@ async fn status_and_check_do_not_run_a_program_but_explicit_check_run_does() {
         app.status().await.unwrap().external[0].state.word(),
         "unrun"
     );
-    assert!(app.check().await.unwrap().is_empty());
+    assert!(app.check(None).await.unwrap().findings.is_empty());
     assert_eq!(executor.count(), 0);
     let model_revision = app.store().model_revision().await.unwrap();
     let checked = app.check_run().await.unwrap();
@@ -277,7 +277,7 @@ async fn status_and_check_do_not_run_a_program_but_explicit_check_run_does() {
         app.status().await.unwrap().external[0].state.word(),
         "current"
     );
-    assert!(app.check().await.unwrap().is_empty());
+    assert!(app.check(None).await.unwrap().findings.is_empty());
     assert_eq!(executor.count(), 1);
 }
 
@@ -454,10 +454,10 @@ async fn a_valid_clause_finding_is_kept_and_an_empty_success_replaces_it() {
     assert!(checked.external[0].failure.is_none());
     assert_eq!(checked.findings.len(), 1);
     assert!(checked.findings[0].subject.is_some());
-    assert_eq!(app.check().await.unwrap().len(), 1);
+    assert_eq!(app.check(None).await.unwrap().findings.len(), 1);
     let checked = app.check_run().await.unwrap();
     assert!(checked.findings.is_empty());
-    assert!(app.check().await.unwrap().is_empty());
+    assert!(app.check(None).await.unwrap().findings.is_empty());
     let reports = app.store().external_reports().await.unwrap();
     assert_eq!(reports.len(), 1);
     assert!(reports[0].findings.is_empty());
@@ -723,6 +723,217 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
         app.status().await.unwrap().external[0].state.word(),
         "current"
     );
+}
+
+/// The id of the only Clause of the Contract `contract` of the Project.
+async fn clause_of(
+    app: &App<SqliteStore, Counter, FakeExecutor>,
+    contract: chidev_core::domain::vo::id::ContractId,
+) -> Uuid {
+    let project = app.store().project().await.unwrap().unwrap();
+    project
+        .contexts()
+        .flat_map(|context| context.contracts())
+        .find(|candidate| candidate.id() == contract)
+        .unwrap()
+        .clauses()[0]
+        .id()
+        .as_uuid()
+}
+
+#[tokio::test]
+async fn a_put_is_refused_by_a_gate_for_what_it_introduced_and_not_for_what_the_saved_report_had() {
+    let executor = FakeExecutor::default();
+    let mut app = app(
+        "gate-introduced",
+        vec![Hook::Put, Hook::Check],
+        true,
+        executor.clone(),
+    )
+    .await;
+    let contract = app
+        .put_contract("core", "stack", "Stack", &clauses("push then pop"))
+        .await
+        .unwrap();
+    // An explicit run records a finding about the model as it is.
+    let known = finding("the contract contradicts itself");
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known.clone()]));
+    app.check_run().await.unwrap();
+    // A put that leaves the program saying the same of a model it described is not refused for it, and does not
+    // say it again.
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known.clone()]));
+    let kept = app
+        .put_contract("core", "stack", "Stack", &clauses("push, then pop"))
+        .await
+        .unwrap();
+    assert!(kept.findings.is_empty(), "{:?}", kept.findings);
+    // What is recorded is what the program said, all of it.
+    let reports = app.store().external_reports().await.unwrap();
+    assert_eq!(reports[0].findings.len(), 1);
+    // A finding it did not have before refuses the put, and only that one is named.
+    let clause = clause_of(&app, contract.value.id).await;
+    let mut fresh = finding("the clause is vague");
+    fresh.subject = Some(ExternalSubject {
+        kind: "clause".into(),
+        id: clause.to_string(),
+    });
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known, fresh]));
+    let revision = app.store().revision().await.unwrap();
+    match app
+        .put_contract("core", "stack", "Stack", &clauses("push, then pop, once"))
+        .await
+        .unwrap_err()
+    {
+        AppError::ExternalRefused { findings, external } => {
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(findings[0].subject.is_some());
+            // The attempts return whole.
+            assert_eq!(external[0].findings.len(), 2);
+        }
+        error => panic!("expected external gate refusal, got {error:?}"),
+    }
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+}
+
+#[tokio::test]
+async fn a_new_finding_about_the_whole_project_refuses_a_put_beside_one_the_saved_report_had() {
+    let executor = FakeExecutor::default();
+    let mut app = app(
+        "gate-project-wide",
+        vec![Hook::Put, Hook::Check],
+        true,
+        executor.clone(),
+    )
+    .await;
+    app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+        .await
+        .unwrap();
+    let known = finding("the project has no glossary");
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known.clone()]));
+    app.check_run().await.unwrap();
+    // Both are about the whole Project (no subject); only the message tells them apart.
+    let fresh = finding("the project names two owners");
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known, fresh]));
+    let revision = app.store().revision().await.unwrap();
+    match app
+        .put_contract("core", "stack", "Stack", &clauses("push, then pop"))
+        .await
+        .unwrap_err()
+    {
+        AppError::ExternalRefused { findings, .. } => {
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(findings[0].subject.is_none());
+            assert!(findings[0].message.contains("two owners"), "{findings:?}");
+        }
+        error => panic!("expected external gate refusal, got {error:?}"),
+    }
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+}
+
+#[tokio::test]
+async fn a_gate_judges_every_finding_when_the_saved_report_does_not_describe_the_model_before() {
+    let executor = FakeExecutor::default();
+    let mut app = app(
+        "gate-no-baseline",
+        vec![Hook::Put, Hook::Check],
+        true,
+        executor.clone(),
+    )
+    .await;
+    app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+        .await
+        .unwrap();
+    let known = finding("the contract contradicts itself");
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known.clone()]));
+    app.check_run().await.unwrap();
+    // The same program under another configuration: what it saved says nothing of this one.
+    let store = app.into_store();
+    let registry = Registry::with_external(
+        &[],
+        vec![],
+        vec![rule(vec![Hook::Put, Hook::Check], true, "config-v2")],
+        &[],
+    )
+    .unwrap();
+    let mut app = App::with_registry(
+        store,
+        Counter(1_000),
+        registry,
+        FixedClock(Timestamp::from_millis(1_000)),
+    )
+    .with_external(executor.clone());
+    executor
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(reply(vec![known.clone()]));
+    assert!(matches!(
+        app.put_contract("core", "stack", "Stack", &clauses("push, then pop"))
+            .await,
+        Err(AppError::ExternalRefused { .. })
+    ));
+    // And with no saved report at all: all of it is judged.
+    let mut app = self::app(
+        "gate-no-report",
+        vec![Hook::Put],
+        true,
+        FakeExecutor::answering(reply(vec![known])),
+    )
+    .await;
+    assert!(matches!(
+        app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+            .await,
+        Err(AppError::ExternalRefused { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_failed_run_refuses_a_gate_put_even_when_the_saved_report_failed_the_same_way() {
+    let executor = FakeExecutor::default();
+    let mut app = app(
+        "gate-failed-again",
+        vec![Hook::Put, Hook::Check],
+        true,
+        executor.clone(),
+    )
+    .await;
+    executor.replies.lock().unwrap().push_back(failed());
+    app.check_run().await.unwrap();
+    assert!(
+        app.store().external_reports().await.unwrap()[0]
+            .failure
+            .is_some()
+    );
+    executor.replies.lock().unwrap().push_back(failed());
+    assert!(matches!(
+        app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+            .await,
+        Err(AppError::ExternalRefused { .. })
+    ));
 }
 
 /// The reads of a rule, from the words a person writes in `chidev.toml`.

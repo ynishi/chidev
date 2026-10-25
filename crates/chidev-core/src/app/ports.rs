@@ -123,6 +123,10 @@ impl Outcome {
 /// findings of each level it gave. Kept apart from the Project (append-only), so a run can be told apart later
 /// from the model it read: the store's revision names the model. There is no duration yet; timing needs a clock
 /// port, which the use cases do not have.
+///
+/// The counts are those of the whole run over the state the use case would keep, however much of it the use case
+/// went on to report: a put reports only what it introduced, and its record still counts everything the check
+/// found in the model after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     /// The check.

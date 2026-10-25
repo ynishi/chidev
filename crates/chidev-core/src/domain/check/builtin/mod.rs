@@ -3,6 +3,14 @@
 //! once. What must never be kept the Project already refuses (its invariants), and a check is for what may be kept
 //! but should not be left. The one builtin that is mandatory is `sim.nondeterministic`: a simulation that cannot be
 //! repeated finds nothing anyone can reproduce, so no policy turns it down.
+//!
+//! Each descriptor lists its hooks, and the hooks say what its check speaks about ([`Descriptor::kind`]). A check
+//! that runs at `put` speaks about what an edit made stale or out of place: only what the put introduced is
+//! reported, and it fills the grounds of its findings, which are what tell one put's finding from the last one's.
+//! A check that does not speaks about the state of the model (something is not there, not settled or not measured)
+//! and is judged where something is confirmed or asked for. `check_list` shows the kind and the hooks of each rule.
+//!
+//! [`Descriptor::kind`]: super::descriptor::Descriptor::kind
 
 mod change_requests;
 mod citations;
@@ -60,8 +68,12 @@ pub fn all() -> &'static [&'static dyn Check] {
     ]
 }
 
-/// The hooks of the checks that read the whole model, not only what a change touches.
-const ALL_HOOKS: &[Hook] = &[Hook::Put, Hook::Pin, Hook::Resolve, Hook::Check];
+/// The hooks of a check that speaks about the state of the model (its kind is [`CheckKind::State`], which it is
+/// because `put` is not among its hooks): the ones that confirm something or ask for the whole model. It does not
+/// run at `put`, where an edit has not finished the model and would be told so every time.
+///
+/// [`CheckKind::State`]: super::descriptor::CheckKind::State
+const CONFIRM_HOOKS: &[Hook] = &[Hook::Pin, Hook::Resolve, Hook::Check];
 
 #[cfg(test)]
 mod fixture {
@@ -229,8 +241,7 @@ mod fixture {
     ) -> Vec<Finding> {
         check.run(
             &CheckView {
-                before: None,
-                after: p,
+                project: p,
                 pins,
                 change_requests: crs,
                 measurements: &[],
@@ -270,6 +281,7 @@ mod tests {
     use super::*;
     use crate::domain::check::descriptor::Executor;
     use crate::domain::check::level::Level;
+    use crate::domain::entity::project::Project;
 
     #[test]
     fn the_builtins_have_distinct_ids_and_the_levels_that_were_decided() {
@@ -840,5 +852,226 @@ mod tests {
             ]
         );
         assert_eq!(found[0].level(), crate::domain::check::Level::Note);
+    }
+
+    use crate::domain::check::{Ground, LineState, introduced};
+    use crate::domain::service::footprint::moves_between;
+    use crate::domain::vo::footprint::Footprint;
+
+    #[test]
+    fn a_citation_that_moves_on_is_introduced_by_the_put_that_moved_it_and_not_again_by_one_that_did_not()
+     {
+        let mut p = project();
+        put_contract(&mut p, "a half rounds to even");
+        let was = run(&StaleCite, &p, &[], &[]);
+        assert_eq!(was.len(), 1);
+        assert_eq!(was[0].grounds().len(), 1);
+        // A put that leaves the Project as it is introduces nothing.
+        assert!(introduced(&was, &run(&StaleCite, &p, &[], &[])).is_empty());
+        // The Case now also cites an Item that moved: a ground the finding did not have.
+        let mut q = p.clone();
+        put_interface(&mut q, "fn a(x: u8)");
+        let found = introduced(&was, &run(&StaleCite, &q, &[], &[]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].grounds().len(), 2);
+        // The same Clause moves on again: the finding is the same and its mark is another.
+        let mut r = p.clone();
+        put_contract(&mut r, "a half rounds to odd");
+        assert_eq!(introduced(&was, &run(&StaleCite, &r, &[], &[])).len(), 1);
+    }
+
+    #[test]
+    fn a_pin_that_goes_stale_for_one_more_reason_or_the_same_reason_again_is_introduced() {
+        let mut p = project();
+        let pins = [pin(&p)];
+        put_contract(&mut p, "a half rounds to even");
+        let was = run(&StalePin, &p, &pins, &[]);
+        assert_eq!(was.len(), 1);
+        // Nothing moved since.
+        assert!(introduced(&was, &run(&StalePin, &p, &pins, &[])).is_empty());
+        // The Harness the Pin stands on moves too: one more reason.
+        let mut q = p.clone();
+        revise_harness(&mut q);
+        let found = introduced(&was, &run(&StalePin, &q, &pins, &[]));
+        assert_eq!(found.len(), 1);
+        assert!(matches!(
+            found[0].grounds(),
+            [Ground::Pin { .. }, Ground::Pin { .. }]
+        ));
+        // The same Contract moves again: the reason is the same and the revision it has is not.
+        let mut r = p.clone();
+        put_contract(&mut r, "a half rounds to odd");
+        assert_eq!(introduced(&was, &run(&StalePin, &r, &pins, &[])).len(), 1);
+    }
+
+    #[test]
+    fn a_target_a_request_keeps_that_moves_again_is_introduced() {
+        let mut p = project();
+        let keeping = cr(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            None,
+            &[(Target::Clause(clause(30)), ExpectKind::Keep)],
+        );
+        let crs = [keeping];
+        put_contract(&mut p, "a half rounds to even");
+        let was = run(&KeepMoved, &p, &[], &crs);
+        assert_eq!(was.len(), 1);
+        assert!(introduced(&was, &run(&KeepMoved, &p, &[], &crs)).is_empty());
+        let mut q = p.clone();
+        put_contract(&mut q, "a half rounds to odd");
+        assert_eq!(introduced(&was, &run(&KeepMoved, &q, &[], &crs)).len(), 1);
+    }
+
+    #[test]
+    fn work_outside_the_frame_is_introduced_by_the_work_that_did_it_and_not_by_a_put_of_no_request()
+    {
+        let mut p = project();
+        let mut c = cr(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            None,
+            &[(Target::Clause(clause(30)), ExpectKind::Target)],
+        );
+        applied_for(&mut c, &mut p, |p| put_interface(p, "fn a(x: u8)"));
+        let was = run(&OutOfFrame, &p, &[], std::slice::from_ref(&c));
+        assert_eq!(was.len(), 1);
+        // Another request, or none, moves the same target again: the work of this one is as it was.
+        let mut q = p.clone();
+        put_interface(&mut q, "fn a(x: u16)");
+        assert!(introduced(&was, &run(&OutOfFrame, &q, &[], std::slice::from_ref(&c))).is_empty());
+        // Its own new work moves the same target again: that is another change set of its own.
+        let mut d = c.clone();
+        let mut r = p.clone();
+        put_interface(&mut r, "fn a(x: u16)");
+        d.record_work(Footprint::new(3, moves_between(&p, &r)))
+            .unwrap();
+        let found = introduced(&was, &run(&OutOfFrame, &r, &[], std::slice::from_ref(&d)));
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0]
+                .grounds()
+                .iter()
+                .any(|g| matches!(g, Ground::Work { at: 3, .. }))
+        );
+    }
+
+    /// A change request whose question is answered on the Policy line `line` as the Policy of `p` has it.
+    fn decided_on(p: &Project, line: &str) -> crate::domain::entity::change_request::ChangeRequest {
+        use std::collections::BTreeMap;
+
+        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+        use crate::domain::vo::answer::{Answer, DecisionMaker};
+        use crate::domain::vo::choice::Choice;
+        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
+        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+        use crate::domain::vo::policy::PolicyLineId;
+        use crate::domain::vo::timestamp::Timestamp;
+        use crate::domain::vo::title::Title;
+        let crux = Crux::new(
+            CruxKind::Ambiguity,
+            vec![CruxOption::new(
+                Choice::try_from("a").unwrap(),
+                None,
+                BTreeMap::new(),
+                None,
+            )],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut c = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(1)),
+            ChangeRequestDraft {
+                title: Title::try_from("on a line").unwrap(),
+                situation: None,
+                intent: Intent::ChangeBehavior,
+                parent: None,
+                issuer: None,
+                expects: BTreeMap::new(),
+                crux: Some(crux),
+                assumptions: Vec::new(),
+                addresses: Vec::new(),
+            },
+        );
+        let basis = p
+            .policy()
+            .basis_on(PolicyLineId::try_from(line).unwrap())
+            .unwrap();
+        let answer = Answer::new(
+            Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None)),
+            basis,
+            DecisionMaker::role("orchestrator").unwrap(),
+            Timestamp::from_millis(1),
+        );
+        c.decide(answer, &BTreeMap::new()).unwrap();
+        c
+    }
+
+    #[test]
+    fn a_policy_line_that_goes_from_reworded_to_gone_is_introduced_and_another_line_reworded_is_not()
+     {
+        use crate::domain::vo::policy::PolicyLineId;
+        use crate::domain::vo::prose::Prose;
+        let line = |n: &str, t: &str| {
+            (
+                PolicyLineId::try_from(n).unwrap(),
+                Prose::try_from(t).unwrap(),
+            )
+        };
+        let mut p = project();
+        p.put_policy(vec![
+            line("P1", "take it from 80"),
+            line("P2", "low: either"),
+        ])
+        .unwrap();
+        let crs = [decided_on(&p, "P1")];
+        // Nothing found while the line is as it was; the line reworded is found.
+        assert!(run(&PolicyLineGone, &p, &[], &crs).is_empty());
+        let mut reworded = p.clone();
+        reworded
+            .put_policy(vec![
+                line("P1", "take it from 90"),
+                line("P2", "low: either"),
+            ])
+            .unwrap();
+        let was = run(&PolicyLineGone, &reworded, &[], &crs);
+        assert_eq!(was.len(), 1);
+        assert!(matches!(
+            was[0].grounds(),
+            [Ground::PolicyLine {
+                state: LineState::Reworded(_),
+                ..
+            }]
+        ));
+        assert_eq!(
+            introduced(&[], &run(&PolicyLineGone, &reworded, &[], &crs)).len(),
+            1
+        );
+        // The line is dropped from the reworded text: it is gone now, which the finding did not say.
+        let mut gone = reworded.clone();
+        gone.put_policy(vec![line("P2", "low: either")]).unwrap();
+        let found = introduced(&was, &run(&PolicyLineGone, &gone, &[], &crs));
+        assert_eq!(found.len(), 1);
+        assert!(matches!(
+            found[0].grounds(),
+            [Ground::PolicyLine {
+                state: LineState::Gone,
+                ..
+            }]
+        ));
+        // Another line reworded moves the Policy, and not what this decision rests on.
+        let mut other = reworded.clone();
+        other
+            .put_policy(vec![
+                line("P1", "take it from 90"),
+                line("P2", "low: the other"),
+            ])
+            .unwrap();
+        assert_eq!(run(&PolicyLineGone, &other, &[], &crs).len(), 1);
+        assert!(introduced(&was, &run(&PolicyLineGone, &other, &[], &crs)).is_empty());
     }
 }

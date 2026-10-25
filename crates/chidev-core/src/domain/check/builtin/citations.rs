@@ -4,12 +4,12 @@ use std::borrow::Cow;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::ALL_HOOKS;
+use super::CONFIRM_HOOKS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
-use crate::domain::check::{Check, Finding};
+use crate::domain::check::{Check, Finding, Ground};
 use crate::domain::service::cite::stale_cites;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::{ClauseId, ItemId};
@@ -41,22 +41,29 @@ impl Check for StaleCite {
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         // One finding per Case, so that the same Case is the same finding however many of its citations moved.
+        // Each citation that moved is a ground: the target and the revision it has now, so that the same target
+        // moving on again is a new ground.
         let mut by_case = BTreeMap::new();
-        for s in stale_cites(view.after) {
+        for s in stale_cites(view.project) {
             let what = s.target.word();
-            by_case
+            let (moved, grounds) = by_case
                 .entry(s.case)
-                .or_insert_with(Vec::new)
-                .push(format!("{what} {} -> {}", s.cited, s.now));
+                .or_insert_with(|| (Vec::new(), Vec::new()));
+            moved.push(format!("{what} {} -> {}", s.cited, s.now));
+            grounds.push(Ground::Cite {
+                target: s.target,
+                now: s.now,
+            });
         }
         by_case
             .into_iter()
-            .map(|(case, moved)| {
+            .map(|(case, (moved, grounds))| {
                 Finding::new(
                     &STALE_CITE,
                     Some(Subject::Case(case)),
                     format!("cites a definition that moved on ({})", moved.join(", ")),
                 )
+                .grounded(grounds)
             })
             .collect()
     }
@@ -73,7 +80,7 @@ static UNCITED_CLAUSE: Descriptor = Descriptor {
         "Nothing checks the promise this clause makes. Add a case that cites it, or open a change request that \
            addresses the finding if the clause is meant to go unchecked for now.",
     ),
-    hooks: Cow::Borrowed(ALL_HOOKS),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -87,13 +94,13 @@ impl Check for UncitedClause {
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let cited: BTreeSet<ClauseId> = view
-            .after
+            .project
             .contexts()
             .flat_map(|c| c.harnesses())
             .flat_map(|h| h.cases())
             .flat_map(|k| k.cites().clauses().keys().copied())
             .collect();
-        view.after
+        view.project
             .contexts()
             .flat_map(|c| c.contracts())
             .flat_map(|k| k.clauses())
@@ -120,7 +127,7 @@ static UNCITED_ITEM: Descriptor = Descriptor {
         "Nothing checks this declaration. Add a case that cites it, or open a change request that addresses the \
            finding if it is meant to go unchecked for now.",
     ),
-    hooks: Cow::Borrowed(ALL_HOOKS),
+    hooks: Cow::Borrowed(CONFIRM_HOOKS),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -134,13 +141,13 @@ impl Check for UncitedItem {
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let cited: BTreeSet<ItemId> = view
-            .after
+            .project
             .contexts()
             .flat_map(|c| c.harnesses())
             .flat_map(|h| h.cases())
             .flat_map(|k| k.cites().items().keys().copied())
             .collect();
-        view.after
+        view.project
             .contexts()
             .flat_map(|c| c.interfaces())
             .flat_map(|i| i.items())

@@ -3,8 +3,12 @@
 use super::descriptor::Descriptor;
 use super::level::Level;
 use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestState};
+use crate::domain::service::pin::StaleReason;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
+use crate::domain::vo::policy::PolicyLineId;
+use crate::domain::vo::revision::Revision;
+use crate::domain::vo::target::Target;
 
 /// Whether a finding is being dealt with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,15 +45,75 @@ pub enum Mention {
     Contract(ContractId),
 }
 
+/// Whether a policy line a decision rests on is gone, or still there with another text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineState {
+    /// The Policy no longer has the line.
+    Gone,
+    /// The line has another text than when it was applied. Holds the revision of the Policy at which the line got
+    /// the text it has now (the line's `changed_at`, not the revision of the Policy as a whole, which goes up when
+    /// any line changes).
+    Reworded(Revision),
+}
+
+/// The mark of one fact that makes a finding true. Two runs of a check that find the same rule about the same
+/// subject (the same [`FindingRef`]) are told apart by their grounds: a put that leaves every ground of a finding
+/// as it was has introduced nothing, and one that adds a ground, or moves the mark of one, has introduced that
+/// part of it. A ground is the mark of a fact, never a copy of the message: the wording can change and the fact
+/// not.
+///
+/// A check about the state of the whole model, not about what a change did to it, gives no grounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ground {
+    /// A citation of a Case whose target is at revision `now`, past the one the Case recorded.
+    Cite {
+        /// What the Case cites.
+        target: Target,
+        /// The revision the target has.
+        now: Revision,
+    },
+    /// Something a Pin stands on moved.
+    Pin {
+        /// What moved.
+        reason: StaleReason,
+        /// The revision of what moved now; `None` when it is gone.
+        now: Option<Revision>,
+    },
+    /// A target a change request keeps has moved.
+    Moved {
+        /// The target.
+        target: Target,
+        /// The revision it has now; `None` when it is gone.
+        now: Option<Revision>,
+    },
+    /// The work of a change request moved a target outside its frame, in the change set kept at the store
+    /// revision `at`. A footprint is a fact about the past that never changes, so another change set moving the
+    /// same target is another ground.
+    Work {
+        /// The target it moved.
+        target: Target,
+        /// The revision of the store the change set was kept at.
+        at: u64,
+    },
+    /// A policy line a decision rests on.
+    PolicyLine {
+        /// The line.
+        line: PolicyLineId,
+        /// Whether it is gone or reworded.
+        state: LineState,
+    },
+}
+
 /// One thing a check found: the rule and what it is about (the [`FindingRef`], which is also how a change request
 /// points at it), how serious it is, and what is wrong in words. The words carry no names the store keeps (those
-/// are not the domain's); the reader of the finding has the subject to look them up by.
+/// are not the domain's); the reader of the finding has the subject to look them up by. The grounds are the marks
+/// of the facts it stands on (see [`Ground`]); they are not part of what makes it the same finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     at: FindingRef,
     level: Level,
     message: String,
-    mentions: Vec<Mention>,
+    grounds: Vec<Ground>,
 }
 
 impl Finding {
@@ -60,19 +124,40 @@ impl Finding {
             at: FindingRef::new(d.id.clone(), subject),
             level: d.default_level,
             message: message.into(),
-            mentions: Vec::new(),
+            grounds: Vec::new(),
         }
     }
 
-    /// The same finding, whose message goes on to name `mentions`.
-    pub fn mentioning(mut self, mentions: Vec<Mention>) -> Finding {
-        self.mentions = mentions;
+    /// The same finding, standing on `grounds`.
+    pub fn grounded(mut self, grounds: Vec<Ground>) -> Finding {
+        self.grounds = grounds;
         self
     }
 
-    /// What the message goes on to name, in order; empty for most findings.
-    pub fn mentions(&self) -> &[Mention] {
-        &self.mentions
+    /// The marks of the facts it stands on, in order; empty for a check that gives none.
+    pub fn grounds(&self) -> &[Ground] {
+        &self.grounds
+    }
+
+    /// What the message goes on to name, in order; empty for most findings. Derived from the grounds, so that
+    /// what a Pin moved on is held once: a `Pin` ground names the thing that moved (the pinned Interface is the
+    /// subject of the finding).
+    pub fn mentions(&self) -> Vec<Mention> {
+        self.grounds
+            .iter()
+            .filter_map(|g| match g {
+                Ground::Pin { reason, .. } => match reason {
+                    StaleReason::Interface => match self.subject() {
+                        Some(Subject::Interface(id)) => Some(Mention::Interface(id)),
+                        _ => None,
+                    },
+                    StaleReason::Harness(id) => Some(Mention::Harness(*id)),
+                    StaleReason::Contract(id) => Some(Mention::Contract(*id)),
+                    StaleReason::UsedInterface(id) => Some(Mention::Interface(*id)),
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     /// The same finding at `level`.

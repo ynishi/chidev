@@ -176,7 +176,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
     let mut app = open(1_000).await;
 
     // the store is read, and `check` reports the shape by the Clause, once, by name and not by id
-    let found = app.check().await.unwrap();
+    let found = app.check(None).await.unwrap().findings;
     let kept: Vec<_> = found
         .iter()
         .filter(|f| f.rule.as_str() == "sim.shape-kept")
@@ -213,7 +213,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
     assert_eq!(refused[0].suggestions.len(), 1, "{refused:#?}");
     // and a put in the shape the protocol runs mends it
     put_sim(&mut app, None, "stock", "C1").await.unwrap();
-    let found = app.check().await.unwrap();
+    let found = app.check(None).await.unwrap().findings;
     assert!(
         found.iter().all(|f| f.rule.as_str() != "sim.shape-kept"),
         "{found:#?}"
@@ -488,7 +488,7 @@ async fn a_rename_alone_keeps_the_id_the_citation_and_every_revision() {
     )
     .await
     .unwrap();
-    let found = app.check().await.unwrap();
+    let found = app.check(None).await.unwrap().findings;
     assert!(found.iter().all(|f| f.rule.as_str() != "cite.stale"));
 }
 
@@ -782,25 +782,25 @@ mod checks {
 
     use chidev_core::app::ports::{Invocation, Outcome};
     use chidev_core::app::{
-        App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, FindingInput, Intent, Registry,
-        SubjectInput,
+        App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
+        FindingInput, Intent, OptionInput, Registry, SubjectInput, TargetInput,
     };
     use chidev_core::domain::check::{
         Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, Level, Params,
     };
-    use chidev_core::domain::vo::finding::RuleId;
+    use chidev_core::domain::vo::finding::{RuleId, Subject};
     use chidev_core::domain::vo::timestamp::Timestamp;
     use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::sqlite::SqliteStore;
 
     use super::{Counter, app};
 
-    /// A mandatory check that finds the Project whenever it has a Context, to try the refusal with.
+    /// A mandatory check that finds every Clause of the Project, to try the refusal with.
     struct Forbidden;
 
     static FORBIDDEN: Descriptor = Descriptor {
         id: RuleId::from_static("test.forbidden"),
-        summary: Cow::Borrowed("a context exists"),
+        summary: Cow::Borrowed("a clause exists"),
         help: Cow::Borrowed("only for the test"),
         hooks: Cow::Borrowed(&[Hook::Put]),
         default_level: Level::Error,
@@ -815,9 +815,17 @@ mod checks {
         }
 
         fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-            view.after
+            view.project
                 .contexts()
-                .map(|c| Finding::new(&FORBIDDEN, None, format!("context {}", c.name())))
+                .flat_map(|c| c.contracts())
+                .flat_map(|k| k.clauses())
+                .map(|cl| {
+                    Finding::new(
+                        &FORBIDDEN,
+                        Some(Subject::Clause(cl.id())),
+                        format!("clause {}", cl.content().label()),
+                    )
+                })
                 .collect()
         }
     }
@@ -833,8 +841,13 @@ mod checks {
         app.store().invocations().await.unwrap()
     }
 
+    /// The rules of `found`.
+    fn rules(found: &[chidev_core::app::Found]) -> Vec<&str> {
+        found.iter().map(|f| f.rule.as_str()).collect()
+    }
+
     #[tokio::test]
-    async fn a_put_reports_what_the_checks_find_and_records_each_run() {
+    async fn a_put_does_not_say_the_model_is_unfinished_but_a_check_of_the_whole_does() {
         let mut app = app("checks-put").await;
         app.init().await.unwrap();
         app.add_context("core", &[]).await.unwrap();
@@ -842,23 +855,90 @@ mod checks {
             .put_contract("core", "stack", "Stack", &clauses())
             .await
             .unwrap();
-        let rules: Vec<&str> = put.findings.iter().map(|f| f.rule.as_str()).collect();
-        assert!(rules.contains(&"cite.uncited-clause"), "{rules:?}");
-        assert!(rules.contains(&"context.no-interface"));
-        assert!(put.findings.iter().all(|f| f.state == FindingState::Open));
+        // A first Contract has a Clause no Case cites, and a Context with no Interface: not an edit's doing.
+        assert!(put.findings.is_empty(), "{:?}", rules(&put.findings));
         let ran = invocations(&app).await;
-        let uncited = ran
-            .iter()
-            .find(|i| i.check.as_str() == "cite.uncited-clause")
-            .unwrap();
-        assert_eq!(uncited.hook, Hook::Put);
-        assert_eq!((uncited.warnings, uncited.outcome), (1, Outcome::Found));
-        // A check with nothing to find is recorded too, as ok.
+        for state in [
+            "cite.uncited-clause",
+            "cite.uncited-item",
+            "pin.unpinned",
+            "context.no-interface",
+            "context.no-harness",
+        ] {
+            assert!(ran.iter().all(|i| i.check.as_str() != state), "{state}");
+        }
+        // The checks that run at put are recorded, with nothing to find as ok.
         let stale = ran
             .iter()
             .find(|i| i.check.as_str() == "cite.stale")
             .unwrap();
+        assert_eq!(stale.hook, Hook::Put);
         assert_eq!((stale.warnings, stale.outcome), (0, Outcome::Ok));
+        // Where the whole is judged, it is said.
+        let found = app.check(None).await.unwrap().findings;
+        let said = rules(&found);
+        assert!(said.contains(&"cite.uncited-clause"), "{said:?}");
+        assert!(said.contains(&"context.no-interface"), "{said:?}");
+        assert!(found.iter().all(|f| f.state == FindingState::Open));
+    }
+
+    #[tokio::test]
+    async fn a_put_reports_the_stale_citation_it_made_and_not_the_one_that_was_there() {
+        let mut app = super::stock("checks-introduced").await;
+        let stock = |c1: &str| {
+            vec![
+                ClauseInput {
+                    label: "C1".to_string(),
+                    text: c1.to_string(),
+                },
+                ClauseInput {
+                    label: "C7".to_string(),
+                    text: "C7 holds".to_string(),
+                },
+            ]
+        };
+        // Reworded, the Clause a Case cites moves on: this put made the Case stale.
+        let put = app
+            .put_contract("core", "stock", "Stock", &stock("C1 holds always"))
+            .await
+            .unwrap();
+        let stale: Vec<_> = put
+            .findings
+            .iter()
+            .filter(|f| f.rule.as_str() == "cite.stale")
+            .collect();
+        assert_eq!(stale.len(), 1, "{:?}", rules(&put.findings));
+        assert_eq!(stale[0].about.as_deref(), Some("case reserve_refuses"));
+        assert!(
+            !rules(&put.findings).contains(&"cite.uncited-clause"),
+            "{:?}",
+            rules(&put.findings)
+        );
+        // A put that has nothing to do with it does not say it again, and the record counts the whole run.
+        let before = invocations(&app).await.len();
+        let other = app
+            .put_contract("core", "extra", "Extra", &super::clauses(&["C9"]))
+            .await
+            .unwrap();
+        assert!(
+            !rules(&other.findings).contains(&"cite.stale"),
+            "{:?}",
+            rules(&other.findings)
+        );
+        let ran = invocations(&app).await;
+        let recorded = ran[before..]
+            .iter()
+            .find(|i| i.check.as_str() == "cite.stale")
+            .unwrap();
+        assert_eq!((recorded.warnings, recorded.outcome), (1, Outcome::Found));
+        // Where the whole is judged, it is still there.
+        assert!(rules(&app.check(None).await.unwrap().findings).contains(&"cite.stale"));
+        // A put of the same Clause again moves the Case's target on again: that is this put's.
+        let again = app
+            .put_contract("core", "stock", "Stock", &stock("C1 holds, again"))
+            .await
+            .unwrap();
+        assert!(rules(&again.findings).contains(&"cite.stale"));
     }
 
     #[tokio::test]
@@ -873,7 +953,7 @@ mod checks {
         let revision = chidev_core::app::ports::Store::revision(app.store())
             .await
             .unwrap();
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         assert!(
             found
                 .iter()
@@ -886,6 +966,145 @@ mod checks {
                 .await
                 .unwrap(),
             revision
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_of_one_context_returns_what_is_about_it_and_counts_the_rest() {
+        let mut app = app("checks-context").await;
+        app.init().await.unwrap();
+        app.add_context("core", &[]).await.unwrap();
+        app.add_context("billing", &[]).await.unwrap();
+        app.put_contract("core", "stack", "Stack", &clauses())
+            .await
+            .unwrap();
+        app.put_contract("billing", "bill", "Bill", &clauses())
+            .await
+            .unwrap();
+        let clause = |context: &str, contract: &str| {
+            TargetInput::Clause(ClauseRef {
+                context: Some(context.to_string()),
+                contract: contract.to_string(),
+                label: "C1".to_string(),
+            })
+        };
+        let open = |title: &str,
+                    intent: Intent,
+                    targets: Vec<TargetInput>,
+                    keep: Vec<TargetInput>,
+                    crux: Option<CruxInput>| ChangeRequestInput {
+            title: title.to_string(),
+            situation: None,
+            intent,
+            parent: None,
+            issuer: None,
+            targets,
+            keep,
+            crux,
+            assumptions: Vec::new(),
+            addresses: Vec::new(),
+        };
+        let option = |choice: &str, targets: Vec<TargetInput>| OptionInput {
+            choice: choice.to_string(),
+            change: None,
+            targets,
+            keep: Vec::new(),
+            consequence: None,
+        };
+        // One that revises a Clause of core (and says it keeps the behaviour), one that keeps a Clause of billing
+        // (and names no target to change), one whose question only has an option that names a Clause of core, and
+        // one that names nothing.
+        for c in [
+            open(
+                "Keeps wrongly",
+                Intent::KeepBehavior,
+                vec![clause("core", "stack")],
+                Vec::new(),
+                None,
+            ),
+            open(
+                "Keeps billing",
+                Intent::ChangeBehavior,
+                Vec::new(),
+                vec![clause("billing", "bill")],
+                None,
+            ),
+            open(
+                "Undecided",
+                Intent::ChangeBehavior,
+                Vec::new(),
+                Vec::new(),
+                Some(CruxInput {
+                    kind: CruxKind::Ambiguity,
+                    options: vec![
+                        option("reword", vec![clause("core", "stack")]),
+                        option("leave", Vec::new()),
+                    ],
+                    recommended: None,
+                    importance: None,
+                    supersedes: None,
+                }),
+            ),
+            open(
+                "Names nothing",
+                Intent::ChangeBehavior,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ),
+        ] {
+            app.open_change_request(&c).await.unwrap();
+        }
+        let all = app.check(None).await.unwrap();
+        assert_eq!(all.outside, 0);
+        let abouts = |found: &[chidev_core::app::Found], rule: &str| -> Vec<String> {
+            found
+                .iter()
+                .filter(|f| f.rule.as_str() == rule)
+                .filter_map(|f| f.about.clone())
+                .collect()
+        };
+        assert_eq!(
+            abouts(&all.findings, "cr.awaiting-decision"),
+            ["change request `Undecided`"]
+        );
+        for (context, other, request) in [
+            ("core", "billing", "Keeps wrongly"),
+            ("billing", "core", "Keeps billing"),
+        ] {
+            let one = app.check(Some(context)).await.unwrap();
+            let mut said = rules(&one.findings);
+            said.sort_unstable();
+            assert_eq!(
+                said,
+                [
+                    "cite.uncited-clause",
+                    "context.no-harness",
+                    "context.no-interface",
+                    "cr.intent-mismatch"
+                ],
+                "{context}"
+            );
+            // The request is there for the Clause it names or keeps in the Context, and the other Context's things
+            // and the requests that name nothing of it are counted, not returned.
+            assert_eq!(
+                abouts(&one.findings, "cr.intent-mismatch"),
+                [format!("change request `{request}`")]
+            );
+            assert_eq!(one.outside, all.findings.len() - 4, "{context} / {other}");
+            assert!(
+                one.findings
+                    .iter()
+                    .filter_map(|f| f.about.as_deref())
+                    .all(|about| !about.contains(other)),
+                "{context}: {:?}",
+                one.findings
+            );
+        }
+        // A name that is no Context's is refused.
+        assert_eq!(
+            app.check(Some("nowhere")).await,
+            Err(AppError::UnknownContext("nowhere".to_string()))
         );
     }
 
@@ -922,12 +1141,15 @@ mod checks {
                 .find(|f| f.rule.as_str() == "cite.uncited-clause")
                 .map(|f| f.state)
         };
-        assert_eq!(state(&app.check().await.unwrap()), Some(FindingState::Open));
+        assert_eq!(
+            state(&app.check(None).await.unwrap().findings),
+            Some(FindingState::Open)
+        );
         app.open_change_request(&open("leave C1 unchecked"))
             .await
             .unwrap();
         assert_eq!(
-            state(&app.check().await.unwrap()),
+            state(&app.check(None).await.unwrap().findings),
             Some(FindingState::Addressed)
         );
         app.resolve_change_request(
@@ -939,7 +1161,7 @@ mod checks {
         .await
         .unwrap();
         assert_eq!(
-            state(&app.check().await.unwrap()),
+            state(&app.check(None).await.unwrap().findings),
             Some(FindingState::Decided)
         );
         // Naming a rule that is no rule id is refused.
@@ -949,6 +1171,68 @@ mod checks {
             app.open_change_request(&bad).await,
             Err(AppError::Input(_))
         ));
+    }
+
+    /// An App over the store at `name`, with the checks `registry` (the builtin ones when none), that gives ids
+    /// from `start` on.
+    async fn app_over(
+        name: &str,
+        start: u128,
+        registry: Option<Registry>,
+    ) -> App<SqliteStore, Counter> {
+        let dir = std::env::temp_dir().join(format!("chidev-app-{name}-{}", std::process::id()));
+        let store = SqliteStore::open(dir.join("chidev.db")).await.unwrap();
+        let clock = FixedClock(Timestamp::from_millis(1_000));
+        match registry {
+            Some(registry) => App::with_registry(store, Counter(start), registry, clock),
+            None => App::new(store, Counter(start), clock),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_what_a_put_introduced_refuses_it_not_what_was_there() {
+        let name = "refuse-introduced";
+        let dir = std::env::temp_dir().join(format!("chidev-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The Project as it was kept before the check existed: a Clause the check forbids.
+        let mut plain = app_over(name, 0, None).await;
+        plain.init().await.unwrap();
+        plain.add_context("core", &[]).await.unwrap();
+        plain
+            .put_contract("core", "stack", "Stack", &clauses())
+            .await
+            .unwrap();
+        plain.into_store().close().await.unwrap();
+        let mut app = app_over(
+            name,
+            1_000,
+            Some(Registry::new(&[&Forbidden], &[]).unwrap()),
+        )
+        .await;
+        // A put that leaves that Clause as it is introduces nothing, and is kept.
+        let kept = app
+            .put_interface("core", "api", "fn a()\n", &[super::item("a", 1)])
+            .await
+            .unwrap();
+        assert!(kept.findings.is_empty(), "{:?}", rules(&kept.findings));
+        // A put that makes another one is refused, naming only that one.
+        let revision = chidev_core::app::ports::Store::revision(app.store())
+            .await
+            .unwrap();
+        let refused = app
+            .put_contract("core", "more", "More", &super::clauses(&["C2"]))
+            .await;
+        let Err(AppError::Refused(found)) = refused else {
+            panic!("expected a refusal, got {refused:?}");
+        };
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].about.as_deref(), Some("more C2"));
+        assert_eq!(
+            chidev_core::app::ports::Store::revision(app.store())
+                .await
+                .unwrap(),
+            revision
+        );
     }
 
     #[tokio::test]
@@ -1233,9 +1517,10 @@ mod judged {
             AppError::Input(_)
         ));
         assert!(
-            app.check()
+            app.check(None)
                 .await
                 .unwrap()
+                .findings
                 .iter()
                 .all(|f| !f.rule.as_str().starts_with("judged."))
         );
@@ -1275,7 +1560,7 @@ mod judged {
         ))
         .await
         .unwrap();
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         let mine = judged_findings(&found);
         assert_eq!(mine.len(), 3);
         let vague: Vec<_> = mine
@@ -1296,7 +1581,7 @@ mod judged {
             .await
             .unwrap();
         assert_eq!((done.findings, done.replaced), (1, 2));
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         let vague: Vec<_> = judged_findings(&found)
             .into_iter()
             .filter(|f| f.rule.as_str() == "judged.vague")
@@ -1312,7 +1597,7 @@ mod judged {
         app.finding_report(&report("judged.vague", now(&app).await, Vec::new()))
             .await
             .unwrap();
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         assert_eq!(judged_findings(&found).len(), 1);
         let view = app.check_rules(None, Some("judged.vague")).await.unwrap();
         assert_eq!(view.rules[0].state, JudgedState::Current);
@@ -1350,13 +1635,19 @@ mod judged {
         .unwrap();
         let stale_of =
             |found: &[chidev_core::app::Found]| judged_findings(found).first().map(|f| f.stale);
-        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        assert_eq!(
+            stale_of(&app.check(None).await.unwrap().findings),
+            Some(false)
+        );
         assert!(app.status().await.unwrap().judged.is_empty());
 
         // another clause changes: the rule's part of the model moved, so it is to be judged again, but the
         // finding about C1 stands
         put_stack(&mut app, "push then pop", "an empty stack pops nothing").await;
-        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        assert_eq!(
+            stale_of(&app.check(None).await.unwrap().findings),
+            Some(false)
+        );
         let pending = app.status().await.unwrap().judged;
         assert_eq!(pending.len(), 1);
         assert_eq!(
@@ -1371,7 +1662,7 @@ mod judged {
             "an empty stack pops nothing",
         )
         .await;
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         assert_eq!(stale_of(&found), Some(true));
         assert_eq!(app.status().await.unwrap().findings, found);
 
@@ -1384,7 +1675,10 @@ mod judged {
         ))
         .await
         .unwrap();
-        assert_eq!(stale_of(&app.check().await.unwrap()), Some(false));
+        assert_eq!(
+            stale_of(&app.check(None).await.unwrap().findings),
+            Some(false)
+        );
         assert!(app.status().await.unwrap().judged.is_empty());
     }
 
@@ -1420,7 +1714,7 @@ mod judged {
             .await
             .unwrap();
         assert!(done.on_older_revision);
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         let vague = judged_findings(&found)
             .into_iter()
             .find(|f| f.rule.as_str() == "judged.vague")
@@ -1443,7 +1737,10 @@ mod judged {
         .await
         .unwrap();
         let state = |found: &[chidev_core::app::Found]| judged_findings(found)[0].state;
-        assert_eq!(state(&app.check().await.unwrap()), FindingState::Open);
+        assert_eq!(
+            state(&app.check(None).await.unwrap().findings),
+            FindingState::Open
+        );
         app.open_change_request(&ChangeRequestInput {
             title: "reword C1".to_string(),
             situation: None,
@@ -1465,7 +1762,10 @@ mod judged {
         })
         .await
         .unwrap();
-        assert_eq!(state(&app.check().await.unwrap()), FindingState::Addressed);
+        assert_eq!(
+            state(&app.check(None).await.unwrap().findings),
+            FindingState::Addressed
+        );
     }
 
     #[tokio::test]
@@ -1502,7 +1802,7 @@ mod judged {
             .unwrap();
         app.pin("core", "stack-api", "code").await.unwrap();
         put_stack(&mut app, "push then pop, in order", "x").await;
-        let found = app.check().await.unwrap();
+        let found = app.check(None).await.unwrap().findings;
         let pin = found
             .iter()
             .find(|f| f.rule.as_str() == "pin.stale")

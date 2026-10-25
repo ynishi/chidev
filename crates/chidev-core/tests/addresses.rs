@@ -204,7 +204,7 @@ async fn report_every_subject(app: &mut App<SqliteStore, Counter>) {
 }
 
 async fn assert_judged_states(app: &App<SqliteStore, Counter>, state: FindingState) {
-    let findings = app.check().await.unwrap();
+    let findings = app.check(None).await.unwrap().findings;
     let judged: Vec<_> = findings
         .iter()
         .filter(|f| f.rule.as_str().starts_with("judged."))
@@ -273,7 +273,7 @@ async fn every_subject_is_addressed_deduplicated_persisted_and_resolved() {
     ))
     .await
     .unwrap();
-    let found = app.check().await.unwrap();
+    let found = app.check(None).await.unwrap().findings;
     assert_eq!(
         found
             .iter()
@@ -431,7 +431,7 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
     )
     .await
     .unwrap();
-    let findings = app.check().await.unwrap();
+    let findings = app.check(None).await.unwrap().findings;
     let context = findings
         .iter()
         .find(|f| f.rule.as_str() == "judged.context")
@@ -448,9 +448,10 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
     assert_eq!(project.state, FindingState::Open);
     resolve_done(&mut app, "human review").await;
     assert_eq!(
-        app.check()
+        app.check(None)
             .await
             .unwrap()
+            .findings
             .iter()
             .find(|f| f.rule.as_str() == "judged.context")
             .unwrap()
@@ -470,7 +471,10 @@ async fn builtin_context_findings_use_the_same_subject_reference() {
             .unwrap()
             .state
     };
-    assert_eq!(state(app.check().await.unwrap()), FindingState::Open);
+    assert_eq!(
+        state(app.check(None).await.unwrap().findings),
+        FindingState::Open
+    );
     app.open_change_request(&request(
         "keep empty",
         vec![FindingInput {
@@ -480,9 +484,15 @@ async fn builtin_context_findings_use_the_same_subject_reference() {
     ))
     .await
     .unwrap();
-    assert_eq!(state(app.check().await.unwrap()), FindingState::Addressed);
+    assert_eq!(
+        state(app.check(None).await.unwrap().findings),
+        FindingState::Addressed
+    );
     resolve_done(&mut app, "keep empty").await;
-    assert_eq!(state(app.check().await.unwrap()), FindingState::Decided);
+    assert_eq!(
+        state(app.check(None).await.unwrap().findings),
+        FindingState::Decided
+    );
 }
 
 #[derive(Debug)]
@@ -523,7 +533,7 @@ async fn an_external_case_finding_is_addressed_without_changing_its_staleness() 
     let (app, _) = fixture(Registry::with_external(&[], vec![], vec![rule], &[]).unwrap()).await;
     let mut app = app.with_external(CaseExecutor);
     app.check_run().await.unwrap();
-    let finding = app.check().await.unwrap().pop().unwrap();
+    let finding = app.check(None).await.unwrap().findings.pop().unwrap();
     assert_eq!(finding.state, FindingState::Open);
     assert!(!finding.stale);
     app.open_change_request(&request(
@@ -539,14 +549,14 @@ async fn an_external_case_finding_is_addressed_without_changing_its_staleness() 
     ))
     .await
     .unwrap();
-    let finding = app.check().await.unwrap().pop().unwrap();
+    let finding = app.check(None).await.unwrap().findings.pop().unwrap();
     assert_eq!(finding.state, FindingState::Addressed);
     assert!(
         !finding.stale,
         "the external rule did not read change requests"
     );
     resolve_done(&mut app, "review test").await;
-    let finding = app.check().await.unwrap().pop().unwrap();
+    let finding = app.check(None).await.unwrap().findings.pop().unwrap();
     assert_eq!(finding.state, FindingState::Decided);
     assert!(!finding.stale);
 }

@@ -196,6 +196,23 @@ belong):
   are.
 - `status` lists the Pins and whether they hold, the citations behind their
   targets, the change requests, what was retired and the findings of every check.
+- `check` runs every check on the project as it is and answers with the
+  `findings`; nothing is kept. An edit cannot finish the model in one step, so
+  a put answers only with what that put introduced (see "Change sets"): a Clause
+  no Case cites yet, or a Context with no Interface yet, is not said by the put
+  that left it so. The whole model is judged where something is confirmed (`pin`,
+  `cr_resolve`) and by `check` and `status`. `check_list` lists every check with
+  its `level`, its `kind` (`change` for a check that says an edit made something
+  stale or out of place, `state` for one that says the model is not finished or
+  not settled) and the `hooks` it runs at.
+  - `{"op":"check","context":"pricing"}` narrows the answer to one Context: the
+    findings about it and about what it holds, and about a change request that is
+    about it (a target it revises, retires or keeps is in the Context; the options
+    of a question not yet decided name nothing). The run is the whole one and only
+    what is answered is narrowed. `outside` counts the findings left out: those
+    about the Project as a whole, about a change request that names nothing of the
+    Context, and about something that is gone. It is in the answer only when a
+    `context` was given. A name that is no Context's is `input.unknown-name`.
 - `view` reads the part of the model you ask for, as the model holds it (the
   Clauses' text, the Interfaces' source and Items, the Harnesses' source and Cases):
 
@@ -310,8 +327,14 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   refused.
 - When a set is refused nothing changes and the error names every problem found,
   in names: ``the case stock-tests release_frees (context `core`) cites the clause
-  stock C7, which it cannot reach``. The checks of the put hook run once, on the
-  Project before and after the set, and the store takes one commit.
+  stock C7, which it cannot reach``. The checks of the put hook run once on the
+  Project before the set and once on the Project after it, and `findings` are
+  those the set introduced: a finding the Project already had is not said again,
+  and a mandatory check refuses the set only for what the set introduced. The
+  same finding with a ground it did not have before (a Case that now cites one
+  more thing that moved, a Pin that is stale for one more reason, a target moved
+  again) is introduced; a finding whose grounds are all as they were is not. The
+  store takes one commit.
 - The answer has `puts` (each with its `put`, `context`, `name`, `id` and
   `revision`, in the order listed; a `uses` or `base_on_contract` has only the
   Context), `retired` and `findings`. A put or a retire alone is a change set of
@@ -364,12 +387,19 @@ policy layers may override them with values of the same type.
 On `put`, `pin`, and `resolve`, matching external hooks check the proposed model
 before it is saved. Advisory findings are capped at warning. `gate = true` makes
 every finding an error and refuses the change; execution and protocol failures
-also refuse it. A gate cannot be disabled or lowered by policy. A refused
-operation returns its findings and execution evidence without saving them or the
-candidate change. Accepted changes save their external results and invocation
-records in the same transaction. `check_run` saves its results even when a gate
-finds an error, because it changes no asset. A concurrent write refuses the
-commit, with no automatic process retry.
+also refuse it. On `pin` and `resolve` every finding counts. On `put` the findings
+are held to what the put introduced, as the builtin checks are, when there is
+something to compare with: the saved result of the rule, if it describes the model
+as it stood before the put (the same input and registration, which `status.external`
+calls `current`). A finding that result already had (the same subject and the same
+message) is neither reported nor refused for; a program gives no typed reason, so
+its message is what tells two findings about one subject apart. Without such a saved result every finding
+counts, and a failed run refuses a gate whatever was saved. A gate cannot be
+disabled or lowered by policy. A refused operation returns its findings and
+execution evidence without saving them or the candidate change. Accepted changes
+save their external results and invocation records in the same transaction.
+`check_run` saves its results even when a gate finds an error, because it changes
+no asset. A concurrent write refuses the commit, with no automatic process retry.
 
 Programs receive one JSON document on stdin and return one on stdout. For
 example, a response with no findings is `{"protocol":1,"findings":[]}`. Diagnostics
@@ -1017,7 +1047,8 @@ the same commit). That ties the work to the request that asked for it:
   stay in its frame, and **the frame is the request's own**: a parent's targets
   neither widen nor bound its parts. A footprint that moved a target outside the
   frame of the request it was applied for is reported as `cr.out-of-frame` (a
-  warning; hooks `put` and `check`) for that request, and `status` lists it as
+  warning) for that request, by the put that did it and by `check` for as long as
+  it lasts, and `status` lists it as
   `out_of_frame` of that request next to its `work` (each footprint's
   `store_revision` and the targets it moved). A request with no targets has all its
   work out of frame. A container that moved only because something inside it moved
@@ -1067,9 +1098,9 @@ Interfaces, Harness implementation, code), not only to the specification.
   each with a text. `policy_put` replaces all of them:
   `{"op":"policy_put","lines":[{"id":"P1","text":"take the recommendation when its confidence is 80 or more"}]}`.
   Its revision goes up when the lines change, and `status.policy` shows the
-  revision and the lines. The note `crux.policy-line-gone` (hooks: put, check)
-  reports an answer that rests on a line which is gone or whose text changed
-  since; the answer itself stands.
+  revision and the lines. The note `crux.policy-line-gone` reports an answer that
+  rests on a line which is gone or whose text changed since (by the `policy_put`
+  that did it, and by `check` for as long as it lasts); the answer itself stands.
 - An **Assumption** `{statement, reason, evidence}` is an interpretation settled
   from the repository and general knowledge, so nobody is asked. `evidence` is a
   list of `{"repo":{"path":"src/round.rs","lines":[10,14]}}` (a path relative to

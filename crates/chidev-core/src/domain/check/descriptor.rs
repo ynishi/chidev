@@ -18,7 +18,9 @@ pub enum Executor {
     ///
     /// Advisory checks are capped at warning; a gate is mandatory at error and fails closed on any
     /// execution or protocol failure. Successful candidate changes keep the result and execution evidence
-    /// atomically. Refused changes return their attempts without persisting them.
+    /// atomically. Refused changes return their attempts without persisting them. At `put` the findings of a
+    /// successful run are held to what the put introduced, by their subjects, when the saved result of the rule
+    /// describes the model before the put; a failed run refuses a gate whatever was saved.
     ///
     /// [`crate::app::App::check_run`] explicitly executes and records check-hook programs.
     /// Reading check/status uses saved results and never starts a program. The program has the caller's
@@ -45,6 +47,30 @@ impl Executor {
         [Executor::Builtin, Executor::External, Executor::Judged]
             .into_iter()
             .find(|e| e.word() == word)
+    }
+}
+
+/// What a check speaks about. It is not stored: [`Descriptor::kind`] reads it from the hooks, by whether the check
+/// runs at `put` (see [`Hook::Put`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    /// It runs at `put` and speaks about what an edit made stale or took out of place (a citation behind its
+    /// target, a Pin whose basis moved, a keep that moved). At `put` it is held to what the edit introduced; at
+    /// the confirmation hooks the whole model is judged.
+    Change,
+    /// It does not run at `put` and speaks about the state of the model: something is not there, not settled or
+    /// not measured yet (a Clause no Case cites, a Context without an Interface). It is judged at the
+    /// confirmation hooks and on demand.
+    State,
+}
+
+impl CheckKind {
+    /// The word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            CheckKind::Change => "change",
+            CheckKind::State => "state",
+        }
     }
 }
 
@@ -122,7 +148,8 @@ pub struct Descriptor {
     /// The level it has when no policy says otherwise.
     pub default_level: Level,
     /// Whether a policy may not lower it below `error` or turn it off (as rustc's `forbid`): what the check finds
-    /// must never be kept.
+    /// must never be kept. At `put` only what the put introduced counts: a finding that was there before it does
+    /// not refuse an edit that did not make it.
     pub mandatory: bool,
     /// The parameters it takes.
     pub params: Cow<'static, [ParamSpec]>,
@@ -131,6 +158,18 @@ pub struct Descriptor {
 }
 
 impl Descriptor {
+    /// What it speaks about, read from its hooks so that there is one source. A check that runs at `put` speaks
+    /// about what an edit made stale and is held there to what the edit introduced ([`CheckKind::Change`]); one
+    /// that does not speaks about the state of the model and is judged at the confirmation hooks
+    /// ([`CheckKind::State`]).
+    pub fn kind(&self) -> CheckKind {
+        if self.runs_at(Hook::Put) {
+            CheckKind::Change
+        } else {
+            CheckKind::State
+        }
+    }
+
     /// The parameter named `name`.
     pub fn param(&self, name: &str) -> Option<&ParamSpec> {
         self.params.iter().find(|p| p.name == name)

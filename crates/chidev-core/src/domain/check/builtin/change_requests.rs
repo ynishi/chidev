@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use crate::domain::check::descriptor::{Descriptor, Executor};
+use crate::domain::check::finding::{Ground, LineState};
 use crate::domain::check::level::{Hook, Level};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
@@ -11,6 +12,7 @@ use crate::domain::entity::change_request::ChangeRequestState;
 use crate::domain::service::change_request::{
     awaiting_decision, keep_moved, out_of_frame, resolved_without_work, targets_untouched,
 };
+use crate::domain::service::cite::revision_of;
 use crate::domain::vo::answer::Basis;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::intent::Intent;
@@ -83,7 +85,7 @@ impl Check for TargetsUntouched {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        targets_untouched(view.change_requests, view.after)
+        targets_untouched(view.change_requests, view.project)
             .into_iter()
             .map(|u| {
                 Finding::new(
@@ -113,7 +115,7 @@ static AWAITING_DECISION: Descriptor = Descriptor {
            for a decision maker. What depends on the answer waits; the option chosen may expect more of other \
            targets. Apply the Policy if a line covers it, or ask a person, then decide it (`cr_decide`).",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
+    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -168,7 +170,7 @@ impl Check for PolicyLineGone {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        let policy = view.after.policy();
+        let policy = view.project.policy();
         view.change_requests
             .iter()
             .filter_map(|c| {
@@ -180,19 +182,30 @@ impl Check for PolicyLineGone {
                 else {
                     return None;
                 };
-                let message = match policy.line(*line) {
-                    None => format!("the policy line {line} it was decided on is gone"),
-                    Some(l) if l.changed_at() > *policy_revision => format!(
-                        "the policy line {line} was reworded after it was applied (policy {policy_revision}, now {})",
-                        policy.revision()
+                // The ground is the line's own `changed_at`, not the revision of the whole Policy: rewording
+                // another line moves that and has nothing to do with this decision.
+                let (message, state) = match policy.line(*line) {
+                    None => (
+                        format!("the policy line {line} it was decided on is gone"),
+                        LineState::Gone,
+                    ),
+                    Some(l) if l.changed_at() > *policy_revision => (
+                        format!(
+                            "the policy line {line} was reworded after it was applied (policy {policy_revision}, now {})",
+                            policy.revision()
+                        ),
+                        LineState::Reworded(l.changed_at()),
                     ),
                     Some(_) => return None,
                 };
-                Some(Finding::new(
-                    &POLICY_LINE_GONE,
-                    Some(Subject::ChangeRequest(c.id())),
-                    message,
-                ))
+                Some(
+                    Finding::new(
+                        &POLICY_LINE_GONE,
+                        Some(Subject::ChangeRequest(c.id())),
+                        message,
+                    )
+                    .grounded(vec![Ground::PolicyLine { line: *line, state }]),
+                )
             })
             .collect()
     }
@@ -225,14 +238,25 @@ impl Check for KeepMoved {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        keep_moved(view.change_requests, view.after)
+        keep_moved(view.change_requests, view.project)
             .into_iter()
             .map(|k| {
+                // Each target that moved, with the revision it has now (none when it is gone): it moving on
+                // again is a new ground.
+                let grounds = k
+                    .moved
+                    .iter()
+                    .map(|t| Ground::Moved {
+                        target: *t,
+                        now: revision_of(view.project, *t),
+                    })
+                    .collect();
                 Finding::new(
                     &KEEP_MOVED,
                     Some(Subject::ChangeRequest(k.cr)),
                     format!("{} target(s) it keeps have moved", k.moved.len()),
                 )
+                .grounded(grounds)
             })
             .collect()
     }
@@ -269,11 +293,22 @@ impl Check for OutOfFrame {
         out_of_frame(view.change_requests)
             .into_iter()
             .map(|o| {
+                // The ground is the footprint, not the Project as it is now: a put that moves the same target
+                // for no request leaves the work of the request, and so its grounds, as they were.
+                let grounds = o
+                    .by_work
+                    .iter()
+                    .map(|(target, at)| Ground::Work {
+                        target: *target,
+                        at: *at,
+                    })
+                    .collect();
                 Finding::new(
                     &OUT_OF_FRAME,
                     Some(Subject::ChangeRequest(o.cr)),
                     format!("{} target(s) moved outside its frame", o.moved.len()),
                 )
+                .grounded(grounds)
             })
             .collect()
     }
@@ -292,7 +327,7 @@ static INTENT_MISMATCH: Descriptor = Descriptor {
            It may be right (rewording a Clause keeps the behaviour), but one of the two is likely wrong: check the \
            intent and the targets.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),

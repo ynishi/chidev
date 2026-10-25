@@ -147,7 +147,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 continue;
             }
             let model = self
-                .external_model(rule, view.after, view.change_requests, pending)
+                .external_model(rule, view.project, view.change_requests, pending)
                 .await?;
             let params = policy
                 .params
@@ -243,6 +243,67 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             });
         }
         Ok(reports)
+    }
+
+    /// What an edit is held to among the `reports` of the external checks run on the state after it: for a
+    /// rule that ran, the findings its saved report does not have, when that report describes the state `before`
+    /// (the same input and configuration, as [`App::external_standing`] tells), so that a finding that was there
+    /// before the edit neither refuses it nor is reported again. Otherwise there is nothing to compare with and all
+    /// the findings are judged. A failed run is never narrowed, and a failed saved report is no baseline: whether
+    /// the program ran is not something a put leaves as it was. A finding is the same when its subject and its
+    /// message are: the protocol gives no typed reason, so the message is the only mark of what makes it hold.
+    pub(super) async fn judged_externals(
+        &self,
+        before: &CheckView<'_>,
+        reports: &[ExternalReport],
+    ) -> Result<Vec<ExternalReport>, AppError> {
+        if reports.is_empty() {
+            return Ok(Vec::new());
+        }
+        let saved = self.store.external_reports().await?;
+        let mut judged = Vec::with_capacity(reports.len());
+        for r in reports {
+            let mut narrowed = r.clone();
+            let rule = self
+                .registry
+                .external()
+                .iter()
+                .find(|rule| rule.descriptor().id.as_str() == r.rule);
+            if let (Some(rule), None, Some(base)) =
+                (rule, &r.failure, saved.iter().find(|s| s.rule == r.rule))
+                && base.failure.is_none()
+                && self
+                    .describes(base, rule, before.project, before.change_requests)
+                    .await?
+            {
+                // The protocol gives a finding no typed grounds, so its message is the only mark of the fact that
+                // makes it hold: a finding is known when the base has one about the same subject with the same
+                // message. Comparing the subject alone would make every finding about the whole Project one.
+                let known: Vec<(Option<Subject>, &str)> = base
+                    .findings
+                    .iter()
+                    .map(|f| (f.subject.as_ref().and_then(subject), f.message.as_str()))
+                    .collect();
+                narrowed.findings.retain(|f| {
+                    !known.contains(&(f.subject.as_ref().and_then(subject), f.message.as_str()))
+                });
+            }
+            judged.push(narrowed);
+        }
+        Ok(judged)
+    }
+
+    /// Whether the saved `report` of `rule` describes the model `p` with the change requests `crs`: the same input
+    /// and the same configuration of the rule as it is registered now.
+    async fn describes(
+        &self,
+        report: &ExternalReport,
+        rule: &ExternalRule,
+        p: &Project,
+        crs: &[ChangeRequest],
+    ) -> Result<bool, AppError> {
+        Ok(report.config_stamp == self.external_config_stamp(rule)?
+            && report.input_stamp == fingerprint(&self.external_model(rule, p, crs, &[]).await?)?)
     }
 
     pub(super) fn external_invocations(
@@ -351,9 +412,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             let report = reports.iter().find(|r| r.rule == id.as_str());
             let state = if let Some(r) = report {
-                let current = r.input_stamp
-                    == fingerprint(&self.external_model(rule, p, crs, &[]).await?)?
-                    && r.config_stamp == self.external_config_stamp(rule)?;
+                let current = self.describes(r, rule, p, crs).await?;
                 found.extend(
                     self.external_findings(std::slice::from_ref(r), p, crs, &[], !current)
                         .await?,
@@ -383,8 +442,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let crs = self.store.change_requests().await?;
         let measured = self.measured(&p).await?;
         let view = CheckView {
-            before: None,
-            after: &p,
+            project: &p,
             pins: &pins,
             change_requests: &crs,
             measurements: &measured.measurements,
