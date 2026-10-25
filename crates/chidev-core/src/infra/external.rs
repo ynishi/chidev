@@ -1,5 +1,5 @@
 //! Project-registered checks executed as programs, without a shell. Registration is explicit in
-//! `checks.toml`; the program has the caller's permissions, not a sandbox. Input selection limits the
+//! `chidev.toml`; the program has the caller's permissions, not a sandbox. Input selection limits the
 //! JSON sent to it, not its access to the machine. Each attempt has its own process group on Unix.
 //!
 //! The process receives one [`ExternalCall`] JSON document on stdin and returns one [`ExternalReply`]
@@ -25,14 +25,14 @@
 //! spawning it; it does not fingerprint interpreter dependencies or attest against concurrent changes.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
 
 use super::process;
+use super::project::{Project, Section};
 use crate::app::ports::external::{
     ExecutionEvidence, ExternalAttempt, ExternalCall, ExternalExecutor, ExternalFailure,
     ExternalReply,
@@ -94,23 +94,18 @@ fn default_timeout() -> u64 {
     10
 }
 
-/// Loads external checks from the project `checks.toml`. Other top-level tables are left to their
+/// Loads external checks from the `[external]` table of the project's settings. Other tables are left to their
 /// own readers. Rule order is lexicographic, independent of the file's table order.
-pub fn load(root: &Path) -> Result<(Vec<ExternalRule>, ProcessExecutor), ExternalConfigError> {
-    let path = root.join("checks.toml");
+pub fn load(
+    project: &Project,
+) -> Result<(Vec<ExternalRule>, ProcessExecutor), ExternalConfigError> {
     let error = |message: String| ExternalConfigError {
-        path: path.clone(),
+        path: project.file().to_path_buf(),
         message,
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(error(e.to_string())),
-    };
-    let value: toml::Table = toml::from_str(&text).map_err(|e| error(e.to_string()))?;
     let mut rules = Vec::new();
     let mut programs = BTreeMap::new();
-    if let Some(external) = value.get("external") {
+    if let Some(external) = project.section(Section::External) {
         let table = external
             .as_table()
             .ok_or_else(|| error("`external` is a table of rule registrations".to_string()))?;
@@ -189,7 +184,7 @@ pub fn load(root: &Path) -> Result<(Vec<ExternalRule>, ProcessExecutor), Externa
             rules.push(rule);
         }
     }
-    let root = root.canonicalize().map_err(|e| error(e.to_string()))?;
+    let root = project.root().to_path_buf();
     Ok((rules, ProcessExecutor { root, programs }))
 }
 
@@ -281,9 +276,16 @@ impl ProcessExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::project::{FILE, find};
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    /// Loads the external checks of the project rooted at `dir`.
+    fn load(dir: &Path) -> Result<(Vec<ExternalRule>, ProcessExecutor), ExternalConfigError> {
+        super::load(&find(dir).unwrap())
+    }
 
     struct Fixture(PathBuf);
 
@@ -295,12 +297,13 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(FILE), "").unwrap();
             Self(dir)
         }
 
         fn config(&self, row: &str) {
             std::fs::write(
-                self.0.join("checks.toml"),
+                self.0.join(FILE),
                 format!("[external.\"ext.test\"]\n{row}\n"),
             )
             .unwrap();

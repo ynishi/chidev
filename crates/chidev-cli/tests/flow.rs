@@ -10,16 +10,20 @@ use std::process::Command;
 
 use serde_json::Value;
 
-/// A directory of its own under cargo's temporary one, empty, so that a run starts from no store.
+/// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root) and
+/// nothing else, so that a run starts from no store.
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("chidev.toml"), "").expect("a file");
     dir
 }
 
-fn exec(file: &Path, store: &Path) -> (Vec<Value>, Option<i32>) {
+/// `chidev exec` of `file` with `dir` as the project's root, on `store`.
+fn exec(dir: &Path, file: &Path, store: &Path) -> (Vec<Value>, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
+        .current_dir(dir)
         .arg("exec")
         .arg(file)
         .arg("--store")
@@ -38,6 +42,7 @@ fn exec(file: &Path, store: &Path) -> (Vec<Value>, Option<i32>) {
 fn run() -> (Vec<Value>, Option<i32>) {
     let dir = fresh_dir("flow");
     exec(
+        &dir,
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flow.jsonl")),
         &dir.join("chidev.db"),
     )
@@ -1197,11 +1202,11 @@ fn a_second_run_continues_the_project_the_first_kept() {
     )
     .expect("a file");
 
-    let (results, code) = exec(&first, &store);
+    let (results, code) = exec(&dir, &first, &store);
     assert_eq!(code, Some(0), "{results:#?}");
 
     // the project is there: `init` is refused, and the Context the first run added takes a Contract
-    let (results, code) = exec(&second, &store);
+    let (results, code) = exec(&dir, &second, &store);
     assert_eq!(code, Some(1), "{results:#?}");
     assert_eq!(at(&results, 1)["ok"], false);
     assert!(message(at(&results, 1)).contains("already"));
@@ -1250,7 +1255,7 @@ fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
         "hooks=['check','put']\nreads=['contracts']\ngate=false\n",
         "params = { strict = true }\n[checks.\"ext.contract\".params]\nstrict = false\n"
     );
-    std::fs::write(dir.join("checks.toml"), registration).unwrap();
+    std::fs::write(dir.join("chidev.toml"), registration).unwrap();
     let (results, code, err) = exec_in(
         &dir,
         concat!(
@@ -1282,7 +1287,7 @@ fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
     assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap(), "run\n");
 
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         registration.replace("gate=false", "gate=true"),
     )
     .unwrap();
@@ -1308,7 +1313,7 @@ fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
 fn malformed_external_registration_stops_before_initializing_a_store() {
     let dir = fresh_dir("external-invalid");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         "[external.\"ext.bad\"]\ncommand='anything'\nhooks=['check']\nreads=['unknown']\n",
     )
     .unwrap();
@@ -1333,12 +1338,12 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
     let dir = fresh_dir("policy");
     std::fs::create_dir_all(dir.join(".chidev")).expect("a directory");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         "[checks.\"context.\"]\nlevel = \"off\"\n\n[checks.\"pin.unpinned\"]\nlevel = \"error\"\n",
     )
     .expect("a file");
     std::fs::write(
-        dir.join(".chidev/checks.local.toml"),
+        dir.join(".chidev/chidev.local.toml"),
         "[checks.\"pin.unpinned\"]\nlevel = \"warning\"\n",
     )
     .expect("a file");
@@ -1395,7 +1400,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
 fn a_policy_that_names_no_check_stops_the_run_before_any_operation() {
     let dir = fresh_dir("bad-policy");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         "[checks.\"cite.nothing\"]\nlevel = \"off\"\n",
     )
     .expect("a file");
@@ -1572,7 +1577,7 @@ fn a_policy_holds_a_judged_rule_like_any_check() {
     std::fs::create_dir_all(dir.join("checks/judged")).expect("a directory");
     std::fs::write(dir.join("checks/judged/vague-clause.toml"), VAGUE_RULE).expect("a file");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         "[checks.\"judged.\"]\nlevel = \"off\"\n",
     )
     .expect("a file");
@@ -1916,7 +1921,7 @@ fn formatting_descriptive_fields_and_policy_levels_do_not_invalidate_a_judgment(
     );
     std::fs::write(dir.join("checks/judged/rule.toml"), formatted).unwrap();
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         "[checks.\"judged.vague-clause\"]\nlevel='note'\n",
     )
     .unwrap();
@@ -2547,4 +2552,95 @@ fn a_change_set_with_a_bad_file_is_refused_whole_and_names_every_bad_entry() {
     assert!(error.contains("../outside.rs"), "{error}");
     assert!(error.contains("not both"), "{error}");
     assert_eq!(at(&results, 5)["revision"], 1, "{results:#?}");
+}
+
+/// `chidev exec` of the operations `ops` (written to `ops.jsonl` in `dir`) run from `cwd`, with `--store` when `store`
+/// is given: the results, the exit code, standard error.
+fn exec_from(
+    cwd: &Path,
+    dir: &Path,
+    ops: &[Value],
+    store: Option<&str>,
+) -> (Vec<Value>, Option<i32>, String) {
+    let file = dir.join("ops.jsonl");
+    let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
+    std::fs::write(&file, text).expect("a file");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chidev"));
+    command.current_dir(cwd).arg("exec").arg(&file);
+    if let Some(store) = store {
+        command.arg("--store").arg(store);
+    }
+    let out = command.output().expect("chidev runs");
+    let lines = String::from_utf8(out.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
+        .collect();
+    (
+        lines,
+        out.status.code(),
+        String::from_utf8(out.stderr).expect("utf-8"),
+    )
+}
+
+#[test]
+fn from_a_sub_directory_the_root_is_the_nearest_chidev_toml_and_holds_the_files_and_the_store() {
+    let dir = fresh_dir("root-above");
+    file_project(&dir);
+    let mut ops = file_setup();
+    ops.push(api_from_file("src/api.rs"));
+    ops.push(serde_json::json!({"op":"status"}));
+    // `src` has no chidev.toml of its own: the root is the directory above it
+    let (results, code, err) = exec_from(&dir.join("src"), &dir, &ops, None);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert!(results.iter().all(|r| r["ok"] == true), "{results:#?}");
+    assert_eq!(at(&results, 4)["revision"], 1);
+    assert!(dir.join(".chidev/chidev.db").is_file());
+    assert!(!dir.join("src/.chidev").exists());
+}
+
+#[test]
+fn without_a_chidev_toml_anywhere_up_the_run_stops_before_any_operation() {
+    let dir = std::env::temp_dir().join(format!("chidev-no-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    if dir.ancestors().any(|d| d.join("chidev.toml").is_file()) {
+        eprintln!("skipped: a chidev.toml above the temporary directory marks a root");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let (results, code, err) = exec_from(&dir, &dir, &file_setup(), None);
+    assert_eq!(code, Some(2), "{err}\n{results:#?}");
+    assert!(results.is_empty(), "{results:#?}");
+    let here = dir.canonicalize().expect("a real path");
+    assert!(
+        err.contains(&format!(
+            "no chidev.toml in {} or any parent directory",
+            here.display()
+        )) && err.contains("marks the project's root"),
+        "{err}"
+    );
+    assert!(!dir.join(".chidev").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_store_flag_wins_over_the_store_of_the_settings_and_is_relative_to_where_it_runs() {
+    let dir = fresh_dir("store-flag");
+    file_project(&dir);
+    std::fs::write(
+        dir.join("chidev.toml"),
+        "[store]\npath = \"var/from-settings.db\"\n",
+    )
+    .expect("a file");
+    let ops = [serde_json::json!({"op":"init"})];
+    // without the flag, the settings say, from the root whatever the directory it runs in
+    let (results, code, err) = exec_from(&dir.join("src"), &dir, &ops, None);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert!(dir.join("var/from-settings.db").is_file());
+    // with it, the flag does, from the directory it runs in
+    let (results, code, err) = exec_from(&dir.join("src"), &dir, &ops, Some("from-flag.db"));
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert!(dir.join("src/from-flag.db").is_file());
+    assert!(!dir.join("from-flag.db").exists());
 }

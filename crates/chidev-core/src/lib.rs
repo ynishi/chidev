@@ -26,19 +26,22 @@
 //! user works with, and chidev does not manage them:
 //!
 //! - chidev reads the text it is given, inline or from a file named relative to
-//!   the directory it runs in, and gives its model back on request (`view`). The
-//!   file is read once, when the operation runs.
+//!   the project's root (the nearest directory, from where it runs, with a
+//!   `chidev.toml`), and gives its model back on request (`view`). The file is
+//!   read once, when the operation runs.
 //! - It records no path an asset came from or went to, follows no file, and gives
 //!   a file no id. (The path an assumption cites as its evidence is kept as a
 //!   citation, and chidev does not open it.) Where the files and the store are
 //!   kept, how they are laid out, and whether they are in Git, is the user's to
 //!   choose. chidev depends on no Git and no Git host.
-//! - The project's settings (`checks.toml`) say where the adapters work: which
+//! - The project's settings (`chidev.toml`) say where the adapters work: which
 //!   checkers run, how a measurement builds and tests, where an Interface's code
-//!   is written in the copy a measurement makes (`[[measure.layout]]`). The user
+//!   is written in the copy a measurement makes (`[[measure.layout]]`), and where
+//!   the store is kept ([`infra::project`] says how the root is found). The user
 //!   writes them and chidev only reads them. They hold no asset's identity: the
 //!   model means the same without them. chidev never writes them, uses a path in
-//!   them only as a place in that copy, and never takes an asset's text from one.
+//!   them only as a place (in that copy, or the store), and never takes an
+//!   asset's text from one.
 //! - An asset is known by the names it is given when it is put (a Context, a name,
 //!   a Clause's label, an Item's key), not by a file. Only an Item keeps its id
 //!   when it is renamed (`replaces`); renaming anything else makes a new asset,

@@ -384,7 +384,7 @@ impl AppError {
 fn no_provider(lang: Option<&str>) -> String {
     match lang {
         Some(lang) => format!("`[measure.items]` has no command for `{lang}`"),
-        None => "the project has no `[measure]` table in checks.toml".to_string(),
+        None => "the project's settings have no `[measure]` table".to_string(),
     }
 }
 

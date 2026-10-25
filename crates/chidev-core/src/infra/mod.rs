@@ -12,5 +12,6 @@ pub mod judged;
 mod persist;
 pub mod policy;
 pub mod process;
+pub mod project;
 pub mod runner;
 pub mod sqlite;

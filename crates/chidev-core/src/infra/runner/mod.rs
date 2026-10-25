@@ -6,7 +6,7 @@
 //! the runner removes its directory when it is done, so the project's files and build output are never touched.
 //!
 //! Which commands to run and where each Interface and Harness lives is the project's `[measure]` table of
-//! `checks.toml` ([`load`]). Every command is a program started without a shell, in a process group of its own,
+//! `chidev.toml` ([`load`]). Every command is a program started without a shell, in a process group of its own,
 //! under a deadline ([`crate::infra::process`]); the whole run has a time budget.
 //!
 //! A run that cannot measure (the baseline fails, a command or the provider fails, the budget is used up) still
@@ -36,6 +36,7 @@ use thiserror::Error;
 
 use self::config::{Config, RunDirs, WORK_DIR};
 use super::process::{self, Capture, Over, Pipe};
+use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
     BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
@@ -69,26 +70,20 @@ pub struct ProcessRunner {
     config: Config,
 }
 
-/// Loads the `[measure]` table of the project's `checks.toml`. A project without the file or the table has no
-/// runner (`None`); a table that is wrong is an error naming the field.
-pub fn load(root: &Path) -> Result<Option<ProcessRunner>, MeasureConfigError> {
-    let path = root.join("checks.toml");
-    let error = |message: String| MeasureConfigError {
-        path: path.clone(),
-        message,
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(error(e.to_string())),
-    };
-    let table: toml::Table = toml::from_str(&text).map_err(|e| error(e.to_string()))?;
-    let Some(measure) = table.get("measure") else {
+/// Loads the `[measure]` table of the project's settings. A project without the table has no runner (`None`); a
+/// table that is wrong is an error naming the field.
+pub fn load(project: &Project) -> Result<Option<ProcessRunner>, MeasureConfigError> {
+    let Some(measure) = project.section(Section::Measure) else {
         return Ok(None);
     };
-    let config = config::parse(measure).map_err(|m| error(format!("measure: {m}")))?;
-    let root = root.canonicalize().map_err(|e| error(e.to_string()))?;
-    Ok(Some(ProcessRunner { root, config }))
+    let config = config::parse(measure).map_err(|m| MeasureConfigError {
+        path: project.file().to_path_buf(),
+        message: format!("measure: {m}"),
+    })?;
+    Ok(Some(ProcessRunner {
+        root: project.root().to_path_buf(),
+        config,
+    }))
 }
 
 impl Runner for ProcessRunner {
@@ -594,8 +589,14 @@ mod tests {
 
     use super::*;
     use crate::app::ports::measure::HarnessText;
+    use crate::infra::project::{self, FILE};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    /// Loads the runner of the project rooted at `dir`.
+    fn load(dir: &Path) -> Result<Option<ProcessRunner>, MeasureConfigError> {
+        super::load(&project::find(dir).unwrap())
+    }
 
     /// The code the Pin accepted; the working tree holds other text in its place.
     const PINNED: &str = "a <= 5 and b + 1\n";
@@ -637,13 +638,13 @@ printf '%s' '{"protocol":1,"sites":3,"mutants":[
             project
         }
 
-        /// Writes `table` (the keys of `[measure]`, its sub-tables written bare) as the project's `checks.toml`.
+        /// Writes `table` (the keys of `[measure]`, its sub-tables written bare) as the project's `chidev.toml`.
         fn table(&self, table: &str) {
             let text = table
                 .replace("[mutants]", "[measure.mutants]")
                 .replace("[items]", "[measure.items]")
                 .replace("[[layout]]", "[[measure.layout]]");
-            std::fs::write(self.0.join("checks.toml"), format!("[measure]\n{text}")).unwrap();
+            std::fs::write(self.0.join(FILE), format!("[measure]\n{text}")).unwrap();
         }
 
         fn runner(&self) -> ProcessRunner {
@@ -1025,15 +1026,11 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
     #[test]
     fn a_project_without_the_table_has_no_runner_and_a_wrong_table_is_an_error() {
         let project = Project::new(TABLE);
-        std::fs::write(project.0.join("checks.toml"), "[checks]\n").unwrap();
+        std::fs::write(project.0.join(FILE), "[checks]\n").unwrap();
         assert!(load(&project.0).unwrap().is_none());
-        std::fs::remove_file(project.0.join("checks.toml")).unwrap();
+        std::fs::write(project.0.join(FILE), "").unwrap();
         assert!(load(&project.0).unwrap().is_none());
-        std::fs::write(
-            project.0.join("checks.toml"),
-            "[measure]\nbuild = []\ntest = []\n",
-        )
-        .unwrap();
+        std::fs::write(project.0.join(FILE), "[measure]\nbuild = []\ntest = []\n").unwrap();
         let error = load(&project.0).unwrap_err();
         assert!(
             error.to_string().contains("measure: `build` is a command"),

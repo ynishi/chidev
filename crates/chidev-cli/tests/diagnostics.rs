@@ -7,11 +7,13 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-/// A directory of its own under cargo's temporary one, empty, so that a run starts from no store.
+/// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root) and
+/// nothing else, so that a run starts from no store.
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("chidev.toml"), "").expect("a file");
     dir
 }
 

@@ -21,12 +21,10 @@ use chidev_core::infra::external;
 use chidev_core::infra::ids::UuidV7;
 use chidev_core::infra::judged;
 use chidev_core::infra::policy;
+use chidev_core::infra::project;
 use chidev_core::infra::runner;
 use chidev_core::infra::sqlite::SqliteStore;
 use clap::{Parser, Subcommand};
-
-/// Where the project is kept when `--store` is not given, under the current directory.
-const DEFAULT_STORE: &str = ".chidev/chidev.db";
 
 /// Contract, Interface and Harness as the assets of a codebase; the code is a cache pinned to them.
 #[derive(Debug, Parser)]
@@ -43,9 +41,10 @@ enum Command {
     Exec {
         /// The JSON lines to run; stdin when not given.
         file: Option<PathBuf>,
-        /// The database that keeps the project.
-        #[arg(long, value_name = "PATH", default_value = DEFAULT_STORE)]
-        store: PathBuf,
+        /// The database that keeps the project, relative to the current directory. Without it, the project's
+        /// settings say (`[store]` in `chidev.toml`), and else it is `.chidev/chidev.db` under the project's root.
+        #[arg(long, value_name = "PATH")]
+        store: Option<PathBuf>,
     },
     /// Prints a JSON Schema (2020-12): `ops` for a line of `exec`, `view` for the `view` an operation of that name
     /// returns. Without a name, lists the schemas. A schema says what a document must look like to be read; a rule
@@ -56,7 +55,7 @@ enum Command {
         name: Option<schema::Name>,
     },
     /// The providers that come with chidev: programs that speak a protocol on standard input and output, which a
-    /// project names in the `[measure]` table of `checks.toml` (`mutants`, `items`) like any provider of its own.
+    /// project names in the `[measure]` table of `chidev.toml` (`mutants`, `items`) like any provider of its own.
     Provider {
         #[command(subcommand)]
         provider: Provider,
@@ -145,25 +144,31 @@ async fn main() -> ExitCode {
                 },
                 None => Box::new(BufReader::new(io::stdin())),
             };
-            // The project's root is the directory the command runs in; its policy files and the judged rules are read
-            // from there, and so are the files a `source_file` or a `code_file` names. Either being unreadable stops
-            // the run before any operation.
-            let root = match std::env::current_dir() {
-                Ok(root) => root,
+            // The project's root is the nearest directory, from the one the command runs in, that has a `chidev.toml`;
+            // the settings and the judged rules are read from there, and so are the files a `source_file` or a
+            // `code_file` names. No root, or either being unreadable, stops the run before any operation.
+            let project = match std::env::current_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|cwd| project::find(&cwd).map_err(|e| e.to_string()))
+            {
+                Ok(project) => project,
                 Err(e) => {
                     eprintln!("chidev: {e}");
                     return ExitCode::from(2);
                 }
             };
+            let root = project.root();
+            // the flag is relative to the current directory, as a path on the command line is; the setting is not
+            let store = store.unwrap_or_else(|| project.store().to_path_buf());
             let registry = match (|| -> Result<_, String> {
-                let layers = policy::load(&root).map_err(|e| format!("policy: {e}"))?;
-                let rules = judged::load(&root).map_err(|e| format!("rules: {e}"))?;
+                let layers = policy::load(&project).map_err(|e| format!("policy: {e}"))?;
+                let rules = judged::load(root).map_err(|e| format!("rules: {e}"))?;
                 let (external_rules, executor) =
-                    external::load(&root).map_err(|e| format!("external: {e}"))?;
+                    external::load(&project).map_err(|e| format!("external: {e}"))?;
                 let registry =
                     Registry::with_external(builtin::all(), rules, external_rules, &layers)
                         .map_err(|e| format!("policy: {e}"))?;
-                let measure = runner::load(&root).map_err(|e| format!("measure: {e}"))?;
+                let measure = runner::load(&project).map_err(|e| format!("measure: {e}"))?;
                 Ok((registry, executor, measure))
             })() {
                 Ok(r) => r,
@@ -187,7 +192,7 @@ async fn main() -> ExitCode {
                 app = app.with_items(measure.clone()).with_runner(measure);
             }
             let mut out = io::stdout().lock();
-            let code = match ops::run(&mut app, &root, reader, &mut out).await {
+            let code = match ops::run(&mut app, root, reader, &mut out).await {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::from(1),
                 Err(e) => {

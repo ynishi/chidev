@@ -17,9 +17,42 @@ chi is the project's name: the initials of Contract, Harness and Interface, and
 The layer rules are in `arch-lint.toml` and run with `cargo test`. A crate or layer
 that does not fit the project is deleted, together with its `arch-lint.toml` scope.
 
+## The project and `chidev.toml`
+
+A project's root is the nearest directory with a `chidev.toml` file, looking at
+the directory `chidev` runs in and then at each parent. The file may be empty; it
+marks the root. With none up to the top, `chidev exec` stops with status 2 before
+any operation: it does not fall back to the current directory and it does not stop
+at a `.git`. A parent's `chidev.toml` is found when a project has none, as Cargo
+finds a parent's `Cargo.toml`. The files were `checks.toml` and
+`.chidev/checks.local.toml` before; one of those in a directory on the way up to the
+root (the root included) stops `chidev exec` with status 2 and the name to give it.
+
+Paths inside an operation (`source_file`, `code_file`) and in the settings are
+relative to the root, so they mean the same from any directory of the project; a
+path on the command line (the file to run, `--store`) is relative to the directory
+`chidev` runs in. The RustDoc of `infra::project` gives the reasons.
+
+The settings are the tables of `chidev.toml`, each described where it belongs:
+`[checks]` (the levels and parameters of the checks), `[external]` (see "External
+checks"), `[measure]` (see "`[measure]` in `chidev.toml`") and `[store]`:
+
+```toml
+[store]
+path = "var/chidev.db"   # relative to the root; an absolute path is kept as it is
+```
+
+The store is the database `--store` names; without it, the `[store] path` of
+`.chidev/chidev.local.toml` (the person's own file, not kept with the project), then
+the `[store] path` of `chidev.toml`, then `.chidev/chidev.db` under the root. The
+person's file holds `[store]` and `[checks]` only: it can change a level or where the
+store is, not register a program to run or a command to measure with. A table or a
+key that is not known, or a table in a file that may not hold it, is refused with the
+file named.
+
 ## Operations
 
-`chidev exec <file> --store <db>` reads one JSON object per line, runs each as an
+`chidev exec <file> [--store <db>]` reads one JSON object per line, runs each as an
 operation, and prints one result line per operation (`"ok"`, the `line` it came
 from, and its fields). A line that fails gets `"ok":false` and `diagnostics` (see
 "Diagnostics"), and the run goes on; the exit status is 1 if any line failed. Things are named, never
@@ -81,7 +114,7 @@ belong):
   - `items` can be left out. A provider for the language of the Interface then
     finds them in `source` (see "Provider protocol `chidev-items 1`"): the language
     is the `lang` of the Interface's `[[measure.layout]]`, and the command is
-    `[measure.items]` of `checks.toml`. The keys and lines are the provider's, so
+    `[measure.items]` of `chidev.toml`. The keys and lines are the provider's, so
     nothing is written by hand, and a provider that fails or disagrees refuses the
     put before anything is read or kept. With `items` written, no provider is
     started. A put that leaves `items` out is refused when the Interface has no layout
@@ -142,8 +175,8 @@ belong):
   being written into the line: `interface_put` and `harness_put` take `source_file`
   in place of `source`, and `pin` takes `code_file` in place of `code`. Exactly one
   of the two is given (both, or neither, is refused). The path is relative to the
-  directory `chidev` runs in (the project's root, where `checks.toml` and the
-  measure settings are read from); an absolute path, a path with a `..` part, a file
+  project's root (the nearest directory with a `chidev.toml`, where the settings
+  are read from); an absolute path, a path with a `..` part, a file
   that is missing or cannot be read, and a file that is not UTF-8 text are refused
   with the path named. The file is read when the operation runs, and the model keeps
   the *text*, not the path: changing the file later changes nothing until the
@@ -287,7 +320,7 @@ checked once, on the state it ends in, and all of it is applied or none of it.
 
 ## External checks
 
-Register a project's checker in `checks.toml`:
+Register a project's checker in `chidev.toml`:
 
 ```toml
 [external."ext.contract-consistency"]
@@ -302,10 +335,10 @@ gate = false
 strict = true
 ```
 
-The executable runs without an implicit shell, from the project's root (the CLI's
-working directory). Bare command names resolve through `PATH`. Registration is
-project-only; the person's `.chidev/checks.toml` can change policy, not register
-programs. A program has the caller's permissions: this is not a sandbox.
+The executable runs without an implicit shell, from the project's root (the nearest
+directory with a `chidev.toml`). Bare command names resolve through `PATH`.
+Registration is project-only; the person's `.chidev/chidev.local.toml` can change
+policy, not register programs. A program has the caller's permissions: this is not a sandbox.
 
 `chidev exec` accepts an explicit `{"op":"check_run"}` operation to execute
 `check`-hook programs and record their results. `status` and `check` never start
@@ -330,7 +363,7 @@ Programs receive one JSON document on stdin and return one on stdout. For
 example, a response with no findings is `{"protocol":1,"findings":[]}`. Diagnostics
 go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`, and/or
 `change_requests`; unrequested sections are omitted, and a word that is not one is
-refused when `checks.toml` is loaded. Context metadata is always sent. The model
+refused when `chidev.toml` is loaded. Context metadata is always sent. The model
 sent is the `view` of the operation of that name, for every Context and the
 sections read. A program can name only the requested rule and subjects present in that
 restricted view. See the RustDoc of `app::ports::external` for the wire types,
@@ -400,7 +433,7 @@ that stopped before it had evaluated the mutants it was given (the budget ran ou
 is not capped: it is a failed run of kind `budget`, as before. A run that ended
 with fewer mutants than it was given and no failure is refused as a measurement.
 
-### `[measure]` in `checks.toml`
+### `[measure]` in `chidev.toml`
 
 ```toml
 [measure]
@@ -470,7 +503,7 @@ has a command for it. Three things follow from the table being `[measure]`'s:
 
 - A project with no `[measure]` table has no provider of items: `interface_put`
   and a `change_set` cannot leave `items` out there (`items.no-provider`), and write
-  them. A `checks.toml` with other tables but no `[measure]` is the same.
+  them. A `chidev.toml` with other tables but no `[measure]` is the same.
 - A language with a command in `items` alone is valid, and it can be measured by
   nothing: `measure` stops, naming it, with "`mutants` has no command for `<lang>`".
 - The provider is started in the project's root, as the provider of mutants is, and
@@ -712,7 +745,7 @@ sampled cases again: a different schedule means the script draws something besid
 its seed (a fault of the script), the same schedule and a different trace means
 the program draws its own order (a fault of the program).
 
-#### `[measure.sim.<context>]` in `checks.toml`
+#### `[measure.sim.<context>]` in `chidev.toml`
 
 ```toml
 [measure]

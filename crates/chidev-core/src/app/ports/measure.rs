@@ -102,7 +102,7 @@ pub struct SimulateReport {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RunnerError {
     /// The program was started without a measure configuration.
-    #[error("no measure is configured; add a [measure] table to checks.toml")]
+    #[error("no measure is configured; add a [measure] table to the project's settings")]
     Unconfigured,
     /// The configuration cannot measure this: no layout for the Interface or a Harness, no provider for its
     /// language, a provider that cannot be found.

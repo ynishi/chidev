@@ -1,4 +1,4 @@
-//! The `[measure]` table of `checks.toml`: what to run to build and test a project, where each Interface and Harness
+//! The `[measure]` table of `chidev.toml`: what to run to build and test a project, where each Interface and Harness
 //! lives in the working tree, which command makes mutants for a language (`[measure.mutants]`), which command finds
 //! the Items of an Interface from its code (`[measure.items]`), and (`[measure.sim.<context>]`) how to run the sim
 //! script of a Context against its program. Nothing here is guessed from the project's files; a field

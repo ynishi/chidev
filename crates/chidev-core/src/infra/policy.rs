@@ -1,6 +1,6 @@
-//! The policy files, read into the typed layers the domain resolves: `checks.toml` in the project's root (the
-//! project's choices, kept with it) and `.chidev/checks.local.toml` (the person's own, not kept with the project). A
-//! missing file is an empty layer. The shape of a file:
+//! The `[checks]` of the project's settings, read into the typed layers the domain resolves: the table of
+//! `chidev.toml` (the project's choices, kept with it) and the table of the person's file (their own, not kept with
+//! the project); a file without the table is an empty layer. The shape of the table:
 //!
 //! ```toml
 //! [checks."cite."]            # a family: every check whose id starts with `cite.`
@@ -12,97 +12,47 @@
 //! max = 3
 //! ```
 //!
-//! The file is parsed here, at the edge; what a key may name and what a mandatory check may be set to are the
-//! domain's rules ([`Policy::resolve`](crate::domain::check::Policy::resolve)), so a file is checked against the
-//! checks that exist when the registry is built.
+//! The table is read here, at the edge; what a key may name and what a mandatory check may be set to are the
+//! domain's rules ([`Policy::resolve`](crate::domain::check::Policy::resolve)), so it is checked against the checks
+//! that exist when the registry is built.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::project::{Project, Section};
 use crate::domain::check::policy::ParamValue;
 use crate::domain::check::{Layer, Level, Origin, Selector, Setting};
 
-/// The project's policy file, relative to the project's root.
-pub const PROJECT_FILE: &str = "checks.toml";
-
-/// The person's policy file, relative to the project's root.
-pub const PERSON_FILE: &str = ".chidev/checks.local.toml";
-
-/// Why a policy file cannot be read.
+/// Why the `[checks]` of a settings file is not a policy.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PolicyFileError {
-    /// The file exists and cannot be read.
-    #[error("{}: {message}", path.display())]
-    Read {
-        /// The file.
-        path: PathBuf,
-        /// What the system said.
-        message: String,
-    },
-    /// The file is not a policy.
-    #[error("{}: {message}", path.display())]
-    Invalid {
-        /// The file.
-        path: PathBuf,
-        /// What is wrong.
-        message: String,
-    },
+#[error("{}: {message}", path.display())]
+pub struct PolicyFileError {
+    /// The settings file.
+    pub path: PathBuf,
+    /// What is wrong.
+    pub message: String,
 }
 
-/// The layers of the policy for the project rooted at `root`: the project's, then the person's. A file that is not
-/// there adds an empty layer.
-pub fn load(root: &Path) -> Result<Vec<Layer>, PolicyFileError> {
+/// The layers of the policy for `project`: the project's, then the person's. A file without `[checks]` adds an empty
+/// layer.
+pub fn load(project: &Project) -> Result<Vec<Layer>, PolicyFileError> {
+    let error = |path: &Path| {
+        let path = path.to_path_buf();
+        move |message| PolicyFileError { path, message }
+    };
     Ok(vec![
-        read(&root.join(PROJECT_FILE), Origin::Project)?,
-        read(&root.join(PERSON_FILE), Origin::Person)?,
+        layer(project.section(Section::Checks), Origin::Project).map_err(error(project.file()))?,
+        layer(project.person_section(Section::Checks), Origin::Person)
+            .map_err(error(project.person_file()))?,
     ])
 }
 
-fn read(path: &Path, origin: Origin) -> Result<Layer, PolicyFileError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text, origin).map_err(|message| PolicyFileError::Invalid {
-            path: path.to_path_buf(),
-            message,
-        }),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Layer {
-            origin,
-            entries: Vec::new(),
-        }),
-        Err(e) => Err(PolicyFileError::Read {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        }),
-    }
-}
-
-/// The layer `text` is, for `origin`.
-pub fn parse(text: &str, origin: Origin) -> Result<Layer, String> {
-    let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+/// The layer a `[checks]` table is, for `origin`; no table is an empty layer.
+pub(crate) fn layer(value: Option<&toml::Value>, origin: Origin) -> Result<Layer, String> {
     let mut entries = Vec::new();
-    for (key, value) in &doc {
-        // Project registrations are validated by the external adapter loader. A person
-        // may override levels here, but cannot register programs in their policy layer.
-        if key == "external" && origin == Origin::Project {
-            if !value.is_table() {
-                return Err("`external` is a table of rule registrations".into());
-            }
-            continue;
-        }
-        // The measure configuration (commands to run) is the project's, validated by the runner loader.
-        if key == "measure" && origin == Origin::Project {
-            if !value.is_table() {
-                return Err("`measure` is a table of measure settings".into());
-            }
-            continue;
-        }
-        if key != "checks" {
-            return Err(format!(
-                "`{key}` is not a section of a policy; there is `checks`"
-            ));
-        }
+    if let Some(value) = value {
         let toml::Value::Table(checks) = value else {
             return Err("`checks` is a table of checks".to_string());
         };
@@ -112,6 +62,18 @@ pub fn parse(text: &str, origin: Origin) -> Result<Layer, String> {
         }
     }
     Ok(Layer { origin, entries })
+}
+
+/// The layer a text with only a `[checks]` table is, for `origin`; any other top-level key is refused.
+pub fn parse(text: &str, origin: Origin) -> Result<Layer, String> {
+    let doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    if let Some(key) = doc.keys().find(|k| k.as_str() != Section::Checks.name()) {
+        return Err(format!(
+            "`{key}` is not a section of a policy; there is `{}`",
+            Section::Checks.name()
+        ));
+    }
+    layer(doc.get(Section::Checks.name()), origin)
 }
 
 fn setting_of(name: &str, value: &toml::Value) -> Result<Setting, String> {
@@ -215,6 +177,11 @@ mod tests {
         for (text, expect) in [
             ("[other]\nx = 1", "not a section"),
             (
+                "[checks]\n[external.\"ext.a\"]",
+                "`external` is not a section",
+            ),
+            ("[measure]", "`measure` is not a section"),
+            (
                 "[checks.\"pin.stale\"]\nlevel = \"loud\"",
                 "off, note, warning or error",
             ),
@@ -235,11 +202,13 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_file_is_an_empty_layer_and_a_present_one_is_read() {
+    fn a_project_without_the_table_has_empty_layers_and_a_present_one_is_read() {
+        use crate::infra::project::{FILE, PERSON_FILE, find};
         let dir = std::env::temp_dir().join(format!("chidev-policy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".chidev")).unwrap();
-        let layers = load(&dir).unwrap();
+        std::fs::write(dir.join(FILE), "").unwrap();
+        let layers = load(&find(&dir).unwrap()).unwrap();
         assert_eq!(layers.len(), 2);
         assert!(layers.iter().all(|l| l.entries.is_empty()));
         std::fs::write(
@@ -247,11 +216,17 @@ mod tests {
             "[checks.\"context.\"]\nlevel = \"off\"\n",
         )
         .unwrap();
-        std::fs::write(dir.join(PROJECT_FILE), "[checks\n").unwrap();
-        assert!(matches!(load(&dir), Err(PolicyFileError::Invalid { .. })));
-        std::fs::remove_file(dir.join(PROJECT_FILE)).unwrap();
-        let layers = load(&dir).unwrap();
+        std::fs::write(dir.join(FILE), "[checks]\nx = 1\n").unwrap();
+        let error = load(&find(&dir).unwrap()).unwrap_err();
+        assert!(error.path.ends_with(FILE), "{error}");
+        std::fs::write(dir.join(FILE), "").unwrap();
+        let layers = load(&find(&dir).unwrap()).unwrap();
+        assert_eq!(layers[0].origin, Origin::Project);
         assert_eq!(layers[1].origin, Origin::Person);
         assert_eq!(layers[1].entries.len(), 1);
+        std::fs::write(dir.join(PERSON_FILE), "[checks]\nx = 1\n").unwrap();
+        let error = load(&find(&dir).unwrap()).unwrap_err();
+        assert!(error.path.ends_with("chidev.local.toml"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

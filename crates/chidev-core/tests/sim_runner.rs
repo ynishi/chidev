@@ -13,7 +13,8 @@ use chidev_core::domain::vo::digest::Digest;
 use chidev_core::domain::vo::id::ClauseId;
 use chidev_core::domain::vo::measure::FailureKind;
 use chidev_core::domain::vo::sim::{CitedClause, ClauseName, RegressName};
-use chidev_core::infra::runner::{ProcessRunner, load};
+use chidev_core::infra::project::{self, FILE};
+use chidev_core::infra::runner::{self, ProcessRunner};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -33,7 +34,7 @@ impl Project {
         std::fs::write(dir.join("prog.sh"), "program, working tree text\n").unwrap();
         std::fs::write(dir.join("script.sh"), script).unwrap();
         std::fs::write(
-            dir.join("checks.toml"),
+            dir.join(FILE),
             r#"[measure]
 build = ["sh", "-c", "grep -q PINNED prog.sh"]
 env = {}
@@ -61,15 +62,17 @@ path = "script.sh"
         Project(dir)
     }
 
-    /// Changes `checks.toml`.
+    /// Changes `chidev.toml`.
     fn edit(&self, f: impl Fn(&str) -> String) {
-        let path = self.0.join("checks.toml");
+        let path = self.0.join(FILE);
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(path, f(&text)).unwrap();
     }
 
     fn runner(&self) -> ProcessRunner {
-        load(&self.0).unwrap().expect("a [measure] table")
+        runner::load(&project::find(&self.0).unwrap())
+            .unwrap()
+            .expect("a [measure] table")
     }
 }
 

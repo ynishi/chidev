@@ -19,10 +19,12 @@ use serde_json::{Value, json};
 const PINNED: &str = include_str!("fixtures/measure/stock.rs");
 const HARNESS: &str = include_str!("fixtures/measure/stock_tests.rs");
 
+/// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root).
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("chidev.toml"), "").expect("a file");
     dir
 }
 
@@ -73,7 +75,7 @@ fn project_with(name: &str, extra: &str) -> PathBuf {
     )
     .expect("stock.rs");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         format!(
             r#"[measure]
 build = ["cargo", "build", "--quiet", "--tests", "--offline"]
@@ -101,7 +103,7 @@ path = "tests/stock.rs"
             extra = extra
         ),
     )
-    .expect("checks.toml");
+    .expect("chidev.toml");
     dir
 }
 
@@ -311,7 +313,7 @@ fn message_project(name: &str, extra: &str) -> PathBuf {
     )
     .expect("message.rs");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         format!(
             r#"[measure]
 build = ["cargo", "build", "--quiet", "--tests", "--offline"]
@@ -339,7 +341,7 @@ path = "tests/message.rs"
             extra = extra
         ),
     )
-    .expect("checks.toml");
+    .expect("chidev.toml");
     dir
 }
 

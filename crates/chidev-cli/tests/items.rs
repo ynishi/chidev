@@ -28,10 +28,12 @@ else
 fi
 "#;
 
+/// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root).
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("chidev.toml"), "").expect("a file");
     dir
 }
 
@@ -53,7 +55,7 @@ fn project(name: &str, timeout: u64) -> PathBuf {
     );
     write(
         &dir,
-        "checks.toml",
+        "chidev.toml",
         &format!(
             r#"[measure]
 build = ["true"]
@@ -347,8 +349,8 @@ fn a_project_without_a_measure_table_cannot_leave_the_items_out() {
             .unwrap()
             .contains("no `[measure]` table")
     );
-    // a checks.toml with other tables is the same
-    write(&dir, "checks.toml", "[checks]\n");
+    // a chidev.toml with other tables is the same
+    write(&dir, "chidev.toml", "[checks]\n");
     let results = exec(&dir, &[put("api", "fn a();\n")]);
     assert_eq!(one(&results[0])["code"], "items.no-provider");
 }
@@ -650,7 +652,7 @@ fn rust_project(name: &str) -> PathBuf {
     let dir = fresh_dir(name);
     write(
         &dir,
-        "checks.toml",
+        "chidev.toml",
         &format!(
             r#"[measure]
 build = ["true"]

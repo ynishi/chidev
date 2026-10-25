@@ -19,10 +19,12 @@ use serde_json::{Value, json};
 const BANK: &str = include_str!("fixtures/sim/bank.py");
 const SIM: &str = include_str!("fixtures/sim/sim.py");
 
+/// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root).
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("chidev.toml"), "").expect("a file");
     dir
 }
 
@@ -74,7 +76,7 @@ fn project_running(name: &str, program: &str) -> PathBuf {
     // The working tree's own program is a stub that answers nothing: the simulation must run the pinned code.
     std::fs::write(dir.join("bank.py"), "import sys\nsys.exit(1)\n").expect("bank.py");
     std::fs::write(
-        dir.join("checks.toml"),
+        dir.join("chidev.toml"),
         format!(
             r#"[measure]
 build = ["python3", "-m", "py_compile", "bank.py"]
@@ -100,7 +102,7 @@ path = "sim.py"
 "#
         ),
     )
-    .expect("checks.toml");
+    .expect("chidev.toml");
     dir
 }
 

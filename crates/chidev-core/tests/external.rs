@@ -725,7 +725,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     );
 }
 
-/// The reads of a rule, from the words a person writes in `checks.toml`.
+/// The reads of a rule, from the words a person writes in `chidev.toml`.
 fn reads(words: &[&str]) -> Vec<ModelSection> {
     words
         .iter()
