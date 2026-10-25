@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
+The first release. Everything below was written while chidev was unreleased; an
+entry that says what something "was" or what "earlier versions" did describes a
+state no release had.
+
 ### Added
 
 - `{"op":"view","sections":[..],"contexts":[..]}` reads the part of the model that is
@@ -317,6 +323,59 @@ and this project adheres to
 - The README describes the operations that build the model (`init`, `context_add`,
   `context_uses`, `base_on_contract`, `contract_put`, `interface_put`, `harness_put`,
   `pin`, `status`) with their JSON.
+- The Project's decision Policy: numbered lines `P1`, `P2`, ... each with a
+  text, and a revision that moves when its lines change (each line also records
+  the revision at which it got its text). The operation `policy_put` replaces
+  all the lines; `status.policy` shows them. The builtin check
+  `crux.policy-line-gone` (note; put, check) reports an answer that rests on a
+  Policy line that is gone or was reworded after it was applied.
+- Assumptions: `assumptions` on `cr_open`, and the operation `cr_assume`
+  (`title`, `statement`, `reason`, `evidence`) appends one to a request that is
+  not resolved. They only grow. Evidence is a place in the repository (a
+  relative path without `..`, with optional `lines`) or general knowledge (a
+  reference).
+- A `Clock` port of the application with a system adapter (`infra::clock::SystemClock`)
+  and a fixed clock for tests (`infra::clock::FixedClock`); the domain takes the
+  time as the value `Timestamp` and never reads a clock. The CLI sets the system
+  clock.
+- Domain values `Confidence`, `Importance`, `Recommended`, `Answer`, `Basis`,
+  `DecisionMaker`, `Timestamp`, `Policy`, `PolicyLineId`, `Assumption` and
+  `Evidence`, and the errors `AlreadyAnswered`, `SupersedesUnknown`,
+  `SupersedesUnanswered`, `UnknownPolicyLine` and `PolicyRevisionMismatch` of a
+  change request.
+- Every part of the asset tree can be a target: the Project, a Context, a
+  Contract, an Interface, a Harness, a Clause, an Item and a Case. The Project
+  and a Context have a revision. The Project's moves when a Context is added or
+  removed; a Context's moves when one of its assets is added or removed and when
+  its `uses` or its basis change (not when an asset's content does). So an
+  addition is written as a change of what holds the new thing (`change` the
+  Contract for a new Clause, the Context for a new Interface, the Project for a
+  new Context), a removal as `remove`, and a Case can be changed.
+- The check `cr.keep-moved` (warning; put, resolve, check) reports an unresolved
+  change request that keeps a target which has moved. The check
+  `cr.intent-mismatch` (note; put, check) reports a keep-behavior request that
+  changes or removes a Clause, and a change-behavior request that changes or
+  removes nothing, in itself or in any option of its Crux.
+- `status.awaiting` lists the change requests whose Crux has no decision, and the
+  builtin check `cr.awaiting-decision` (note; put, resolve, check) reports them.
+  `cr.unapplied` now also covers the changes a decision asked.
+- External check execution through an application port and a Unix process adapter,
+  with project registration, bounded JSON communication, timeout and cancellation
+  cleanup, advisory results and mandatory change gates.
+- Explicit `check_run` operations, saved external result freshness in `status`,
+  and atomic SQLite storage of results and execution evidence alongside changes.
+- Change-request addresses accept every finding subject through the shared
+  `SubjectInput`, with legacy CLI item/clause input retained and ambiguous or
+  misspelled subject selectors rejected. Rust `FindingInput` callers migrate
+  from item/clause fields to `subject`.
+- Judged rule definition digests: `check_rules` gives each rule a
+  `rule_digest` over its deciding fields (id, subject, question, true, false),
+  and `finding_report` requires it back; a missing or mismatching digest is
+  refused and replaces nothing. A changed deciding field makes saved judgments
+  stale; editing summary, fix, hints, hooks or level does not. Old database
+  rows hold a null digest and show as stale.
+- `chidev-cli` installs the `chidev` command (`cargo install chidev-cli`); the
+  crates carry keywords and categories for crates.io.
 
 ### Changed
 
@@ -520,62 +579,6 @@ and this project adheres to
   `decided_expects` (with a kind) in place of `lines` and `decided_changes`; a
   Crux option has `expects` in place of `changes`.
 
-### Added
-
-- The Project's decision Policy: numbered lines `P1`, `P2`, ... each with a
-  text, and a revision that moves when its lines change (each line also records
-  the revision at which it got its text). The operation `policy_put` replaces
-  all the lines; `status.policy` shows them. The builtin check
-  `crux.policy-line-gone` (note; put, check) reports an answer that rests on a
-  Policy line that is gone or was reworded after it was applied.
-- Assumptions: `assumptions` on `cr_open`, and the operation `cr_assume`
-  (`title`, `statement`, `reason`, `evidence`) appends one to a request that is
-  not resolved. They only grow. Evidence is a place in the repository (a
-  relative path without `..`, with optional `lines`) or general knowledge (a
-  reference).
-- A `Clock` port of the application with a system adapter (`infra::clock::SystemClock`)
-  and a fixed clock for tests (`infra::clock::FixedClock`); the domain takes the
-  time as the value `Timestamp` and never reads a clock. The CLI sets the system
-  clock.
-- Domain values `Confidence`, `Importance`, `Recommended`, `Answer`, `Basis`,
-  `DecisionMaker`, `Timestamp`, `Policy`, `PolicyLineId`, `Assumption` and
-  `Evidence`, and the errors `AlreadyAnswered`, `SupersedesUnknown`,
-  `SupersedesUnanswered`, `UnknownPolicyLine` and `PolicyRevisionMismatch` of a
-  change request.
-
-- Every part of the asset tree can be a target: the Project, a Context, a
-  Contract, an Interface, a Harness, a Clause, an Item and a Case. The Project
-  and a Context have a revision. The Project's moves when a Context is added or
-  removed; a Context's moves when one of its assets is added or removed and when
-  its `uses` or its basis change (not when an asset's content does). So an
-  addition is written as a change of what holds the new thing (`change` the
-  Contract for a new Clause, the Context for a new Interface, the Project for a
-  new Context), a removal as `remove`, and a Case can be changed.
-- The check `cr.keep-moved` (warning; put, resolve, check) reports an unresolved
-  change request that keeps a target which has moved. The check
-  `cr.intent-mismatch` (note; put, check) reports a keep-behavior request that
-  changes or removes a Clause, and a change-behavior request that changes or
-  removes nothing, in itself or in any option of its Crux.
-
-- `status.awaiting` lists the change requests whose Crux has no decision, and the
-  builtin check `cr.awaiting-decision` (note; put, resolve, check) reports them.
-  `cr.unapplied` now also covers the changes a decision asked.
-- External check execution through an application port and a Unix process adapter,
-  with project registration, bounded JSON communication, timeout and cancellation
-  cleanup, advisory results and mandatory change gates.
-- Explicit `check_run` operations, saved external result freshness in `status`,
-  and atomic SQLite storage of results and execution evidence alongside changes.
-- Change-request addresses accept every finding subject through the shared
-  `SubjectInput`, with legacy CLI item/clause input retained and ambiguous or
-  misspelled subject selectors rejected. Rust `FindingInput` callers migrate
-  from item/clause fields to `subject`.
-- Judged rule definition digests: `check_rules` gives each rule a
-  `rule_digest` over its deciding fields (id, subject, question, true, false),
-  and `finding_report` requires it back; a missing or mismatching digest is
-  refused and replaces nothing. A changed deciding field makes saved judgments
-  stale; editing summary, fix, hints, hooks or level does not. Old database
-  rows hold a null digest and show as stale.
-
 ### Removed
 
 - The check `cr.unapplied`, `status.unapplied` and the refusals of `cr_resolve`
@@ -595,3 +598,6 @@ and this project adheres to
   one that cannot waits for a decision maker. A later decision no longer replaces
   an earlier one (see `supersedes`). The compatibility read of a change request
   stored without `addresses` is gone with it.
+
+[Unreleased]: https://github.com/ynishi/chidev/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/ynishi/chidev/releases/tag/v0.1.0
