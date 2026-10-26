@@ -5,12 +5,13 @@
 //!
 //! The file holds `meta` (the store's revision, which every commit bumps), `project`, `pins` and
 //! `change_requests` (one JSON document each, in the schema the record names; see `persist`), `asset_names`, and
-//! `check_invocations` (the checks each use case ran, appended and never changed), `judged_reports` and
+//! `check_invocations` (the checks each use case ran, appended and never changed; the column `hook` holds the
+//! moment by its word, and `"trigger"` the use case that ran the check, by the word of its trigger), `judged_reports` and
 //! `judged_findings` (what agents reported for the judged rules: one report per rule, replaced as a whole, and its
 //! findings), `external_reports` (the latest result per external rule), `pin_codes` (the code each Pin
 //! accepted), `measure_runs` and `measure_items` (the measurements, appended, and their mutants), and
 //! `model_revision` (the store revision at which the model last changed). `PRAGMA user_version` is the layout of the tables; a file with a higher one
-//! is refused. New tables, execution metadata on `check_invocations`, and `rule_digest` on `judged_reports` are added
+//! is refused. New tables, execution metadata and the trigger on `check_invocations`, and `rule_digest` on `judged_reports` are added
 //! without a new layout number: they are created `IF NOT EXISTS` (or
 //! added when missing) each time a file of layout 1 is opened, so a database made before them gets them and
 //! nothing else in it changes. Old rule digests remain NULL: a current definition cannot establish the
@@ -25,12 +26,14 @@ use uuid::Uuid;
 
 use super::persist::measure::{ItemRow, RunRow};
 use super::persist::{self, CURRENT};
+use crate::app::commit::{Gated, Trigger};
 use crate::app::ports::external::{ExecutionEvidence, ExternalReport};
 use crate::app::ports::{
     AssetKind, AssetNames, Changes, Invocation, JudgedFinding, JudgedReport, JudgedRepository,
     Outcome, Store, StoreRevision,
 };
-use crate::domain::check::{Executor, Hook, Level};
+use crate::domain::check::level::MomentWordError;
+use crate::domain::check::{Executor, Level, Moment};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
@@ -83,7 +86,9 @@ COMMIT;
 ";
 
 /// The record of the checks the use cases ran. Append-only: a row is written with the commit of the use case that
-/// ran the check, and `store_revision` is the revision that use case read (the model the check saw).
+/// ran the check, and `store_revision` is the revision that use case read (the model the check saw). The column
+/// is called `hook` for the moment, which a database made before the moments were named still has; it is the name
+/// of a column and no word a person reads. A row with `put` there is an edit.
 const CREATE_INVOCATIONS: &str = "
 CREATE TABLE IF NOT EXISTS check_invocations (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +222,7 @@ fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "check_invocations", "judge", "TEXT")?;
         add_column(conn, "check_invocations", "external", "TEXT")?;
         add_column(conn, "check_invocations", "rule_digest", "TEXT")?;
+        add_column(conn, "check_invocations", "trigger", "TEXT")?;
         conn.execute_batch(CREATE_JUDGED)?;
         add_column(conn, "judged_reports", "rule_digest", "TEXT")?;
         conn.execute_batch(CREATE_EXTERNAL)?;
@@ -230,7 +236,8 @@ fn revision_of(n: i64) -> Option<StoreRevision> {
     u64::try_from(n).ok().map(StoreRevision)
 }
 
-/// An invocation as stored: revision, check, hook, counts, outcome, executor, judge, external evidence, rule digest.
+/// An invocation as stored: revision, check, moment, counts, outcome, executor, judge, external evidence, rule
+/// digest, trigger.
 type InvocationRow = (
     i64,
     String,
@@ -240,6 +247,7 @@ type InvocationRow = (
     i64,
     String,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -299,7 +307,7 @@ impl SqliteStore {
             .isle
             .call(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest
+                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\"
                      FROM check_invocations ORDER BY seq",
                 )?;
                 stmt.query_map([], |r| {
@@ -315,6 +323,7 @@ impl SqliteStore {
                         r.get(8)?,
                         r.get(9)?,
                         r.get(10)?,
+                        r.get(11)?,
                     ))
                 })?
                 .collect()
@@ -336,11 +345,17 @@ impl SqliteStore {
                     judge,
                     external,
                     rule_digest,
+                    trigger,
                 )| {
                     Ok(Invocation {
                         check: RuleId::try_from(check.as_str())
                             .map_err(|e| corrupt(&e.to_string()))?,
-                        hook: Hook::from_word(&hook).ok_or_else(|| corrupt(&hook))?,
+                        moment: match Moment::parse(&hook) {
+                            Ok(m) => m,
+                            // A row made when the word was `put` is an edit still.
+                            Err(MomentWordError::Renamed { to, .. }) => to,
+                            Err(_) => return Err(corrupt(&hook)),
+                        },
                         read_at: StoreRevision(
                             u64::try_from(at).map_err(|_| corrupt("a revision"))?,
                         ),
@@ -351,6 +366,9 @@ impl SqliteStore {
                         executor: Executor::from_word(&executor)
                             .ok_or_else(|| corrupt(&executor))?,
                         judge,
+                        trigger: trigger
+                            .map(|w| Trigger::from_word(&w).ok_or_else(|| corrupt(&w)))
+                            .transpose()?,
                         rule_digest: rule_digest
                             .map(|d| Digest::restore(&d).ok_or_else(|| corrupt("a rule digest")))
                             .transpose()?,
@@ -688,7 +706,21 @@ impl Store for SqliteStore {
             .ok_or_else(|| StoreError::Corrupt(format!("the model's revision is {number}")))
     }
 
-    async fn commit(&self, read_at: StoreRevision, changes: Changes) -> Result<(), StoreError> {
+    async fn commit(&self, read_at: StoreRevision, gated: Gated) -> Result<(), StoreError> {
+        self.write(read_at, gated.into_changes()).await
+    }
+}
+
+impl SqliteStore {
+    /// Keeps `changes` whole, if the store still stands at `read_at`. It is [`Store::commit`] without the proof that
+    /// the checks were run, for the tests of what the store itself promises (a conflict keeps nothing, a record is
+    /// appended, a report replaces): an inherent method of this type, which a use case, generic over [`Store`],
+    /// cannot call.
+    pub(crate) async fn write(
+        &self,
+        read_at: StoreRevision,
+        changes: Changes,
+    ) -> Result<(), StoreError> {
         let read_at = i64::try_from(read_at.0)
             .map_err(|_| StoreError::Failed("a revision too large to keep".to_string()))?;
         // Everything is written to text before the write lock is taken, so the lock is held only for the SQL.
@@ -740,7 +772,9 @@ impl Store for SqliteStore {
                         StoreError::Failed("a revision too large to keep".to_string())
                     })?,
                     i.check.to_string(),
-                    i.hook.word(),
+                    // The stored word, not the word of the configuration: a row is read by every chidev that
+                    // opens the file, 0.1.0 included, which knows `put` and not `edit`.
+                    i.moment.digest_key(),
                     i64::from(i.notes),
                     i64::from(i.warnings),
                     i64::from(i.errors),
@@ -753,6 +787,7 @@ impl Store for SqliteStore {
                         .transpose()
                         .map_err(|e| StoreError::Failed(format!("external evidence: {e}")))?,
                     i.rule_digest.map(|d| d.to_string()),
+                    i.trigger.map(|t| t.word()),
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -872,14 +907,14 @@ impl Store for SqliteStore {
                         ],
                     )?;
                 }
-                for (at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest) in
+                for (at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger) in
                     &invocations
                 {
                     tx.execute(
                         "INSERT INTO check_invocations
-                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest],
+                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\")
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger],
                     )?;
                 }
                 for (rule, doc) in &external {
@@ -958,7 +993,8 @@ mod tests {
             project: Some(p),
             invocations: vec![Invocation {
                 check: RuleId::from_static("cite.uncited-clause"),
-                hook: Hook::Put,
+                moment: Moment::Edit,
+                trigger: None,
                 read_at: StoreRevision(0),
                 notes: 0,
                 warnings: 2,
@@ -983,7 +1019,7 @@ mod tests {
         assert_eq!(store.project().await.unwrap(), None);
         let at = store.revision().await.unwrap();
         let c = changes();
-        store.commit(at, c.clone()).await.unwrap();
+        store.write(at, c.clone()).await.unwrap();
         store.close().await.unwrap();
 
         let store = SqliteStore::open(&path).await.unwrap();
@@ -1010,12 +1046,12 @@ mod tests {
         let path = temp_db("invocations");
         let store = SqliteStore::open(&path).await.unwrap();
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         let again = store.revision().await.unwrap();
-        store.commit(again, changes()).await.unwrap();
+        store.write(again, changes()).await.unwrap();
         assert_eq!(store.invocations().await.unwrap().len(), 2);
         // Committed at an old revision: refused, so its record is not kept either.
-        assert_eq!(store.commit(at, changes()).await, Err(StoreError::Conflict));
+        assert_eq!(store.write(at, changes()).await, Err(StoreError::Conflict));
         assert_eq!(store.invocations().await.unwrap().len(), 2);
         store.close().await.unwrap();
     }
@@ -1035,7 +1071,7 @@ mod tests {
         let store = SqliteStore::open(&path).await.unwrap();
         assert!(store.invocations().await.unwrap().is_empty());
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         assert_eq!(store.invocations().await.unwrap().len(), 1);
         store.close().await.unwrap();
     }
@@ -1067,7 +1103,7 @@ mod tests {
             judged: reports,
             ..Changes::default()
         };
-        store.commit(at, changes).await.unwrap();
+        store.write(at, changes).await.unwrap();
     }
 
     #[tokio::test]
@@ -1100,14 +1136,14 @@ mod tests {
     async fn rule_versions_roundtrip_in_reports_and_append_only_invocations() {
         let path = temp_db("rule-versions");
         let store = SqliteStore::open(&path).await.unwrap();
-        store.commit(StoreRevision(0), changes()).await.unwrap();
+        store.write(StoreRevision(0), changes()).await.unwrap();
         let mut first = report("judged.a", 1);
         first.rule_digest = Some(Digest::of(b"rule v1"));
         let first_run = judged_invocation(&first);
         let mut unknown = report("judged.unknown", 0);
         unknown.rule_digest = None;
         store
-            .commit(
+            .write(
                 StoreRevision(1),
                 Changes {
                     judged: vec![first.clone(), unknown.clone()],
@@ -1122,7 +1158,7 @@ mod tests {
         second.rule_digest = Some(Digest::of(b"rule v2"));
         let second_run = judged_invocation(&second);
         store
-            .commit(
+            .write(
                 StoreRevision(2),
                 Changes {
                     judged: vec![second.clone()],
@@ -1150,7 +1186,7 @@ mod tests {
         old_report.rule_digest = Some(Digest::of(b"irrecoverable old definition"));
         let old_run = judged_invocation(&old_report);
         store
-            .commit(
+            .write(
                 StoreRevision(0),
                 Changes {
                     judged: vec![old_report.clone()],
@@ -1189,7 +1225,7 @@ mod tests {
             let store = SqliteStore::open(&path).await.unwrap();
             let report = report("judged.a", 0);
             store
-                .commit(
+                .write(
                     StoreRevision(0),
                     Changes {
                         invocations: vec![judged_invocation(&report)],
@@ -1226,7 +1262,7 @@ mod tests {
         first.rule_digest = Some(Digest::of(b"v1"));
         let first_run = judged_invocation(&first);
         store
-            .commit(
+            .write(
                 StoreRevision(0),
                 Changes {
                     invocations: vec![first_run.clone()],
@@ -1240,7 +1276,7 @@ mod tests {
         second.rule_digest = Some(Digest::of(b"v2"));
         assert_eq!(
             store
-                .commit(
+                .write(
                     StoreRevision(0),
                     Changes {
                         invocations: vec![judged_invocation(&second)],
@@ -1271,10 +1307,10 @@ mod tests {
             pins: changes().pins,
             ..Changes::default()
         };
-        store.commit(at, pin_only).await.unwrap();
+        store.write(at, pin_only).await.unwrap();
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(3));
         store.close().await.unwrap();
     }
@@ -1284,7 +1320,7 @@ mod tests {
         let path = temp_db("before-judged");
         let store = SqliteStore::open(&path).await.unwrap();
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         store.close().await.unwrap();
         // the tables as the previous version made them
         let conn = Connection::open(&path).unwrap();
@@ -1312,7 +1348,7 @@ mod tests {
     async fn a_database_before_external_checks_keeps_its_invocations_and_gets_the_new_storage() {
         let path = temp_db("before-external");
         let store = SqliteStore::open(&path).await.unwrap();
-        store.commit(StoreRevision(0), changes()).await.unwrap();
+        store.write(StoreRevision(0), changes()).await.unwrap();
         store.close().await.unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
@@ -1391,13 +1427,13 @@ mod tests {
         first_changes.invocations[0].executor = Executor::External;
         first_changes.invocations[0].external = Some(second.evidence.clone());
         store
-            .commit(StoreRevision(0), first_changes.clone())
+            .write(StoreRevision(0), first_changes.clone())
             .await
             .unwrap();
         let mut replacement = external_report("ext.a", None);
         replacement.findings.clear();
         store
-            .commit(
+            .write(
                 StoreRevision(1),
                 Changes {
                     external: vec![replacement.clone()],
@@ -1429,7 +1465,7 @@ mod tests {
         let store = SqliteStore::open(&path).await.unwrap();
         let first = external_report("ext.a", None);
         store
-            .commit(
+            .write(
                 StoreRevision(0),
                 Changes {
                     external: vec![first.clone()],
@@ -1442,7 +1478,7 @@ mod tests {
         stale.external = vec![external_report("ext.b", Some("exit"))];
         stale.invocations[0].external = Some(first.evidence.clone());
         assert_eq!(
-            store.commit(StoreRevision(0), stale).await,
+            store.write(StoreRevision(0), stale).await,
             Err(StoreError::Conflict)
         );
         assert_eq!(store.external_reports().await.unwrap(), vec![first]);
@@ -1457,7 +1493,7 @@ mod tests {
         let path = temp_db("external-rule-corrupt");
         let store = SqliteStore::open(&path).await.unwrap();
         store
-            .commit(
+            .write(
                 StoreRevision(0),
                 Changes {
                     external: vec![external_report("ext.a", None)],
@@ -1484,8 +1520,8 @@ mod tests {
         let path = temp_db("stale");
         let store = SqliteStore::open(&path).await.unwrap();
         let at = store.revision().await.unwrap();
-        store.commit(at, Changes::default()).await.unwrap();
-        let stale = store.commit(at, changes()).await;
+        store.write(at, Changes::default()).await.unwrap();
+        let stale = store.write(at, changes()).await;
         assert_eq!(stale, Err(StoreError::Conflict));
         assert_eq!(store.project().await.unwrap(), None);
         assert!(store.pins().await.unwrap().is_empty());
@@ -1517,7 +1553,7 @@ mod tests {
         let path = temp_db("schema");
         let store = SqliteStore::open(&path).await.unwrap();
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         store.close().await.unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute("UPDATE project SET schema = 3", []).unwrap();
@@ -1571,7 +1607,7 @@ mod tests {
             measurements: vec![first.clone()],
             ..Changes::default()
         };
-        store.commit(at, kept).await.unwrap();
+        store.write(at, kept).await.unwrap();
         assert_eq!(
             store.latest_measurements().await.unwrap(),
             std::slice::from_ref(&first)
@@ -1594,7 +1630,7 @@ mod tests {
             measurements: vec![second.clone(), other.clone()],
             ..Changes::default()
         };
-        store.commit(at, kept).await.unwrap();
+        store.write(at, kept).await.unwrap();
         let latest = store.latest_measurements().await.unwrap();
         assert_eq!(latest, [second.clone(), other.clone()]);
         assert!(latest[0].failure().is_some());
@@ -1622,7 +1658,7 @@ mod tests {
         let path = temp_db("measure-conflict");
         let store = SqliteStore::open(&path).await.unwrap();
         let at = store.revision().await.unwrap();
-        store.commit(at, changes()).await.unwrap();
+        store.write(at, changes()).await.unwrap();
         let stale = Changes {
             measurements: vec![run_of(1, 30, vec![])],
             pin_codes: vec![PinCode {
@@ -1632,7 +1668,7 @@ mod tests {
             }],
             ..Changes::default()
         };
-        assert_eq!(store.commit(at, stale).await, Err(StoreError::Conflict));
+        assert_eq!(store.write(at, stale).await, Err(StoreError::Conflict));
         assert!(store.latest_measurements().await.unwrap().is_empty());
         assert_eq!(
             store
@@ -1660,7 +1696,7 @@ mod tests {
             pin_codes: vec![code(50, text)],
             ..Changes::default()
         };
-        store.commit(at, kept).await.unwrap();
+        store.write(at, kept).await.unwrap();
         assert_eq!(
             store
                 .pin_code(PinId::from_uuid(fixture::id(50)))
@@ -1673,7 +1709,7 @@ mod tests {
             pin_codes: vec![code(51, "other")],
             ..Changes::default()
         };
-        store.commit(at, kept).await.unwrap();
+        store.write(at, kept).await.unwrap();
         assert_eq!(
             store
                 .pin_code(PinId::from_uuid(fixture::id(50)))
@@ -1715,7 +1751,7 @@ mod tests {
                 )],
                 ..Changes::default()
             };
-            store.commit(at, kept).await.unwrap();
+            store.write(at, kept).await.unwrap();
             assert_eq!(store.latest_measurements().await.unwrap().len(), 1);
             store.close().await.unwrap();
             let conn = Connection::open(&path).unwrap();
@@ -1731,5 +1767,117 @@ mod tests {
             );
             store.close().await.unwrap();
         }
+    }
+
+    fn invocation_with(trigger: Option<Trigger>) -> Changes {
+        let mut c = changes();
+        c.invocations[0].trigger = trigger;
+        c
+    }
+
+    #[tokio::test]
+    async fn an_invocation_keeps_the_trigger_of_the_use_case_that_ran_it() {
+        use crate::app::commit::{AskTrigger, EditTrigger};
+
+        let path = temp_db("trigger");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let first = Trigger::Edit(EditTrigger::PutContract);
+        let second = Trigger::Ask(AskTrigger::CheckRun);
+        store
+            .write(StoreRevision(0), invocation_with(Some(first)))
+            .await
+            .unwrap();
+        store
+            .write(StoreRevision(1), invocation_with(Some(second)))
+            .await
+            .unwrap();
+        let read = store.invocations().await.unwrap();
+        assert_eq!(read[0].trigger, Some(first));
+        assert_eq!(read[1].trigger, Some(second));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_row_made_before_the_trigger_was_kept_reads_without_one() {
+        let path = temp_db("trigger-old-row");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A database as an earlier version left it: the table has no `trigger` column.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE).unwrap();
+        conn.execute_batch(CREATE_INVOCATIONS).unwrap();
+        conn.execute(
+            "INSERT INTO check_invocations
+             (store_revision, check_id, hook, notes, warnings, errors, outcome)
+             VALUES (0, 'cite.uncited-clause', 'put', 0, 2, 0, 'found')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        let read = store.invocations().await.unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].trigger, None);
+        // The word `put` was the moment of an edit, and still reads as one.
+        assert_eq!(read[0].moment, Moment::Edit);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_trigger_word_no_version_wrote_is_a_corrupt_row() {
+        let path = temp_db("trigger-unknown");
+        let store = SqliteStore::open(&path).await.unwrap();
+        store
+            .write(StoreRevision(0), invocation_with(None))
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE check_invocations SET \"trigger\" = 'bogus'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(matches!(
+            store.invocations().await,
+            Err(StoreError::Corrupt(_))
+        ));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_moment_is_written_by_its_kept_word_and_either_word_of_an_edit_is_read_as_one() {
+        let path = temp_db("moment-word");
+        let store = SqliteStore::open(&path).await.unwrap();
+        store
+            .write(StoreRevision(0), invocation_with(None))
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let written: String = conn
+            .query_row("SELECT hook FROM check_invocations", [], |r| r.get(0))
+            .unwrap();
+        // The word 0.1.0 reads, so that the file stays readable to it.
+        assert_eq!(written, "put");
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.invocations().await.unwrap()[0].moment, Moment::Edit);
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE check_invocations SET hook = 'edit'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.invocations().await.unwrap()[0].moment, Moment::Edit);
+        store.close().await.unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE check_invocations SET hook = 'save'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(matches!(
+            store.invocations().await,
+            Err(StoreError::Corrupt(_))
+        ));
+        store.close().await.unwrap();
     }
 }

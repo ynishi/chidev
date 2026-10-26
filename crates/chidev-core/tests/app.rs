@@ -224,7 +224,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
 async fn an_asset_and_its_name_are_kept_together() {
     let mut app = app("asset-name").await;
     app.init().await.unwrap();
-    let ctx = app.add_context("core", &[]).await.unwrap();
+    let ctx = app.add_context("core", &[]).await.unwrap().value;
     let put = app
         .put_contract(
             "core",
@@ -786,7 +786,7 @@ mod checks {
         FindingInput, Intent, OptionInput, Registry, SubjectInput, TargetInput,
     };
     use chidev_core::domain::check::{
-        Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, Level, Params,
+        Check, CheckView, Descriptor, Executor, Finding, FindingState, Level, Moment, Params,
     };
     use chidev_core::domain::vo::finding::{RuleId, Subject};
     use chidev_core::domain::vo::timestamp::Timestamp;
@@ -802,7 +802,7 @@ mod checks {
         id: RuleId::from_static("test.forbidden"),
         summary: Cow::Borrowed("a clause exists"),
         help: Cow::Borrowed("only for the test"),
-        hooks: Cow::Borrowed(&[Hook::Put]),
+        moments: Cow::Borrowed(&[Moment::Edit]),
         default_level: Level::Error,
         mandatory: true,
         params: std::borrow::Cow::Borrowed(&[]),
@@ -872,7 +872,7 @@ mod checks {
             .iter()
             .find(|i| i.check.as_str() == "cite.stale")
             .unwrap();
-        assert_eq!(stale.hook, Hook::Put);
+        assert_eq!(stale.moment, Moment::Edit);
         assert_eq!((stale.warnings, stale.outcome), (0, Outcome::Ok));
         // Where the whole is judged, it is said.
         let found = app.check(None).await.unwrap().findings;
@@ -1249,6 +1249,8 @@ mod checks {
         );
         app.init().await.unwrap();
         app.add_context("core", &[]).await.unwrap();
+        // Adding the Context was an edit, and the check ran on it; the refused put leaves that record as it was.
+        let kept = invocations(&app).await.len();
         let refused = app.put_contract("core", "stack", "Stack", &clauses()).await;
         let Err(AppError::Refused(found)) = refused else {
             panic!("expected a refusal, got {refused:?}");
@@ -1272,7 +1274,7 @@ mod checks {
                 .unwrap(),
             None
         );
-        assert!(invocations(&app).await.is_empty());
+        assert_eq!(invocations(&app).await.len(), kept);
     }
 }
 
@@ -1282,7 +1284,7 @@ mod judged {
         App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, FindingInput, Intent,
         JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
     };
-    use chidev_core::domain::check::{Executor, FindingState, Hook, Level};
+    use chidev_core::domain::check::{Executor, FindingState, Level, Moment};
     use chidev_core::domain::vo::timestamp::Timestamp;
     use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::judged::parse;
@@ -1292,7 +1294,7 @@ mod judged {
 
     fn rule(id: &str, subject: &str, level: &str) -> String {
         format!(
-            "id = \"{id}\"\nsummary = \"s\"\nsubject = \"{subject}\"\nhooks = [\"put\"]\nlevel = \"{level}\"\n\
+            "id = \"{id}\"\nsummary = \"s\"\nsubject = \"{subject}\"\nmoments = [\"edit\"]\nlevel = \"{level}\"\n\
              question = \"q\"\ntrue = \"t\"\nfalse = \"f\"\nfix = \"x\"\n"
         )
     }
@@ -1388,7 +1390,7 @@ mod judged {
             &[
                 rule("judged.vague", "clause", "warning"),
                 rule("judged.quiet", "context", "off"),
-                rule("judged.later", "clause", "note").replace("put", "check"),
+                rule("judged.later", "clause", "note").replace("edit", "check"),
             ],
         )
         .await;
@@ -1407,7 +1409,7 @@ mod judged {
         assert_eq!(clauses[0]["text"], "push then pop");
         assert_eq!(clauses[0]["revision"], 1);
 
-        let at_put = app.check_rules(Some(Hook::Put), None).await.unwrap();
+        let at_put = app.check_rules(Some(Moment::Edit), None).await.unwrap();
         assert_eq!(at_put.rules.len(), 1);
         let one = app.check_rules(None, Some("judged.later")).await.unwrap();
         assert_eq!(one.rules[0].level, Level::Note);

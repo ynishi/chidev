@@ -1,4 +1,4 @@
-//! Running the checks: the registry (the checks and the policy they run under), the runner that applies a hook to a
+//! Running the checks: the registry (the checks and the policy they run under), the runner that applies a moment to a
 //! view, and the findings as a use case hands them to its caller. Pure: the view is built by the use case, and
 //! what a run leaves to be kept (its invocations) goes out through `Changes`.
 
@@ -8,8 +8,8 @@ use crate::domain::check::external::ExternalRule;
 use thiserror::Error;
 
 use crate::domain::check::{
-    Check, CheckView, Descriptor, Executor, Finding, FindingState, Hook, JudgedRule, Layer, Level,
-    Params, Policy, PolicyError,
+    Check, CheckView, Descriptor, Executor, Finding, FindingState, JudgedRule, Layer, Level,
+    Moment, Params, Policy, PolicyError,
 };
 use crate::domain::vo::finding::{RuleId, Subject};
 
@@ -26,7 +26,7 @@ pub enum RegistryError {
 
 /// The checks that can run and the policy they run under. Built once for a run of the program: the policy is
 /// resolved when it is built, so a bad policy file is an error before any use case runs. The builtin checks are
-/// code and run in the hooks; the judged rules are data read from the project's files, held by the same policy
+/// code and run at the moments; the judged rules are data read from the project's files, held by the same policy
 /// and run by no one here: an agent judges them and reports.
 pub struct Registry {
     checks: Vec<&'static dyn Check>,
@@ -62,7 +62,7 @@ pub struct CheckInfo<'a> {
     pub params: &'a Params,
 }
 
-/// What one hook did over a view.
+/// What one moment did over a view.
 #[derive(Debug, Default)]
 pub struct Run {
     /// Every finding, at the level the policy gives, in the order of the checks. A check at `off` did not run.
@@ -217,15 +217,15 @@ impl Registry {
         self.policy.of(id).map(|r| r.level)
     }
 
-    /// Runs the checks that run at `hook` and are not off over `view`, which the store stood at `read_at` for.
-    pub fn run(&self, hook: Hook, read_at: StoreRevision, view: &CheckView<'_>) -> Run {
+    /// Runs the checks that run at `moment` and are not off over `view`, which the store stood at `read_at` for.
+    pub fn run(&self, moment: Moment, read_at: StoreRevision, view: &CheckView<'_>) -> Run {
         let mut run = Run::default();
         for check in &self.checks {
             let d = check.descriptor();
             let Some(resolved) = self.policy.of(&d.id) else {
                 continue;
             };
-            if resolved.level == Level::Off || !d.runs_at(hook) {
+            if resolved.level == Level::Off || !d.runs_at(moment) {
                 continue;
             }
             let found: Vec<Finding> = check
@@ -235,7 +235,8 @@ impl Registry {
                 .collect();
             let mut invocation = Invocation {
                 check: d.id.clone(),
-                hook,
+                moment,
+                trigger: None,
                 read_at,
                 notes: 0,
                 warnings: 0,
@@ -340,6 +341,6 @@ pub struct CheckResult {
 pub struct Checked<T> {
     /// What the use case returns.
     pub value: T,
-    /// Every finding of the checks that ran at its hook, except those at `off`; for a put, those it introduced.
+    /// Every finding of the checks that ran at its moment, except those at `off`; for a put, those it introduced.
     pub findings: Vec<Found>,
 }

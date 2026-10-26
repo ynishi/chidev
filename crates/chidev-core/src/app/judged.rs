@@ -9,12 +9,13 @@
 use std::cmp::min;
 
 use super::check::{Found, Judgment};
+use super::commit::{RecordChanges, RecordTrigger};
 use super::model_view::ModelView;
 use super::ports::{
-    Changes, IdSource, Invocation, JudgedFinding, JudgedReport, Outcome, Store, StoreRevision,
+    IdSource, Invocation, JudgedFinding, JudgedReport, Outcome, Store, StoreRevision,
 };
 use super::{App, AppError, SubjectInput, input};
-use crate::domain::check::{Executor, Finding, Hook, JudgedRule, Level};
+use crate::domain::check::{Executor, Finding, JudgedRule, Level, Moment};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
@@ -147,11 +148,11 @@ where
     G: IdSource,
     E: super::ports::external::ExternalExecutor,
 {
-    /// The judged rules to judge at `hook` (all when none), or the one named `rule`, with the level each is held
+    /// The judged rules to judge at `moment` (all when none), or the one named `rule`, with the level each is held
     /// to and a view of the model to judge them on. Rules the policy turned off are left out.
     pub async fn check_rules(
         &self,
-        hook: Option<Hook>,
+        moment: Option<Moment>,
         rule: Option<&str>,
     ) -> Result<RulesView, AppError> {
         let at = self.store.revision().await?;
@@ -166,7 +167,7 @@ where
         let mut rules = Vec::new();
         for r in self.registry.judged() {
             if named.is_some_and(|n| n.id() != r.id())
-                || hook.is_some_and(|h| !r.descriptor().runs_at(h))
+                || moment.is_some_and(|h| !r.descriptor().runs_at(h))
             {
                 continue;
             }
@@ -304,7 +305,8 @@ where
         };
         let invocation = Invocation {
             check: id.clone(),
-            hook: Hook::Check,
+            moment: Moment::Check,
+            trigger: None,
             read_at,
             notes: count(Level::Note),
             warnings: count(Level::Warning),
@@ -332,12 +334,13 @@ where
         };
         let findings = stored_report.findings.len();
         let state = state_of(&rule, Some(&stored_report), &view);
-        let changes = Changes {
+        let record = RecordChanges {
             judged: vec![stored_report],
             invocations: vec![invocation],
-            ..Changes::default()
+            ..RecordChanges::default()
         };
-        self.store.commit(at, changes).await?;
+        self.commit_record(RecordTrigger::ReportFinding, at, record)
+            .await?;
         Ok(Reported {
             rule: id,
             rule_digest,
@@ -350,8 +353,8 @@ where
     }
 
     /// The findings agents reported, as callers see findings, and the judged rules that are not up to date.
-    /// Reported findings are the standing record, so they show whatever hooks their rules belong to (the hooks
-    /// say when an agent is asked to judge, not when a result is shown). A rule the policy turned off shows none.
+    /// Reported findings are the standing record, so they show whatever moments their rules belong to (the
+    /// moments say when an agent is asked to judge, not when a result is shown). A rule the policy turned off shows none.
     pub(super) async fn judged_standing(
         &self,
         p: &Project,

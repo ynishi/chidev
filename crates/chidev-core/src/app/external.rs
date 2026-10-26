@@ -6,12 +6,15 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::commit::AskTrigger;
 use super::model_view::{ModelView, ViewSelection};
 use super::ports::external::*;
-use super::ports::{AssetName, Changes, IdSource, Invocation, Outcome, Store, StoreRevision};
+use super::ports::{AssetName, IdSource, Invocation, Outcome, Store, StoreRevision};
 use super::{App, AppError, Found, input};
 use crate::domain::check::external::ExternalRule;
-use crate::domain::check::{CheckView, Executor, Finding, Hook, Level, ParamValue};
+use crate::domain::check::{
+    CheckView, DIGEST_MOMENTS_KEY, Executor, Finding, Level, Moment, ParamValue,
+};
 use crate::domain::entity::{change_request::ChangeRequest, project::Project};
 use crate::domain::vo::{
     digest::Digest,
@@ -124,15 +127,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        fingerprint(
-            &json!({"process":rule.config_digest(), "reads":rule.reads().iter().map(|s|s.word()).collect::<Vec<_>>(), "gate":rule.gate(),
-            "level":self.registry.level_of(&d.id).map(Level::word), "hooks":d.hooks.iter().map(|h|h.word()).collect::<Vec<_>>(), "params":params}),
-        )
+        let mut stamp = json!({"process":rule.config_digest(), "reads":rule.reads().iter().map(|s|s.word()).collect::<Vec<_>>(), "gate":rule.gate(),
+            "level":self.registry.level_of(&d.id).map(Level::word), "params":params});
+        // The moments are counted by their digest key, under the key the first digests used: a word that is
+        // renamed must not make a saved result stale (see `Moment::digest_key`).
+        stamp[DIGEST_MOMENTS_KEY] =
+            json!(d.moments.iter().map(|m| m.digest_key()).collect::<Vec<_>>());
+        fingerprint(&stamp)
     }
 
     pub(super) async fn run_external(
         &self,
-        hook: Hook,
+        moment: Moment,
         at: StoreRevision,
         view: &CheckView<'_>,
         pending: &[AssetName],
@@ -143,7 +149,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let Some(policy) = self.registry.policy().of(&d.id) else {
                 continue;
             };
-            if policy.level == Level::Off || !d.runs_at(hook) {
+            if policy.level == Level::Off || !d.runs_at(moment) {
                 continue;
             }
             let model = self
@@ -164,8 +170,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 })
                 .collect();
             let call = ExternalCall {
-                protocol: 1,
-                hook: hook.word().into(),
+                protocol: REQUEST_PROTOCOL,
+                moment: moment.word().into(),
                 rules: vec![d.id.to_string()],
                 read_at: at.0,
                 params,
@@ -182,7 +188,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "protocol".into(),
                     message: message.into(),
                 };
-                if reply.protocol != 1 {
+                if !REPLY_PROTOCOLS.contains(&reply.protocol) {
                     return Err(invalid("unsupported response protocol"));
                 }
                 reply
@@ -309,7 +315,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub(super) fn external_invocations(
         &self,
         reports: &[ExternalReport],
-        hook: Hook,
+        moment: Moment,
         at: StoreRevision,
     ) -> Vec<Invocation> {
         reports
@@ -326,7 +332,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 };
                 Some(Invocation {
                     check: rule,
-                    hook,
+                    moment,
+                    trigger: None,
                     read_at: at,
                     notes: count("note"),
                     warnings: count("warning"),
@@ -433,42 +440,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok((found, standing))
     }
 
-    /// Explicitly runs check-hook programs and persists their results and invocations. Unlike a change gate,
+    /// Explicitly runs check-moment programs and persists their results and invocations. Unlike a change gate,
     /// errors are recorded and returned, since this operation changes no asset. No automatic retries occur.
     pub async fn check_run(&mut self) -> Result<ExternalChecked, AppError> {
         let at = self.store.revision().await?;
-        let p = self.project().await?;
-        let pins = self.store.pins().await?;
-        let crs = self.store.change_requests().await?;
-        let measured = self.measured(&p).await?;
-        let view = CheckView {
-            project: &p,
-            pins: &pins,
-            change_requests: &crs,
-            measurements: &measured.measurements,
-            measure_settings: &measured.settings,
-            sim_settings: &measured.sim_settings,
-        };
-        let mut run = self.registry.run(Hook::Check, at, &view);
-        let external = self.run_external(Hook::Check, at, &view, &[]).await?;
-        let mut findings = self.found(&run.findings, &p, &crs, &[]).await?;
-        findings.extend(
-            self.external_findings(&external, &p, &crs, &[], false)
-                .await?,
-        );
-        findings.extend(self.judged_standing(&p, &crs, at).await?.0);
-        run.invocations
-            .extend(self.external_invocations(&external, Hook::Check, at));
-        self.store
-            .commit(
-                at,
-                Changes {
-                    invocations: run.invocations,
-                    external: external.clone(),
-                    ..Changes::default()
-                },
-            )
-            .await?;
-        Ok(ExternalChecked { findings, external })
+        self.commit_ask(AskTrigger::CheckRun, at).await
     }
 }

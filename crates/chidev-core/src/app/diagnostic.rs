@@ -489,7 +489,7 @@ pub struct RuleExplanation {
     pub executor: Option<&'static str>,
     /// The moments a check runs at.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub hooks: Vec<&'static str>,
+    pub moments: Vec<&'static str>,
     /// Whether a policy may not lower a check below `error`.
     pub mandatory: bool,
 }
@@ -527,7 +527,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 values: r.values.to_vec(),
                 example: Some(r.example.to_string()),
                 executor: None,
-                hooks: Vec::new(),
+                moments: Vec::new(),
                 mandatory: false,
             });
         }
@@ -547,7 +547,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             values: vec!["state", "stale"],
             example: None,
             executor: Some(d.executor.word()),
-            hooks: d.hooks.iter().map(|h| h.word()).collect(),
+            moments: d.moments.iter().map(|m| m.word()).collect(),
             mandatory: d.mandatory,
         })
     }

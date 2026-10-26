@@ -4,11 +4,11 @@
 //! but should not be left. The one builtin that is mandatory is `sim.nondeterministic`: a simulation that cannot be
 //! repeated finds nothing anyone can reproduce, so no policy turns it down.
 //!
-//! Each descriptor lists its hooks, and the hooks say what its check speaks about ([`Descriptor::kind`]). A check
-//! that runs at `put` speaks about what an edit made stale or out of place: only what the put introduced is
-//! reported, and it fills the grounds of its findings, which are what tell one put's finding from the last one's.
+//! Each descriptor lists its moments, and the moments say what its check speaks about ([`Descriptor::kind`]). A check
+//! that runs at an edit speaks about what an edit made stale or out of place: only what the edit introduced is
+//! reported, and it fills the grounds of its findings, which are what tell one edit's finding from the last one's.
 //! A check that does not speaks about the state of the model (something is not there, not settled or not measured)
-//! and is judged where something is confirmed or asked for. `check_list` shows the kind and the hooks of each rule.
+//! and is judged where something is confirmed or asked for. `check_list` shows the kind and the moments of each rule.
 //!
 //! [`Descriptor::kind`]: super::descriptor::Descriptor::kind
 
@@ -20,7 +20,7 @@ mod pins;
 mod sim;
 
 use super::Check;
-use super::level::Hook;
+use super::level::Moment;
 
 pub use self::change_requests::{
     AwaitingDecision, IntentMismatch, KeepMoved, OutOfFrame, PolicyLineGone, ResolvedWithoutWork,
@@ -68,12 +68,12 @@ pub fn all() -> &'static [&'static dyn Check] {
     ]
 }
 
-/// The hooks of a check that speaks about the state of the model (its kind is [`CheckKind::State`], which it is
-/// because `put` is not among its hooks): the ones that confirm something or ask for the whole model. It does not
-/// run at `put`, where an edit has not finished the model and would be told so every time.
+/// The moments of a check that speaks about the state of the model (its kind is [`CheckKind::State`], which it is
+/// because an edit is not among its moments): the ones that confirm something or ask for the whole model. It does
+/// not run at an edit, where the model is not finished and would be told so every time.
 ///
 /// [`CheckKind::State`]: super::descriptor::CheckKind::State
-const CONFIRM_HOOKS: &[Hook] = &[Hook::Pin, Hook::Resolve, Hook::Check];
+const CONFIRM_MOMENTS: &[Moment] = &[Moment::Pin, Moment::Resolve, Moment::Check];
 
 #[cfg(test)]
 mod fixture {
@@ -297,7 +297,11 @@ mod tests {
                 d.id
             );
             assert_eq!(d.executor, Executor::Builtin);
-            assert!(d.hooks.contains(&Hook::Check), "{} runs on demand", d.id);
+            assert!(
+                d.moments.contains(&Moment::Check),
+                "{} runs on demand",
+                d.id
+            );
             assert!(!d.summary.is_empty() && !d.help.is_empty());
             let note = matches!(
                 d.id.as_str(),

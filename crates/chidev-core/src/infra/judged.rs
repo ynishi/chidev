@@ -6,7 +6,7 @@
 //! id = "judged.vague-clause"        # starts with `judged.`
 //! summary = "a clause too vague for a case to check"
 //! subject = "clause"                # context, interface, item, clause, case, change_request or project
-//! hooks = ["put", "check"]          # at which moments an agent is asked to judge it
+//! moments = ["edit", "check"]       # at which moments an agent is asked to judge it
 //! level = "warning"                 # the default level; a policy may change it
 //! question = "Can a case be written from this clause alone?"
 //! true = "no condition or value a case could check"
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::domain::check::{Hook, JudgedDraft, JudgedRule, Level};
+use crate::domain::check::{JudgedDraft, JudgedRule, Level, Moment, renamed_key};
 use crate::domain::vo::finding::{RuleId, SubjectKind};
 
 /// The directory of the rule files, relative to the project's root.
@@ -52,7 +52,7 @@ pub enum RuleFileError {
     },
 }
 
-/// What a file says, before the domain judges it. Unknown keys are refused, so a misspelt `hooks` is not a rule
+/// What a file says, before the domain judges it. Unknown keys are refused, so a misspelt `moments` is not a rule
 /// that quietly belongs nowhere.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,7 +60,12 @@ struct RuleFile {
     id: String,
     summary: String,
     subject: String,
-    hooks: Vec<String>,
+    /// Optional only so that the old key is told apart from a missing one.
+    #[serde(default)]
+    moments: Option<Vec<String>>,
+    /// Only to be refused: the key was `hooks` before it was `moments`.
+    #[serde(default)]
+    hooks: Option<toml::Value>,
     level: String,
     question: String,
     #[serde(rename = "true")]
@@ -116,13 +121,15 @@ pub fn parse(text: &str) -> Result<JudgedRule, String> {
             kinds.join(", ")
         )
     })?;
-    let hooks = file
-        .hooks
+    if file.hooks.is_some() {
+        return Err(renamed_key("hooks", "moments"));
+    }
+    let moments = file
+        .moments
+        .as_deref()
+        .ok_or("missing field `moments`")?
         .iter()
-        .map(|w| {
-            Hook::from_word(w)
-                .ok_or_else(|| format!("`hooks` has `{w}`; there are put, pin, resolve and check"))
-        })
+        .map(|w| Moment::parse(w).map_err(|e| format!("`moments` has `{w}`: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
     let level = Level::from_word(&file.level).ok_or_else(|| {
         format!(
@@ -138,7 +145,7 @@ pub fn parse(text: &str) -> Result<JudgedRule, String> {
         false_when: file.false_when,
         fix: file.fix,
         when: file.when,
-        hooks,
+        moments,
         level,
         subject,
         mandatory: file.mandatory,
@@ -154,7 +161,7 @@ mod tests {
         id = "judged.vague-clause"
         summary = "a clause too vague for a case to check"
         subject = "clause"
-        hooks = ["put", "check"]
+        moments = ["edit", "check"]
         level = "warning"
         question = "Can a case be written from this clause alone?"
         true = "no condition or value a case could check"
@@ -171,7 +178,7 @@ mod tests {
         assert_eq!(r.true_when(), "no condition or value a case could check");
         assert_eq!(r.when(), ["should"]);
         assert_eq!(r.descriptor().default_level, Level::Warning);
-        assert_eq!(&*r.descriptor().hooks, [Hook::Put, Hook::Check]);
+        assert_eq!(&*r.descriptor().moments, [Moment::Edit, Moment::Check]);
     }
 
     #[test]
@@ -190,11 +197,30 @@ mod tests {
                 RULE.replace("\"clause\"", "\"contract\""),
                 "`subject` is `contract`",
             ),
-            (RULE.replace("\"put\"", "\"save\""), "`hooks` has `save`"),
+            (RULE.replace("\"edit\"", "\"save\""), "`moments` has `save`"),
+            (RULE.replace("\"edit\"", "\"put\""), "`put` is now `edit`"),
+            (
+                RULE.replace(
+                    "moments = [\"edit\", \"check\"]",
+                    "hooks = [\"put\", \"check\"]",
+                ),
+                "`hooks` is now `moments`",
+            ),
+            (
+                RULE.replace(
+                    "moments = [\"edit\", \"check\"]",
+                    "hooks = [\"edit\", \"check\"]",
+                ),
+                "`hooks` is now `moments`",
+            ),
+            (
+                RULE.replace("moments = [\"edit\", \"check\"]\n", ""),
+                "missing field `moments`",
+            ),
             (RULE.replace("\"warning\"", "\"loud\""), "`level` is `loud`"),
             (
-                RULE.replace("hooks = [\"put\", \"check\"]", "hooks = []"),
-                "belongs to no hook",
+                RULE.replace("moments = [\"edit\", \"check\"]", "moments = []"),
+                "belongs to no moment",
             ),
             (format!("{RULE}\nmandatory = true"), "cannot be mandatory"),
             (format!("{RULE}\nseverity = 3"), "unknown field"),

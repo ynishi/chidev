@@ -32,7 +32,7 @@ impl IdSource for Counter {
 
 type Language = dyn Fn(&str, &str) -> Result<String, ItemsError> + Send + Sync;
 type Answer = dyn Fn(&str, &str) -> Result<Vec<FoundItem>, ItemsError> + Send + Sync;
-type Hook = dyn Fn() -> BoxFuture<'static, ()> + Send + Sync;
+type Moment = dyn Fn() -> BoxFuture<'static, ()> + Send + Sync;
 
 /// A source of Items that answers as the test says, and keeps what it was asked.
 #[derive(Clone)]
@@ -44,7 +44,7 @@ struct Fake {
     /// What `items` was asked: the language and the source.
     asked: Arc<Mutex<Vec<(String, String)>>>,
     /// Run while the provider is being asked, as the world goes on while a process runs.
-    meanwhile: Option<Arc<Hook>>,
+    meanwhile: Option<Arc<Moment>>,
 }
 
 impl std::fmt::Debug for Fake {
@@ -650,7 +650,7 @@ async fn a_rekey_changes_the_keys_and_moves_no_revision_when_the_lines_declare_t
     let mut app = stock("rekey-keys", fake.clone()).await;
     let (revision, before) = stock_items(&app).await;
     let store = app.store().revision().await.unwrap();
-    let done = app.items_rekey("core", "stock").await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
     assert_eq!(
         done.rekeyed,
         [
@@ -685,7 +685,7 @@ async fn a_rekey_to_lines_that_declare_something_else_revises_that_item_and_says
     )
     .await;
     let (_, before) = stock_items(&app).await;
-    let done = app.items_rekey("core", "stock").await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
     // the keys are the provider's already; only the lines of the first differ, and so does its declaration
     assert!(done.rekeyed.is_empty());
     assert_eq!(
@@ -716,6 +716,50 @@ async fn a_rekey_to_lines_that_declare_something_else_revises_that_item_and_says
 }
 
 #[tokio::test]
+async fn a_rekey_that_revises_an_item_a_case_cites_says_the_citation_is_behind() {
+    let source = "fn reserve(\n    n: u8)\nfn release()\n";
+    let fake = Fake::answering(&[("reserve", 1, 2), ("release", 3, 3)]);
+    let mut app = kept(
+        "rekey-stale-cite",
+        fake,
+        source,
+        &[item("reserve", 1), item("release", 3)],
+    )
+    .await;
+    app.put_harness(
+        "core",
+        "tests",
+        "fn reserves() {}\n",
+        &[CaseInput {
+            name: "reserves".to_string(),
+            lines: (1, 1),
+            items: vec![ItemRef {
+                context: None,
+                interface: "stock".to_string(),
+                key: "reserve".to_string(),
+            }],
+            clauses: Vec::new(),
+        }],
+    )
+    .await
+    .unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap();
+    assert_eq!(done.value.revised.len(), 1);
+    // The edit made a citation stale, and says so; it did not need a put to find it.
+    let stale: Vec<_> = done
+        .findings
+        .iter()
+        .filter(|f| f.rule.as_str() == "cite.stale")
+        .collect();
+    assert_eq!(stale.len(), 1, "{:?}", done.findings);
+    assert_eq!(stale[0].about.as_deref(), Some("case reserves"));
+    // A rekey that moves nothing says nothing.
+    let again = app.items_rekey("core", "stock").await.unwrap();
+    assert!(again.value.revised.is_empty());
+    assert!(again.findings.is_empty(), "{:?}", again.findings);
+}
+
+#[tokio::test]
 async fn a_rekey_pairs_no_item_with_a_declaration_it_shares_lines_with_others_over() {
     // one Item on two lines, where the provider finds two declarations: the Item is listed, not rekeyed
     let source = "fn a();\nfn b();\nfn c();\n";
@@ -735,7 +779,7 @@ async fn a_rekey_pairs_no_item_with_a_declaration_it_shares_lines_with_others_ov
     )
     .await;
     let (revision, before) = stock_items_of(&app, "fn a").await;
-    let done = app.items_rekey("core", "stock").await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
     assert_eq!(done.rekeyed, [changed("c", "C")]);
     assert_eq!(done.unmatched, ["a and b"]);
     let (now, after) = stock_items_of(&app, "fn a").await;
@@ -753,7 +797,7 @@ async fn a_rekey_pairs_no_item_with_a_declaration_it_shares_lines_with_others_ov
     )
     .await;
     let store_before = app.store().revision().await.unwrap();
-    let done = app.items_rekey("core", "stock").await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
     assert!(done.rekeyed.is_empty());
     assert_eq!(done.unmatched, ["a", "b"]);
     assert_eq!(
@@ -974,7 +1018,7 @@ async fn a_store_of_schema_1_comes_to_the_providers_keys_with_the_ids_and_the_ci
     let (revision, before) = stock_items(&app).await;
     // the decoded keys are the signatures
     assert_eq!(keys_of(&before), ["fn reserve()", "fn release()"]);
-    let done = app.items_rekey("core", "stock").await.unwrap();
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
     assert_eq!(
         done.rekeyed,
         [

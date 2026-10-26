@@ -1,14 +1,15 @@
 //! Measuring: the operations that run a measure and keep what it observed, and the reading of what is kept. A
 //! mutation run takes the code a Pin accepted and tests it against changes of itself; a simulation builds the
 //! program from the code of the Pins of the Interfaces a sim Harness builds and drives it with the script. A measure takes minutes and
-//! makes facts, so it is an operation of its own and never a hook; the checks (`measure.failed`, `mutation.*`,
+//! makes facts, so it is an operation of its own and never a moment of the checks; the checks (`measure.failed`, `mutation.*`,
 //! `sim.*`) only judge the record it leaves.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
-use super::ports::{AssetKind, Changes, IdSource, Store, StoreRevision};
+use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, context_id};
 use crate::domain::entity::measurement::{Counts, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
@@ -352,7 +353,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             failure: report.failure,
             evidence: report.evidence,
         })?;
-        self.keep_measurement(&measurement).await?;
+        self.keep_measurement(RecordTrigger::Measure, &measurement)
+            .await?;
         self.measured_words(&measurement).await
     }
 
@@ -464,29 +466,30 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             failure: report.failure,
             evidence: report.evidence,
         })?;
-        self.keep_measurement(&measurement).await?;
+        self.keep_measurement(RecordTrigger::Simulate, &measurement)
+            .await?;
         self.measured_words(&measurement).await
     }
 
-    /// Keeps `measurement` alone, trying again when another writer got in between.
-    async fn keep_measurement(&self, measurement: &Measurement) -> Result<(), AppError> {
+    /// Keeps `measurement` alone as the record of `trigger`, trying again when another writer got in between.
+    async fn keep_measurement(
+        &mut self,
+        trigger: RecordTrigger,
+        measurement: &Measurement,
+    ) -> Result<(), AppError> {
+        let record = || RecordChanges {
+            measurements: vec![measurement.clone()],
+            ..RecordChanges::default()
+        };
         for _ in 1..COMMIT_TRIES {
             let at: StoreRevision = self.store.revision().await?;
-            let changes = Changes {
-                measurements: vec![measurement.clone()],
-                ..Changes::default()
-            };
-            match self.store.commit(at, changes).await {
-                Err(StoreError::Conflict) => continue,
-                other => return Ok(other?),
+            match self.commit_record(trigger, at, record()).await {
+                Err(AppError::Store(StoreError::Conflict)) => continue,
+                other => return other,
             }
         }
         let at = self.store.revision().await?;
-        let changes = Changes {
-            measurements: vec![measurement.clone()],
-            ..Changes::default()
-        };
-        Ok(self.store.commit(at, changes).await?)
+        self.commit_record(trigger, at, record()).await
     }
 
     /// `<contract>:<label>` for each Clause the simulation `outcome` names, from the model as it is now. A Clause

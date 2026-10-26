@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use thiserror::Error;
 
 use super::descriptor::{Descriptor, Executor};
-use super::level::{Hook, Level};
+use super::level::{Level, Moment};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
 
@@ -30,9 +30,9 @@ pub enum JudgedRuleError {
         /// The field.
         field: &'static str,
     },
-    /// It belongs to no hook, so no one would be asked to judge it.
-    #[error("the judged rule `{0}` belongs to no hook")]
-    NoHooks(RuleId),
+    /// It belongs to no moment, so no one would be asked to judge it.
+    #[error("the judged rule `{0}` belongs to no moment")]
+    NoMoments(RuleId),
     /// It asks to be mandatory. A mandatory check refuses the use case that finds something, and a judged rule's
     /// result arrives after the use case, so it can refuse nothing.
     #[error(
@@ -58,8 +58,8 @@ pub struct JudgedDraft {
     pub fix: String,
     /// Literal words that hint where to look; they narrow the agent's reading, they decide nothing.
     pub when: Vec<String>,
-    /// The hooks it belongs to: at which of these moments the agent is asked to judge it.
-    pub hooks: Vec<Hook>,
+    /// The moments it belongs to: at which of these moments the agent is asked to judge it.
+    pub moments: Vec<Moment>,
     /// The level it has when no policy says otherwise.
     pub level: Level,
     /// What it judges: a finding about this kind of thing.
@@ -92,7 +92,7 @@ impl JudgedRule {
             false_when,
             fix,
             when,
-            mut hooks,
+            mut moments,
             level,
             subject,
             mandatory,
@@ -114,17 +114,17 @@ impl JudgedRule {
                 return Err(JudgedRuleError::Blank { rule: id, field });
             }
         }
-        if hooks.is_empty() {
-            return Err(JudgedRuleError::NoHooks(id));
+        if moments.is_empty() {
+            return Err(JudgedRuleError::NoMoments(id));
         }
-        hooks.sort();
-        hooks.dedup();
+        moments.sort();
+        moments.dedup();
         Ok(JudgedRule {
             descriptor: Descriptor {
                 id,
                 summary: Cow::Owned(summary),
                 help: Cow::Owned(fix.clone()),
-                hooks: Cow::Owned(hooks),
+                moments: Cow::Owned(moments),
                 default_level: level,
                 mandatory: false,
                 params: std::borrow::Cow::Borrowed(&[]),
@@ -143,7 +143,7 @@ impl JudgedRule {
     ///
     /// Version 2 hashes length-prefixed UTF-8 fields in this order: `chidev.judged-rule/v2`, id, subject,
     /// question, true, false. A field is its decimal byte length, `:`, then its bytes; text is exact.
-    /// The summary, fix, `when` hints, hooks and default level are left out: they describe, guide, schedule or
+    /// The summary, fix, `when` hints, moments and default level are left out: they describe, guide, schedule or
     /// weight the rule but do not change what is a finding, so editing them must not make saved judgments stale
     /// (policy level overrides are excluded for the same reason). Comments and TOML formatting do not matter.
     /// Changing this encoding requires a new format marker so existing records cannot silently acquire another
@@ -228,7 +228,7 @@ mod tests {
             false_when: "the clause is a definition".to_string(),
             fix: "reword it with a condition and an observable result".to_string(),
             when: vec!["should".to_string()],
-            hooks: vec![Hook::Put, Hook::Check, Hook::Put],
+            moments: vec![Moment::Edit, Moment::Check, Moment::Edit],
             level: Level::Warning,
             subject: SubjectKind::Clause,
             mandatory: false,
@@ -243,8 +243,8 @@ mod tests {
         assert_eq!(d.executor, Executor::Judged);
         assert!(!d.mandatory && d.params.is_empty());
         assert_eq!(d.default_level, Level::Warning);
-        // listed once each, in the order of the hooks
-        assert_eq!(&*d.hooks, [Hook::Put, Hook::Check]);
+        // listed once each, in the order of the moments
+        assert_eq!(&*d.moments, [Moment::Edit, Moment::Check]);
         assert_eq!(d.help, r.fix());
         assert_eq!(r.when(), ["should"]);
         assert_eq!(r.subject(), SubjectKind::Clause);
@@ -266,8 +266,8 @@ mod tests {
             JudgedRuleError::Mandatory(_)
         ));
         assert!(matches!(
-            with(|d| d.hooks.clear()),
-            JudgedRuleError::NoHooks(_)
+            with(|d| d.moments.clear()),
+            JudgedRuleError::NoMoments(_)
         ));
         assert!(matches!(
             with(|d| d.question = "  ".to_string()),
@@ -313,7 +313,7 @@ mod tests {
             |d| d.fix.push('!'),
             |d| d.when[0].push('!'),
             |d| d.when.push("must".into()),
-            |d| d.hooks.push(Hook::Resolve),
+            |d| d.moments.push(Moment::Resolve),
             |d| d.level = Level::Error,
         ];
         for change in others {

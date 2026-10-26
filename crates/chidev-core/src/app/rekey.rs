@@ -5,9 +5,10 @@
 use std::collections::BTreeMap;
 
 use super::change_set::items_error;
+use super::commit::{EditTrigger, ModelDelta};
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, IdSource, Store};
-use super::{App, AppError, context_id, input};
+use super::{App, AppError, Checked, context_id, input};
 use crate::domain::service::rekey::pair;
 use crate::domain::vo::id::{InterfaceId, ItemId};
 use crate::domain::vo::item_key::ItemKey;
@@ -59,12 +60,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// leaves it, and lines that declare something else take it to the next one (and the Interface with it); those
     /// are listed in [`Rekeyed::revised`]. A key that two Items would have, a provider that is not there or fails
     /// are refused with nothing changed. The change is kept as the store stood when the use case began, so a store
-    /// that has moved since refuses it. It is no change set and has no footprint.
+    /// that has moved since refuses it. It is no change set and has no footprint. It is an edit: a citation of an Item
+    /// it revised is behind, and the answer says so (`cite.stale`) like the answer of a put.
     pub async fn items_rekey(
         &mut self,
         context: &str,
         interface: &str,
-    ) -> Result<Rekeyed, AppError> {
+    ) -> Result<Checked<Rekeyed>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
         let ctx = context_id(&p, context)?;
@@ -128,14 +130,22 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
         }
         let revision = now.revision().number();
-        if *now != old {
-            self.commit_project(at, p).await?;
-        }
-        Ok(Rekeyed {
-            rekeyed,
-            revised,
-            unmatched,
-            revision,
+        // An Item whose lines declare something else is revised, and a citation of it is then behind: an edit like
+        // any other, told what it introduced.
+        let findings = if *now != old {
+            let delta = ModelDelta::new().with_project(p);
+            self.commit_edit(EditTrigger::RekeyItems, at, delta).await?
+        } else {
+            Vec::new()
+        };
+        Ok(Checked {
+            value: Rekeyed {
+                rekeyed,
+                revised,
+                unmatched,
+                revision,
+            },
+            findings,
         })
     }
 }

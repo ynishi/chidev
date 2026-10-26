@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use super::level::{Hook, Level};
+use super::level::{Level, Moment};
 use crate::domain::vo::finding::RuleId;
 
 /// Who runs a check. The three share the descriptor, the [`Finding`](super::Finding), the level and the policy.
@@ -18,17 +18,17 @@ pub enum Executor {
     ///
     /// Advisory checks are capped at warning; a gate is mandatory at error and fails closed on any
     /// execution or protocol failure. Successful candidate changes keep the result and execution evidence
-    /// atomically. Refused changes return their attempts without persisting them. At `put` the findings of a
-    /// successful run are held to what the put introduced, by their subjects, when the saved result of the rule
-    /// describes the model before the put; a failed run refuses a gate whatever was saved.
+    /// atomically. Refused changes return their attempts without persisting them. At [`Moment::Edit`] the findings
+    /// of a successful run are held to what the edit introduced, by their subjects, when the saved result of the
+    /// rule describes the model before the edit; a failed run refuses a gate whatever was saved.
     ///
-    /// [`crate::app::App::check_run`] explicitly executes and records check-hook programs.
+    /// [`crate::app::App::check_run`] explicitly executes and records check-moment programs.
     /// Reading check/status uses saved results and never starts a program. The program has the caller's
     /// permissions, not a sandbox; its executable checksum records identity, not confinement.
     External,
     /// A rule written as data (`checks/judged/*.toml`) that the agent driving chidev judges: chidev keeps the
     /// rule and the results, hands the agent the rule and a view of the model, and records what the agent
-    /// reports. It runs at no hook, so it can never be mandatory: its result arrives after the use case.
+    /// reports. It runs at no moment, so it can never be mandatory: its result arrives after the use case.
     Judged,
 }
 
@@ -50,17 +50,17 @@ impl Executor {
     }
 }
 
-/// What a check speaks about. It is not stored: [`Descriptor::kind`] reads it from the hooks, by whether the check
-/// runs at `put` (see [`Hook::Put`]).
+/// What a check speaks about. It is not stored: [`Descriptor::kind`] reads it from the moments, by whether the check
+/// runs at [`Moment::Edit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckKind {
-    /// It runs at `put` and speaks about what an edit made stale or took out of place (a citation behind its
-    /// target, a Pin whose basis moved, a keep that moved). At `put` it is held to what the edit introduced; at
-    /// the confirmation hooks the whole model is judged.
+    /// It runs at an edit and speaks about what an edit made stale or took out of place (a citation behind its
+    /// target, a Pin whose basis moved, a keep that moved). At an edit it is held to what the edit introduced; at
+    /// the confirmation moments the whole model is judged.
     Change,
-    /// It does not run at `put` and speaks about the state of the model: something is not there, not settled or
+    /// It does not run at an edit and speaks about the state of the model: something is not there, not settled or
     /// not measured yet (a Clause no Case cites, a Context without an Interface). It is judged at the
-    /// confirmation hooks and on demand.
+    /// confirmation moments and on demand.
     State,
 }
 
@@ -131,7 +131,7 @@ pub struct ParamSpec {
 
 /// A check described: what it is called, what it finds, where it runs, how serious it is by default.
 ///
-/// The texts and hooks are `Cow`s so that one type serves a builtin check, whose descriptor is a `static` that
+/// The texts and moments are `Cow`s so that one type serves a builtin check, whose descriptor is a `static` that
 /// borrows them, and a judged rule, whose descriptor is read from a file and owns them: the registry and the
 /// policy take `&Descriptor` of either without leaking the rule's strings to make them `'static`. The parameters
 /// are borrowed for builtins and owned for project-registered external checks.
@@ -144,11 +144,11 @@ pub struct Descriptor {
     /// Why it matters and what to do about a finding.
     pub help: Cow<'static, str>,
     /// The moments it runs at.
-    pub hooks: Cow<'static, [Hook]>,
+    pub moments: Cow<'static, [Moment]>,
     /// The level it has when no policy says otherwise.
     pub default_level: Level,
     /// Whether a policy may not lower it below `error` or turn it off (as rustc's `forbid`): what the check finds
-    /// must never be kept. At `put` only what the put introduced counts: a finding that was there before it does
+    /// must never be kept. At an edit only what the edit introduced counts: a finding that was there before it does
     /// not refuse an edit that did not make it.
     pub mandatory: bool,
     /// The parameters it takes.
@@ -158,12 +158,12 @@ pub struct Descriptor {
 }
 
 impl Descriptor {
-    /// What it speaks about, read from its hooks so that there is one source. A check that runs at `put` speaks
-    /// about what an edit made stale and is held there to what the edit introduced ([`CheckKind::Change`]); one
-    /// that does not speaks about the state of the model and is judged at the confirmation hooks
+    /// What it speaks about, read from its moments so that there is one source. A check that runs at an edit
+    /// speaks about what an edit made stale and is held there to what the edit introduced ([`CheckKind::Change`]);
+    /// one that does not speaks about the state of the model and is judged at the confirmation moments
     /// ([`CheckKind::State`]).
     pub fn kind(&self) -> CheckKind {
-        if self.runs_at(Hook::Put) {
+        if self.runs_at(Moment::Edit) {
             CheckKind::Change
         } else {
             CheckKind::State
@@ -175,8 +175,8 @@ impl Descriptor {
         self.params.iter().find(|p| p.name == name)
     }
 
-    /// Whether it runs at `hook`.
-    pub fn runs_at(&self, hook: Hook) -> bool {
-        self.hooks.contains(&hook)
+    /// Whether it runs at `moment`.
+    pub fn runs_at(&self, moment: Moment) -> bool {
+        self.moments.contains(&moment)
     }
 }

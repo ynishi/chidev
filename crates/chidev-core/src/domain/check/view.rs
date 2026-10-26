@@ -20,7 +20,7 @@ pub struct CheckView<'a> {
     /// Every change request, as the use case would leave them.
     pub change_requests: &'a [ChangeRequest],
     /// The latest measurement of each subject (an Interface for a mutation run, a sim Harness for a simulation)
-    /// and kind that has one. The hooks of a change give none: a measurement is read by the on-demand hook, and a
+    /// and kind that has one. The moments of a change give none: a measurement is read by the on-demand moment, and a
     /// change does not move it.
     pub measurements: &'a [Measurement],
     /// What the settings digest of the measure is now, for each Interface the runner can say it for; an
@@ -33,7 +33,7 @@ pub struct CheckView<'a> {
 }
 
 /// A change to the model, as the states on either side of it: what the use case read, and what it would keep.
-/// A use case that edits gives the checks of the `put` hook both, so that only what the edit introduced is
+/// A use case that edits gives the checks of an edit both, so that only what the edit introduced is
 /// reported. A use case that confirms (a pin, a resolution) or a person who asks gives one [`CheckView`].
 #[derive(Debug, Clone, Copy)]
 pub struct Change<'a> {

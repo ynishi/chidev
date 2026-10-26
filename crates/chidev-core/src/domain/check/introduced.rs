@@ -27,7 +27,7 @@ mod tests {
     use super::*;
     use crate::domain::check::descriptor::{Descriptor, Executor};
     use crate::domain::check::finding::Ground;
-    use crate::domain::check::level::{Hook, Level};
+    use crate::domain::check::level::{Level, Moment};
     use crate::domain::vo::finding::{RuleId, Subject};
     use crate::domain::vo::id::{ClauseId, test_uuid};
     use crate::domain::vo::target::Target;
@@ -36,7 +36,7 @@ mod tests {
         id: RuleId::from_static("t.rule"),
         summary: Cow::Borrowed("s"),
         help: Cow::Borrowed("h"),
-        hooks: Cow::Borrowed(&[Hook::Put]),
+        moments: Cow::Borrowed(&[Moment::Edit]),
         default_level: Level::Warning,
         mandatory: false,
         params: Cow::Borrowed(&[]),
@@ -47,7 +47,7 @@ mod tests {
         id: RuleId::from_static("t.other"),
         summary: Cow::Borrowed("s"),
         help: Cow::Borrowed("h"),
-        hooks: Cow::Borrowed(&[Hook::Put]),
+        moments: Cow::Borrowed(&[Moment::Edit]),
         default_level: Level::Warning,
         mandatory: false,
         params: Cow::Borrowed(&[]),

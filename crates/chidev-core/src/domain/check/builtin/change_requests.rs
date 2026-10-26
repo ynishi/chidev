@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::domain::check::descriptor::{Descriptor, Executor};
 use crate::domain::check::finding::{Ground, LineState};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
@@ -31,7 +31,7 @@ static RESOLVED_WITHOUT_WORK: Descriptor = Descriptor {
            disagree. If nothing needed to change, resolve it as `invalid` or `wont_do` with the reason; if the \
            work was done under another request, say so in its resolution or reopen it.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Resolve, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -72,7 +72,7 @@ static TARGETS_UNTOUCHED: Descriptor = Descriptor {
            target needed nothing), but the request and the work say different things: check the targets, or the \
            resolution. A request with no work at all is `cr.resolved-without-work`, not this.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Resolve, Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -115,7 +115,7 @@ static AWAITING_DECISION: Descriptor = Descriptor {
            for a decision maker. What depends on the answer waits; the option chosen may expect more of other \
            targets. Apply the Policy if a line covers it, or ask a person, then decide it (`cr_decide`).",
     ),
-    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Resolve, Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -157,7 +157,7 @@ static POLICY_LINE_GONE: Descriptor = Descriptor {
            but what it was derived from is not what it was. If the decision should differ, open a change request \
            whose Crux supersedes it.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -225,7 +225,7 @@ static KEEP_MOVED: Descriptor = Descriptor {
            done would record a contradiction. Either the change was meant (name the target in a request that asks \
            for it) or the target should be put back.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Resolve, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Resolve, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -277,7 +277,7 @@ static OUT_OF_FRAME: Descriptor = Descriptor {
            a parent's targets neither widen nor bound its parts. Either the change was meant (name the target in \
            `targets`, or apply the change set for the request it belongs to) or it should be taken back.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -327,7 +327,7 @@ static INTENT_MISMATCH: Descriptor = Descriptor {
            It may be right (rewording a Clause keeps the behaviour), but one of the two is likely wrong: check the \
            intent and the targets.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Resolve, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Resolve, Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),

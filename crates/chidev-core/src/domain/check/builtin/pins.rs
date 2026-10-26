@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 
-use super::CONFIRM_HOOKS;
+use super::CONFIRM_MOMENTS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding, Ground};
@@ -25,7 +25,7 @@ static STALE_PIN: Descriptor = Descriptor {
         "The interface, a harness that checks it or a contract it cites changed after the code was pinned. Run \
            the harness against the code and pin it again.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Pin, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Pin, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -100,7 +100,7 @@ static UNPINNED: Descriptor = Descriptor {
     help: Cow::Borrowed(
         "Nothing records which code the harness checked. Pin the code once a case checks the interface.",
     ),
-    hooks: Cow::Borrowed(CONFIRM_HOOKS),
+    moments: Cow::Borrowed(CONFIRM_MOMENTS),
     default_level: Level::Note,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),

@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
@@ -53,7 +53,7 @@ static MEASURE_FAILED: Descriptor = Descriptor {
            or a command failed, or the time ran out. The evidence of the run is in its record. Fix the cause and run \
            the measure again; an earlier run is not used while the latest one failed.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -90,7 +90,7 @@ static UNMEASURED: Descriptor = Descriptor {
         "Nothing records how strong the harness is against changes of this code. Run the mutate measure for the \
            interface once its harness is in place.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -127,7 +127,7 @@ static STALE: Descriptor = Descriptor {
         "The pinned code, the interface, a harness that checks it, a contract it cites, or the measure settings \
            changed after the run. Its result says nothing of the code as it is now. Run the measure again.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -171,7 +171,7 @@ static CAPPED: Descriptor = Descriptor {
            left out. Raise `max_mutants` in `[measure]` and run the measure again to cover every site, or accept \
            the sample knowing it is one. A run that stopped early (the budget) is not capped; it failed.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -214,7 +214,7 @@ static SURVIVED: Descriptor = Descriptor {
            place does. Either a case is missing (change the harness), or the change does not alter behaviour (an \
            equivalent mutant) and the survivor can be accepted with the reason.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Note,
     mandatory: false,
     params: Cow::Borrowed(&[]),

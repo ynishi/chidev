@@ -16,7 +16,7 @@ use chidev_core::app::{
     SubjectInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
-use chidev_core::domain::check::{FindingState, Hook};
+use chidev_core::domain::check::{FindingState, Moment};
 use chidev_core::domain::repository::{ChangeRequestRepository, ProjectRepository};
 use chidev_core::domain::vo::finding::{RuleId, SubjectKind};
 use chidev_core::domain::vo::model_section::ModelSection;
@@ -121,7 +121,7 @@ fn subjects() -> Vec<(&'static str, Option<SubjectInput>)> {
 fn judged_registry() -> Registry {
     let rules = subjects().into_iter().map(|(kind, _)| {
         judged::parse(&format!(
-            "id='judged.{kind}'\nsummary='review'\nsubject='{kind}'\nhooks=['check']\nlevel='warning'\nquestion='q'\ntrue='t'\nfalse='f'\nfix='x'\n"
+            "id='judged.{kind}'\nsummary='review'\nsubject='{kind}'\nmoments=['check']\nlevel='warning'\nquestion='q'\ntrue='t'\nfalse='f'\nfix='x'\n"
         )).unwrap()
     }).collect();
     Registry::builtin_with_judged(rules, &[]).unwrap()
@@ -524,7 +524,7 @@ impl ExternalExecutor for CaseExecutor {
 async fn an_external_case_finding_is_addressed_without_changing_its_staleness() {
     let rule = ExternalRule::new(
         RuleId::from_static("ext.case"),
-        vec![Hook::Check],
+        vec![Moment::Check],
         vec![ModelSection::Harnesses],
         false,
         "config".into(),

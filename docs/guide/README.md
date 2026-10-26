@@ -20,9 +20,10 @@ directory is read by the command or shipped with it.
    - `{"op":"view",..}` and `{"op":"status"}`: the model as it is kept, and
      the state of its Pins, change requests and checks;
    - `{"op":"check"}`, and `{"op":"check","context":..}` for one Context's
-     share: what the whole model is found to lack. A put does not say it, since
+     share: what the whole model is found to lack. An edit does not say it, since
      an edit cannot finish the model; `{"op":"check_list"}` shows, for each
-     check, the `kind` and the `hooks` it runs at.
+     check, the `kind` and the `moments` it runs at (see
+     [Triggers and moments](../../README.md#triggers-and-moments)).
 
 When this guide and the README or the RustDoc disagree, they win: the guide
 describes a way of working, they describe what the command does.
