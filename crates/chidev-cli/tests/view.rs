@@ -348,7 +348,7 @@ fn without_a_name_the_schemas_there_are_are_listed() {
         .iter()
         .map(|s| s["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(names, ["ops", "view"]);
+    assert_eq!(names, ["ops", "view", "external-call", "external-reply"]);
     // what a name prints carries the title and the id the list gives
     for s in schemas {
         let printed = schema(&[s["name"].as_str().unwrap()]);
@@ -365,4 +365,88 @@ fn an_unknown_name_is_refused_by_the_parser() {
         .expect("chidev runs");
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn the_schemas_of_an_external_check_describe_the_request_it_is_sent_and_the_reply_it_gives() {
+    use std::os::unix::fs::PermissionsExt;
+    let call = schema(&["external-call"]);
+    let reply = schema(&["external-reply"]);
+    assert_eq!(call["title"], "chidev-external-call 2");
+    assert_eq!(call["$id"], "urn:chidev:schema:external-call:2");
+    assert_eq!(reply["title"], "chidev-external-reply 2");
+    assert_eq!(reply["$id"], "urn:chidev:schema:external-reply:2");
+    // the words a reply may give are the ones it is read with
+    assert_eq!(reply["properties"]["protocol"]["enum"], json!([1, 2]));
+    let finding = &reply["$defs"]["ExternalFinding"]["properties"];
+    assert_eq!(
+        finding["level"]["enum"],
+        json!(["note", "warning", "error", null])
+    );
+    assert_eq!(
+        reply["$defs"]["ExternalSubject"]["properties"]["kind"]["enum"],
+        json!([
+            "change_request",
+            "context",
+            "interface",
+            "item",
+            "clause",
+            "case"
+        ])
+    );
+    assert_eq!(
+        call["properties"]["moment"]["enum"],
+        json!(["edit", "pin", "resolve", "check"])
+    );
+
+    // a program that keeps what it is sent, and answers with a finding
+    let dir = fresh_dir("external-schemas");
+    let answer =
+        json!({"protocol":2,"findings":[{"rule":"ext.keep","message":"kept","level":"note"}]});
+    let checker = dir.join("checker");
+    std::fs::write(
+        &checker,
+        format!("#!/bin/sh\ncat > request.json\nprintf '%s' '{answer}'\n"),
+    )
+    .expect("a file");
+    std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    std::fs::write(
+        dir.join("chidev.toml"),
+        "[external.\"ext.keep\"]\ncommand='./checker'\nmoments=['check']\nreads=['contracts','change_requests']\n",
+    )
+    .expect("a file");
+    let mut ops: Vec<Value> = setup();
+    ops.push(json!({"op":"check_run"}));
+    let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
+    std::fs::write(dir.join("ops.jsonl"), text).expect("a file");
+    let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
+        .current_dir(&dir)
+        .arg("exec")
+        .arg("ops.jsonl")
+        .output()
+        .expect("chidev runs");
+    assert!(out.status.success(), "{out:#?}");
+    let last: Value = serde_json::from_str(
+        String::from_utf8(out.stdout)
+            .expect("utf-8")
+            .lines()
+            .last()
+            .expect("a result"),
+    )
+    .expect("one JSON object");
+    assert_eq!(
+        last["external"][0]["findings"][0]["message"], "kept",
+        "{last:#?}"
+    );
+
+    let request: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("request.json")).expect("the request"),
+    )
+    .expect("one JSON document");
+    keys_fit(&request, &call, &call, "request");
+    keys_fit(&answer, &reply, &reply, "reply");
+    let with_subject = json!({"protocol":1,"findings":[{"rule":"ext.keep","message":"m",
+        "subject":{"kind":"context","id":"01a17790-2c62-72dd-8b3a-58ac6f178fab"}}]});
+    keys_fit(&with_subject, &reply, &reply, "reply");
 }

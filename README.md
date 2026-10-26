@@ -300,6 +300,8 @@ read and write them, so a schema and the reading cannot differ:
 chidev schema          # lists the schemas, with the title and the id of each
 chidev schema ops      # one line of exec: an operation. title "chidev-exec 1", $id urn:chidev:schema:ops:1
 chidev schema view     # the `view` of the operation `view`. title "chidev-view 3", $id urn:chidev:schema:view:3
+chidev schema external-call   # what an external check is sent (see "External checks"). title "chidev-external-call 2"
+chidev schema external-reply  # what an external check answers. title "chidev-external-reply 2"
 ```
 
 - **A schema is a necessary condition, not a sufficient one.** It says what a line
@@ -452,12 +454,28 @@ a program is told when it is asked. A response with no findings is
 `{"protocol":2,"findings":[]}`; a response of `protocol` 1 is accepted as well (its
 form did not change), and any other version is a failed run. Diagnostics
 go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`, and/or
-`change_requests`; unrequested sections are omitted, and a word that is not one is
-refused when `chidev.toml` is loaded. Context metadata is always sent. The model
-sent is the `view` of the operation of that name, for every Context and the
-sections read. A program can name only the requested rule and subjects present in that
-restricted view. See the RustDoc of `app::ports::external` for the wire types,
-and `infra::external` for process limits and platform support.
+`change_requests`; unrequested sections are omitted, and a word that is not one, or
+no word at all, is refused when `chidev.toml` is loaded. Context metadata is always
+sent. The model sent is the `view` of the operation of that name, for every Context
+and the sections read.
+
+`chidev schema external-call` and `chidev schema external-reply` print the shape of
+the request and of the reply. A reply is a `protocol` and its `findings`, each a
+`rule`, a `message`, and, optionally, a `subject` (`{"kind":..,"id":..}`) and a
+`level`:
+
+```json
+{"protocol":2,"findings":[{"rule":"ext.contract-consistency","message":"C2 contradicts C1",
+ "subject":{"kind":"clause","id":"<the id of the Clause in the model sent>"},"level":"warning"}]}
+```
+
+What the shape does not say, and a reply is refused for (a failed run): the `rule` of
+a finding is the rule the program was asked for; its `message` is not blank; its
+`subject` is one present in the model sent. A finding with no `subject` is about the
+whole project, and one with no `level` is at the level the policy gives the rule;
+policy caps a `level`, and a gate makes every finding an error. See the RustDoc of
+`app::ports::external` for the wire types, and `infra::external` for process limits
+and platform support.
 
 The recorded SHA-256 identifies the executable read before launch. It does not
 cover script arguments, dependencies, or later filesystem changes; displaying a

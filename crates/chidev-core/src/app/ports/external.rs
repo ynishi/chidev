@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use crate::app::model_view::ModelSlice;
+use crate::domain::check::{Level, Moment};
 use crate::domain::vo::finding::RuleId;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -59,6 +61,18 @@ impl Serialize for ExternalModelView {
     }
 }
 
+/// The schema of the slice: the order of the keys is the only thing [`Serialize`] above changes, and a schema does not
+/// state an order.
+impl JsonSchema for ExternalModelView {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ExternalModelView".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        ModelSlice::json_schema(generator)
+    }
+}
+
 /// `value` as a JSON value, which keeps the keys of an object in the order of their names.
 fn by_name<T: Serialize + ?Sized, E: serde::ser::Error>(value: &T) -> Result<serde_json::Value, E> {
     serde_json::to_value(value).map_err(E::custom)
@@ -74,12 +88,56 @@ pub const REQUEST_PROTOCOL: u32 = 2;
 /// answers as it did keeps working once it reads `moment`; any other version is a failed run.
 pub const REPLY_PROTOCOLS: [u32; 2] = [1, 2];
 
+/// The kinds of subject a finding may name: the kinds of the model a program is sent whose ids it can check against
+/// that model.
+pub const SUBJECT_KINDS: [&str; 6] = [
+    "change_request",
+    "context",
+    "interface",
+    "item",
+    "clause",
+    "case",
+];
+
+/// The schema of a request's `protocol`: [`REQUEST_PROTOCOL`].
+fn request_protocol_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "integer", "const": REQUEST_PROTOCOL })
+}
+
+/// The schema of a reply's `protocol`: one of [`REPLY_PROTOCOLS`].
+fn reply_protocol_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "integer", "enum": REPLY_PROTOCOLS })
+}
+
+/// The schema of `moment`: the words of the moments.
+fn moment_schema(_: &mut SchemaGenerator) -> Schema {
+    let words: Vec<&str> = Moment::ALL.iter().map(|m| m.word()).collect();
+    json_schema!({ "type": "string", "enum": words })
+}
+
+/// The schema of a subject's `kind`: one of [`SUBJECT_KINDS`].
+fn subject_kind_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "enum": SUBJECT_KINDS })
+}
+
+/// The schema of a finding's `level`: the word of a level a check reports at (every level but `off`), or none.
+fn finding_level_schema(_: &mut SchemaGenerator) -> Schema {
+    let words: Vec<serde_json::Value> = [Level::Note, Level::Warning, Level::Error]
+        .iter()
+        .map(|l| serde_json::Value::from(l.word()))
+        .chain([serde_json::Value::Null])
+        .collect();
+    json_schema!({ "enum": words })
+}
+
 /// One process request, also its stdin JSON format.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ExternalCall {
-    /// Process protocol version ([`REQUEST_PROTOCOL`]).
+    /// The version of the request.
+    #[schemars(schema_with = "request_protocol_schema")]
     pub protocol: u32,
     /// The moment the program is asked at: `edit`, `pin`, `resolve` or `check`.
+    #[schemars(schema_with = "moment_schema")]
     pub moment: String,
     /// Exactly one rule in the first protocol implementation.
     pub rules: Vec<String>,
@@ -92,17 +150,18 @@ pub struct ExternalCall {
 }
 
 /// A subject by kind and UUID, validated against the sent model by the app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSubject {
-    /// Subject kind.
+    /// The kind of the subject: a kind of the model the program was sent whose ids it can be checked against.
+    #[schemars(schema_with = "subject_kind_schema")]
     pub kind: String,
     /// Subject UUID.
     pub id: String,
 }
 
 /// An untrusted finding from a program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalFinding {
     /// The requested rule.
@@ -114,14 +173,16 @@ pub struct ExternalFinding {
     pub message: String,
     /// Optional severity, validated and bounded by policy.
     #[serde(default)]
+    #[schemars(schema_with = "finding_level_schema")]
     pub level: Option<String>,
 }
 
 /// The stdout JSON format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalReply {
-    /// One of [`REPLY_PROTOCOLS`].
+    /// The version of the reply: one of the versions accepted.
+    #[schemars(schema_with = "reply_protocol_schema")]
     pub protocol: u32,
     /// Every finding; empty means a successful check with no findings.
     pub findings: Vec<ExternalFinding>,
