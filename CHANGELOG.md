@@ -15,6 +15,12 @@ and this project adheres to
   words that say their form (`[first, last]`, `[n, n]` for one line), not
   serde's ("invalid length 1, expected a tuple of size 2"). The README says an evidence's `lines` are the
   first and last line.
+- The guide (`docs/guide/PROCEDURE.md`) lets a Case the implementer finds
+  wrong against its Clause go back to the Harness writer with that Clause, who
+  puts the corrected Harness `for` the same part (step 4 no longer reads as one
+  put per part), and points to an external check at the `pin` moment with
+  `gate = true` for refusing a `pin` while the tests fail, since chidev does not
+  run them (step 5).
 
 - The guide (`docs/guide/PROCEDURE.md`) decides six points a first version left
   to judgement: a question is an Assumption when the requirements' text, the
