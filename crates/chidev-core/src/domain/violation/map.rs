@@ -15,10 +15,11 @@ use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET, CR_ALREADY_RESOLVED,
     CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN,
     CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN,
-    INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE,
-    PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT,
-    SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
-    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE,
+    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
+    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
+    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
+    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
@@ -277,9 +278,17 @@ impl InterfaceError {
             InterfaceError::BlankItem { id } => {
                 Violation::of(INTERFACE_BLANK_ITEM).about(Party::Target(Target::Item(*id)))
             }
-            InterfaceError::DuplicateId(_) | InterfaceError::RangeOutside { .. } => {
-                Violation::unmapped(self)
-            }
+            InterfaceError::RangeOutside {
+                id,
+                first,
+                last,
+                total,
+            } => Violation::of(INTERFACE_LINES_OUTSIDE)
+                .about(Party::Target(Target::Item(*id)))
+                .with_value("first", Value::Count(*first))
+                .with_value("last", Value::Count(*last))
+                .with_value("total", Value::Count(*total)),
+            InterfaceError::DuplicateId(_) => Violation::unmapped(self),
         }
     }
 }
@@ -294,9 +303,17 @@ impl HarnessError {
             HarnessError::BuildsOfTests(harness) => {
                 Violation::of(SIM_BUILDS_OF_TESTS).about(Party::Target(Target::Harness(*harness)))
             }
-            HarnessError::DuplicateId(_)
-            | HarnessError::RangeOutside { .. }
-            | HarnessError::NoItem(_) => Violation::unmapped(self),
+            HarnessError::RangeOutside {
+                id,
+                first,
+                last,
+                total,
+            } => Violation::of(HARNESS_LINES_OUTSIDE)
+                .about(Party::Target(Target::Case(*id)))
+                .with_value("first", Value::Count(*first))
+                .with_value("last", Value::Count(*last))
+                .with_value("total", Value::Count(*total)),
+            HarnessError::DuplicateId(_) | HarnessError::NoItem(_) => Violation::unmapped(self),
         }
     }
 }
@@ -577,9 +594,7 @@ mod tests {
         "ContractError::DuplicateLabel",
         "HarnessError::DuplicateId",
         "HarnessError::NoItem",
-        "HarnessError::RangeOutside",
         "InterfaceError::DuplicateId",
-        "InterfaceError::RangeOutside",
         "PinError::UnknownInterface",
         "PolicyError::BadLineId",
         "PolicyError::DuplicateLine",
@@ -746,7 +761,7 @@ mod tests {
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
         assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
-        assert_eq!(STILL_UNMAPPED.len(), 29);
+        assert_eq!(STILL_UNMAPPED.len(), 27);
     }
 
     #[test]

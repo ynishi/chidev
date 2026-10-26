@@ -421,6 +421,45 @@ fn the_example_of_each_rule_of_the_items_of_an_interface_is_refused_by_that_rule
 }
 
 #[test]
+fn lines_past_the_code_are_refused_by_a_rule_that_names_them() {
+    let ids = ["interface.lines-outside", "harness.lines-outside"];
+    let ops: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"op":"explain","rule":id}))
+        .collect();
+    let explained = run("diag-lines-explain", &ops);
+    for e in &explained {
+        assert!(!e["help"].as_str().unwrap().is_empty(), "{e:#?}");
+    }
+    let examples: Vec<Value> = explained
+        .iter()
+        .map(|e| serde_json::from_str(e["example"].as_str().unwrap()).expect("an operation"))
+        .collect();
+    let refused = after_setup("diag-lines", &examples);
+    for (id, result) in ids.iter().zip(&refused) {
+        let d = one(result);
+        assert_eq!(d["code"], *id, "{result:#?}");
+        // the lines given and the lines the code has are in the sentence and in the values
+        assert_eq!(
+            (
+                &d["values"]["first"],
+                &d["values"]["last"],
+                &d["values"]["total"]
+            ),
+            (&json!(2), &json!(3), &json!(1)),
+            "{d:#?}"
+        );
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains("lines 2 to 3, but the code ends at line 1"),
+            "{d:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_finding_is_a_diagnostic_too_with_its_rule_as_the_code_and_the_help_of_the_rule() {
     let r = after_setup("diag-finding", &[json!({"op":"check"})]);
     let findings = r[0]["findings"].as_array().unwrap();
