@@ -500,6 +500,33 @@ fn a_second_init_is_refused_by_a_rule() {
 }
 
 #[test]
+fn lines_of_another_length_are_refused_with_the_form_they_take() {
+    let r = after_setup(
+        "diag-lines-form",
+        &[
+            json!({"op":"interface_put","context":"core","name":"api","source":"fn price()\n",
+                "items":[{"key":"price","lines":[1]}]}),
+            json!({"op":"harness_put","context":"core","name":"tests","source":"fn t() {}\n",
+                "cases":[{"name":"t","lines":[1,1,1],"items":[{"interface":"api","key":"price"}]}]}),
+            json!({"op":"cr_open","title":"T","intent":"change_behavior",
+                "assumptions":[{"statement":"s","reason":"r",
+                    "evidence":[{"repo":{"path":"R.md","lines":[16]}}]}]}),
+        ],
+    );
+    for (result, length) in r.iter().zip([1, 3, 1]) {
+        let d = one(result);
+        assert_eq!(d["code"], "input.invalid", "{d:#?}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!(
+                "`lines` is [first, last], two line numbers counted from 1 ([n, n] for one line), not a list of {length}"
+            )),
+            "{d:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_finding_is_a_diagnostic_too_with_its_rule_as_the_code_and_the_help_of_the_rule() {
     let r = after_setup("diag-finding", &[json!({"op":"check"})]);
     let findings = r[0]["findings"].as_array().unwrap();
