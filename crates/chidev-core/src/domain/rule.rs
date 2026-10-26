@@ -135,6 +135,10 @@ pub const PIN_UNCHECKED: RuleId = RuleId::from_static("pin.unchecked");
 pub const INTERFACE_KEY_TAKEN: RuleId = RuleId::from_static("interface.key-taken");
 /// An Item of an Interface is on lines with nothing in them.
 pub const INTERFACE_BLANK_ITEM: RuleId = RuleId::from_static("interface.blank-item");
+/// An Item of an Interface is on lines its code does not have.
+pub const INTERFACE_LINES_OUTSIDE: RuleId = RuleId::from_static("interface.lines-outside");
+/// A Case of a Harness is on lines its code does not have.
+pub const HARNESS_LINES_OUTSIDE: RuleId = RuleId::from_static("harness.lines-outside");
 /// An Item replaces a key that the same put still gives to an Item.
 pub const INPUT_REPLACES_KEPT: RuleId = RuleId::from_static("input.replaces-kept");
 /// Two Items of a put replace one key, or two renames name one key.
@@ -436,6 +440,24 @@ static RULES: &[Rule] = &[
         message: "{s0} is on lines with nothing in them, so it declares nothing",
         values: &[],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n\n","items":[{"key":"a","lines":[2,2]}]}"#,
+    },
+    Rule {
+        id: INTERFACE_LINES_OUTSIDE,
+        kind: RuleKind::Invariant,
+        summary: "An Item is on lines of its Interface's code.",
+        help: "`lines` are the first and last line of the Item's declaration in `source`, counted from 1, so they cannot pass the last line of it. Count them in the code as it is put (a `source_file` is read when the operation runs), and put the Interface again. When `items_rekey` is refused so, the lines came from the provider, not from you: the provider read the code wrongly.",
+        message: "{s0} is on lines {first} to {last}, but the code ends at line {total}",
+        values: &["first", "last", "total"],
+        example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n","items":[{"key":"a","lines":[2,3]}]}"#,
+    },
+    Rule {
+        id: HARNESS_LINES_OUTSIDE,
+        kind: RuleKind::Invariant,
+        summary: "A Case is on lines of its Harness's code.",
+        help: "`lines` are the first and last line of the Case in `source` (its test, an attribute above it included, or its case of a simulation), counted from 1, so they cannot pass the last line of it. Count them in the code as it is put (a `source_file` is read when the operation runs), and put the Harness again.",
+        message: "{s0} is on lines {first} to {last}, but the code ends at line {total}",
+        values: &["first", "last", "total"],
+        example: r##"{"op":"harness_put","context":"core","name":"tests","source":"#[test] fn t() {}\n","cases":[{"name":"t","lines":[2,3],"items":[{"interface":"api","key":"price"}]}]}"##,
     },
     Rule {
         id: PIN_UNCHECKED,

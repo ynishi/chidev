@@ -92,6 +92,12 @@ and this project adheres to
 
 ### Added
 
+- An Item or a Case whose `lines` pass the end of its code is refused by a rule
+  of its own, `interface.lines-outside` or `harness.lines-outside`, which
+  `explain` describes; it was refused before with no rule
+  (`domain.unmapped`). The README says what a Case's `lines` are: the first and
+  last line of its test, an attribute above it included, or of its case of a
+  simulation.
 - The record of the checks that were run keeps the use case that ran them: a
   `trigger` column on `check_invocations` (added to a database made before it,
   with no layout change; the rows already there have none). The moment of a row

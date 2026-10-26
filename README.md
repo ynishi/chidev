@@ -101,7 +101,8 @@ belong):
   The answer has the asset's `id` and `revision`.
 - `interface_put` is the same for an Interface: `source` is its code, and each
   item has its `key`, the first and last `lines` it is on (from 1) and, when it is
-  renamed, `replaces` (the key it had) to keep its id.
+  renamed, `replaces` (the key it had) to keep its id. Lines past the end of
+  `source` are refused (`interface.lines-outside`).
   - The `key` is the name the Item is known by: a path such as `price` or
     `Stack::push`, one line, written by you or found by a provider (chidev does not
     read it; see `items` below). It is the Item's identity: an Item whose key is one
@@ -178,7 +179,10 @@ belong):
     it began: a store that has moved since refuses it. It is an edit, so the answer
     has `findings`: a citation it makes stale (`cite.stale`) is one.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
-  a new Harness) or `sim`. A Case of tests cites one Item at least and any Clauses;
+  a new Harness) or `sim`. Each Case has its `name` and the first and last `lines`
+  it is on in `source` (from 1): its test, an attribute above it included, or its
+  case of a simulation; lines past the end of `source` are refused
+  (`harness.lines-outside`). A Case of tests cites one Item at least and any Clauses;
   a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
   whose pinned code it runs (see "Simulation"). `context` in a citation (default:
   the Case's own) reaches a Context that one uses. A citation records the revision
