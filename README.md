@@ -951,7 +951,8 @@ does not know (`change` and `remove` of earlier versions among them).
 - `keep`: the targets that must stay as they are; the revision recorded at
   `cr_open` is compared, whoever moved the target.
 - Each option of the Crux takes the same `targets` / `keep` lists (and
-  `wording`, the exact new text of the definitions). `cr_decide` records the
+  `wording`, the exact new text of the definitions, and `consequence`, free text
+  saying what else choosing it affects). `cr_decide` records the
   revision each of them has at that moment. Deciding with the decision maker's
   own wording, or leaving it unspecified, names nothing more.
 - Neither list gates the closing of the request. `status` shows, for each of its
@@ -1044,7 +1045,7 @@ removing a feature):
 `issuer`, `state`, `answer`, `resolution` and `history`, its `targets` with what
 the work did to each, its `keep` with whether each moved, its `work` and its
 `out_of_frame`. It lists a request whose Crux has no decision under `awaiting`
-(title, kind, options with what each names, the recommendation with its
+(title, kind, options with what each names and its `consequence`, the recommendation with its
 confidence, and the importance), and the unresolved requests one of whose `keep`
 moved under `keep_moved`. The checks:
 
@@ -1125,7 +1126,8 @@ record who decided what, on which basis, strictly and immutably, because it
 cannot be reproduced. It applies to every change request and finding (Contracts,
 Interfaces, Harness implementation, code), not only to the specification.
 
-- The Crux has a `kind`, its `options` (each with the expectations it asks), a
+- The Crux has a `kind`, its `options` (each with the expectations it asks and,
+  optionally, its `consequence`: what else choosing it affects), a
   `recommended` choice `{choice, reason?, confidence?}` where `confidence` is a
   percentage from 0 to 100, an `importance` (`low`, `normal` or `high`), and
   `supersedes`, the title of a change request whose answered Crux this one

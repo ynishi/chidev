@@ -30,14 +30,20 @@ take several, one after the other, as long as the Harness role is kept apart.
 | role | reads | does |
 |---|---|---|
 | intake | the request, `status`, `view` | opens the change requests, in the requester's words |
-| designer | the assets (`view`) | puts the Contracts and Interfaces |
+| designer | the requirements and their acceptance examples, the assets (`view`) | puts the Contracts and Interfaces |
 | Harness writer (blind) | the Contracts and Interfaces only, never the code | writes the tests and puts the Harness |
 | implementer | everything | writes the code, runs the tests, pins it |
 | decision maker | the Crux, the Policy | decides a Crux (`cr_decide`), resolves requests |
 
 The Harness writer is blind so that the tests check what the Contracts promise,
 not what the code happens to do. A role that has read the implementation does
-not put a Harness.
+not put a Harness. What the Harness writer needs from the requirements, an
+acceptance example included, the designer has put into a Contract: an example
+that shows a promise becomes a Clause (or the wording of one), and an example
+that shows something no Clause promises is a question for step 2 (an
+Assumption or a Crux) before it is a Case: once the answer gives it a Clause,
+a Case checks it like any other. A Harness writer that finds it cannot write a
+test from the Contracts and Interfaces sends the gap back to the designer.
 
 ## The loop
 
@@ -47,13 +53,22 @@ not put a Harness.
 2. **Split.** Read the request against the Contracts and Interfaces (`view`).
    For each part, open a request with `parent` set, naming what it will revise
    or retire (`targets`) and what must stay (`keep`). Name the container when a
-   part adds something (the Contract that takes a new Clause). For a question
-   that comes up:
+   part adds something (the Contract that takes a new Clause). Keep the
+   Contracts, the Interfaces and the Harness of one Context in one part unless
+   there is a reason to split them. For a question that comes up:
    - the repository and general knowledge answer it: record an Assumption,
      with its evidence, and go on;
    - a choice has to be made: give the part a `crux` with its options and a
-     recommendation. The work that depends on the answer waits; the rest goes
-     on.
+     recommendation. The change an option makes is its `wording` and its
+     `targets`: name there the assets that already exist and that choosing it
+     would change beyond what the part names (an Interface whose types it
+     changes); a target has to exist when the request opens. Say in its
+     `consequence` what else choosing it affects (what a user of the program
+     sees, what is not there yet to be named). The work that depends on the
+     answer waits: the Clause that promises the point, the Cases that check
+     it, and the code that keeps it. The rest goes on. The code written
+     meanwhile still does something at that point, but nothing promises it;
+     it is not the answer, and the answer's work may change it.
 
    See [Change requests](../../README.md#change-requests) and
    [Crux, Policy and Assumption](../../README.md#crux-policy-and-assumption).
@@ -62,10 +77,22 @@ not put a Harness.
    ends in. Keep an Item's id across a rename with `replaces`. Raise a Context
    to `contract` basis when its behaviour needs promises a signature cannot
    carry. See [Change sets](../../README.md#change-sets).
+   - Write an Interface's `source` as a caller sees it, since the Harness
+     writer has nothing else to call it from: the path a caller writes (the
+     crate and module), and for a program, its name, its arguments and what it
+     reads and writes. Write what is not a declaration as comments of the
+     language (so that the source still parses, as a provider needs when
+     `items` is left out), outside the `lines` of the Items: rewording it then
+     leaves the Items as they are, though it is still a change of the
+     Interface, which moves its revision, makes its Pin stale and, where the
+     project measures, its mutation and simulation runs too.
 4. **Harness (blind).** The Harness writer writes the tests from the Contracts
-   and Interfaces, and puts the Harness in a `change_set` `for` the same part:
-   every Case cites the Items it calls and the Clauses it checks. Every Clause
-   added or changed is cited by some Case.
+   and Interfaces, and puts the Harness in a `change_set` `for` the part whose
+   change that put carries: every Case cites the Items it calls and the
+   Clauses it checks. Every Clause added or changed is cited by some Case. A
+   put replaces the whole Harness, so put it once per part: the put that adds
+   the Cases of an answered Crux, and only those, is applied `for` the part
+   that holds the Crux.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. Where the project measures,
    `measure` the Pin (mutation, simulation) and read what it found; see
@@ -105,12 +132,17 @@ at first nothing is there but the Project.
   Interface or Harness yet) are expected while it is being drawn.
 - An interpretation the repository or general knowledge settles is an
   Assumption of the part whose work it settles (the parent's, if it settles the
-  request as a whole). Requirements kept as a file in the repository are cited
-  by its path.
-- A question nothing settles is a part with a Crux and a recommendation. Once it
-  is decided, the work its answer asks for, the Clause and the Cases that cite
-  it, is applied `for` that part. The rest of the work, the Interfaces and the
-  Harness too, is applied `for` the parts that ask for it (steps 3 to 6).
+  request as a whole). Keep the requirements and their acceptance examples as
+  files in the repository (a copy of what was given, if it came from elsewhere),
+  so that an Assumption can cite them by path; the designer puts what an
+  example shows into the Contracts (see [Roles](#roles)).
+- A question nothing settles is a part with a Crux and a recommendation. Like
+  any part it names what holds what its answer adds (step 2): the Contract that
+  takes its Clause once that Contract is there, as in the example, or the
+  Context before it is; its options name what choosing them would change. Once it is decided, the work its
+  answer asks for, the Clause and the Cases that cite it, is applied `for` that
+  part. The rest of the work, the Interfaces and the Harness too, is applied
+  `for` the parts that ask for it (steps 3 to 6).
 
 Each operation goes on one line, as `chidev exec` reads them:
 
@@ -122,7 +154,7 @@ Each operation goes on one line, as `chidev exec` reads them:
 {"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
 {"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
 {"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]}]}
-{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command"},{"choice":"the program stops with exit code 2"}]}}
+{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"contract":{"context":"tally","contract":"lines"}}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command","consequence":"a file with one broken line still gives the counts of the others"},{"choice":"the program stops with exit code 2","consequence":"a file with one broken line gives no counts at all"}]}}
 ```
 
 The requirements (here `REQUIREMENTS.md`) say nothing of a line that is not
