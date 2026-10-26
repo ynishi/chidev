@@ -43,7 +43,14 @@ that shows a promise becomes a Clause (or the wording of one), and an example
 that shows something no Clause promises is a question for step 2 (an
 Assumption or a Crux) before it is a Case: once the answer gives it a Clause,
 a Case checks it like any other. A Harness writer that finds it cannot write a
-test from the Contracts and Interfaces sends the gap back to the designer.
+test from the Contracts and Interfaces sends the gap back to the designer, who
+treats it as a question of step 2: a Clause where the requirements settle it,
+an Assumption where an interpretation does, a Crux where two readings remain,
+or a comment of the Interface reworded where it says more than any Clause
+promises. The answer is work `for` the part that holds it, and the Harness
+writer then puts the Cases that check it. A resolved part takes no work:
+`cr_reopen` it first, or open a new request. Reopening leaves a resolved parent
+resolved, so reopen a part while its parent is still open.
 
 Not reading the code keeps the tests from fitting the code; it does not keep them
 from sharing a misreading of the requirements with the Contracts. So whoever
@@ -52,7 +59,11 @@ only what the record holds
 (`{"op":"view","sections":["contracts","interfaces","harnesses","change_requests"]}`:
 the Harnesses so that a put keeps the Cases already there, the change requests
 for the part a put is `for`), not the requirements, the code or the
-conversation that wrote the Contracts.
+conversation that wrote the Contracts. A request names its targets by id
+(`expects`, each with its `id`), and the same `view` gives each Context and
+asset its id beside its name. That tells Contexts apart, not two parts of one
+Context: `view` gives a request no parent and no Crux, so the designer names,
+by its title, the part each put is `for`, and the part that holds a Crux.
 
 ## The loop
 
@@ -101,7 +112,10 @@ conversation that wrote the Contracts.
      `items` is left out), outside the `lines` of the Items: rewording it then
      leaves the Items as they are, though it is still a change of the
      Interface, which moves its revision, makes its Pin stale and, where the
-     project measures, its mutation and simulation runs too.
+     project measures, its mutation and simulation runs too. A comment that
+     gains or loses lines moves the declarations after it: count their `lines`
+     again, or keep such comments after the last Item, or leave `items` out
+     where a provider finds them.
    - An Interface has one Item per declaration a caller uses: for a library,
      each public function or type it calls; for a program, `main`, with its
      subcommands, arguments and what it reads and writes in the comments
@@ -110,30 +124,40 @@ conversation that wrote the Contracts.
    and Interfaces, and puts the Harness in a `change_set` `for` the part whose
    change that put carries: every Case cites the Items it calls and the
    Clauses it checks. Every Clause added or changed is cited by some Case. A
-   put replaces the whole Harness, so put it once per part: the put that adds
-   the Cases of an answered Crux, and only those, is applied `for` the part
-   that holds the Crux. The acceptance examples the requirements give are run
-   by Cases too. The designer puts each one into a Clause that names its files
-   (for example, "the input `acceptance/a1.stdin` gives the output
-   `acceptance/a1.expected` and exit code 0"); the Case reads those files from
-   the repository and checks that Clause, so the tests the implementer runs
-   before `pin` check the examples as well, and the Harness writer learns of
-   them from the Contract alone. A runner outside the Harness checks nothing
-   chidev records.
+   put replaces the whole Harness and is applied `for` one part: the put that
+   adds the Cases of an answered Crux, and only those, is applied `for` the
+   part that holds the Crux. A Case the implementer finds wrong against its
+   Clause goes back to the Harness writer with that Clause, and the writer puts
+   the corrected Harness `for` the same part. The acceptance examples the
+   requirements give are run by Cases too. The designer puts each one into a
+   Clause that names its files (for example, "the input `acceptance/a1.stdin`
+   gives the output `acceptance/a1.expected` and exit code 0"); the Case reads
+   those files from the repository and checks that Clause, so the tests the
+   implementer runs before `pin` check the examples as well, and the Harness
+   writer learns of them from the Contract alone. A runner outside the Harness
+   checks nothing chidev records.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
-   `pin` each Interface's code once they pass. Where the project measures,
-   `measure` the Pin (mutation, simulation) and read what it found; see
-   [Measurements](../../README.md#measurements).
+   `pin` each Interface's code once they pass. chidev does not run the tests
+   itself; to have it refuse a `pin` while they fail, register a program that
+   runs them as an external check at the `pin` moment with `gate = true` and a
+   `reads` of at least one section (see
+   [External checks](../../README.md#external-checks)). The program runs the
+   tests of the working tree, not the code the `pin` gives, so the gate holds
+   when that code is the tree's: pin it with `code_file`. Where the project
+   measures, `measure` the Pin (mutation, simulation) and read what it found;
+   see [Measurements](../../README.md#measurements).
 6. **Check.** `status` and `check`: every Pin fresh, no stale citation, nothing
-   out of a request's frame, no finding left that the work should have
-   answered. A stale Pin means implement and pin again; a stale citation means
-   bring the tests up to the target, then put the Harness again. An edit (a
-   put, a retire, `context_add`, `items_rekey`, a change request opened or
-   decided) says only what that edit broke (a citation it made stale, a Pin it
-   left behind), so a Clause no Case cites yet, or a Context with no Interface,
-   is not said while the Contracts, Interfaces and Harness are still being put:
-   it is said here, and by `pin` and `cr_resolve`. To read one Context's share of it,
-   `{"op":"check","context":"<name>"}`; `outside` says how many findings
+   out of a request's frame, no finding left that the work should have answered.
+   A project that does not measure keeps the note `mutation.unmeasured` for each
+   pinned Interface: it says no run was made, not that the work missed
+   something. A stale Pin means implement and pin again; a stale citation means
+   bring the tests up to the target, then put the Harness again. An edit (a put,
+   a retire, `context_add`, `items_rekey`, a change request opened or decided)
+   says only what that edit broke (a citation it made stale, a Pin it left
+   behind), so a Clause no Case cites yet, or a Context with no Interface, is
+   not said while the Contracts, Interfaces and Harness are still being put: it
+   is said here, and by `pin` and `cr_resolve`. To read one Context's share of
+   it, `{"op":"check","context":"<name>"}`; `outside` says how many findings
    belong to no Context in particular, so none is lost by narrowing.
 7. **Decide.** The decision maker answers each Crux with `cr_decide`: by a line
    of the Policy, or with a reason. Then the work the answer asks for goes
@@ -162,6 +186,10 @@ at first nothing is there but the Project.
   only that and is resolved at once; a resolved request takes no more work, and
   the notes its resolve reports about the whole model (a Context with no
   Interface or Harness yet) are expected while it is being drawn.
+- A Context whose behaviour its Contracts promise is based on them in the
+  `change_set` that puts its first Contract (an entry
+  `{"put":"base_on_contract","context":"<name>"}` beside the `contract` one),
+  so that from then on it keeps one.
 - An interpretation the text of the requirements, the repository or general
   knowledge settles is an Assumption of the part whose work it settles (the
   parent's, if it settles the request as a whole). Keep the requirements and their acceptance examples as
@@ -183,18 +211,21 @@ Each operation goes on one line, as `chidev exec` reads them:
 {"op":"cr_open","title":"Add the tally Context","intent":"change_behavior","parent":"First version of tally","targets":[{"project":true}]}
 {"op":"change_set","for":"Add the tally Context","puts":[{"put":"context","name":"tally"}]}
 {"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
-{"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
-{"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]}]}
-{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command","consequence":"a file with one broken line still gives the counts of the others"},{"choice":"the program stops with exit code 2","consequence":"a file with one broken line gives no counts at all"}]}}
+{"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]},{"statement":"a line whose bytes are not text is a line that is not a command","reason":"the requirements say a line that is not a command of this form is not used","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
+{"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]},{"put":"base_on_contract","context":"tally"}]}
+{"op":"cr_open","title":"How large a count grows","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"the program stops with exit code 2","reason":"no count it prints is wrong","confidence":60},"options":[{"choice":"the program stops with exit code 2","consequence":"input that takes a count past the largest gives no counts at all"},{"choice":"the count stays at the largest","consequence":"the other counts are printed, and that one is printed too low with nothing to say so"}]}}
 ```
 
-The requirements (here `REQUIREMENTS.md`) speak of lines of text and say
-nothing of bytes that are not text: whether such a line is one more line that
-is not a command, or input the program refuses, is two readings that nothing
-settles, so it is a Crux; until it is decided, `status` and `check` say so (`cr.awaiting-decision`),
-and only the work that depends on it waits. The Interfaces, the Harness and the
-code of "Lines and counts of tally" follow as steps 3 to 6, the Crux is decided
-(step 7), then the parts and the parent are resolved (step 8).
+The requirements (here `REQUIREMENTS.md`) say that a count never goes below 0
+and nothing of how large it may grow. A program keeps a count in a number of
+some size, and whether one past the largest stays there or stops the program
+is two readings that nothing settles, so it is a Crux; until it is decided,
+`status` and `check` say so (`cr.awaiting-decision`), and only the work that
+depends on it waits. A line whose bytes are not text, by contrast, is settled
+by the text: the requirements say a line that is not a command of this form is
+not used, and that is such a line, so it is an Assumption. The Interfaces, the
+Harness and the code of "Lines and counts of tally" follow as steps 3 to 6, the
+Crux is decided (step 7), then the parts and the parent are resolved (step 8).
 
 ## Never
 
