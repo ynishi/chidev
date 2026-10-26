@@ -61,9 +61,11 @@ the Harnesses so that a put keeps the Cases already there, the change requests
 for the part a put is `for`), not the requirements, the code or the
 conversation that wrote the Contracts. A request names its targets by id
 (`expects`, each with its `id`), and the same `view` gives each Context and
-asset its id beside its name. That tells Contexts apart, not two parts of one
-Context: `view` gives a request no parent and no Crux, so the designer names,
-by its title, the part each put is `for`, and the part that holds a Crux.
+asset its id beside its name, and each request its `parent` and its `crux` (the
+options and, once decided, the decision): the part a put is `for` is the one
+whose parent is the request and whose target holds the change, and a part with
+a `crux` holds the question. `view` does not give a request's `situation` or
+Assumptions.
 
 ## The loop
 

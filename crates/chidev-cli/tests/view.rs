@@ -6,6 +6,7 @@ use std::process::Command;
 
 use chidev_core::app::ports::external::{REPLY_PROTOCOLS, finding_levels, subject_kinds};
 use chidev_core::domain::check::Moment;
+use chidev_core::domain::vo::crux::{CruxKind, Importance};
 use serde_json::{Value, json};
 
 /// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root) and
@@ -70,6 +71,79 @@ fn after_setup(name: &str, more: &[Value]) -> Vec<Value> {
         "{results:#?}"
     );
     results[skip..].to_vec()
+}
+
+#[test]
+fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_it_was_asked_in() {
+    let view = json!({"op":"view","sections":["change_requests"]});
+    let r = after_setup(
+        "view-cr-structure",
+        &[
+            json!({"op":"cr_open","title":"First version","intent":"change_behavior",
+                "situation":"the requirements, in the requester's words","issuer":"the requester",
+                "assumptions":[{"statement":"a reading","reason":"why",
+                    "evidence":[{"knowledge":{"reference":"general"}}]}]}),
+            json!({"op":"cr_open","title":"How a half rounds","intent":"change_behavior",
+                "parent":"First version","targets":[{"context":"core"}],
+                "crux":{"kind":"ambiguity","importance":"normal",
+                    "recommended":{"choice":"up","reason":"the usual way","confidence":60},
+                    "options":[{"choice":"up","consequence":"0.5 gives 1"},
+                        {"choice":"even","targets":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}]}]}}),
+            view.clone(),
+            json!({"op":"cr_decide","title":"How a half rounds","choice":"up",
+                "basis":{"arbitrary":"x"},"by":{"person":"alice"}}),
+            view,
+        ],
+    );
+    assert!(r.iter().all(|x| x["ok"] == true), "{r:#?}");
+    let requests = r[2]["view"]["change_requests"]
+        .as_array()
+        .expect("the change requests");
+    let by_title = |title: &str| {
+        requests
+            .iter()
+            .find(|c| c["title"] == title)
+            .unwrap_or_else(|| panic!("{title}"))
+    };
+    let parent = by_title("First version");
+    let part = by_title("How a half rounds");
+    assert_eq!(part["parent"], parent["id"]);
+    // a request that is no part and holds no question has neither key, as it had none before
+    assert!(parent.get("parent").is_none(), "{parent}");
+    assert!(parent.get("crux").is_none(), "{parent}");
+    let crux = &part["crux"];
+    assert_eq!(crux["kind"], "ambiguity");
+    assert_eq!(crux["importance"], "normal");
+    assert_eq!(crux["recommended"]["choice"], "up");
+    assert_eq!(crux["recommended"]["confidence"], 60);
+    assert_eq!(crux["options"][0]["consequence"], "0.5 gives 1");
+    assert_eq!(crux["options"][1]["expects"][0]["target"], "clause");
+    assert_eq!(crux["decision"], Value::Null);
+    // the words it was asked in, and their readings, are not given
+    for c in requests {
+        for key in ["situation", "issuer", "assumptions"] {
+            assert!(c.get(key).is_none(), "{key}: {c}");
+        }
+    }
+    let decided = r[4]["view"]["change_requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["title"] == "How a half rounds")
+        .expect("the part");
+    assert_eq!(decided["crux"]["decision"], "up");
+    // both views, with a parent and a Crux undecided and decided, are in the shape the schema of the view gives,
+    // and its words for a Crux are the domain's
+    let schema = schema(&["view"]);
+    for at in [2, 4] {
+        keys_fit(&r[at]["view"], &schema, &schema, "view");
+    }
+    let crux = &schema["$defs"]["CruxView"]["properties"];
+    let kinds: Vec<&str> = CruxKind::ALL.iter().map(|k| k.word()).collect();
+    assert_eq!(crux["kind"]["enum"], json!(kinds));
+    let mut importances: Vec<Value> = Importance::ALL.iter().map(|i| json!(i.word())).collect();
+    importances.push(Value::Null);
+    assert_eq!(crux["importance"]["enum"], json!(importances));
 }
 
 /// The one diagnostic of a refused result.

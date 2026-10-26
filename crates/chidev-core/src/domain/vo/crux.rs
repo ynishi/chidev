@@ -24,6 +24,14 @@ pub enum CruxKind {
 }
 
 impl CruxKind {
+    /// Every kind.
+    pub const ALL: [CruxKind; 4] = [
+        CruxKind::Ambiguity,
+        CruxKind::Conflict,
+        CruxKind::Model,
+        CruxKind::Disagreement,
+    ];
+
     /// Whether the question may be left unspecified (the behaviour left free, within invariants).
     pub fn allows_unspecified(self) -> bool {
         self != CruxKind::Model
@@ -100,6 +108,9 @@ pub enum Importance {
 }
 
 impl Importance {
+    /// Every importance, from the least.
+    pub const ALL: [Importance; 3] = [Importance::Low, Importance::Normal, Importance::High];
+
     /// The word for it.
     pub fn word(self) -> &'static str {
         match self {
@@ -111,9 +122,7 @@ impl Importance {
 
     /// The importance a word names; `None` for any other.
     pub fn from_word(word: &str) -> Option<Importance> {
-        [Importance::Low, Importance::Normal, Importance::High]
-            .into_iter()
-            .find(|i| i.word() == word)
+        Importance::ALL.into_iter().find(|i| i.word() == word)
     }
 }
 
