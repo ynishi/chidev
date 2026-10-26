@@ -251,6 +251,13 @@ belong):
     implementer that is to write code from the Contracts and Interfaces, and not
     from the tests that will check it, is given `["contracts","interfaces"]`, and
     nothing of the Harnesses (their source, Cases or citations) is in what it reads.
+  - A change request comes with its `parent` (an id) and its `crux` (the kind, the
+    options, the recommendation and, once decided, the `decision`), each only when it
+    has one (a request with neither is written as it was before), but not with its
+    `situation`, its issuer or its Assumptions: those are the request in the words of
+    whoever asked and the readings of those words, and what is to be relied on of them
+    is in the Contracts. A Harness writer given the view learns which part a put is
+    for and which part holds a question, not the requirements.
 
 A put or a retire does not need an open change request, but it belongs to none: it
 shows in the targets of no change request (only a `change_set` `for` the request

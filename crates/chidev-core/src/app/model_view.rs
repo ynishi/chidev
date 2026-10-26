@@ -128,20 +128,81 @@ pub struct CiteView {
     revision: u64,
 }
 
-/// A change request.
+/// A change request: how it stands among the others, what it asks and the question it holds. Its `situation`, its
+/// issuer and its Assumptions are not in it. They are the request in the words of whoever asked and the readings of
+/// those words, and what a reader of the view is to rely on of them has been put into the Contracts: a Harness writer
+/// who reads only the view writes the tests from the promises, not from the requirements (see the guide, Roles).
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ChangeRequestView {
     id: String,
+    /// The question, for a request that holds a Crux.
     title: String,
     /// `change_behavior` or `keep_behavior`.
     intent: &'static str,
     /// `open`, `decided` or `resolved`.
     state: &'static str,
+    /// The id of the request it is a part of; left out for one that is no part. Left out, not `null`, so that the
+    /// entry of a request with neither a parent nor a Crux is the bytes it was before the field was added, and the
+    /// stamps kept of it (a judged finding's, an external run's) still hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
     /// What it asks of targets (to revise or retire, or to keep), each with the revision the target had when the
     /// request was opened.
     expects: Vec<ExpectView>,
     /// The findings it deals with.
     addresses: Vec<AddressView>,
+    /// The question it holds for the decision maker; left out, as `parent` is, for a request that holds none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crux: Option<CruxView>,
+}
+
+/// A Crux: the kind of question, its options, the recommendation and, once decided, the decision.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CruxView {
+    /// `ambiguity`, `conflict`, `model` or `disagreement`.
+    kind: &'static str,
+    /// `low`, `normal` or `high`; none when it was not given.
+    importance: Option<&'static str>,
+    /// The options, in the order they were given.
+    options: Vec<CruxOptionView>,
+    /// The option recommended; none when there is none.
+    recommended: Option<RecommendedView>,
+    /// The id of the request whose decision this one replaces; none when it replaces none.
+    supersedes: Option<String>,
+    /// The decision, in the words `status` gives it (the choice, `in other words: …` or `left unspecified`); none
+    /// while it is undecided. Only what was decided: the work it asks for is in the Contracts.
+    decision: Option<String>,
+}
+
+/// An option of a Crux.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CruxOptionView {
+    choice: String,
+    /// The wording the option would give; none when it gives none.
+    wording: Option<String>,
+    /// What choosing it would change beyond what the request names.
+    expects: Vec<OptionExpectView>,
+    /// What else choosing it affects.
+    consequence: Option<String>,
+}
+
+/// What an option of a Crux would ask of one target.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct OptionExpectView {
+    /// The kind of the target, as in [`ExpectView`].
+    target: &'static str,
+    /// Its id; none for the Project.
+    id: Option<String>,
+    /// `target` or `keep`.
+    kind: &'static str,
+}
+
+/// The option a Crux recommends, why, and how sure (0 to 100).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RecommendedView {
+    choice: String,
+    reason: Option<String>,
+    confidence: Option<u8>,
 }
 
 /// What a change request asks of a target.
@@ -366,6 +427,36 @@ impl ModelView {
                         }),
                     })
                     .collect(),
+                parent: c.parent().map(|p| p.to_string()),
+                crux: c.crux().map(|x| CruxView {
+                    kind: x.kind().word(),
+                    importance: x.importance().map(|i| i.word()),
+                    options: x
+                        .options()
+                        .iter()
+                        .map(|o| CruxOptionView {
+                            choice: o.choice().as_str().to_string(),
+                            wording: o.change().map(|w| w.as_str().to_string()),
+                            expects: o
+                                .expects()
+                                .iter()
+                                .map(|(t, k)| OptionExpectView {
+                                    target: t.word(),
+                                    id: t.as_uuid().map(|u| u.to_string()),
+                                    kind: k.word(),
+                                })
+                                .collect(),
+                            consequence: o.consequence().map(|w| w.as_str().to_string()),
+                        })
+                        .collect(),
+                    recommended: x.recommended().map(|r| RecommendedView {
+                        choice: r.choice().as_str().to_string(),
+                        reason: r.reason().map(|w| w.as_str().to_string()),
+                        confidence: r.confidence().map(|c| c.percent()),
+                    }),
+                    supersedes: x.supersedes().map(|s| s.to_string()),
+                    decision: x.answer().map(|a| super::decision_text(a.decision())),
+                }),
             })
             .collect();
         ModelView {
