@@ -48,9 +48,50 @@ and this project adheres to
   confirmation set of hooks inside the builtin checks; `OutOfFrame` carries the
   change set each moved target came from; `Project::context_of`,
   `Project::context_of_target` and `contexts_in` are new.
+- Every use case that changes what the store keeps is a trigger of one of four
+  kinds, and is kept only after the checks its kind asks for (an edit, a
+  confirmation, a question, or a record that runs none); see
+  `docs/adr/0002-every-use-case-that-changes-state-is-a-trigger-and-one-door-keeps.md`.
+  Eight operations were kept with no check and are now edits: `context_add`,
+  `context_uses`, `base_on_contract`, `items_rekey`, `cr_open`, `cr_decide`,
+  `cr_assume` and `cr_reopen`. Their results have `findings`, those the edit
+  introduced; a mandatory check refuses them for those, and an external check
+  registered as a gate at `edit` is asked about them and can refuse them.
+  `items_rekey` now says the citations it made stale (`cite.stale`). `init`,
+  `measure`, `simulate` and `finding_report` are records and run no check.
+- The words for when a check runs are renamed. The key `hooks` is `moments` in a
+  registration in `chidev.toml`, and in a judged rule file; the moment of an edit
+  is `edit`, not `put`; `check_list`, `check_rules` and `explain` show `moments`;
+  `check_rules` takes `moment`, not `hook`. The old key, argument and word are
+  refused, and the message names the new one. A file that has `hooks` or `put`
+  must be changed.
+- The request an external program is sent is protocol 2: `hook` is `moment`, and
+  `put` is `edit`. A reply of protocol 1 or 2 is accepted, and any other version
+  is a failed run.
+- The renamed words do not make a saved external result stale. The digest of a
+  registration, and the configuration stamp kept with a result, are made of the
+  words of version 0.1.0 (`hooks`, `put`) through a copy written for the digest:
+  the form of the digest is fixed at 0.1.0's. Changing anything else a
+  registration says still makes the result stale.
+- In Rust (`chidev-core`, a public API change): `Hook` is `Moment` (`Moment::Put` is
+  `Moment::Edit`; `Moment::parse` reads a word, `Moment::digest_key` is the word a
+  digest counts it by) and `Descriptor.hooks` is `Descriptor.moments`.
+  `Invocation.hook` is `Invocation.moment`, and `Invocation` has a `trigger`.
+  `App::add_context`, `set_uses`, `base_on_contract`, `items_rekey`,
+  `open_change_request`, `decide_change_request`, `assume` and
+  `reopen_change_request` return their value in `Checked`, with the findings.
+  `Store::commit` takes a `Gated` (made only in `app::commit`) and not `Changes`.
+  `ExternalCall.hook` is `ExternalCall.moment`, and `ExternalCall.protocol` is 2.
 
 ### Added
 
+- The record of the checks that were run keeps the use case that ran them: a
+  `trigger` column on `check_invocations` (added to a database made before it,
+  with no layout change; the rows already there have none). The moment of a row
+  is still written `put` for an edit, as 0.1.0 wrote it, so a database stays
+  readable to 0.1.0; either word reads as an edit. In Rust,
+  `chidev_core::app::commit::Trigger` lists the use cases by kind, and an
+  `Invocation` has `trigger: Option<Trigger>`.
 - `{"op":"check","context":"<name>"}` answers with the findings about one Context:
   those about it and about what it holds, and those about a change request with
   a target it revises, retires or keeps in the Context. `outside` counts the
