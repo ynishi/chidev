@@ -17,6 +17,9 @@ pub enum Level {
 }
 
 impl Level {
+    /// Every level, in the order of seriousness.
+    pub const ALL: [Level; 4] = [Level::Off, Level::Note, Level::Warning, Level::Error];
+
     /// The word for it, as a policy file and the output write it.
     pub fn word(self) -> &'static str {
         match self {
@@ -29,9 +32,7 @@ impl Level {
 
     /// The level a word names; `None` for any other.
     pub fn from_word(word: &str) -> Option<Level> {
-        [Level::Off, Level::Note, Level::Warning, Level::Error]
-            .into_iter()
-            .find(|l| l.word() == word)
+        Level::ALL.into_iter().find(|l| l.word() == word)
     }
 }
 

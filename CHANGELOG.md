@@ -148,6 +148,13 @@ and this project adheres to
 
 ### Added
 
+- `chidev schema external-call` and `chidev schema external-reply` print the
+  JSON Schema of the request an external check is sent and of the reply it
+  gives, derived from the types that write and read them; the lists of a
+  reply's versions, levels and subject kinds are the ones it is read with.
+  The README says what the shape cannot: a finding's `rule` is the one asked
+  for, its `message` is not blank, its `subject` is in the model sent; and
+  that an empty `reads` is refused.
 - A second `base_on_contract` for a Context already based on its Contracts is
   refused by a rule of its own, `context.already-based`, which `explain`
   describes; it was refused before with no rule (`domain.unmapped`).
