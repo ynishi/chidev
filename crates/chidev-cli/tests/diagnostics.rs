@@ -460,6 +460,28 @@ fn lines_past_the_code_are_refused_by_a_rule_that_names_them() {
 }
 
 #[test]
+fn basing_a_context_on_its_contracts_again_is_refused_by_a_rule() {
+    let explained = run(
+        "diag-already-based-explain",
+        &[json!({"op":"explain","rule":"context.already-based"})],
+    );
+    assert!(
+        !explained[0]["help"].as_str().unwrap().is_empty(),
+        "{explained:#?}"
+    );
+    let example: Value =
+        serde_json::from_str(explained[0]["example"].as_str().unwrap()).expect("an operation");
+    let r = after_setup("diag-already-based", &[example.clone(), example]);
+    assert_eq!(r[0]["ok"], true, "{r:#?}");
+    let d = one(&r[1]);
+    assert_eq!(d["code"], "context.already-based", "{d:#?}");
+    assert_eq!(
+        d["message"],
+        "the context is already based on its contracts"
+    );
+}
+
+#[test]
 fn a_finding_is_a_diagnostic_too_with_its_rule_as_the_code_and_the_help_of_the_rule() {
     let r = after_setup("diag-finding", &[json!({"op":"check"})]);
     let findings = r[0]["findings"].as_array().unwrap();

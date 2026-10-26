@@ -127,6 +127,8 @@ pub const PROJECT_NONE: RuleId = RuleId::from_static("project.none");
 pub const CHANGE_SET_NAMED_TWICE: RuleId = RuleId::from_static("change-set.named-twice");
 /// A Context based on its Contracts keeps one.
 pub const CONTEXT_LAST_CONTRACT: RuleId = RuleId::from_static("context.last-contract");
+/// A Context is based on its Contracts once.
+pub const CONTEXT_ALREADY_BASED: RuleId = RuleId::from_static("context.already-based");
 /// A Context has no asset with this id.
 pub const CONTEXT_NO_SUCH_ASSET: RuleId = RuleId::from_static("context.no-such-asset");
 /// The code of an Interface is pinned only when a Case checks it.
@@ -413,6 +415,15 @@ static RULES: &[Rule] = &[
         message: "the context is based on its contracts, and this is its last one",
         values: &[],
         example: r#"{"op":"contract_retire","context":"core","contract":"only"}"#,
+    },
+    Rule {
+        id: CONTEXT_ALREADY_BASED,
+        kind: RuleKind::Invariant,
+        summary: "A Context is based on its Contracts once.",
+        help: "The Context is already based on its Contracts, and the basis has no way back, so there is nothing to change: leave `base_on_contract` out. `view` shows a Context's basis.",
+        message: "the context is already based on its contracts",
+        values: &[],
+        example: r#"{"op":"base_on_contract","context":"core"}"#,
     },
     Rule {
         id: CONTEXT_NO_SUCH_ASSET,
