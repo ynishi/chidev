@@ -10,6 +10,25 @@ and this project adheres to
 
 ### Changed
 
+- The guide (`docs/guide/PROCEDURE.md`) answers what two first versions run
+  through it had to guess:
+  - the requirements and their acceptance examples are files in the
+    repository, cited by path; the designer puts what an example shows into the
+    Contracts, so the blind Harness writer still reads the Contracts and
+    Interfaces only;
+  - until a Crux is answered, the Clause, the Cases and the code that would
+    keep the answer wait; code written meanwhile is not the answer;
+  - an option names in `targets` the assets that exist and that choosing it
+    would change, and says in `consequence` what else it affects;
+  - a Crux part names what holds what its answer adds, the Contract once it is
+    there;
+  - a Context's Contracts, Interfaces and Harness are kept in one part unless
+    there is a reason to split them, and each put of a Harness is applied for
+    the part whose change it carries;
+  - an Interface's `source` is written as a caller sees it, with what is not a
+    declaration in the language's comments.
+- The README names an option's `consequence` (what else choosing it affects)
+  where it describes options and `status`'s `awaiting`.
 - The guide (`docs/guide/PROCEDURE.md`) runs the first version of a Project
   through change requests like any other change, from right after `init`, so
   that its requirements, Assumptions and open questions (a Crux) are kept; a new
