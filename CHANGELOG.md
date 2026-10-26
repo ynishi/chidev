@@ -18,9 +18,9 @@ and this project adheres to
 - The guide (`docs/guide/PROCEDURE.md`) says what the designer does with a gap
   the Harness writer sends back (a question of step 2, answered as work `for`
   the part that holds it, a resolved part reopened first, while its parent is
-  open); that `view` tells Contexts apart but not two parts of one Context, so
-  the designer names by title the part each put is `for` and the part that
-  holds a Crux; that a comment gaining or losing lines moves the Items after it;
+  open); that the Harness writer reads from `view` the part each put is `for`
+  and the part that holds a Crux; that a comment gaining or losing lines moves
+  the Items after it;
   that `mutation.unmeasured` is a note that no run was made; and that a
   Context is based on its Contracts in the change set that puts its first
   Contract. The example's Crux is now how large a count grows; a line that is
@@ -155,6 +155,13 @@ and this project adheres to
   The README says what the shape cannot: a finding's `rule` is the one asked
   for, its `message` is not blank, its `subject` is in the model sent; and
   that an empty `reads` is refused.
+- A change request in `view` has its `parent` and its `crux` (kind, importance,
+  options, recommendation, what it supersedes and, once decided, the decision),
+  each left out when it has none, so a request with neither is written as
+  before; its `situation`, issuer and Assumptions are not in it. Once any
+  request has a parent or a Crux, saved judged findings about the change
+  requests or the Project, and external runs that read `change_requests`, are
+  stale once. The view stays `chidev-view 3`.
 - A second `base_on_contract` for a Context already based on its Contracts is
   refused by a rule of its own, `context.already-based`, which `explain`
   describes; it was refused before with no rule (`domain.unmapped`).
