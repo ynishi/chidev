@@ -16,7 +16,7 @@ use chidev_core::app::{
     ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
     RuleStanding, RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
 };
-use chidev_core::domain::check::{Hook, Level};
+use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
 use schemars::JsonSchema;
@@ -196,15 +196,21 @@ enum Op {
         #[serde(default)]
         context: Option<String>,
     },
-    /// Explicitly executes external check-hook programs and records this run.
+    /// Explicitly executes external check-moment programs and records this run.
     CheckRun,
     /// Lists every check with the level it runs at.
     CheckList,
-    /// The judged rules to judge (those of `hook`, or the one `rule`; all when neither is given), with a view of
+    /// The judged rules to judge (those of `moment`, or the one `rule`; all when neither is given), with a view of
     /// the model to judge them on. The agent that drives chidev judges; chidev keeps the results.
     CheckRules {
         #[serde(default)]
-        hook: Option<String>,
+        moment: Option<String>,
+        /// Only to be refused: the argument was `hook` before it was `moment`. Without the field the operation
+        /// would run with no moment given, which is every rule. Kept apart from null, so `"hook": null` is refused
+        /// too.
+        #[serde(default, deserialize_with = "present")]
+        #[schemars(skip)]
+        hook: Option<Option<serde_json::Value>>,
         #[serde(default)]
         rule: Option<String>,
     },
@@ -1148,10 +1154,11 @@ impl From<OpenedExpect> for OpenedExpectOut {
 
 /// The result of `cr_open`.
 #[derive(Debug, Serialize)]
-struct CrOpenOut {
+struct CrOpenOut<'a> {
     op: &'static str,
     cr: String,
     expects: Vec<OpenedExpectOut>,
+    findings: Vec<FindingOut<'a>>,
 }
 
 /// A Pin in the result of `status`.
@@ -1392,10 +1399,11 @@ struct PolicyPutOut<'a> {
     findings: Vec<FindingOut<'a>>,
 }
 
-/// The result of an operation that gives nothing back but its name.
+/// The result of an operation that gives nothing back but its name and what the checks of its edit said.
 #[derive(Debug, Serialize)]
-struct DoneOut {
+struct DoneOut<'a> {
     op: &'static str,
+    findings: Vec<FindingOut<'a>>,
 }
 
 /// The freshness of a saved external execution, in the result of `status`.
@@ -1445,6 +1453,7 @@ struct RekeyOut<'a> {
     unmatched: &'a [String],
     /// The revision of the Interface once it is done.
     revision: u64,
+    findings: Vec<FindingOut<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1540,10 +1549,10 @@ struct CheckEntryOut {
     default_level: &'static str,
     mandatory: bool,
     executor: &'static str,
-    /// `change` for a check that runs at `put` and speaks about what an edit made stale or out of place, `state`
-    /// for one that does not and speaks about the state of the model. It is read from the `hooks`.
+    /// `change` for a check that runs at an edit and speaks about what an edit made stale or out of place, `state`
+    /// for one that does not and speaks about the state of the model. It is read from the `moments`.
     kind: &'static str,
-    hooks: Vec<&'static str>,
+    moments: Vec<&'static str>,
     params: std::collections::BTreeMap<String, ParamOut>,
 }
 
@@ -1564,7 +1573,7 @@ struct RuleOut<'a> {
     summary: &'a str,
     /// The kind of thing it judges: a finding names a subject of this kind (`project`: none).
     subject: &'static str,
-    hooks: Vec<&'static str>,
+    moments: Vec<&'static str>,
     /// The level the policy holds it to; a finding is at it or below.
     level: &'static str,
     default_level: &'static str,
@@ -1589,7 +1598,7 @@ impl<'a> RuleOut<'a> {
             rule_digest: r.rule_digest.to_string(),
             summary: &d.summary,
             subject: r.rule.subject().word(),
-            hooks: d.hooks.iter().map(|h| h.word()).collect(),
+            moments: d.moments.iter().map(|m| m.word()).collect(),
             level: r.level.word(),
             default_level: d.default_level.word(),
             question: r.rule.question(),
@@ -2155,15 +2164,16 @@ where
         }
         Op::Init => json!({ "op": "init", "project": app.init().await?.to_string() }),
         Op::ContextAdd { name, uses } => {
-            json!({ "op": "context_add", "context": app.add_context(&name, &uses).await?.to_string() })
+            let done = app.add_context(&name, &uses).await?;
+            json!({ "op": "context_add", "context": done.value.to_string(), "findings": findings_out(&done.findings) })
         }
         Op::ContextUses { context, uses } => {
-            app.set_uses(&context, &uses).await?;
-            json!({ "op": "context_uses" })
+            let done = app.set_uses(&context, &uses).await?;
+            json!({ "op": "context_uses", "findings": findings_out(&done.findings) })
         }
         Op::BaseOnContract { context } => {
-            app.base_on_contract(&context).await?;
-            json!({ "op": "base_on_contract" })
+            let done = app.base_on_contract(&context).await?;
+            json!({ "op": "base_on_contract", "findings": findings_out(&done.findings) })
         }
         Op::ChangeSet {
             for_change_request,
@@ -2252,6 +2262,7 @@ where
             to_value(&RekeyOut {
                 op: "items_rekey",
                 rekeyed: done
+                    .value
                     .rekeyed
                     .iter()
                     .map(|k| KeyChangedOut {
@@ -2260,6 +2271,7 @@ where
                     })
                     .collect(),
                 revised: done
+                    .value
                     .revised
                     .iter()
                     .map(|r| ItemRevisedOut {
@@ -2268,8 +2280,9 @@ where
                         to: r.to,
                     })
                     .collect(),
-                unmatched: &done.unmatched,
-                revision: done.revision,
+                unmatched: &done.value.unmatched,
+                revision: done.value.revision,
+                findings: findings_out(&done.findings),
             })?
         }
         Op::InterfaceRetire { context, interface } => {
@@ -2339,15 +2352,17 @@ where
                 assumptions: assumptions.into_iter().map(AssumptionInput::from).collect(),
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
-            let opened = app.open_change_request(&input).await?;
+            let done = app.open_change_request(&input).await?;
             to_value(&CrOpenOut {
                 op: "cr_open",
-                cr: opened.id.to_string(),
-                expects: opened
+                cr: done.value.id.to_string(),
+                expects: done
+                    .value
                     .expects
                     .into_iter()
                     .map(OpenedExpectOut::from)
                     .collect(),
+                findings: findings_out(&done.findings),
             })?
         }
         Op::PolicyPut { lines } => {
@@ -2376,8 +2391,11 @@ where
                 reason,
                 evidence,
             });
-            app.assume(&title, &assumption).await?;
-            to_value(&DoneOut { op: "cr_assume" })?
+            let done = app.assume(&title, &assumption).await?;
+            to_value(&DoneOut {
+                op: "cr_assume",
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::CrDecide {
             title,
@@ -2400,9 +2418,13 @@ where
                     ));
                 }
             };
-            app.decide_change_request(&title, &decision, &basis.into(), &by.into())
+            let done = app
+                .decide_change_request(&title, &decision, &basis.into(), &by.into())
                 .await?;
-            to_value(&DoneOut { op: "cr_decide" })?
+            to_value(&DoneOut {
+                op: "cr_decide",
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::CrResolve {
             title,
@@ -2416,9 +2438,13 @@ where
             json!({ "op": "cr_resolve", "findings": findings_out(&done.findings) })
         }
         Op::CrReopen { title, reason, by } => {
-            app.reopen_change_request(&title, &reason, &by.into())
+            let done = app
+                .reopen_change_request(&title, &reason, &by.into())
                 .await?;
-            to_value(&DoneOut { op: "cr_reopen" })?
+            to_value(&DoneOut {
+                op: "cr_reopen",
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::Status => {
             let s = app.status().await?;
@@ -2635,18 +2661,17 @@ where
                 outside: context.as_ref().map(|_| checked.outside),
             })?
         }
-        Op::CheckRules { hook, rule } => {
-            let hook = hook
+        Op::CheckRules { moment, hook, rule } => {
+            if hook.is_some() {
+                return Err(AppError::Input(renamed_key("hook", "moment")));
+            }
+            let moment = moment
                 .as_deref()
                 .map(|w| {
-                    Hook::from_word(w).ok_or_else(|| {
-                        AppError::Input(format!(
-                            "the hook `{w}` is not one; it is put, pin, resolve or check"
-                        ))
-                    })
+                    Moment::parse(w).map_err(|e| AppError::Input(format!("the moment `{w}`: {e}")))
                 })
                 .transpose()?;
-            let view = app.check_rules(hook, rule.as_deref()).await?;
+            let view = app.check_rules(moment, rule.as_deref()).await?;
             to_value(&CheckRulesOut {
                 op: "check_rules",
                 store_revision: view.store_revision.0,
@@ -2693,7 +2718,7 @@ where
                     mandatory: c.descriptor.mandatory,
                     executor: c.descriptor.executor.word(),
                     kind: c.descriptor.kind().word(),
-                    hooks: c.descriptor.hooks.iter().map(|h| h.word()).collect(),
+                    moments: c.descriptor.moments.iter().map(|m| m.word()).collect(),
                     params: c
                         .params
                         .iter()

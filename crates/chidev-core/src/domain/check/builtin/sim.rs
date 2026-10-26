@@ -10,9 +10,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use super::CONFIRM_HOOKS;
+use super::CONFIRM_MOMENTS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
@@ -91,7 +91,7 @@ static SIM_SHAPE_KEPT: Descriptor = Descriptor {
            breaks, and `explain` gives its help. This one was kept before that was so, and a change that does not \
            put it goes through. It cannot be simulated. Put it again in the shape the invariant asks for.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Error,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -162,7 +162,7 @@ static SIM_UNCITED_CLAUSE: Descriptor = Descriptor {
            finding if the clause is not for a simulation to check. A contract the sweep cites no clause of is \
            left to the tests, and is not reported.",
     ),
-    hooks: Cow::Borrowed(CONFIRM_HOOKS),
+    moments: Cow::Borrowed(CONFIRM_MOMENTS),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -212,7 +212,7 @@ static SIM_UNRUN: Descriptor = Descriptor {
         "Nothing records what the script finds in the program. Run the simulate measure for the harness once the \
            program it drives is pinned.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -251,7 +251,7 @@ static SIM_STALE: Descriptor = Descriptor {
            settings changed after the run. Its result says nothing of the program as it is now. Run the simulate \
            measure again.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -293,7 +293,7 @@ static SIM_FINDING: Descriptor = Descriptor {
            change request on the clause or the script). The case and step are in the message; run the case again \
            to see its schedule and trace.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Error,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -344,7 +344,7 @@ static SIM_UNREACHED: Descriptor = Descriptor {
            clause was not checked. Change the schedule the script makes (or add a regress case for the \
            situation) so that the situation comes up.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Error,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -395,7 +395,7 @@ static SIM_NONDETERMINISTIC: Descriptor = Descriptor {
            different trace means the program draws its own order: fix the program. A simulation that cannot be \
            repeated finds nothing a person can reproduce, so this cannot be turned down.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Error,
     mandatory: true,
     params: Cow::Borrowed(&[]),
@@ -459,7 +459,7 @@ static SIM_ERROR: Descriptor = Descriptor {
            record. Fix the cause and run the simulate measure again; a failed run is not judged for findings, and a \
            case that could not start the program found nothing and reached nothing.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: Cow::Borrowed(&[]),
@@ -772,9 +772,9 @@ mod tests {
     }
 
     #[test]
-    fn the_findings_of_a_kept_shape_are_not_a_hook_of_put() {
+    fn the_findings_of_a_kept_shape_are_not_a_moment_of_an_edit() {
         // a put is refused by the rules (`sim.*`), so the check runs on demand only
-        assert_eq!(SimShapeKept.descriptor().hooks.as_ref(), &[Hook::Check]);
+        assert_eq!(SimShapeKept.descriptor().moments.as_ref(), &[Moment::Check]);
         assert!(!SimShapeKept.descriptor().mandatory);
         assert_eq!(SimShapeKept.descriptor().default_level, Level::Error);
     }

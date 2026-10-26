@@ -64,13 +64,23 @@ fn by_name<T: Serialize + ?Sized, E: serde::ser::Error>(value: &T) -> Result<ser
     serde_json::to_value(value).map_err(E::custom)
 }
 
+/// The version of the request a program is sent. Version 2 calls the moment of the call `moment` (it was `hook`) and
+/// says `edit` where version 1 said `put`; nothing else in the request changed. Which use case asked is not in it:
+/// a program is told when it is asked (the moment), not by whom, so that the names of the use cases are not a
+/// protocol a program can depend on.
+pub const REQUEST_PROTOCOL: u32 = 2;
+
+/// The versions of a reply that are accepted. The reply did not change between version 1 and 2, so a program that
+/// answers as it did keeps working once it reads `moment`; any other version is a failed run.
+pub const REPLY_PROTOCOLS: [u32; 2] = [1, 2];
+
 /// One process request, also its stdin JSON format.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalCall {
-    /// Process protocol version.
+    /// Process protocol version ([`REQUEST_PROTOCOL`]).
     pub protocol: u32,
-    /// Hook name.
-    pub hook: String,
+    /// The moment the program is asked at: `edit`, `pin`, `resolve` or `check`.
+    pub moment: String,
     /// Exactly one rule in the first protocol implementation.
     pub rules: Vec<String>,
     /// Store revision before the proposed change.
@@ -111,7 +121,7 @@ pub struct ExternalFinding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalReply {
-    /// Must be one.
+    /// One of [`REPLY_PROTOCOLS`].
     pub protocol: u32,
     /// Every finding; empty means a successful check with no findings.
     pub findings: Vec<ExternalFinding>,

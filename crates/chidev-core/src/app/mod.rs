@@ -11,12 +11,14 @@
 //! label, key or case name keeps its id, and a new one gets a fresh id.
 
 mod change_set;
-use self::change_set::only_put;
 pub use self::change_set::{
     ChangeSetDone, ChangeSetInput, ContractPut, HarnessPut, InterfacePut, ItemsInput, PutDone,
     PutInput, RetireInput,
 };
+use self::change_set::{only_put, only_setting};
 mod check;
+pub mod commit;
+use self::commit::{ConfirmTrigger, EditTrigger, ModelDelta};
 mod diagnostic;
 pub use self::diagnostic::{
     DiagSubject, Diagnostic, Names, RuleCard, RuleExplanation, Suggestion, did_you_mean,
@@ -56,11 +58,9 @@ pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
 };
 pub use self::model_view::{ModelSlice, ModelView, VIEW_VERSION};
-use self::ports::{
-    AssetKind, AssetName, Changes, Clock, IdSource, Invocation, PinCode, Store, StoreRevision,
-};
+use self::ports::{AssetKind, AssetName, Clock, IdSource, Store, StoreRevision};
 pub use crate::domain::check::ParamValue;
-use crate::domain::check::{Change, CheckView, Finding, Hook, Mention, introduced};
+use crate::domain::check::{CheckView, Finding, Mention, Moment};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux,
 };
@@ -420,11 +420,11 @@ fn input(e: impl Display) -> AppError {
     AppError::Input(e.to_string())
 }
 
-/// No settings: what the hooks of a change give the checks, which read no measurement.
+/// No settings: what the moments of a change give the checks, which read no measurement.
 static NO_SETTINGS: BTreeMap<InterfaceId, String> = BTreeMap::new();
 static NO_SIM_SETTINGS: BTreeMap<HarnessId, String> = BTreeMap::new();
 
-/// What the checks of a hook read: one state of the model.
+/// What the checks of a moment read: one state of the model.
 fn view<'a>(
     project: &'a Project,
     pins: &'a [Pin],
@@ -438,24 +438,6 @@ fn view<'a>(
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
     }
-}
-
-/// Where a gate stands when it settles a run: the hook and the store revision it read at, the state it judges, and,
-/// for an edit, the state before it, which an external check is held to (see [`App::judged_externals`]). A
-/// confirmation has no state before it.
-#[derive(Clone, Copy)]
-struct Gating<'a> {
-    hook: Hook,
-    at: StoreRevision,
-    after: &'a CheckView<'a>,
-    before: Option<&'a CheckView<'a>>,
-}
-
-/// What the checks of a hook gave: the findings for the caller, the records to keep with the change.
-struct Gate {
-    found: Vec<Found>,
-    invocations: Vec<Invocation>,
-    external: Vec<ExternalReport>,
 }
 
 /// A Clause of a Contract, as a person writes it.
@@ -1261,57 +1243,63 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self.store
     }
 
-    /// Makes the Project.
+    /// Makes the Project. It is a record: there is no model before it to compare with, and an empty one introduces
+    /// nothing, so no check runs (see [`commit`]).
     pub async fn init(&mut self) -> Result<ProjectId, AppError> {
         let at = self.store.revision().await?;
         if self.store.project().await?.is_some() {
             return Err(AppError::AlreadyInitialized);
         }
         let id = ProjectId::from_uuid(self.ids.next_uuid());
-        self.commit_project(at, Project::new(id)).await?;
+        self.commit_init(at, Project::new(id)).await?;
         Ok(id)
     }
 
-    /// Adds a Context named `name` that uses the Contexts named in `uses`.
+    /// Adds a Context named `name` that uses the Contexts named in `uses`. It is a change set of one put, so it is
+    /// told what it introduced, and refused by a mandatory check or an external gate for that, as any edit is.
     pub async fn add_context(
         &mut self,
         name: &str,
         uses: &[String],
-    ) -> Result<ContextId, AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let uses = context_ids(&p, uses)?;
-        let id = ContextId::from_uuid(self.ids.next_uuid());
-        let context = crate::domain::entity::context::Context::new(
-            id,
-            ContextName::try_from(name).map_err(input)?,
-            uses,
-        )
-        .map_err(ProjectError::from)?;
-        p.add_context(context)?;
-        self.commit_project(at, p).await?;
-        Ok(id)
+    ) -> Result<Checked<ContextId>, AppError> {
+        let put = PutInput::Context {
+            name: name.to_string(),
+            uses: uses.to_vec(),
+        };
+        let Checked { value, findings } = self.apply_one(EditTrigger::AddContext, put).await?;
+        let id = value
+            .puts
+            .first()
+            .and_then(|d| d.id)
+            .map(ContextId::from_uuid)
+            .ok_or_else(|| input("the change set made no context"))?;
+        Ok(Checked {
+            value: id,
+            findings,
+        })
     }
 
-    /// Sets the Contexts the Context named `context` uses.
-    pub async fn set_uses(&mut self, context: &str, uses: &[String]) -> Result<(), AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let ctx = context_id(&p, context)?;
-        let uses = context_ids(&p, uses)?;
-        p.set_uses(ctx, uses)?;
-        self.commit_project(at, p).await?;
-        Ok(())
+    /// Sets the Contexts the Context named `context` uses. A change set of one put (see [`App::add_context`]).
+    pub async fn set_uses(
+        &mut self,
+        context: &str,
+        uses: &[String],
+    ) -> Result<Checked<()>, AppError> {
+        let put = PutInput::Uses {
+            context: context.to_string(),
+            uses: uses.to_vec(),
+        };
+        let done = self.apply_one(EditTrigger::SetUses, put).await?;
+        Ok(only_setting(done))
     }
 
-    /// Bases the Context named `context` on its Contracts.
-    pub async fn base_on_contract(&mut self, context: &str) -> Result<(), AppError> {
-        let at = self.store.revision().await?;
-        let mut p = self.project().await?;
-        let ctx = context_id(&p, context)?;
-        p.base_on_contract(ctx)?;
-        self.commit_project(at, p).await?;
-        Ok(())
+    /// Bases the Context named `context` on its Contracts. A change set of one put (see [`App::add_context`]).
+    pub async fn base_on_contract(&mut self, context: &str) -> Result<Checked<()>, AppError> {
+        let put = PutInput::BaseOnContract {
+            context: context.to_string(),
+        };
+        let done = self.apply_one(EditTrigger::BaseOnContract, put).await?;
+        Ok(only_setting(done))
     }
 
     /// Makes or revises the Contract named `name` of the Context `context`. A Clause keeps its id when its label
@@ -1329,7 +1317,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             title: title.to_string(),
             clauses: clauses.to_vec(),
         });
-        let done = self.apply_one(put).await?;
+        let done = self.apply_one(EditTrigger::PutContract, put).await?;
         only_put(done, ContractId::from_uuid)
     }
 
@@ -1362,7 +1350,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             source: source.to_string(),
             items,
         });
-        let done = self.apply_one(put).await?;
+        let done = self.apply_one(EditTrigger::PutInterface, put).await?;
         only_put(done, InterfaceId::from_uuid)
     }
 
@@ -1401,7 +1389,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             source: source.to_string(),
             cases: cases.to_vec(),
         });
-        let done = self.apply_one(put).await?;
+        let done = self.apply_one(EditTrigger::PutHarness, put).await?;
         only_put(done, HarnessId::from_uuid)
     }
 
@@ -1410,8 +1398,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// cites what it owns. Pins, change requests and measurements keep referring to it by id. Like a put, it does
     /// not need an open change request; do it as the work of one that expects the Context to be removed.
     pub async fn retire_context(&mut self, context: &str) -> Result<Checked<Retirement>, AppError> {
-        self.retire_one(RetireInput::Context(context.to_string()))
-            .await
+        self.retire_one(
+            EditTrigger::RetireContext,
+            RetireInput::Context(context.to_string()),
+        )
+        .await
     }
 
     /// Retires the Contract named `contract` of the Context `context` with its Clauses. The Context goes to its next
@@ -1421,10 +1412,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         contract: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        self.retire_one(RetireInput::Contract {
-            context: context.to_string(),
-            contract: contract.to_string(),
-        })
+        self.retire_one(
+            EditTrigger::RetireContract,
+            RetireInput::Contract {
+                context: context.to_string(),
+                contract: contract.to_string(),
+            },
+        )
         .await
     }
 
@@ -1435,10 +1429,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         interface: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        self.retire_one(RetireInput::Interface {
-            context: context.to_string(),
-            interface: interface.to_string(),
-        })
+        self.retire_one(
+            EditTrigger::RetireInterface,
+            RetireInput::Interface {
+                context: context.to_string(),
+                interface: interface.to_string(),
+            },
+        )
         .await
     }
 
@@ -1449,10 +1446,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         harness: &str,
     ) -> Result<Checked<Retirement>, AppError> {
-        self.retire_one(RetireInput::Harness {
-            context: context.to_string(),
-            harness: harness.to_string(),
-        })
+        self.retire_one(
+            EditTrigger::RetireHarness,
+            RetireInput::Harness {
+                context: context.to_string(),
+                harness: harness.to_string(),
+            },
+        )
         .await
     }
 
@@ -1505,39 +1505,23 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             id,
             Digest::of(code.as_bytes()),
         )?;
-        let mut pins = self.store.pins().await?;
-        pins.retain(|k| k.interface() != pin.interface());
-        pins.push(pin.clone());
-        let crs = self.store.change_requests().await?;
-        let gate = self
-            .gate_with(Hook::Pin, at, &view(&p, &pins, &crs), &[])
-            .await?;
-        let changes = Changes {
-            pins: vec![pin],
-            pin_codes: vec![PinCode {
-                pin: id,
-                interface: InterfaceId::from_uuid(iface),
-                code: code.to_string(),
-            }],
-            invocations: gate.invocations,
-            external: gate.external,
-            ..Changes::default()
-        };
-        self.store.commit(at, changes).await?;
+        let delta = ModelDelta::new().with_pin(pin, code.to_string());
+        let findings = self.commit_confirm(ConfirmTrigger::Pin, at, delta).await?;
         Ok(Checked {
             value: id,
-            findings: gate.found,
+            findings,
         })
     }
 
     /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
     /// it is a part of, who raises it, the definitions it is about (each citation names its Context), and the
     /// question for a person, whose options may name the definitions they ask to change. Gives back the id and the
-    /// lines as recorded.
+    /// lines as recorded. Like the record of a change request in general, it is an edit: the checks of an edit
+    /// run, and the answer carries what it introduced.
     pub async fn open_change_request(
         &mut self,
         c: &ChangeRequestInput,
-    ) -> Result<Opened, AppError> {
+    ) -> Result<Checked<Opened>, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
@@ -1682,22 +1666,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 recorded: e.recorded,
             });
         }
-        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+        let delta = ModelDelta::new().with_change_request(cr);
+        let findings = self
+            .commit_edit(EditTrigger::OpenChangeRequest, at, delta)
             .await?;
-        Ok(Opened { id, expects })
+        Ok(Checked {
+            value: Opened { id, expects },
+            findings,
+        })
     }
 
     /// Records the answer to the Crux of the change request titled `title`: the `decision`, what it rests on
     /// (`basis`: a line of the Project's Policy, which must exist, or an arbitrary reason), who decided it (`by`),
     /// and when (from the clock). The answer is recorded once and never rewritten: a Crux already answered refuses
-    /// another. The Policy line is cited at the revision the Policy has now.
+    /// another. The Policy line is cited at the revision the Policy has now. An edit of the record (see
+    /// [`App::open_change_request`]).
     pub async fn decide_change_request(
         &mut self,
         title: &str,
         decision: &DecisionInput,
         basis: &BasisInput,
         by: &DecisionMakerInput,
-    ) -> Result<(), AppError> {
+    ) -> Result<Checked<()>, AppError> {
         let now = self.clock.now();
         let at = self.store.revision().await?;
         let p = self.project().await?;
@@ -1729,29 +1719,37 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         decide(&mut cr, Answer::new(decision, basis, by, now), &p)
             .map_err(|e| AppError::on(&cr, e))?;
-        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+        let delta = ModelDelta::new().with_change_request(cr);
+        let findings = self
+            .commit_edit(EditTrigger::DecideChangeRequest, at, delta)
             .await?;
-        Ok(())
+        Ok(Checked {
+            value: (),
+            findings,
+        })
     }
 
     /// Appends an Assumption to the change request titled `title`. Assumptions only grow; a resolved change
-    /// request takes none.
+    /// request takes none. An edit of the record (see [`App::open_change_request`]).
     pub async fn assume(
         &mut self,
         title: &str,
         assumption: &AssumptionInput,
-    ) -> Result<(), AppError> {
+    ) -> Result<Checked<()>, AppError> {
         let at = self.store.revision().await?;
         let mut cr = self.change_request_titled(title).await?;
         cr.assume(assumption_of(assumption)?)
             .map_err(|e| AppError::on(&cr, e))?;
-        self.commit_change_request(at, cr, Vec::new(), Vec::new())
-            .await?;
-        Ok(())
+        let delta = ModelDelta::new().with_change_request(cr);
+        let findings = self.commit_edit(EditTrigger::Assume, at, delta).await?;
+        Ok(Checked {
+            value: (),
+            findings,
+        })
     }
 
     /// Replaces the decision Policy of the Project with `lines`, whole. Its revision goes one up when they differ
-    /// from the ones it has. The checks of the put hook run (`crux.policy-line-gone` notes a decision that rests
+    /// from the ones it has. The checks of an edit run (`crux.policy-line-gone` notes a decision that rests
     /// on a line that this put made gone or reworded).
     pub async fn put_policy(
         &mut self,
@@ -1759,7 +1757,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<PolicyPut>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
-        let before = p.clone();
         let mut given = Vec::with_capacity(lines.len());
         for l in lines {
             given.push((
@@ -1769,28 +1766,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         p.put_policy(given)?;
         let revision = p.policy().revision();
-        let pins = self.store.pins().await?;
-        let crs = self.store.change_requests().await?;
-        let gate = self
-            .gate_put(
-                at,
-                &Change {
-                    before: view(&before, &pins, &crs),
-                    after: view(&p, &pins, &crs),
-                },
-                &[],
-            )
-            .await?;
-        let changes = Changes {
-            project: Some(p),
-            invocations: gate.invocations,
-            external: gate.external,
-            ..Changes::default()
-        };
-        self.store.commit(at, changes).await?;
+        let delta = ModelDelta::new().with_project(p);
+        let findings = self.commit_edit(EditTrigger::PutPolicy, at, delta).await?;
         Ok(Checked {
             value: PolicyPut { revision },
-            findings: gate.found,
+            findings,
         })
     }
 
@@ -1798,7 +1778,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// (`reason`), who says so (`by`), and when (from the clock). Only explicit states refuse it: the request
     /// resolved already, its Crux not answered (to resolve it as done), a part of it not resolved, a `duplicate` or
     /// `superseded` that points at a change request that does not exist (or at itself). The revisions of the
-    /// targets and the work recorded for the request are not consulted; the checks of the resolve hook say where
+    /// targets and the work recorded for the request are not consulted; the checks of the resolve moment say where
     /// they disagree with the record.
     pub async fn resolve_change_request(
         &mut self,
@@ -1809,9 +1789,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<()>, AppError> {
         let now = self.clock.now();
         let at = self.store.revision().await?;
-        let p = self.project().await?;
+        self.project().await?;
         let mut cr = self.change_request_titled(title).await?;
-        let mut crs = self.store.change_requests().await?;
+        let crs = self.store.change_requests().await?;
         let titled = |t: &String| {
             crs.iter()
                 .find(|c| c.title().as_str() == t.trim())
@@ -1832,29 +1812,26 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             now,
         );
         resolve(&mut cr, resolution, &crs).map_err(|e| AppError::on(&cr, e))?;
-        let pins = self.store.pins().await?;
-        crs.retain(|k| k.id() != cr.id());
-        crs.push(cr.clone());
-        let gate = self
-            .gate_with(Hook::Resolve, at, &view(&p, &pins, &crs), &[])
-            .await?;
-        self.commit_change_request(at, cr, gate.invocations, gate.external)
+        let delta = ModelDelta::new().with_change_request(cr);
+        let findings = self
+            .commit_confirm(ConfirmTrigger::ResolveChangeRequest, at, delta)
             .await?;
         Ok(Checked {
             value: (),
-            findings: gate.found,
+            findings,
         })
     }
 
     /// Opens the resolved change request titled `title` again: why (`reason`), who says so (`by`), and when (from
     /// the clock). The resolution it had stays in its history; it takes work, decisions and assumptions again and
-    /// can be resolved anew. Its parts and its parent are not touched.
+    /// can be resolved anew. Its parts and its parent are not touched. An edit of the record (see
+    /// [`App::open_change_request`]).
     pub async fn reopen_change_request(
         &mut self,
         title: &str,
         reason: &str,
         by: &DecisionMakerInput,
-    ) -> Result<(), AppError> {
+    ) -> Result<Checked<()>, AppError> {
         let now = self.clock.now();
         let at = self.store.revision().await?;
         let mut cr = self.change_request_titled(title).await?;
@@ -1864,9 +1841,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             now,
         ))
         .map_err(|e| AppError::on(&cr, e))?;
-        self.commit_change_request(at, cr, Vec::new(), Vec::new())
+        let delta = ModelDelta::new().with_change_request(cr);
+        let findings = self
+            .commit_edit(EditTrigger::ReopenChangeRequest, at, delta)
             .await?;
-        Ok(())
+        Ok(Checked {
+            value: (),
+            findings,
+        })
     }
 
     /// Runs every check on the state as it is: what the person would see if each check ran now, with what agents
@@ -1926,7 +1908,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let pins = self.store.pins().await?;
         let measured = self.measured(p).await?;
         let run = self.registry.run(
-            Hook::Check,
+            Moment::Check,
             at,
             &CheckView {
                 project: p,
@@ -2154,133 +2136,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     async fn project(&self) -> Result<Project, AppError> {
         self.store.project().await?.ok_or(AppError::NoProject)
-    }
-
-    /// Commits `p` alone, as the store stood at `at` when the use case began to read.
-    async fn commit_project(&self, at: StoreRevision, p: Project) -> Result<(), AppError> {
-        let changes = Changes {
-            project: Some(p),
-            ..Changes::default()
-        };
-        Ok(self.store.commit(at, changes).await?)
-    }
-
-    /// Commits `cr` alone, as the store stood at `at` when the use case began to read.
-    async fn commit_change_request(
-        &self,
-        at: StoreRevision,
-        cr: ChangeRequest,
-        invocations: Vec<Invocation>,
-        external: Vec<ExternalReport>,
-    ) -> Result<(), AppError> {
-        let changes = Changes {
-            change_requests: vec![cr],
-            invocations,
-            external,
-            ..Changes::default()
-        };
-        Ok(self.store.commit(at, changes).await?)
-    }
-
-    /// Runs the checks of the put hook on the two states of an edit: the model as the store has it, and as the
-    /// use case would keep it. `pending` are the names the use case is about to give, which the store does not
-    /// have yet. An edit is told only what it introduced (see [`Hook::Put`]), and a mandatory check refuses it
-    /// only for that.
-    async fn gate_put(
-        &self,
-        at: StoreRevision,
-        change: &Change<'_>,
-        pending: &[AssetName],
-    ) -> Result<Gate, AppError> {
-        let before = self.registry.run(Hook::Put, at, &change.before);
-        let run = self.registry.run(Hook::Put, at, &change.after);
-        let reported = introduced(&before.findings, &run.findings);
-        let gating = Gating {
-            hook: Hook::Put,
-            at,
-            after: &change.after,
-            before: Some(&change.before),
-        };
-        self.settle(&gating, run, reported, pending).await
-    }
-
-    /// Runs the checks of `hook`, a confirmation, on `view`: the model with the Pins and change requests the use
-    /// case would leave. A confirmation judges the whole of it, so everything the run found is reported.
-    async fn gate_with(
-        &self,
-        hook: Hook,
-        at: StoreRevision,
-        view: &CheckView<'_>,
-        pending: &[AssetName],
-    ) -> Result<Gate, AppError> {
-        let run = self.registry.run(hook, at, view);
-        let reported = run.findings.clone();
-        let gating = Gating {
-            hook,
-            at,
-            after: view,
-            before: None,
-        };
-        self.settle(&gating, run, reported, pending).await
-    }
-
-    /// What every gate does with a run of the builtin checks: a `reported` finding of a mandatory check at `error`
-    /// refuses the use case before anything is kept (and before an external program is run); then the external
-    /// checks of the hook run on the state after, and one that is a gate and has something to say refuses it; what
-    /// is left is the findings for the caller and the records to keep. The records are those of the whole `run`,
-    /// however much of it is `reported`.
-    async fn settle(
-        &self,
-        gating: &Gating<'_>,
-        mut run: Run,
-        reported: Vec<Finding>,
-        pending: &[AssetName],
-    ) -> Result<Gate, AppError> {
-        let Gating {
-            hook,
-            at,
-            after,
-            before,
-        } = *gating;
-        let (project, crs) = (after.project, after.change_requests);
-        let refusing = self.registry.refusing(&reported);
-        if !refusing.is_empty() {
-            return Err(AppError::Refused(
-                self.found(&refusing, project, crs, pending).await?,
-            ));
-        }
-        let external = self.run_external(hook, at, after, pending).await?;
-        let judged = match before {
-            Some(before) => self.judged_externals(before, &external).await?,
-            None => external.clone(),
-        };
-        if judged.iter().any(|r| {
-            self.registry
-                .external()
-                .iter()
-                .any(|rule| rule.descriptor().id.as_str() == r.rule && rule.gate())
-                && !r.findings.is_empty()
-        }) {
-            let refusing = self
-                .external_findings(&judged, project, crs, pending, false)
-                .await?;
-            return Err(AppError::ExternalRefused {
-                findings: refusing,
-                external,
-            });
-        }
-        run.invocations
-            .extend(self.external_invocations(&external, hook, at));
-        let mut found = self.found(&reported, project, crs, pending).await?;
-        found.extend(
-            self.external_findings(&judged, project, crs, pending, false)
-                .await?,
-        );
-        Ok(Gate {
-            external,
-            found,
-            invocations: run.invocations,
-        })
     }
 
     /// The findings as a caller sees them: their state among `crs`, and what they are about in words.

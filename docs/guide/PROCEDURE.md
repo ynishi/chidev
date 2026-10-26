@@ -68,11 +68,12 @@ not put a Harness.
 6. **Check.** `status` and `check`: every Pin fresh, no stale citation, nothing
    out of a request's frame, no finding left that the work should have
    answered. A stale Pin means implement and pin again; a stale citation means
-   bring the tests up to the target, then put the Harness again. A put says
-   only what that put broke (a citation it made stale, a Pin it left behind),
-   so a Clause no Case cites yet, or a Context with no Interface, is not said
-   while the Contracts, Interfaces and Harness are still being put: it is said
-   here, and by `pin` and `cr_resolve`. To read one Context's share of it,
+   bring the tests up to the target, then put the Harness again. An edit (a
+   put, a retire, `context_add`, `items_rekey`, a change request opened or
+   decided) says only what that edit broke (a citation it made stale, a Pin it
+   left behind), so a Clause no Case cites yet, or a Context with no Interface,
+   is not said while the Contracts, Interfaces and Harness are still being put:
+   it is said here, and by `pin` and `cr_resolve`. To read one Context's share of it,
    `{"op":"check","context":"<name>"}`; `outside` says how many findings
    belong to no Context in particular, so none is lost by narrowing.
 7. **Decide.** The decision maker answers each Crux with `cr_decide`: by a line

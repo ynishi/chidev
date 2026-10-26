@@ -284,6 +284,15 @@ fn the_schema_of_the_operations_is_json_schema_2020_12_named_by_its_protocol() {
             .is_some_and(|required| required.contains(&json!("context"))),
         "{check}"
     );
+    // `check_rules` filters by `moment`; the argument it was called before is refused and is not offered
+    let rules = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|alternative| alternative["properties"]["op"]["const"] == "check_rules")
+        .expect("the operation `check_rules`");
+    assert!(rules["properties"]["moment"].is_object(), "{rules}");
+    assert!(rules["properties"].get("hook").is_none(), "{rules}");
     // a type that is read through another (`try_from`) is described by the one it is read through
     let address = &schema["$defs"]["AddressDto"]["properties"];
     for field in ["rule", "subject", "item", "clause"] {

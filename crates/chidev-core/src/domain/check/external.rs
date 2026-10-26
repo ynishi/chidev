@@ -1,6 +1,6 @@
 //! An external check's rules, independent of its process transport.
 
-use super::{Descriptor, Executor, Hook, Level};
+use super::{Descriptor, Executor, Level, Moment};
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::model_section::ModelSection;
 use std::borrow::Cow;
@@ -14,11 +14,11 @@ pub struct ExternalRule {
 }
 
 impl ExternalRule {
-    /// Validates a rule's namespace, hooks and the sections it reads (at least one). A gate cannot be lowered by
+    /// Validates a rule's namespace, moments and the sections it reads (at least one). A gate cannot be lowered by
     /// policy. `reads` is kept as written, in order and with repeats: a saved run stamps it as it was configured.
     pub fn new(
         id: RuleId,
-        hooks: Vec<Hook>,
+        moments: Vec<Moment>,
         reads: Vec<ModelSection>,
         gate: bool,
         config_digest: String,
@@ -26,8 +26,8 @@ impl ExternalRule {
         if !id.in_family("ext.") || id.as_str() == "ext." {
             return Err("an external id starts with ext. and has a name".into());
         }
-        if hooks.is_empty() {
-            return Err(format!("{id} has no hooks"));
+        if moments.is_empty() {
+            return Err(format!("{id} has no moments"));
         }
         if reads.is_empty() {
             return Err(format!("{id} has no reads"));
@@ -37,7 +37,7 @@ impl ExternalRule {
                 summary: Cow::Owned(id.to_string()),
                 help: Cow::Borrowed("Run the project's external checker."),
                 id,
-                hooks: Cow::Owned(hooks),
+                moments: Cow::Owned(moments),
                 default_level: if gate { Level::Error } else { Level::Warning },
                 mandatory: gate,
                 params: std::borrow::Cow::Borrowed(&[]),
@@ -98,7 +98,7 @@ mod tests {
     fn rule(reads: Vec<ModelSection>) -> Result<ExternalRule, String> {
         ExternalRule::new(
             RuleId::from_static("ext.test"),
-            vec![Hook::Check],
+            vec![Moment::Check],
             reads,
             false,
             "config".into(),

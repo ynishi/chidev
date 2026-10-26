@@ -1,7 +1,7 @@
 //! The change set use case: several assets put and retired as one transition of the Project.
 //!
 //! A put or a retirement of one asset is a change set of one, so there is a single path that turns names into ids,
-//! lets the domain apply the whole and check its rules once, runs the put-hook gate once on the Project before and
+//! lets the domain apply the whole and check its rules once, runs the checks of an edit once on the Project before and
 //! after (so that it reports what the change set introduced), and commits once, with the names of the assets it
 //! made.
 
@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 
+use super::commit::{EditTrigger, ModelDelta};
 use super::ports::external::ExternalExecutor;
 use super::ports::items::{FoundItem, ItemsError};
-use super::ports::{AssetKind, AssetName, Changes, IdSource, Store};
+use super::ports::{AssetKind, AssetName, IdSource, Store};
 use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RenameInput,
-    RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired, view,
+    RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired,
 };
-use crate::domain::check::Change;
 use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
@@ -222,17 +222,27 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ///
     /// Names are turned into ids next (a Case may cite a Clause or an Item that the same change set makes), then
     /// the domain applies the whole to a copy of the Project and checks the rules of the Project once, on the state
-    /// it ends in; the put hook runs once on the Project before and after; and one commit keeps the Project and
+    /// it ends in; the checks of an edit run once on the Project before and after; and one commit keeps the Project and
     /// the names of the assets made. When it is refused nothing is kept, and the error names every problem found
     /// (a Case that cites what it cannot reach is named with its Harness, and what it cites with the Contract or
     /// Interface that has it).
     ///
     /// A set applied `for` a change request records what it moved (the targets whose revision differs between the
     /// Project before and after, with the containers they were in) as work of that request, in the same commit; the
-    /// request must exist and not be resolved. The checks of the put hook see the request with that work, so a move
+    /// request must exist and not be resolved. The checks of an edit see the request with that work, so a move
     /// outside its frame is found by the set that makes it.
     pub async fn apply_change_set(
         &mut self,
+        set: &ChangeSetInput,
+    ) -> Result<Checked<ChangeSetDone>, AppError> {
+        self.apply_set(EditTrigger::ApplyChangeSet, set).await
+    }
+
+    /// [`App::apply_change_set`], for the use case `trigger`: a put or a retirement of one thing is a change set of
+    /// one, and every use case that edits the model by name goes through here.
+    async fn apply_set(
+        &mut self,
+        trigger: EditTrigger,
         set: &ChangeSetInput,
     ) -> Result<Checked<ChangeSetDone>, AppError> {
         if set.puts.is_empty() && set.retires.is_empty() {
@@ -369,25 +379,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let moves = moves_between(&p_before, &after);
             cr.record_work(Footprint::new(at.0 + 1, moves))?;
         }
-        // The state before has the change requests as the store has them; the one the change set is applied for
-        // gains the work in the state after, which is how an edit can introduce a finding about its request.
-        let pins = self.store.pins().await?;
-        let crs_before = self.store.change_requests().await?;
-        let mut crs_after = crs_before.clone();
-        if let Some(cr) = &applied_for {
-            crs_after.retain(|c| c.id() != cr.id());
-            crs_after.push(cr.clone());
-        }
-        let gate = self
-            .gate_put(
-                at,
-                &Change {
-                    before: view(&p_before, &pins, &crs_before),
-                    after: view(&after, &pins, &crs_after),
-                },
-                &plan.names,
-            )
-            .await?;
         let mut retired = Vec::new();
         for r in after.retired().iter().skip(p.retired().len()) {
             retired.push(self.retired_status(r, &plan.names).await?);
@@ -397,48 +388,54 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .iter()
             .map(|put| put_done(put, &p, &plan, &after))
             .collect();
-        let changes = Changes {
-            project: Some(after),
-            change_requests: applied_for.into_iter().collect(),
-            names: plan.names,
-            invocations: gate.invocations,
-            external: gate.external,
-            ..Changes::default()
-        };
-        self.store.commit(at, changes).await?;
+        // The change request the set is applied for gains the work in the state after, which is how an edit can
+        // introduce a finding about its request.
+        let mut delta = ModelDelta::new().with_project(after).with_names(plan.names);
+        if let Some(cr) = applied_for {
+            delta = delta.with_change_request(cr);
+        }
+        let findings = self.commit_edit(trigger, at, delta).await?;
         Ok(Checked {
             value: ChangeSetDone {
                 puts: done,
                 retired,
             },
-            findings: gate.found,
+            findings,
         })
     }
 
     /// A change set of one put.
     pub(super) async fn apply_one(
         &mut self,
+        trigger: EditTrigger,
         put: PutInput,
     ) -> Result<Checked<ChangeSetDone>, AppError> {
-        self.apply_change_set(&ChangeSetInput {
-            change_request: None,
-            puts: vec![put],
-            retires: Vec::new(),
-        })
+        self.apply_set(
+            trigger,
+            &ChangeSetInput {
+                change_request: None,
+                puts: vec![put],
+                retires: Vec::new(),
+            },
+        )
         .await
     }
 
     /// A change set of one retirement.
     pub(super) async fn retire_one(
         &mut self,
+        trigger: EditTrigger,
         retire: RetireInput,
     ) -> Result<Checked<Retirement>, AppError> {
         let done = self
-            .apply_change_set(&ChangeSetInput {
-                change_request: None,
-                puts: Vec::new(),
-                retires: vec![retire],
-            })
+            .apply_set(
+                trigger,
+                &ChangeSetInput {
+                    change_request: None,
+                    puts: Vec::new(),
+                    retires: vec![retire],
+                },
+            )
             .await?;
         Ok(Checked {
             value: Retirement {
@@ -1132,6 +1129,14 @@ fn put_done(put: &PutInput, before: &Project, plan: &Plan, after: &Project) -> P
         name: Some(name),
         id,
         revision,
+    }
+}
+
+/// The change set of one setting of a Context (its `uses`, or what it is based on), which makes no asset.
+pub(super) fn only_setting(done: Checked<ChangeSetDone>) -> Checked<()> {
+    Checked {
+        value: (),
+        findings: done.findings,
     }
 }
 

@@ -4,9 +4,9 @@ use std::borrow::Cow;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::CONFIRM_HOOKS;
+use super::CONFIRM_MOMENTS;
 use crate::domain::check::descriptor::{Descriptor, Executor};
-use crate::domain::check::level::{Hook, Level};
+use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding, Ground};
@@ -27,7 +27,7 @@ static STALE_CITE: Descriptor = Descriptor {
         "The case was written against an older definition and may no longer check what it says. \
            Bring the case up to date (put the harness again) or, if it still holds, put it to record the new revision.",
     ),
-    hooks: Cow::Borrowed(&[Hook::Put, Hook::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -80,7 +80,7 @@ static UNCITED_CLAUSE: Descriptor = Descriptor {
         "Nothing checks the promise this clause makes. Add a case that cites it, or open a change request that \
            addresses the finding if the clause is meant to go unchecked for now.",
     ),
-    hooks: Cow::Borrowed(CONFIRM_HOOKS),
+    moments: Cow::Borrowed(CONFIRM_MOMENTS),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -127,7 +127,7 @@ static UNCITED_ITEM: Descriptor = Descriptor {
         "Nothing checks this declaration. Add a case that cites it, or open a change request that addresses the \
            finding if it is meant to go unchecked for now.",
     ),
-    hooks: Cow::Borrowed(CONFIRM_HOOKS),
+    moments: Cow::Borrowed(CONFIRM_MOMENTS),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),

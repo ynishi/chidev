@@ -93,7 +93,8 @@ belong):
 - `init` makes the project (once). `context_add` adds a Context; `uses` (optional)
   names the Contexts it uses, whose Contracts and Interfaces its Cases may cite.
   `context_uses` replaces that list. `base_on_contract` bases a Context on its
-  Contracts (it needs one, and there is no way back).
+  Contracts (it needs one, and there is no way back). The three are edits like a
+  put is, and answer with `findings` as a put does (see "Triggers and moments").
 - `contract_put` makes the Contract or revises it, whole: the `clauses` given are
   the Clauses it has afterwards, a label it had keeps its Clause, a label it
   did not have is new, and one left out is removed. A label is `C` and a number.
@@ -174,7 +175,8 @@ belong):
     paired still has), and when the provider cannot be asked (`input.items-required`,
     `items.no-provider`, `items.protocol`, `items.failed`, as for a put). It is one
     operation of its own, not a `change_set`, and it is kept as the store stood when
-    it began: a store that has moved since refuses it.
+    it began: a store that has moved since refuses it. It is an edit, so the answer
+    has `findings`: a citation it makes stale (`cite.stale`) is one.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
   a new Harness) or `sim`. A Case of tests cites one Item at least and any Clauses;
   a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
@@ -204,7 +206,7 @@ belong):
   `cr_resolve`) and by `check` and `status`. `check_list` lists every check with
   its `level`, its `kind` (`change` for a check that says an edit made something
   stale or out of place, `state` for one that says the model is not finished or
-  not settled) and the `hooks` it runs at.
+  not settled) and the `moments` it runs at.
   - `{"op":"check","context":"pricing"}` narrows the answer to one Context: the
     findings about it and about what it holds, and about a change request that is
     about it (a target it revises, retires or keeps is in the Context; the options
@@ -248,6 +250,38 @@ A put or a retire does not need an open change request, but it belongs to none: 
 shows in the targets of no change request (only a `change_set` `for` the request
 does, see "Change requests"). A change that touches
 several assets and holds only as a whole is one `change_set` (next section).
+
+### Triggers and moments
+
+Every operation that changes what the store keeps is the trigger of one use case, and
+the checks it is held to follow from the kind of use case it is. There are four
+kinds, and a use case belongs to one of them for good:
+
+- An **edit** changes what the model says: a put or a retire, a Context added or
+  its `uses` set, the Policy, the record of a change request (`cr_open`,
+  `cr_decide`, `cr_assume`, `cr_reopen`), `items_rekey`. The checks of the `edit`
+  moment run on the model before it and after it, and the answer has `findings`:
+  those the edit introduced. A mandatory check, or an external check that is a gate,
+  refuses it only for those.
+- A **confirmation** claims the model is in a state: `pin` (moment `pin`) and
+  `cr_resolve` (moment `resolve`). The checks of its moment judge the whole model as
+  it would stand, and everything they find is in `findings`.
+- A **question** asks for every check on the model as it stands: `check_run` (moment
+  `check`). It keeps what the checks said, external programs included, and refuses
+  nothing, since it changes no asset.
+- A **record** keeps a fact and runs no check: `init`, `measure`, `simulate` and
+  `finding_report`.
+
+The moments are `edit`, `pin`, `resolve` and `check`. They are what a check says it
+runs at (`moments` in `check_list`, in a judged rule's file and in an external
+registration), and what `check_rules` filters by (`moment`). The use cases of each
+kind are listed where the types are, in the RustDoc of `chidev_core::app::commit`
+(`Trigger`); a use case added there has to name its kind, and nothing is kept
+that did not go through the entry of its kind. Each check run is kept with the use
+case that ran it.
+
+The moments were called `hooks`, `hook` in `check_rules`, and the moment `edit` was
+`put`. Those words are refused, and the message names the one to write instead.
 
 ### Protocol `chidev-exec 1`
 
@@ -327,7 +361,7 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   refused.
 - When a set is refused nothing changes and the error names every problem found,
   in names: ``the case stock-tests release_frees (context `core`) cites the clause
-  stock C7, which it cannot reach``. The checks of the put hook run once on the
+  stock C7, which it cannot reach``. The checks of the `edit` moment run once on the
   Project before the set and once on the Project after it, and `findings` are
   those the set introduced: a finding the Project already had is not said again,
   and a mandatory check refuses the set only for what the set introduced. The
@@ -361,7 +395,7 @@ Register a project's checker in `chidev.toml`:
 [external."ext.contract-consistency"]
 command = "./tools/check-contract"
 args = []
-hooks = ["put", "check"]
+moments = ["edit", "check"]
 timeout = 10
 reads = ["contracts"]
 gate = false
@@ -376,7 +410,7 @@ Registration is project-only; the person's `.chidev/chidev.local.toml` can chang
 policy, not register programs. A program has the caller's permissions: this is not a sandbox.
 
 `chidev exec` accepts an explicit `{"op":"check_run"}` operation to execute
-`check`-hook programs and record their results. `status` and `check` never start
+programs registered at the `check` moment and record their results. `status` and `check` never start
 an external program; they show saved findings. `status.external` shows `unrun`,
 `current`, or `stale`, comparing the supplied model sections and registration /
 policy with the saved execution. `current` describes freshness, not success.
@@ -384,14 +418,17 @@ Results at `off` are omitted, and the program is not started. Scalar parameter
 defaults are declared under the registration's `params`; existing `[checks]`
 policy layers may override them with values of the same type.
 
-On `put`, `pin`, and `resolve`, matching external hooks check the proposed model
-before it is saved. Advisory findings are capped at warning. `gate = true` makes
-every finding an error and refuses the change; execution and protocol failures
-also refuse it. On `pin` and `resolve` every finding counts. On `put` the findings
-are held to what the put introduced, as the builtin checks are, when there is
-something to compare with: the saved result of the rule, if it describes the model
-as it stood before the put (the same input and registration, which `status.external`
-calls `current`). A finding that result already had (the same subject and the same
+At the moments `edit`, `pin` and `resolve`, the external checks registered for the
+moment check the proposed model before it is saved (see "Triggers and moments" for
+the operations that are held to each). Advisory findings are capped at warning.
+`gate = true` makes every finding an error and refuses the change; execution and
+protocol failures also refuse it. At `pin` and `resolve` every finding counts. At
+`edit` the findings are held to what the edit introduced, as the builtin checks are,
+when there is something to compare with: the saved result of the rule, if it
+describes the model as it stood before the edit (the same input and registration,
+which `status.external` calls `current`). The words of the registration that were
+only renamed (`moments` was `hooks`, and `edit` was `put`) are counted as they
+were, so a result saved before the rename is still `current`. A finding that result already had (the same subject and the same
 message) is neither reported nor refused for; a program gives no typed reason, so
 its message is what tells two findings about one subject apart. Without such a saved result every finding
 counts, and a failed run refuses a gate whatever was saved. A gate cannot be
@@ -401,8 +438,13 @@ save their external results and invocation records in the same transaction.
 `check_run` saves its results even when a gate finds an error, because it changes
 no asset. A concurrent write refuses the commit, with no automatic process retry.
 
-Programs receive one JSON document on stdin and return one on stdout. For
-example, a response with no findings is `{"protocol":1,"findings":[]}`. Diagnostics
+Programs receive one JSON document on stdin and return one on stdout. The request
+is `protocol` 2: it has the `moment` the program is asked at (`edit`, `pin`,
+`resolve` or `check`; version 1 called it `hook` and said `put` for `edit`), the
+`rules`, `read_at`, `params` and the `model`. It does not say which operation asked:
+a program is told when it is asked. A response with no findings is
+`{"protocol":2,"findings":[]}`; a response of `protocol` 1 is accepted as well (its
+form did not change), and any other version is a failed run. Diagnostics
 go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`, and/or
 `change_requests`; unrequested sections are omitted, and a word that is not one is
 refused when `chidev.toml` is loaded. Context metadata is always sent. The model
@@ -426,7 +468,7 @@ against changes of itself (mutants) and keeps what the Harness noticed:
 {"op":"measure","kind":"mutate","context":"inventory","interface":"stock"}
 ```
 
-It is an operation of its own, never a hook: it takes as long as the project's
+It is an operation of its own and a record, never an edit or a moment of the checks: it takes as long as the project's
 build and tests take, once per mutant. It runs the code the Pin accepted (`pin`
 keeps the text beside the Pin) and the Harness sources as the model holds them
 now, in a copy of the project made under `.chidev/measure/<run>/`, with a target
@@ -447,7 +489,7 @@ time), and the failure if there was one. Measurements are appended; the newest p
 kind and Interface is current, the older stay as history
 (`measure_runs`, `measure_items`). A result is kept in one commit with nothing else.
 
-The checks read the record and run nothing (they are builtin, at the `check` hook):
+The checks read the record and run nothing (they are builtin, at the `check` moment):
 
 | rule | default | finds |
 |---|---|---|
@@ -829,7 +871,7 @@ only a put of that Harness is refused; `sim.shape-kept` reports it.
 
 | rule | default | finds |
 |---|---|---|
-| `sim.shape-kept` | error | a sim Harness kept in a shape a put of it is refused for: one the store held before the rule, or one beside another sim Harness of its Context; about the Case, the Clause or the Context (hook `check` only; it does not refuse a change). One label in two Contracts of the sweep is fine |
+| `sim.shape-kept` | error | a sim Harness kept in a shape a put of it is refused for: one the store held before the rule, or one beside another sim Harness of its Context; about the Case, the Clause or the Context (moment `check` only; it does not refuse a change). One label in two Contracts of the sweep is fine |
 | `sim.uncited-clause` | warning | a Clause that no sim Case cites, of a Contract a sim Harness takes on (cites at least one Clause of); a Contract the sim cites nothing of is left to the tests and not reported |
 | `sim.unrun` | warning | a sim Harness never simulated |
 | `sim.stale` | warning | the script, a Case or the `builds` of the Harness, a Contract it cites a Clause of, a built Interface, the code pinned for it, or the settings moved after the run |
@@ -1270,7 +1312,7 @@ way the report replaces nothing and records no run. The result carries the saved
 
 The digest covers only the fields that decide the answer: `id`, `subject`,
 `question`, `true` and `false` (see `JudgedRule::digest` in RustDoc). The
-summary, fix, `when` hints, hooks and default level describe, guide, schedule or
+summary, fix, `when` hints, moments and default level describe, guide, schedule or
 weight the rule without changing what is a finding, so editing them, TOML
 comments or formatting, or a Policy level override leaves saved judgments
 current. Changing a deciding field makes the saved report and every finding

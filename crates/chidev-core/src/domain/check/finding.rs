@@ -214,7 +214,7 @@ mod tests {
 
     use super::*;
     use crate::domain::check::descriptor::Executor;
-    use crate::domain::check::level::Hook;
+    use crate::domain::check::level::Moment;
     use crate::domain::entity::change_request::ChangeRequestDraft;
     use crate::domain::vo::answer::DecisionMaker;
     use crate::domain::vo::id::{ChangeRequestId, ClauseId, test_uuid};
@@ -229,7 +229,7 @@ mod tests {
         id: RuleId::from_static("t.rule"),
         summary: Cow::Borrowed("s"),
         help: Cow::Borrowed("h"),
-        hooks: Cow::Borrowed(&[Hook::Check]),
+        moments: Cow::Borrowed(&[Moment::Check]),
         default_level: Level::Note,
         mandatory: false,
         params: std::borrow::Cow::Borrowed(&[]),

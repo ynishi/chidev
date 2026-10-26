@@ -4,17 +4,18 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use chidev_core::app::commit::{AskTrigger, Trigger};
 use chidev_core::app::ports::external::{
     ExecutionEvidence, ExternalAttempt, ExternalCall, ExternalExecutor, ExternalFailure,
     ExternalFinding, ExternalReply, ExternalSubject,
 };
-use chidev_core::app::ports::{Changes, IdSource, Store, StoreRevision};
+use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, DecisionMakerInput,
     FindingInput, Intent, ItemInput, ItemRef, Registry, ResolutionInput, SubjectInput, TargetInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
-use chidev_core::domain::check::{Executor, Hook, Level, Origin};
+use chidev_core::domain::check::{Executor, Level, Moment, Origin};
 use chidev_core::domain::repository::{
     ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
 };
@@ -58,12 +59,18 @@ impl ExternalExecutor for FakeExecutor {
     async fn execute(&self, rule: &RuleId, call: ExternalCall) -> ExternalAttempt {
         assert_eq!(rule.as_str(), "ext.contract");
         if let Some(path) = &self.concurrent_write {
-            let other_writer = SqliteStore::open(path).await.unwrap();
-            other_writer
-                .commit(StoreRevision(call.read_at), Changes::default())
-                .await
-                .unwrap();
-            other_writer.close().await.unwrap();
+            // Another process writes while this one waits for the program: a real use case of a second `App` over
+            // the same file, with no check to run, so that it moves the store's revision and nothing else.
+            let other = SqliteStore::open(path).await.unwrap();
+            let registry = Registry::with_external(&[], vec![], vec![], &[]).unwrap();
+            let mut other = App::with_registry(
+                other,
+                Counter(1_000),
+                registry,
+                FixedClock(Timestamp::from_millis(1_000)),
+            );
+            other.check_run().await.unwrap();
+            other.into_store().close().await.unwrap();
         }
         self.calls.lock().unwrap().push(call);
         ExternalAttempt {
@@ -84,7 +91,7 @@ impl ExternalExecutor for FakeExecutor {
     }
 }
 
-fn rule(hooks: Vec<Hook>, gate: bool, config: &str) -> ExternalRule {
+fn rule(hooks: Vec<Moment>, gate: bool, config: &str) -> ExternalRule {
     ExternalRule::new(
         RuleId::from_static("ext.contract"),
         hooks,
@@ -97,7 +104,7 @@ fn rule(hooks: Vec<Hook>, gate: bool, config: &str) -> ExternalRule {
 
 async fn app(
     name: &str,
-    hooks: Vec<Hook>,
+    hooks: Vec<Moment>,
     gate: bool,
     executor: FakeExecutor,
 ) -> App<SqliteStore, Counter, FakeExecutor> {
@@ -106,7 +113,7 @@ async fn app(
 
 async fn app_with_reads(
     name: &str,
-    hooks: Vec<Hook>,
+    hooks: Vec<Moment>,
     gate: bool,
     executor: FakeExecutor,
     reads: Vec<ModelSection>,
@@ -122,17 +129,24 @@ async fn app_with_reads(
         "config-v1".into(),
     )
     .unwrap();
-    let registry = Registry::with_external(&[], vec![], vec![external], &[]).unwrap();
-    let mut app = App::with_registry(
+    // The project is set up with no check registered: adding the Context is an edit, and the registered program
+    // would be asked about it (and its answer kept). The ids used here are the first two of the counter.
+    let mut setup = App::with_registry(
         store,
         Counter::default(),
+        Registry::with_external(&[], vec![], vec![], &[]).unwrap(),
+        FixedClock(Timestamp::from_millis(1_000)),
+    );
+    setup.init().await.unwrap();
+    setup.add_context("core", &[]).await.unwrap();
+    let registry = Registry::with_external(&[], vec![], vec![external], &[]).unwrap();
+    App::with_registry(
+        setup.into_store(),
+        Counter(2),
         registry,
         FixedClock(Timestamp::from_millis(1_000)),
     )
-    .with_external(executor);
-    app.init().await.unwrap();
-    app.add_context("core", &[]).await.unwrap();
-    app
+    .with_external(executor)
 }
 
 fn clauses(text: &str) -> Vec<ClauseInput> {
@@ -168,7 +182,13 @@ fn failed() -> Result<ExternalReply, ExternalFailure> {
 #[tokio::test]
 async fn advisory_failure_is_visible_and_kept_with_the_accepted_change() {
     let executor = FakeExecutor::answering(failed());
-    let mut app = app("advisory-failure", vec![Hook::Put], false, executor.clone()).await;
+    let mut app = app(
+        "advisory-failure",
+        vec![Moment::Edit],
+        false,
+        executor.clone(),
+    )
+    .await;
     let put = app
         .put_contract("core", "stack", "Stack", &clauses("push then pop"))
         .await
@@ -192,7 +212,7 @@ async fn advisory_failure_is_visible_and_kept_with_the_accepted_change() {
 #[tokio::test]
 async fn a_gate_failure_refuses_the_whole_change_and_returns_its_evidence() {
     let executor = FakeExecutor::answering(failed());
-    let mut app = app("gate-failure", vec![Hook::Put], true, executor).await;
+    let mut app = app("gate-failure", vec![Moment::Edit], true, executor).await;
     let before = app.store().revision().await.unwrap();
     let project = app.store().project().await.unwrap();
     let result = app
@@ -223,7 +243,7 @@ async fn a_gate_also_refuses_a_finding_the_program_calls_a_note() {
     note.level = Some("note".into());
     let mut app = app(
         "gate-note",
-        vec![Hook::Put],
+        vec![Moment::Edit],
         true,
         FakeExecutor::answering(reply(vec![note])),
     )
@@ -247,7 +267,7 @@ async fn advisory_findings_cannot_promote_themselves_above_warning() {
     error.level = Some("error".into());
     let mut app = app(
         "advisory-error",
-        vec![Hook::Check],
+        vec![Moment::Check],
         false,
         FakeExecutor::answering(reply(vec![error])),
     )
@@ -260,7 +280,7 @@ async fn advisory_findings_cannot_promote_themselves_above_warning() {
 #[tokio::test]
 async fn status_and_check_do_not_run_a_program_but_explicit_check_run_does() {
     let executor = FakeExecutor::default();
-    let mut app = app("explicit-run", vec![Hook::Check], false, executor.clone()).await;
+    let mut app = app("explicit-run", vec![Moment::Check], false, executor.clone()).await;
     assert_eq!(
         app.status().await.unwrap().external[0].state.word(),
         "unrun"
@@ -286,7 +306,7 @@ async fn only_requested_assets_are_sent_and_a_changed_input_makes_the_report_sta
     let executor = FakeExecutor::default();
     let mut app = app(
         "reads-and-stale",
-        vec![Hook::Check],
+        vec![Moment::Check],
         false,
         executor.clone(),
     )
@@ -308,8 +328,8 @@ async fn only_requested_assets_are_sent_and_a_changed_input_makes_the_report_sta
     .unwrap();
     app.check_run().await.unwrap();
     let call = executor.calls.lock().unwrap()[0].clone();
-    assert_eq!(call.protocol, 1);
-    assert_eq!(call.hook, "check");
+    assert_eq!(call.protocol, 2);
+    assert_eq!(call.moment, "check");
     assert_eq!(call.rules, vec!["ext.contract"]);
     // a program reads the model as JSON in another process, and so does this test
     let model = serde_json::to_value(&call.model).unwrap();
@@ -372,14 +392,14 @@ async fn malformed_responses_are_failed_attempts_instead_of_successful_checks() 
         (
             "wrong-version",
             Ok(ExternalReply {
-                protocol: 2,
+                protocol: 3,
                 findings: vec![],
             }),
         ),
     ] {
         let mut app = app(
             name,
-            vec![Hook::Check],
+            vec![Moment::Check],
             false,
             FakeExecutor::answering(response),
         )
@@ -393,9 +413,44 @@ async fn malformed_responses_are_failed_attempts_instead_of_successful_checks() 
 }
 
 #[tokio::test]
+async fn a_reply_of_version_one_or_two_is_accepted_and_the_request_names_the_moment() {
+    for protocol in [1, 2] {
+        let executor = FakeExecutor::answering(Ok(ExternalReply {
+            protocol,
+            findings: vec![finding("worth a look")],
+        }));
+        let mut app = app(
+            &format!("reply-v{protocol}"),
+            vec![Moment::Edit],
+            false,
+            executor.clone(),
+        )
+        .await;
+        let put = app
+            .put_contract("core", "rules", "Rules", &clauses("a rule"))
+            .await
+            .unwrap();
+        assert_eq!(put.findings.len(), 1, "version {protocol}");
+        let call = executor.calls.lock().unwrap()[0].clone();
+        // The request is version 2 whatever the reply is, and names the moment by its word.
+        assert_eq!(call.protocol, 2);
+        assert_eq!(call.moment, "edit");
+        let sent = serde_json::to_value(&call).unwrap();
+        assert!(sent.get("hook").is_none(), "{sent}");
+        assert_eq!(sent["moment"], "edit");
+    }
+}
+
+#[tokio::test]
 async fn a_subject_that_exists_but_was_not_sent_is_refused() {
     let executor = FakeExecutor::default();
-    let mut app = app("hidden-subject", vec![Hook::Check], false, executor.clone()).await;
+    let mut app = app(
+        "hidden-subject",
+        vec![Moment::Check],
+        false,
+        executor.clone(),
+    )
+    .await;
     let interface = app
         .put_interface(
             "core",
@@ -427,7 +482,13 @@ async fn a_subject_that_exists_but_was_not_sent_is_refused() {
 #[tokio::test]
 async fn a_valid_clause_finding_is_kept_and_an_empty_success_replaces_it() {
     let executor = FakeExecutor::default();
-    let mut app = app("valid-subject", vec![Hook::Check], false, executor.clone()).await;
+    let mut app = app(
+        "valid-subject",
+        vec![Moment::Check],
+        false,
+        executor.clone(),
+    )
+    .await;
     let contract = app
         .put_contract("core", "stack", "Stack", &clauses("push then pop"))
         .await
@@ -468,7 +529,7 @@ async fn a_valid_clause_finding_is_kept_and_an_empty_success_replaces_it() {
 async fn explicit_check_records_a_failed_gate_without_changing_the_model() {
     let mut app = app(
         "explicit-gate",
-        vec![Hook::Check],
+        vec![Moment::Check],
         true,
         FakeExecutor::answering(failed()),
     )
@@ -481,12 +542,17 @@ async fn explicit_check_records_a_failed_gate_without_changing_the_model() {
     assert_eq!(app.store().external_reports().await.unwrap().len(), 1);
     assert_eq!(app.store().project().await.unwrap(), project);
     assert_eq!(app.store().model_revision().await.unwrap(), model_revision);
+    // The run is kept as the run of the question that was asked.
+    let runs = app.store().invocations().await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].moment, Moment::Check);
+    assert_eq!(runs[0].trigger, Some(Trigger::Ask(AskTrigger::CheckRun)));
 }
 
 #[tokio::test]
 async fn changing_the_registered_process_configuration_invalidates_its_previous_result() {
     let executor = FakeExecutor::default();
-    let mut app = app("config-stale", vec![Hook::Check], false, executor.clone()).await;
+    let mut app = app("config-stale", vec![Moment::Check], false, executor.clone()).await;
     app.check_run().await.unwrap();
     assert_eq!(
         app.status().await.unwrap().external[0].state.word(),
@@ -496,7 +562,7 @@ async fn changing_the_registered_process_configuration_invalidates_its_previous_
     let registry = Registry::with_external(
         &[],
         vec![],
-        vec![rule(vec![Hook::Check], false, "config-v2")],
+        vec![rule(vec![Moment::Check], false, "config-v2")],
         &[],
     )
     .unwrap();
@@ -524,17 +590,17 @@ async fn a_policy_disabled_rule_is_not_executed_and_a_gate_cannot_be_disabled() 
     let registry = Registry::with_external(
         &[],
         vec![],
-        vec![rule(vec![Hook::Check], true, "config-v1")],
+        vec![rule(vec![Moment::Check], true, "config-v1")],
         std::slice::from_ref(&layer),
     );
     assert!(registry.is_err());
 
     let executor = FakeExecutor::default();
-    let app = app("policy-off", vec![Hook::Check], false, executor.clone()).await;
+    let app = app("policy-off", vec![Moment::Check], false, executor.clone()).await;
     let registry = Registry::with_external(
         &[],
         vec![],
-        vec![rule(vec![Hook::Check], false, "config-v1")],
+        vec![rule(vec![Moment::Check], false, "config-v1")],
         &[layer],
     )
     .unwrap();
@@ -561,7 +627,7 @@ async fn a_concurrent_write_rejects_the_result_without_retrying_the_external_pro
         concurrent_write: Some(path),
         ..FakeExecutor::default()
     };
-    let mut app = app(name, vec![Hook::Check], false, executor.clone()).await;
+    let mut app = app(name, vec![Moment::Check], false, executor.clone()).await;
     let revision = app.store().revision().await.unwrap();
     let model_revision = app.store().model_revision().await.unwrap();
     let error = app.check_run().await.unwrap_err();
@@ -576,7 +642,7 @@ async fn a_concurrent_write_rejects_the_result_without_retrying_the_external_pro
 #[tokio::test]
 async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
     let executor = FakeExecutor::answering(failed());
-    let mut app = app("pin-hook", vec![Hook::Pin], true, executor.clone()).await;
+    let mut app = app("pin-hook", vec![Moment::Pin], true, executor.clone()).await;
     let interface = app
         .put_interface(
             "core",
@@ -637,7 +703,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
     assert_eq!(app.store().external_reports().await.unwrap().len(), 1);
     let invocations = app.store().invocations().await.unwrap();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].hook, Hook::Pin);
+    assert_eq!(invocations[0].moment, Moment::Pin);
     assert_eq!(invocations[0].read_at, revision);
     assert_eq!(executor.count(), 2);
     assert!(
@@ -646,7 +712,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
             .lock()
             .unwrap()
             .iter()
-            .all(|call| call.hook == "pin")
+            .all(|call| call.moment == "pin")
     );
     assert_eq!(
         app.status().await.unwrap().external[0].state.word(),
@@ -659,7 +725,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     let executor = FakeExecutor::answering(failed());
     let mut app = app_with_reads(
         "resolve-hook",
-        vec![Hook::Resolve],
+        vec![Moment::Resolve],
         true,
         executor.clone(),
         vec![ModelSection::ChangeRequests],
@@ -697,10 +763,10 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert!(app.store().external_reports().await.unwrap().is_empty());
     assert!(app.store().invocations().await.unwrap().is_empty());
     let call = executor.calls.lock().unwrap()[0].clone();
-    assert_eq!(call.hook, "resolve");
+    assert_eq!(call.moment, "resolve");
     let model = serde_json::to_value(&call.model).unwrap();
     let candidate = &model["change_requests"][0];
-    assert_eq!(candidate["id"], cr.id.to_string());
+    assert_eq!(candidate["id"], cr.value.id.to_string());
     assert_eq!(candidate["state"], "resolved");
 
     app.resolve_change_request("accept current behavior", &how, "settled", &by)
@@ -716,7 +782,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert_eq!(app.store().external_reports().await.unwrap().len(), 1);
     let invocations = app.store().invocations().await.unwrap();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].hook, Hook::Resolve);
+    assert_eq!(invocations[0].moment, Moment::Resolve);
     assert_eq!(invocations[0].read_at, revision);
     assert_eq!(executor.count(), 2);
     assert_eq!(
@@ -746,7 +812,7 @@ async fn a_put_is_refused_by_a_gate_for_what_it_introduced_and_not_for_what_the_
     let executor = FakeExecutor::default();
     let mut app = app(
         "gate-introduced",
-        vec![Hook::Put, Hook::Check],
+        vec![Moment::Edit, Moment::Check],
         true,
         executor.clone(),
     )
@@ -812,7 +878,7 @@ async fn a_new_finding_about_the_whole_project_refuses_a_put_beside_one_the_save
     let executor = FakeExecutor::default();
     let mut app = app(
         "gate-project-wide",
-        vec![Hook::Put, Hook::Check],
+        vec![Moment::Edit, Moment::Check],
         true,
         executor.clone(),
     )
@@ -855,7 +921,7 @@ async fn a_gate_judges_every_finding_when_the_saved_report_does_not_describe_the
     let executor = FakeExecutor::default();
     let mut app = app(
         "gate-no-baseline",
-        vec![Hook::Put, Hook::Check],
+        vec![Moment::Edit, Moment::Check],
         true,
         executor.clone(),
     )
@@ -875,7 +941,7 @@ async fn a_gate_judges_every_finding_when_the_saved_report_does_not_describe_the
     let registry = Registry::with_external(
         &[],
         vec![],
-        vec![rule(vec![Hook::Put, Hook::Check], true, "config-v2")],
+        vec![rule(vec![Moment::Edit, Moment::Check], true, "config-v2")],
         &[],
     )
     .unwrap();
@@ -899,7 +965,7 @@ async fn a_gate_judges_every_finding_when_the_saved_report_does_not_describe_the
     // And with no saved report at all: all of it is judged.
     let mut app = self::app(
         "gate-no-report",
-        vec![Hook::Put],
+        vec![Moment::Edit],
         true,
         FakeExecutor::answering(reply(vec![known])),
     )
@@ -916,7 +982,7 @@ async fn a_failed_run_refuses_a_gate_put_even_when_the_saved_report_failed_the_s
     let executor = FakeExecutor::default();
     let mut app = app(
         "gate-failed-again",
-        vec![Hook::Put, Hook::Check],
+        vec![Moment::Edit, Moment::Check],
         true,
         executor.clone(),
     )
@@ -1059,7 +1125,7 @@ async fn sent_to(name: &str, words: &[&str]) -> (String, String, String) {
     let executor = FakeExecutor::default();
     let mut app = app_with_reads(
         name,
-        vec![Hook::Check],
+        vec![Moment::Check],
         false,
         executor.clone(),
         reads(words),
@@ -1079,10 +1145,10 @@ async fn sent_to(name: &str, words: &[&str]) -> (String, String, String) {
 /// The standard input of a program that reads every section, listed out of order and with one twice. A saved
 /// `input_stamp` is compared with this document's digest, so changing one byte of it makes every saved external
 /// run stale: these values were taken before the model was typed and are what it must keep writing.
-const SENT_ALL: &str = r#"{"protocol":1,"hook":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"harnesses":[{"cases":[{"cites":{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","revision":1}],"items":[{"id":"00000000-0000-0000-0000-00000000000a","revision":1}]},"id":"00000000-0000-0000-0000-00000000000d","lines":[1,1],"name":"pushes","revision":1}],"id":"00000000-0000-0000-0000-00000000000c","name":"tests","revision":1,"source":"fn pushes() {}\n"}],"id":"00000000-0000-0000-0000-000000000002","interfaces":[{"id":"00000000-0000-0000-0000-000000000009","items":[{"id":"00000000-0000-0000-0000-00000000000a","key":"push","lines":[1,1],"revision":1},{"id":"00000000-0000-0000-0000-00000000000b","key":"pop","lines":[2,2],"revision":1}],"name":"stack","revision":1,"source":"fn push()\nfn pop()\n"}],"name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"harnesses":[],"id":"00000000-0000-0000-0000-000000000003","interfaces":[],"name":"util","uses":["core"]}],"change_requests":[{"addresses":[{"rule":"cite.uncited-clause","subject":{"id":"00000000-0000-0000-0000-000000000006","kind":"clause"}}],"expects":[{"id":"00000000-0000-0000-0000-00000000000a","kind":"keep","recorded":1,"target":"item"}],"id":"00000000-0000-0000-0000-00000000000e","intent":"keep_behavior","state":"open","title":"keep push"},{"addresses":[],"expects":[{"id":"00000000-0000-0000-0000-000000000006","kind":"target","recorded":1,"target":"clause"}],"id":"00000000-0000-0000-0000-00000000000f","intent":"change_behavior","state":"open","title":"reword C2"}]}}"#;
+const SENT_ALL: &str = r#"{"protocol":2,"moment":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"harnesses":[{"cases":[{"cites":{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","revision":1}],"items":[{"id":"00000000-0000-0000-0000-00000000000a","revision":1}]},"id":"00000000-0000-0000-0000-00000000000d","lines":[1,1],"name":"pushes","revision":1}],"id":"00000000-0000-0000-0000-00000000000c","name":"tests","revision":1,"source":"fn pushes() {}\n"}],"id":"00000000-0000-0000-0000-000000000002","interfaces":[{"id":"00000000-0000-0000-0000-000000000009","items":[{"id":"00000000-0000-0000-0000-00000000000a","key":"push","lines":[1,1],"revision":1},{"id":"00000000-0000-0000-0000-00000000000b","key":"pop","lines":[2,2],"revision":1}],"name":"stack","revision":1,"source":"fn push()\nfn pop()\n"}],"name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"harnesses":[],"id":"00000000-0000-0000-0000-000000000003","interfaces":[],"name":"util","uses":["core"]}],"change_requests":[{"addresses":[{"rule":"cite.uncited-clause","subject":{"id":"00000000-0000-0000-0000-000000000006","kind":"clause"}}],"expects":[{"id":"00000000-0000-0000-0000-00000000000a","kind":"keep","recorded":1,"target":"item"}],"id":"00000000-0000-0000-0000-00000000000e","intent":"keep_behavior","state":"open","title":"keep push"},{"addresses":[],"expects":[{"id":"00000000-0000-0000-0000-000000000006","kind":"target","recorded":1,"target":"clause"}],"id":"00000000-0000-0000-0000-00000000000f","intent":"change_behavior","state":"open","title":"reword C2"}]}}"#;
 
 /// The standard input of a program that reads the contracts only: no other section, and no `change_requests`.
-const SENT_CONTRACTS: &str = r#"{"protocol":1,"hook":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"id":"00000000-0000-0000-0000-000000000002","name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"id":"00000000-0000-0000-0000-000000000003","name":"util","uses":["core"]}]}}"#;
+const SENT_CONTRACTS: &str = r#"{"protocol":2,"moment":"check","rules":["ext.contract"],"read_at":9,"params":{},"model":{"version":3,"contexts":[{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000005","label":"C1","revision":1,"text":"push then pop returns the value"},{"id":"00000000-0000-0000-0000-000000000006","label":"C2","revision":1,"text":"pop on empty is an error"}],"id":"00000000-0000-0000-0000-000000000004","name":"rules","revision":1,"title":"Rules"}],"id":"00000000-0000-0000-0000-000000000002","name":"core","uses":[]},{"basis":"interface","contracts":[{"clauses":[{"id":"00000000-0000-0000-0000-000000000008","label":"C1","revision":1,"text":"a \"quoted\" <word> & more"}],"id":"00000000-0000-0000-0000-000000000007","name":"misc","revision":1,"title":"Misc"}],"id":"00000000-0000-0000-0000-000000000003","name":"util","uses":["core"]}]}}"#;
 
 /// The whole view a judged rule is given (`check_rules`) for the same model: the declared order of the fields, every
 /// section of every Context.
@@ -1092,7 +1158,7 @@ const WHOLE_VIEW: &str = r#"{"version":3,"store_revision":9,"contexts":[{"id":"0
 async fn the_view_a_judged_rule_is_given_is_the_whole_model_in_declared_order() {
     let mut app = app_with_reads(
         "pinned-view",
-        vec![Hook::Check],
+        vec![Moment::Check],
         false,
         FakeExecutor::default(),
         reads(&["contracts"]),
@@ -1136,4 +1202,144 @@ async fn what_a_program_is_sent_and_the_stamps_kept_are_what_they_always_were() 
         config,
         "213868a14489d87ad3161e0c80eb9307a3ede852fc99e75d01ac97b11f4b1bb3"
     );
+}
+
+#[tokio::test]
+async fn adding_a_context_setting_its_uses_and_basing_it_on_its_contracts_are_edits_a_gate_sees() {
+    let executor = FakeExecutor::default();
+    let mut app = app("gate-context", vec![Moment::Edit], true, executor.clone()).await;
+    app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+        .await
+        .unwrap();
+    app.add_context("util", &[]).await.unwrap();
+    let asked = executor.count();
+    let revision = app.store().revision().await.unwrap();
+    let project = app.store().project().await.unwrap();
+
+    let say = |message: &str| {
+        executor
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(reply(vec![finding(message)]));
+    };
+    let refused = |result: Result<_, AppError>| match result {
+        Err(AppError::ExternalRefused { findings, .. }) => assert_eq!(findings.len(), 1),
+        other => panic!("expected the gate to refuse, got {other:?}"),
+    };
+    say("a context too many");
+    refused(app.add_context("billing", &[]).await.map(|_| ()));
+    say("the uses are wrong");
+    refused(
+        app.set_uses("core", &["util".to_string()])
+            .await
+            .map(|_| ()),
+    );
+    say("not on its contracts");
+    refused(app.base_on_contract("core").await.map(|_| ()));
+    // Each was asked, and none kept anything.
+    assert_eq!(executor.count(), asked + 3);
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+    assert_eq!(app.store().project().await.unwrap(), project);
+
+    // When the program has nothing to say they are kept, and the answer carries what the checks said (nothing).
+    let added = app.add_context("billing", &[]).await.unwrap();
+    assert!(added.findings.is_empty());
+    assert!(
+        app.set_uses("core", &["util".to_string()])
+            .await
+            .unwrap()
+            .findings
+            .is_empty()
+    );
+    assert!(
+        app.base_on_contract("core")
+            .await
+            .unwrap()
+            .findings
+            .is_empty()
+    );
+}
+
+/// The digests the first version made: every word of a registration that was only renamed counts as it was.
+mod renamed_words {
+    use super::*;
+
+    /// The configuration stamp (SHA-256 of the JSON of what the rule is configured with) of the rule
+    /// `rule(vec![Edit, Check], true, "config-v1")` with no parameters, as version 0.1.0 made it: its moments
+    /// counted as `put` and `check` under the key `hooks`.
+    const STAMP_MADE_BY_0_1_0: &str =
+        "f145fde5e08d11b1fbd75467e29d06c051fc6728df5db2800a3eac4dc0971bc7";
+
+    #[tokio::test]
+    async fn the_word_of_an_edit_is_not_part_of_what_makes_a_saved_result_stale() {
+        let executor = FakeExecutor::default();
+        let mut app = app(
+            "stamp-0-1-0",
+            vec![Moment::Edit, Moment::Check],
+            true,
+            executor.clone(),
+        )
+        .await;
+        app.put_contract("core", "stack", "Stack", &clauses("push then pop"))
+            .await
+            .unwrap();
+        let first = finding("the contract contradicts itself");
+        let second = finding("the project has no glossary");
+        executor
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(reply(vec![first.clone(), second]));
+        app.check_run().await.unwrap();
+        let saved = app.store().external_reports().await.unwrap();
+        // What this version saves is what the first version saved for the same registration.
+        assert_eq!(saved[0].config_stamp, STAMP_MADE_BY_0_1_0);
+        assert_eq!(saved[0].findings.len(), 2);
+
+        // So the result describes the model, and an edit that mends one of the two findings is not refused for
+        // the one that was there.
+        executor
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(reply(vec![first.clone()]));
+        let kept = app
+            .put_contract("core", "stack", "Stack", &clauses("push, then pop"))
+            .await
+            .unwrap();
+        assert!(kept.findings.is_empty(), "{:?}", kept.findings);
+        assert!(
+            app.store().external_reports().await.unwrap()[0].config_stamp == STAMP_MADE_BY_0_1_0
+        );
+
+        // A change of anything the registration says is another matter: the result is stale, and every finding
+        // counts again.
+        let store = app.into_store();
+        let registry = Registry::with_external(
+            &[],
+            vec![],
+            vec![rule(vec![Moment::Edit, Moment::Check], true, "config-v2")],
+            &[],
+        )
+        .unwrap();
+        let mut changed = App::with_registry(
+            store,
+            Counter(1_000),
+            registry,
+            FixedClock(Timestamp::from_millis(1_000)),
+        )
+        .with_external(executor.clone());
+        executor
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(reply(vec![first]));
+        assert!(matches!(
+            changed
+                .put_contract("core", "stack", "Stack", &clauses("push, then pop, once"))
+                .await,
+            Err(AppError::ExternalRefused { .. })
+        ));
+    }
 }

@@ -1266,33 +1266,43 @@ fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
     std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
     let registration = concat!(
         "[external.\"ext.contract\"]\ncommand='./checker'\n",
-        "hooks=['check','put']\nreads=['contracts']\ngate=false\n",
+        "moments=['check','edit']\nreads=['contracts']\ngate=false\n",
         "params = { strict = true }\n[checks.\"ext.contract\".params]\nstrict = false\n"
     );
+    // The project is made before the program is registered: adding the Context is an edit, which the program
+    // registered at `put` would be run for.
+    std::fs::write(dir.join("chidev.toml"), "").unwrap();
+    let (_, code, err) = exec_in(
+        &dir,
+        "{\"op\":\"init\"}\n{\"op\":\"context_add\",\"name\":\"core\"}\n",
+    );
+    assert_eq!(code, Some(0), "{err}");
     std::fs::write(dir.join("chidev.toml"), registration).unwrap();
     let (results, code, err) = exec_in(
         &dir,
         concat!(
-            "{\"op\":\"init\"}\n{\"op\":\"context_add\",\"name\":\"core\"}\n",
             "{\"op\":\"status\"}\n{\"op\":\"check\"}\n{\"op\":\"check_list\"}\n",
             "{\"op\":\"check_run\"}\n{\"op\":\"status\"}\n"
         ),
     );
     assert_eq!(code, Some(0), "{err}\n{results:#?}");
-    assert_eq!(results[2]["external"][0]["state"], "unrun");
+    assert_eq!(results[0]["external"][0]["state"], "unrun");
     assert!(
-        results[4]["checks"]
+        results[2]["checks"]
             .as_array()
             .unwrap()
             .iter()
             .any(|r| r["id"] == "ext.contract" && r["executor"] == "external")
     );
-    assert_eq!(results[5]["external"][0]["findings"][0]["level"], "warning");
-    assert_eq!(results[6]["external"][0]["state"], "current");
+    assert_eq!(results[3]["external"][0]["findings"][0]["level"], "warning");
+    assert_eq!(results[4]["external"][0]["state"], "current");
     assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap(), "run\n");
     let input: Value =
         serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
-    assert_eq!(input["protocol"], 1);
+    // The request is version 2 and names the moment; the program answers in version 1, which is accepted.
+    assert_eq!(input["protocol"], 2);
+    assert_eq!(input["moment"], "check");
+    assert!(input.get("hook").is_none());
     assert_eq!(input["params"]["strict"], false);
     assert!(input["model"]["contexts"][0].get("interfaces").is_none());
     let (results, code, err) = exec_in(&dir, "{\"op\":\"status\"}\n");
@@ -1328,7 +1338,7 @@ fn malformed_external_registration_stops_before_initializing_a_store() {
     let dir = fresh_dir("external-invalid");
     std::fs::write(
         dir.join("chidev.toml"),
-        "[external.\"ext.bad\"]\ncommand='anything'\nhooks=['check']\nreads=['unknown']\n",
+        "[external.\"ext.bad\"]\ncommand='anything'\nmoments=['check']\nreads=['unknown']\n",
     )
     .unwrap();
     let (results, code, err) = exec_in(&dir, "{\"op\":\"init\"}\n");
@@ -1385,7 +1395,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
     assert_eq!(entry("cr.resolved-without-work")["level"], "warning");
     assert_eq!(entry("cr.targets-untouched")["level"], "note");
     assert_eq!(
-        entry("cr.resolved-without-work")["hooks"],
+        entry("cr.resolved-without-work")["moments"],
         serde_json::json!(["resolve", "check"])
     );
     assert!(
@@ -1397,8 +1407,8 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
     );
     assert_eq!(entry("crux.policy-line-gone")["level"], "note");
     assert_eq!(
-        entry("crux.policy-line-gone")["hooks"],
-        serde_json::json!(["put", "check"])
+        entry("crux.policy-line-gone")["moments"],
+        serde_json::json!(["edit", "check"])
     );
     assert_eq!(entry("context.no-harness")["level"], "off");
     assert_eq!(entry("context.no-harness")["default_level"], "note");
@@ -1433,7 +1443,7 @@ fn a_policy_that_names_no_check_stops_the_run_before_any_operation() {
 const VAGUE_RULE: &str = r#"id = "judged.vague-clause"
 summary = "a clause too vague for a case to check"
 subject = "clause"
-hooks = ["put", "check"]
+moments = ["edit", "check"]
 level = "warning"
 question = "Can a case be written from this clause alone?"
 true = "the clause has no condition or value a case could check"
@@ -1478,7 +1488,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
             "{{\"op\":\"check\"}}\n",
             "{{\"op\":\"status\"}}\n",
             "{{\"op\":\"finding_report\",\"rule\":\"cite.stale\",\"rule_digest\":\"RULE_DIGEST\",\"judge\":\"agent-1\",\"read_at\":6,\"findings\":[]}}\n",
-            "{{\"op\":\"check_rules\",\"hook\":\"pin\"}}\n",
+            "{{\"op\":\"check_rules\",\"moment\":\"pin\"}}\n",
         ),
         clause = clause
     );
@@ -1513,7 +1523,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
         "Can a case be written from this clause alone?"
     );
     assert_eq!(rule["when"], serde_json::json!(["should"]));
-    assert_eq!(rule["hooks"], serde_json::json!(["put", "check"]));
+    assert_eq!(rule["moments"], serde_json::json!(["edit", "check"]));
     let model = &rules["model"];
     assert_eq!(model["version"], 3);
     assert_eq!(model["store_revision"], 3);
@@ -1927,7 +1937,7 @@ fn formatting_descriptive_fields_and_policy_levels_do_not_invalidate_a_judgment(
     let formatted = format!(
         "# A comment does not change the parsed rule.\n{}\n",
         VAGUE_RULE
-            .replace("hooks = [\"put\", \"check\"]", "hooks = [ \"check\" ]")
+            .replace("moments = [\"edit\", \"check\"]", "moments = [ \"check\" ]")
             .replace(
                 "a clause too vague",
                 "a reworded summary of a clause too vague"
@@ -2660,4 +2670,166 @@ fn the_store_flag_wins_over_the_store_of_the_settings_and_is_relative_to_where_i
     assert_eq!(code, Some(0), "{err}\n{results:#?}");
     assert!(dir.join("src/from-flag.db").is_file());
     assert!(!dir.join("from-flag.db").exists());
+}
+
+/// The operations that used to keep what they changed without a word from the checks say what the checks said.
+#[test]
+fn the_operations_that_were_kept_without_a_check_answer_with_findings() {
+    let dir = fresh_dir("kept-with-findings");
+    let ops = [
+        "{\"op\":\"init\"}",
+        "{\"op\":\"context_add\",\"name\":\"base\"}",
+        "{\"op\":\"context_add\",\"name\":\"core\"}",
+        "{\"op\":\"context_uses\",\"context\":\"core\",\"uses\":[\"base\"]}",
+        "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"stack\",\"title\":\"Stack\",\"clauses\":[{\"label\":\"C1\",\"text\":\"push then pop\"}]}",
+        "{\"op\":\"base_on_contract\",\"context\":\"core\"}",
+        "{\"op\":\"cr_open\",\"title\":\"q\",\"intent\":\"keep_behavior\",\"crux\":{\"kind\":\"ambiguity\",\"options\":[{\"choice\":\"keep\"}]}}",
+        "{\"op\":\"cr_assume\",\"title\":\"q\",\"statement\":\"a stack is a stack\",\"reason\":\"it is how it is used\"}",
+        "{\"op\":\"cr_decide\",\"title\":\"q\",\"choice\":\"keep\",\"basis\":{\"arbitrary\":\"nothing derives it\"},\"by\":{\"person\":\"alice\"}}",
+        "{\"op\":\"cr_resolve\",\"title\":\"q\",\"resolution\":\"done\",\"reason\":\"settled\",\"by\":{\"person\":\"alice\"}}",
+        "{\"op\":\"cr_reopen\",\"title\":\"q\",\"reason\":\"it came back\",\"by\":{\"person\":\"alice\"}}",
+    ];
+    let (results, code, err) = exec_in(&dir, &(ops.join("\n") + "\n"));
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    for (n, op) in ops.iter().enumerate().skip(1) {
+        let result = &results[n];
+        assert_eq!(result["ok"], true, "{op}: {result:#?}");
+        assert!(
+            result["findings"].is_array(),
+            "{op} has no findings: {result:#?}"
+        );
+    }
+    // `init` makes the Project and runs no check, so it has nothing to say.
+    assert!(results[0].get("findings").is_none());
+}
+
+/// A registered gate sees the edits that were not asked about, and `init`, which is a record, is not asked.
+#[test]
+#[cfg(unix)]
+fn a_registered_gate_refuses_adding_a_context_and_is_not_asked_about_init() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fresh_dir("gate-context-add");
+    let checker = dir.join("checker");
+    std::fs::write(
+        &checker,
+        concat!(
+            "#!/bin/sh\ncat > request.json\necho run >> runs\n",
+            "printf '%s' '{\"protocol\":2,\"findings\":[{\"rule\":\"ext.contract\",\"message\":\"no new contexts\"}]}'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("chidev.toml"),
+        "[external.\"ext.contract\"]\ncommand='./checker'\nmoments=['edit']\nreads=['contracts']\ngate=true\n",
+    )
+    .unwrap();
+    let (results, code, err) = exec_in(
+        &dir,
+        "{\"op\":\"init\"}\n{\"op\":\"context_add\",\"name\":\"core\"}\n{\"op\":\"status\"}\n",
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    assert_eq!(results[0]["ok"], true, "{results:#?}");
+    assert_eq!(results[1]["ok"], false, "{results:#?}");
+    assert_eq!(results[1]["external"][0]["findings"][0]["level"], "error");
+    assert!(
+        message(&results[1]).contains("no new contexts"),
+        "{results:#?}"
+    );
+    // the program was asked once, for the edit and not for `init`
+    assert_eq!(std::fs::read_to_string(dir.join("runs")).unwrap(), "run\n");
+    let asked: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
+    assert_eq!(
+        (asked["protocol"].clone(), asked["moment"].clone()),
+        (2.into(), "edit".into())
+    );
+    // and nothing was kept
+    assert_eq!(results[2]["ok"], true);
+    assert_eq!(results[2]["external"][0]["state"], "unrun");
+}
+
+/// The words the first version used are refused, each with the word it is now.
+#[test]
+fn an_old_word_for_a_moment_is_refused_with_the_new_one() {
+    // the key of a registration, and the word `put` in it
+    for (name, registration, expect) in [
+        (
+            "key",
+            "[external.\"ext.old\"]\ncommand='x'\nhooks=['check']\nreads=['contracts']\n",
+            "`hooks` is now `moments`",
+        ),
+        (
+            "key-and-word",
+            "[external.\"ext.old\"]\ncommand='x'\nhooks=['put']\nreads=['contracts']\n",
+            "`hooks` is now `moments`",
+        ),
+        (
+            "word",
+            "[external.\"ext.old\"]\ncommand='x'\nmoments=['put']\nreads=['contracts']\n",
+            "`put` is now `edit`",
+        ),
+    ] {
+        let dir = fresh_dir(&format!("old-word-external-{name}"));
+        std::fs::write(dir.join("chidev.toml"), registration).unwrap();
+        let (results, code, err) = exec_in(&dir, "{\"op\":\"init\"}\n");
+        assert_eq!(code, Some(2), "{name}");
+        assert!(results.is_empty(), "{name}");
+        assert!(err.contains(expect), "{name}: {err}");
+    }
+    // the same in a judged rule
+    for (name, text, expect) in [
+        (
+            "key",
+            VAGUE_RULE.replace(
+                "moments = [\"edit\", \"check\"]",
+                "hooks = [\"edit\", \"check\"]",
+            ),
+            "`hooks` is now `moments`",
+        ),
+        (
+            "word",
+            VAGUE_RULE.replace("\"edit\"", "\"put\""),
+            "`put` is now `edit`",
+        ),
+    ] {
+        let dir = fresh_dir(&format!("old-word-judged-{name}"));
+        std::fs::create_dir_all(dir.join("checks/judged")).unwrap();
+        std::fs::write(dir.join("checks/judged/vague.toml"), text).unwrap();
+        let (results, code, err) = exec_in(&dir, "{\"op\":\"init\"}\n");
+        assert_eq!(code, Some(2), "{name}");
+        assert!(results.is_empty(), "{name}");
+        assert!(err.contains(expect), "{name}: {err}");
+    }
+    // and in the argument of `check_rules`, where an argument left unread would have asked for every rule
+    let dir = fresh_dir("old-word-check-rules");
+    std::fs::create_dir_all(dir.join("checks/judged")).unwrap();
+    std::fs::write(dir.join("checks/judged/vague-clause.toml"), VAGUE_RULE).unwrap();
+    let (results, code, err) = exec_in(
+        &dir,
+        concat!(
+            "{\"op\":\"init\"}\n",
+            "{\"op\":\"check_rules\",\"hook\":\"pin\"}\n",
+            "{\"op\":\"check_rules\",\"moment\":\"put\"}\n",
+            "{\"op\":\"check_rules\",\"moment\":\"save\"}\n",
+            "{\"op\":\"check_rules\",\"moment\":\"edit\"}\n",
+            "{\"op\":\"check_rules\",\"moment\":\"pin\"}\n",
+        ),
+    );
+    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+    assert!(
+        message(&results[1]).contains("`hook` is now `moment`"),
+        "{results:#?}"
+    );
+    assert!(
+        message(&results[2]).contains("`put` is now `edit`"),
+        "{results:#?}"
+    );
+    assert!(
+        message(&results[3]).contains("`save` is not a moment"),
+        "{results:#?}"
+    );
+    assert_eq!(results[4]["ok"], true, "{results:#?}");
+    assert_eq!(results[4]["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(results[5]["rules"], serde_json::json!([]));
 }

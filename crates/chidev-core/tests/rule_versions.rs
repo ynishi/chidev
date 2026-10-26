@@ -27,7 +27,7 @@ const RULE: &str = "judged.clause-review";
 
 fn rule_text(question: &str) -> String {
     format!(
-        "id='{RULE}'\nsummary='review a clause'\nsubject='clause'\nhooks=['check','put']\nlevel='warning'\nquestion='{question}'\ntrue='no observable result'\nfalse='an observable result'\nfix='state the result'\nwhen=['should']\n"
+        "id='{RULE}'\nsummary='review a clause'\nsubject='clause'\nmoments=['check','edit']\nlevel='warning'\nquestion='{question}'\ntrue='no observable result'\nfalse='an observable result'\nfix='state the result'\nwhen=['should']\n"
     )
 }
 
@@ -301,7 +301,7 @@ async fn editing_what_does_not_decide_the_judgment_leaves_it_current() {
     let edited = rule_text("can this be tested?")
         .replace("review a clause", "a reworded summary")
         .replace("state the result", "a reworded fix")
-        .replace("['check','put']", "['check']")
+        .replace("['check','edit']", "['check']")
         .replace("['should']", "['must']")
         .replace("level='warning'", "level='error'");
     let app = open(&path, &edited, None).await;

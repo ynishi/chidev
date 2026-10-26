@@ -3,7 +3,8 @@
 //! JSON sent to it, not its access to the machine. Each attempt has its own process group on Unix.
 //!
 //! The process receives one [`ExternalCall`] JSON document on stdin and returns one [`ExternalReply`]
-//! JSON document on stdout (protocol version 1). Stderr is diagnostics, never part of the response.
+//! JSON document on stdout (the request is protocol version 2; a reply of version 1 or 2 is accepted). Stderr is
+//! diagnostics, never part of the response.
 //! Stdout is capped at 1 MiB and stderr at 64 KiB; exceeding either cap fails the attempt. The default
 //! timeout is 10 seconds and covers executable resolution and hashing as well as pipe I/O and process
 //! completion. A timeout or cancellation kills the process group and reaps the direct child. Only Unix
@@ -13,7 +14,7 @@
 //! [external."ext.example"]
 //! command = "./tools/check-example"
 //! args = []
-//! hooks = ["put", "check"]
+//! moments = ["edit", "check"]
 //! reads = ["contracts"]
 //! timeout = 10
 //! gate = false
@@ -38,7 +39,7 @@ use crate::app::ports::external::{
     ExternalReply,
 };
 use crate::domain::check::external::ExternalRule;
-use crate::domain::check::{Hook, ParamValue};
+use crate::domain::check::{DIGEST_MOMENTS_KEY, Moment, ParamValue, renamed_key};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::model_section::ModelSection;
@@ -80,7 +81,12 @@ struct Registration {
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    hooks: Vec<String>,
+    /// The moments the program is asked at. Optional only so that the old key is told apart from a missing one.
+    #[serde(default)]
+    moments: Option<Vec<String>>,
+    /// Only to be refused: the key was `hooks` before it was `moments`.
+    #[serde(default)]
+    hooks: Option<toml::Value>,
     #[serde(default = "default_timeout")]
     timeout: u64,
     reads: Vec<String>,
@@ -92,6 +98,38 @@ struct Registration {
 
 fn default_timeout() -> u64 {
     10
+}
+
+/// The key of the moments of a registration.
+const MOMENTS_KEY: &str = "moments";
+
+/// The key the moments had before, which is refused with [`MOMENTS_KEY`].
+const RENAMED_MOMENTS_KEY: &str = "hooks";
+
+/// A registration as the first digests counted it: the key `moments` as `hooks` ([`DIGEST_MOMENTS_KEY`]) and each
+/// moment by its [`Moment::digest_key`], everything else as it is.
+///
+/// The digest of a registration is made of its table, so that a change of anything it says makes a saved result
+/// stale. A word that is renamed says nothing new, so the table is written back to the form it had when the digests
+/// that exist were made before it is hashed: a person who only changed `hooks = ["put"]` to `moments = ["edit"]`
+/// has the digest the saved results were made under. This is a copy for the digest and no way to configure with the
+/// old words, which `load` refuses. **The digest is fixed at the form of version 0.1.0.**
+///
+/// `moments` are the moments `load` read from the same table, in the order and with the repeats they were written
+/// with, so the words are not read a second time here.
+fn legacy_form(entry: &toml::Value, moments: &[Moment]) -> Result<toml::Value, String> {
+    let mut table = entry
+        .as_table()
+        .cloned()
+        .ok_or_else(|| "a registration is a table".to_string())?;
+    if table.remove(MOMENTS_KEY).is_some() {
+        let words = moments
+            .iter()
+            .map(|m| toml::Value::String(m.digest_key().to_string()))
+            .collect();
+        table.insert(DIGEST_MOMENTS_KEY.to_string(), toml::Value::Array(words));
+    }
+    Ok(toml::Value::Table(table))
 }
 
 /// Loads external checks from the `[external]` table of the project's settings. Other tables are left to their
@@ -127,10 +165,15 @@ pub fn load(
                 return Err(invalid("`timeout` must be positive seconds".to_string()));
             }
             let id = RuleId::try_from(name.as_str()).map_err(|e| invalid(e.to_string()))?;
-            let hooks = registration
-                .hooks
+            if registration.hooks.is_some() {
+                return Err(invalid(renamed_key(RENAMED_MOMENTS_KEY, MOMENTS_KEY)));
+            }
+            let moments = registration
+                .moments
+                .as_deref()
+                .ok_or_else(|| invalid(format!("missing field `{MOMENTS_KEY}`")))?
                 .iter()
-                .map(|h| Hook::from_word(h).ok_or_else(|| invalid(format!("unknown hook `{h}`"))))
+                .map(|w| Moment::parse(w).map_err(|e| invalid(format!("`{MOMENTS_KEY}`: {e}"))))
                 .collect::<Result<Vec<_>, _>>()?;
             let reads = registration
                 .reads
@@ -159,12 +202,14 @@ pub fn load(
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
             // Include rule metadata as well as the launch configuration: changing what a check reads
             // or when it runs must invalidate a saved observation too.
-            let config_digest =
-                Digest::of(&serde_json::to_vec(entry).map_err(|e| invalid(e.to_string()))?)
-                    .to_string();
+            let config_digest = Digest::of(
+                &serde_json::to_vec(&legacy_form(entry, &moments).map_err(&invalid)?)
+                    .map_err(|e| invalid(e.to_string()))?,
+            )
+            .to_string();
             let rule = ExternalRule::new(
                 id.clone(),
-                hooks,
+                moments,
                 reads,
                 registration.gate,
                 config_digest.clone(),
@@ -276,6 +321,7 @@ impl ProcessExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ports::external::REQUEST_PROTOCOL;
     use crate::infra::project::{FILE, find};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -325,17 +371,62 @@ mod tests {
     }
 
     const REGISTRATION: &str =
-        "command = './checker'\nhooks = ['put', 'check']\nreads = ['contracts']\ntimeout = 10";
+        "command = './checker'\nmoments = ['edit', 'check']\nreads = ['contracts']\ntimeout = 10";
 
     fn call() -> ExternalCall {
         ExternalCall {
-            protocol: 1,
-            hook: "check".into(),
+            protocol: REQUEST_PROTOCOL,
+            moment: "check".into(),
             rules: vec!["ext.test".into()],
             read_at: 0,
             params: BTreeMap::new(),
             model: crate::app::ports::external::ExternalModelView::empty(1),
         }
+    }
+
+    /// The digest of the registration `command = './checker'`, `hooks = ['put', 'check']`, `reads = ['contracts']`,
+    /// `timeout = 10`, as version 0.1.0 made it: the SHA-256 of its table written as JSON. A result saved by that
+    /// version is stale unless this version makes the same digest of the same registration in the words it has now.
+    const MADE_BY_0_1_0: &str = "6707f25502d6567f57aacb5cec2416e6e01976fa60e71b4cc6d4e541c27699b6";
+
+    #[test]
+    fn the_digest_of_a_registration_is_the_one_version_0_1_0_made_of_it() {
+        let fixture = Fixture::new();
+        fixture.config(REGISTRATION);
+        let (rules, _) = load(&fixture.0).unwrap();
+        assert_eq!(rules[0].config_digest(), MADE_BY_0_1_0);
+        // What the digest is for: anything the registration says that did not just change its name moves it.
+        for changed in [
+            REGISTRATION.replace("./checker", "./other"),
+            REGISTRATION.replace("'edit', 'check'", "'pin', 'check'"),
+            REGISTRATION.replace("'edit', 'check'", "'check', 'edit'"),
+            REGISTRATION.replace("timeout = 10", "timeout = 11"),
+            REGISTRATION.replace("['contracts']", "['contracts', 'harnesses']"),
+        ] {
+            fixture.config(&changed);
+            let (rules, _) = load(&fixture.0).unwrap();
+            assert_ne!(rules[0].config_digest(), MADE_BY_0_1_0, "{changed}");
+        }
+    }
+
+    #[test]
+    fn a_registration_is_written_back_to_the_form_its_digest_was_made_of() {
+        let entry: toml::Value = toml::from_str(
+            "command = 'c'\nmoments = ['check', 'edit', 'pin', 'resolve']\nreads = ['contracts']",
+        )
+        .unwrap();
+        let moments = [Moment::Check, Moment::Edit, Moment::Pin, Moment::Resolve];
+        let back = legacy_form(&entry, &moments).unwrap();
+        let table = back.as_table().unwrap();
+        assert!(table.get(MOMENTS_KEY).is_none());
+        let words: Vec<&str> = table[DIGEST_MOMENTS_KEY]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap())
+            .collect();
+        assert_eq!(words, ["check", "put", "pin", "resolve"]);
+        assert_eq!(table["command"].as_str(), Some("c"));
     }
 
     #[test]
@@ -368,7 +459,26 @@ mod tests {
                 "`contract`",
             ),
             (REGISTRATION.replace("'contracts'", ""), "reads"),
-            (REGISTRATION.replace("'put', 'check'", "'unknown'"), "hook"),
+            (
+                REGISTRATION.replace("'edit', 'check'", "'unknown'"),
+                "`unknown` is not a moment",
+            ),
+            (
+                REGISTRATION.replace("'edit', 'check'", "'put', 'check'"),
+                "`put` is now `edit`",
+            ),
+            (
+                REGISTRATION.replace("moments = ['edit', 'check']", "hooks = ['edit', 'check']"),
+                "`hooks` is now `moments`",
+            ),
+            (
+                REGISTRATION.replace("moments = ['edit', 'check']", "hooks = ['put', 'check']"),
+                "`hooks` is now `moments`",
+            ),
+            (
+                REGISTRATION.replace("moments = ['edit', 'check']\n", ""),
+                "missing field `moments`",
+            ),
             (format!("{REGISTRATION}\ntimeotu = 1"), "unknown field"),
             (
                 format!("{REGISTRATION}\nparams = {{ limit = [1, 2] }}"),

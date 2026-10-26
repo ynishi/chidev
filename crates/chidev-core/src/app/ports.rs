@@ -9,7 +9,9 @@ use std::future::Future;
 
 use uuid::Uuid;
 
-use crate::domain::check::{Executor, Hook, Level};
+use super::commit::{Gated, Trigger};
+
+use crate::domain::check::{Executor, Level, Moment};
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
@@ -119,7 +121,7 @@ impl Outcome {
     }
 }
 
-/// The record of one check run by one use case: which check, at which hook, over the store as it stood, and how many
+/// The record of one check run by one use case: which check, at which moment, over the store as it stood, and how many
 /// findings of each level it gave. Kept apart from the Project (append-only), so a run can be told apart later
 /// from the model it read: the store's revision names the model. There is no duration yet; timing needs a clock
 /// port, which the use cases do not have.
@@ -131,8 +133,10 @@ impl Outcome {
 pub struct Invocation {
     /// The check.
     pub check: RuleId,
-    /// The hook it ran at.
-    pub hook: Hook,
+    /// The moment it ran at.
+    pub moment: Moment,
+    /// The use case that ran it, whose entry made the record; none for a row made before the use cases were named.
+    pub trigger: Option<Trigger>,
     /// The revision of the store the use case read.
     pub read_at: StoreRevision,
     /// Findings at `note`.
@@ -268,11 +272,12 @@ pub trait Store:
     /// on a view read before such a commit is not taken for one made on an older model.
     fn model_revision(&self) -> impl Future<Output = Result<StoreRevision, StoreError>> + Send;
 
-    /// Keeps `changes` whole, if the store still stands at `read_at`; otherwise keeps nothing and answers
-    /// [`StoreError::Conflict`].
+    /// Keeps what `gated` changed whole, if the store still stands at `read_at`; otherwise keeps nothing and
+    /// answers [`StoreError::Conflict`]. A [`Gated`] is made only by an entry of [`App`](super::App), so nothing is
+    /// kept that did not go through the checks its use case is held to.
     fn commit(
         &self,
         read_at: StoreRevision,
-        changes: Changes,
+        gated: Gated,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }

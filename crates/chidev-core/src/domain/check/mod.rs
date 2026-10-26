@@ -8,7 +8,7 @@
 //!
 //! - **builtin** ([`builtin`]): Rust code of this crate, a pure function of the view. Done.
 //! - **judged** ([`judged`]): a rule written as data, which the agent driving chidev judges (chidev keeps the rules
-//!   and the results; it never judges). Done. It runs at no hook and cannot be mandatory.
+//!   and the results; it never judges). Done. It runs at no moment and cannot be mandatory.
 //! - **external** ([`external`]): a project-registered program run through an application port. Its findings
 //!   share the policy and change gates; execution failures are explicit findings. See [`Executor::External`].
 //!
@@ -28,7 +28,7 @@ pub use self::descriptor::{CheckKind, Descriptor, Executor, ParamDefault, ParamK
 pub use self::finding::{Finding, FindingState, Ground, LineState, Mention};
 pub use self::introduced::introduced;
 pub use self::judged::{JudgedDraft, JudgedRule, JudgedRuleError};
-pub use self::level::{Hook, Level};
+pub use self::level::{DIGEST_MOMENTS_KEY, Level, Moment, MomentWordError, renamed_key};
 pub use self::policy::{Layer, Origin, ParamValue, Params, Policy, PolicyError, Selector, Setting};
 pub use self::view::{Change, CheckView};
 

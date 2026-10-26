@@ -361,7 +361,7 @@ impl Policy {
 mod tests {
     use super::*;
     use crate::domain::check::descriptor::{Executor, ParamSpec};
-    use crate::domain::check::level::Hook;
+    use crate::domain::check::level::Moment;
 
     static PARAMS: [ParamSpec; 2] = [
         ParamSpec {
@@ -386,7 +386,7 @@ mod tests {
             id,
             summary: "".into(),
             help: "".into(),
-            hooks: [Hook::Check][..].into(),
+            moments: [Moment::Check][..].into(),
             default_level: level,
             mandatory,
             params: params.into(),

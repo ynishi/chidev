@@ -495,6 +495,8 @@ fn items_rekey_gives_the_provider_keys_and_keeps_the_ids_and_the_revisions() {
     assert_eq!(r["revised"], json!([]));
     assert_eq!(r["unmatched"], json!([]));
     assert_eq!(r["revision"], revision);
+    // a rekey is an edit, and says what its checks said
+    assert_eq!(r["findings"], json!([]));
     // the provider was sent the code the Interface keeps
     let asked: Value =
         serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
