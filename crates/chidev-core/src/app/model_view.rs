@@ -14,12 +14,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::project::Project;
+use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{Subject, SubjectKind};
 use crate::domain::vo::id::ContextId;
@@ -135,15 +136,16 @@ pub struct CiteView {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ChangeRequestView {
     id: String,
-    /// The question, for a request that holds a Crux.
+    /// What is asked; for a request that holds a Crux, the question.
     title: String,
     /// `change_behavior` or `keep_behavior`.
     intent: &'static str,
     /// `open`, `decided` or `resolved`.
     state: &'static str,
     /// The id of the request it is a part of; left out for one that is no part. Left out, not `null`, so that the
-    /// entry of a request with neither a parent nor a Crux is the bytes it was before the field was added, and the
-    /// stamps kept of it (a judged finding's, an external run's) still hold.
+    /// entry of a request with neither a parent nor a Crux is the bytes it was before the field was added. A stamp
+    /// taken over the change requests (a judged finding about them or the Project, an external run that reads them)
+    /// is stale once when any request has a parent or a Crux, as it is after any change of what it was taken over.
     #[serde(skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     /// What it asks of targets (to revise or retire, or to keep), each with the revision the target had when the
@@ -159,9 +161,11 @@ pub struct ChangeRequestView {
 /// A Crux: the kind of question, its options, the recommendation and, once decided, the decision.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CruxView {
-    /// `ambiguity`, `conflict`, `model` or `disagreement`.
+    /// The kind of question: `ambiguity`, `conflict`, `model` or `disagreement`.
+    #[schemars(schema_with = "crux_kind_schema")]
     kind: &'static str,
     /// `low`, `normal` or `high`; none when it was not given.
+    #[schemars(schema_with = "importance_schema")]
     importance: Option<&'static str>,
     /// The options, in the order they were given.
     options: Vec<CruxOptionView>,
@@ -172,6 +176,22 @@ pub struct CruxView {
     /// The decision, in the words `status` gives it (the choice, `in other words: …` or `left unspecified`); none
     /// while it is undecided. Only what was decided: the work it asks for is in the Contracts.
     decision: Option<String>,
+}
+
+/// The schema of a Crux's `kind`: the word of one of the kinds.
+fn crux_kind_schema(_: &mut SchemaGenerator) -> Schema {
+    let words: Vec<&str> = CruxKind::ALL.iter().map(|k| k.word()).collect();
+    json_schema!({ "type": "string", "enum": words })
+}
+
+/// The schema of a Crux's `importance`: the word of one of them, or none.
+fn importance_schema(_: &mut SchemaGenerator) -> Schema {
+    let words: Vec<serde_json::Value> = Importance::ALL
+        .iter()
+        .map(|i| serde_json::Value::from(i.word()))
+        .chain([serde_json::Value::Null])
+        .collect();
+    json_schema!({ "enum": words })
 }
 
 /// An option of a Crux.

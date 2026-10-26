@@ -6,6 +6,7 @@ use std::process::Command;
 
 use chidev_core::app::ports::external::{REPLY_PROTOCOLS, finding_levels, subject_kinds};
 use chidev_core::domain::check::Moment;
+use chidev_core::domain::vo::crux::{CruxKind, Importance};
 use serde_json::{Value, json};
 
 /// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root) and
@@ -131,6 +132,18 @@ fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_
         .find(|c| c["title"] == "How a half rounds")
         .expect("the part");
     assert_eq!(decided["crux"]["decision"], "up");
+    // both views, with a parent and a Crux undecided and decided, are in the shape the schema of the view gives,
+    // and its words for a Crux are the domain's
+    let schema = schema(&["view"]);
+    for at in [2, 4] {
+        keys_fit(&r[at]["view"], &schema, &schema, "view");
+    }
+    let crux = &schema["$defs"]["CruxView"]["properties"];
+    let kinds: Vec<&str> = CruxKind::ALL.iter().map(|k| k.word()).collect();
+    assert_eq!(crux["kind"]["enum"], json!(kinds));
+    let mut importances: Vec<Value> = Importance::ALL.iter().map(|i| json!(i.word())).collect();
+    importances.push(Value::Null);
+    assert_eq!(crux["importance"]["enum"], json!(importances));
 }
 
 /// The one diagnostic of a refused result.
