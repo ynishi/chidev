@@ -511,15 +511,20 @@ fn lines_of_another_length_are_refused_with_the_form_they_take() {
             json!({"op":"cr_open","title":"T","intent":"change_behavior",
                 "assumptions":[{"statement":"s","reason":"r",
                     "evidence":[{"repo":{"path":"R.md","lines":[16]}}]}]}),
+            json!({"op":"cr_open","title":"U","intent":"change_behavior",
+                "assumptions":[{"statement":"s","reason":"r",
+                    "evidence":[{"repo":{"path":"R.md","lines":16}}]}]}),
         ],
     );
-    for (result, length) in r.iter().zip([1, 3, 1]) {
+    let given = ["a list of 1", "a list of 3", "a list of 1", "`16`"];
+    assert_eq!(r.len(), given.len(), "{r:#?}");
+    for (result, given) in r.iter().zip(given) {
         let d = one(result);
         assert_eq!(d["code"], "input.invalid", "{d:#?}");
         let message = d["message"].as_str().unwrap();
         assert!(
             message.contains(&format!(
-                "`lines` is [first, last], two line numbers counted from 1 ([n, n] for one line), not a list of {length}"
+                "`lines` is [first, last], two line numbers counted from 1 ([n, n] for one line), not {given}"
             )),
             "{d:#?}"
         );

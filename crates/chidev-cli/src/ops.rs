@@ -979,17 +979,28 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-/// `lines`: the first and last line, counted from 1. A list of another length is refused with words that say
-/// so, since serde's own ("invalid length 1, expected a tuple of size 2") name neither the field nor the form.
+/// `lines`: the first and last line, counted from 1. Any other value (a list of another length, one number) is
+/// refused with words that say the form, since serde's own ("invalid length 1, expected a tuple of size 2",
+/// "expected a sequence") name neither the field nor the form.
 fn two_lines<'de, D>(deserializer: D) -> Result<[usize; 2], D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let lines = Vec::<usize>::deserialize(deserializer)?;
-    <[usize; 2]>::try_from(lines.as_slice()).map_err(|_| {
+    let value = Value::deserialize(deserializer)?;
+    let two = value.as_array().and_then(|all| match all.as_slice() {
+        [first, last] => Some([
+            usize::try_from(first.as_u64()?).ok()?,
+            usize::try_from(last.as_u64()?).ok()?,
+        ]),
+        _ => None,
+    });
+    two.ok_or_else(|| {
+        let given = match value.as_array() {
+            Some(all) if all.len() != 2 => format!("a list of {}", all.len()),
+            _ => format!("`{value}`"),
+        };
         serde::de::Error::custom(format!(
-            "`lines` is [first, last], two line numbers counted from 1 ([n, n] for one line), not a list of {}",
-            lines.len()
+            "`lines` is [first, last], two line numbers counted from 1 ([n, n] for one line), not {given}"
         ))
     })
 }
