@@ -472,10 +472,10 @@ the request and of the reply. A reply is a `protocol` and its `findings`, each a
 What the shape does not say, and a reply is refused for (a failed run): the `rule` of
 a finding is the rule the program was asked for; its `message` is not blank; its
 `subject` is one present in the model sent. A finding with no `subject` is about the
-whole project, and one with no `level` is at the level the policy gives the rule;
-policy caps a `level`, and a gate makes every finding an error. See the RustDoc of
-`app::ports::external` for the wire types, and `infra::external` for process limits
-and platform support.
+whole project, and one with no `level` is at the level its rule is held to; what a
+`level` becomes (capped for an advisory rule, an error for a gate) is said above. See
+the RustDoc of `app::ports::external` for the wire types, and `infra::external` for
+process limits and platform support.
 
 The recorded SHA-256 identifies the executable read before launch. It does not
 cover script arguments, dependencies, or later filesystem changes; displaying a

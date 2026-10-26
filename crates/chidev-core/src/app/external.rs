@@ -77,14 +77,16 @@ impl ExternalModelView {
     /// Whether the subject is at a typed position of the model the program was sent. An id is accepted only there.
     fn contains(&self, s: &ExternalSubject) -> bool {
         let slice = self.slice();
-        match s.kind.as_str() {
-            "change_request" => slice.has_change_request(&s.id),
-            "context" => slice.has_context(&s.id),
-            "interface" => slice.has_interface(&s.id),
-            "item" => slice.has_item(&s.id),
-            "clause" => slice.has_clause(&s.id),
-            "case" => slice.has_case(&s.id),
-            _ => false,
+        // Matched on the kind, not its word, so that a kind added to the domain is a case to decide here; the words a
+        // reply may give (`subject_kinds`) are the kinds this does not refuse.
+        match SubjectKind::from_word(&s.kind) {
+            Some(SubjectKind::ChangeRequest) => slice.has_change_request(&s.id),
+            Some(SubjectKind::Context) => slice.has_context(&s.id),
+            Some(SubjectKind::Interface) => slice.has_interface(&s.id),
+            Some(SubjectKind::Item) => slice.has_item(&s.id),
+            Some(SubjectKind::Clause) => slice.has_clause(&s.id),
+            Some(SubjectKind::Case) => slice.has_case(&s.id),
+            Some(SubjectKind::Project) | None => false,
         }
     }
 }
@@ -210,8 +212,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         }
                         let level = match f.level.as_deref() {
                             None => effective,
-                            Some(l) => Level::from_word(l)
-                                .filter(|l| *l != Level::Off)
+                            Some(l) => finding_levels()
+                                .find(|level| level.word() == l)
                                 .ok_or_else(|| invalid("invalid finding level"))?,
                         };
                         Ok(ExternalStoredFinding {

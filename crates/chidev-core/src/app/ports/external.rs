@@ -5,7 +5,7 @@ use std::future::Future;
 
 use crate::app::model_view::ModelSlice;
 use crate::domain::check::{Level, Moment};
-use crate::domain::vo::finding::RuleId;
+use crate::domain::vo::finding::{RuleId, SubjectKind};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
@@ -88,16 +88,18 @@ pub const REQUEST_PROTOCOL: u32 = 2;
 /// answers as it did keeps working once it reads `moment`; any other version is a failed run.
 pub const REPLY_PROTOCOLS: [u32; 2] = [1, 2];
 
-/// The kinds of subject a finding may name: the kinds of the model a program is sent whose ids it can check against
-/// that model.
-pub const SUBJECT_KINDS: [&str; 6] = [
-    "change_request",
-    "context",
-    "interface",
-    "item",
-    "clause",
-    "case",
-];
+/// The kinds of subject a finding may name: every kind but the Project, which has no id; a finding about it names no
+/// subject.
+pub fn subject_kinds() -> impl Iterator<Item = SubjectKind> {
+    SubjectKind::ALL
+        .into_iter()
+        .filter(|k| *k != SubjectKind::Project)
+}
+
+/// The levels a finding may give: every level a check reports at, that is every one but `off`.
+pub fn finding_levels() -> impl Iterator<Item = Level> {
+    Level::ALL.into_iter().filter(|l| *l != Level::Off)
+}
 
 /// The schema of a request's `protocol`: [`REQUEST_PROTOCOL`].
 fn request_protocol_schema(_: &mut SchemaGenerator) -> Schema {
@@ -115,15 +117,15 @@ fn moment_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "enum": words })
 }
 
-/// The schema of a subject's `kind`: one of [`SUBJECT_KINDS`].
+/// The schema of a subject's `kind`: the word of one of [`subject_kinds`].
 fn subject_kind_schema(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({ "type": "string", "enum": SUBJECT_KINDS })
+    let words: Vec<&str> = subject_kinds().map(SubjectKind::word).collect();
+    json_schema!({ "type": "string", "enum": words })
 }
 
-/// The schema of a finding's `level`: the word of a level a check reports at (every level but `off`), or none.
+/// The schema of a finding's `level`: the word of one of [`finding_levels`], or none.
 fn finding_level_schema(_: &mut SchemaGenerator) -> Schema {
-    let words: Vec<serde_json::Value> = [Level::Note, Level::Warning, Level::Error]
-        .iter()
+    let words: Vec<serde_json::Value> = finding_levels()
         .map(|l| serde_json::Value::from(l.word()))
         .chain([serde_json::Value::Null])
         .collect();

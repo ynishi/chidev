@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chidev_core::app::ports::external::{REPLY_PROTOCOLS, finding_levels, subject_kinds};
+use chidev_core::domain::check::Moment;
 use serde_json::{Value, json};
 
 /// A directory of its own under cargo's temporary one, with an empty `chidev.toml` (it is a project's root) and
@@ -198,6 +200,14 @@ fn schema(args: &[&str]) -> Value {
 
 /// The schema `reference` (`#/$defs/Name`) points at.
 fn resolved<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
+    // an optional value (`anyOf` of it and `null`) is checked as the value it is when it is there
+    if let Some(alternatives) = schema.get("anyOf").and_then(Value::as_array)
+        && let Some(present) = alternatives
+            .iter()
+            .find(|a| a.get("type") != Some(&json!("null")))
+    {
+        return resolved(present, root);
+    }
     match schema.get("$ref").and_then(Value::as_str) {
         Some(reference) => {
             let path = reference.strip_prefix("#/").expect("a local reference");
@@ -377,28 +387,22 @@ fn the_schemas_of_an_external_check_describe_the_request_it_is_sent_and_the_repl
     assert_eq!(call["$id"], "urn:chidev:schema:external-call:2");
     assert_eq!(reply["title"], "chidev-external-reply 2");
     assert_eq!(reply["$id"], "urn:chidev:schema:external-reply:2");
-    // the words a reply may give are the ones it is read with
-    assert_eq!(reply["properties"]["protocol"]["enum"], json!([1, 2]));
-    let finding = &reply["$defs"]["ExternalFinding"]["properties"];
+    // the words a reply may give are the ones it is read with: the lists the reading uses
+    let protocols: Vec<Value> = REPLY_PROTOCOLS.iter().map(|p| json!(p)).collect();
+    assert_eq!(reply["properties"]["protocol"]["enum"], json!(protocols));
+    let mut levels: Vec<Value> = finding_levels().map(|l| json!(l.word())).collect();
+    levels.push(Value::Null);
     assert_eq!(
-        finding["level"]["enum"],
-        json!(["note", "warning", "error", null])
+        reply["$defs"]["ExternalFinding"]["properties"]["level"]["enum"],
+        json!(levels)
     );
+    let kinds: Vec<&str> = subject_kinds().map(|k| k.word()).collect();
     assert_eq!(
         reply["$defs"]["ExternalSubject"]["properties"]["kind"]["enum"],
-        json!([
-            "change_request",
-            "context",
-            "interface",
-            "item",
-            "clause",
-            "case"
-        ])
+        json!(kinds)
     );
-    assert_eq!(
-        call["properties"]["moment"]["enum"],
-        json!(["edit", "pin", "resolve", "check"])
-    );
+    let moments: Vec<&str> = Moment::ALL.iter().map(|m| m.word()).collect();
+    assert_eq!(call["properties"]["moment"]["enum"], json!(moments));
 
     // a program that keeps what it is sent, and answers with a finding
     let dir = fresh_dir("external-schemas");
@@ -449,4 +453,9 @@ fn the_schemas_of_an_external_check_describe_the_request_it_is_sent_and_the_repl
     let with_subject = json!({"protocol":1,"findings":[{"rule":"ext.keep","message":"m",
         "subject":{"kind":"context","id":"01a17790-2c62-72dd-8b3a-58ac6f178fab"}}]});
     keys_fit(&with_subject, &reply, &reply, "reply");
+    // the subject inside the optional value is checked too: a misspelled key is caught
+    let misspelled = json!({"protocol":2,"findings":[{"rule":"ext.keep","message":"m",
+        "subject":{"knd":"context","id":"01a17790-2c62-72dd-8b3a-58ac6f178fab"}}]});
+    let caught = std::panic::catch_unwind(|| keys_fit(&misspelled, &reply, &reply, "reply"));
+    assert!(caught.is_err());
 }
