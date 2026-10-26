@@ -49,7 +49,8 @@ an Assumption where an interpretation does, a Crux where two readings remain,
 or a comment of the Interface reworded where it says more than any Clause
 promises. The answer is work `for` the part that holds it, and the Harness
 writer then puts the Cases that check it. A resolved part takes no work:
-`cr_reopen` it first, while its parent is open, or open a new request.
+`cr_reopen` it first, or open a new request. Reopening leaves a resolved parent
+resolved, so reopen a part while its parent is still open.
 
 Not reading the code keeps the tests from fitting the code; it does not keep them
 from sharing a misreading of the requirements with the Contracts. So whoever
@@ -59,9 +60,10 @@ only what the record holds
 the Harnesses so that a put keeps the Cases already there, the change requests
 for the part a put is `for`), not the requirements, the code or the
 conversation that wrote the Contracts. A request names its targets by id
-(`expects`, each with its `id`); the same `view` gives each Context and asset
-its id beside its name, so the part whose target is the Context of a Harness is
-the one its put is `for`.
+(`expects`, each with its `id`), and the same `view` gives each Context and
+asset its id beside its name. That tells Contexts apart, not two parts of one
+Context: `view` gives a request no parent and no Crux, so the designer names,
+by its title, the part each put is `for`, and the part that holds a Crux.
 
 ## The loop
 
@@ -137,8 +139,11 @@ the one its put is `for`.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. chidev does not run the tests
    itself; to have it refuse a `pin` while they fail, register a program that
-   runs them as an external check at the `pin` moment with `gate = true` (see
-   [External checks](../../README.md#external-checks)). Where the project
+   runs them as an external check at the `pin` moment with `gate = true` and a
+   `reads` of at least one section (see
+   [External checks](../../README.md#external-checks)). The program runs the
+   tests of the working tree, not the code the `pin` gives, so the gate holds
+   when that code is the tree's: pin it with `code_file`. Where the project
    measures, `measure` the Pin (mutation, simulation) and read what it found;
    see [Measurements](../../README.md#measurements).
 6. **Check.** `status` and `check`: every Pin fresh, no stale citation, nothing
@@ -182,8 +187,9 @@ at first nothing is there but the Project.
   the notes its resolve reports about the whole model (a Context with no
   Interface or Harness yet) are expected while it is being drawn.
 - A Context whose behaviour its Contracts promise is based on them in the
-  `change_set` that puts its first Contract (`{"put":"base_on_contract"}` after
-  the `contract` entry), so that from then on it keeps one.
+  `change_set` that puts its first Contract (an entry
+  `{"put":"base_on_contract","context":"<name>"}` beside the `contract` one),
+  so that from then on it keeps one.
 - An interpretation the text of the requirements, the repository or general
   knowledge settles is an Assumption of the part whose work it settles (the
   parent's, if it settles the request as a whole). Keep the requirements and their acceptance examples as
@@ -205,7 +211,7 @@ Each operation goes on one line, as `chidev exec` reads them:
 {"op":"cr_open","title":"Add the tally Context","intent":"change_behavior","parent":"First version of tally","targets":[{"project":true}]}
 {"op":"change_set","for":"Add the tally Context","puts":[{"put":"context","name":"tally"}]}
 {"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
-{"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
+{"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]},{"statement":"a line whose bytes are not text is a line that is not a command","reason":"the requirements say a line that is not a command of this form is not used","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
 {"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]},{"put":"base_on_contract","context":"tally"}]}
 {"op":"cr_open","title":"How large a count grows","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"the program stops with exit code 2","reason":"no count it prints is wrong","confidence":60},"options":[{"choice":"the program stops with exit code 2","consequence":"input that takes a count past the largest gives no counts at all"},{"choice":"the count stays at the largest","consequence":"the other counts are printed, and that one is printed too low with nothing to say so"}]}}
 ```
