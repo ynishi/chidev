@@ -13,9 +13,14 @@ says when to use which.
   [The project and `chidev.toml`](../../README.md#the-project-and-chidevtoml).
 - Each run of `chidev exec` starts from the store where the last one ended, so
   give a run only the new operations.
-- The first version of a Project needs no change request: `init`, add the
-  Contexts and put their first assets, then pin. Change requests are for
-  assets that exist, since what a request names has to be there when it opens.
+- The first version of a Project goes through the loop like any other change,
+  from right after `init`, so that the record keeps what it is built from: the
+  requirements in the requester's words, the interpretations settled on the way
+  (Assumptions) and the questions nobody could settle yet (a Crux). What a
+  request names has to be there when it opens (see
+  [Change requests](../../README.md#change-requests)); the Project is there from
+  `init` on and holds a Context, so the part that adds the first Context names
+  it (`{"project":true}`). See [The first version](#the-first-version).
 
 ## Roles
 
@@ -83,10 +88,58 @@ not put a Harness.
    then the parent. Resolving is a decision; the checks say afterwards where
    the record and the work disagree.
 
+## The first version
+
+The loop runs as above. What is particular is only what the requests name, since
+at first nothing is there but the Project.
+
+- The parent holds the requirements in its `situation`, in the requester's words,
+  and names no target, so that any work applied to it by mistake is out of its
+  frame. It takes no work itself.
+- A part names what holds what it adds (see [Change requests](../../README.md#change-requests)):
+  the part that adds a Context names the Project, a part that adds to a Context
+  names that Context. A frame tells Contexts apart, not two parts of one
+  Context. The Project frames everything, so the part that adds a Context does
+  only that and is resolved at once; a resolved request takes no more work, and
+  the notes its resolve reports about the whole model (a Context with no
+  Interface or Harness yet) are expected while it is being drawn.
+- An interpretation the repository or general knowledge settles is an
+  Assumption of the part whose work it settles (the parent's, if it settles the
+  request as a whole). Requirements kept as a file in the repository are cited
+  by its path.
+- A question nothing settles is a part with a Crux and a recommendation. Once it
+  is decided, the work its answer asks for, the Clause and the Cases that cite
+  it, is applied `for` that part. The rest of the work, the Interfaces and the
+  Harness too, is applied `for` the parts that ask for it (steps 3 to 6).
+
+Each operation goes on one line, as `chidev exec` reads them:
+
+```json
+{"op":"init"}
+{"op":"cr_open","title":"First version of tally","intent":"change_behavior","situation":"count named items from a list of commands","issuer":"the requester"}
+{"op":"cr_open","title":"Add the tally Context","intent":"change_behavior","parent":"First version of tally","targets":[{"project":true}]}
+{"op":"change_set","for":"Add the tally Context","puts":[{"put":"context","name":"tally"}]}
+{"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
+{"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
+{"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]}]}
+{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command"},{"choice":"the program stops with exit code 2"}]}}
+```
+
+The requirements (here `REQUIREMENTS.md`) say nothing of a line that is not
+UTF-8, and neither the repository nor general knowledge settles it, so it is a
+Crux; until it is decided, `status` and `check` say so (`cr.awaiting-decision`),
+and only the work that depends on it waits. The Interfaces, the Harness and the
+code of "Lines and counts of tally" follow as steps 3 to 6, the Crux is decided
+(step 7), then the parts and the parent are resolved (step 8).
+
 ## Never
 
-- Change an asset outside the work of a request, once the Project's first
-  version is in.
+- Add, change or retire a Context or an asset other than as the work
+  (`change_set` `for`) of a request: a Context too is added, given its `uses`
+  and based on its Contracts in a `change_set`, not with `context_add`,
+  `context_uses` or `base_on_contract` on their own. The one edit that has no
+  `for`, `items_rekey`, is run while the request it belongs to is open, and its
+  resolution says so.
 - Put a Harness from a role that has read the implementation.
 - Decide a Crux for the decision maker, or answer with a choice the Crux does
   not offer (an own wording is a decision maker's, not an agent's).

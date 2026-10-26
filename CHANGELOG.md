@@ -10,6 +10,13 @@ and this project adheres to
 
 ### Changed
 
+- The guide (`docs/guide/PROCEDURE.md`) runs the first version of a Project
+  through change requests like any other change, from right after `init`, so
+  that its requirements, Assumptions and open questions (a Crux) are kept; a new
+  section, "The first version", says what each request names, with an example
+  that runs. Its "Never" rule now covers the first version too: a Context or an
+  asset is added, changed or retired only as the work of a request.
+
 - A put answers with what the put introduced, not with everything the checks find
   in the Project it leaves. The put hook runs the checks on the Project before the
   edit and on the Project after it, and a finding is introduced when the state
