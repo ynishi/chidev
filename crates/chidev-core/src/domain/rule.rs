@@ -404,7 +404,7 @@ static RULES: &[Rule] = &[
         id: PROJECT_EXISTS,
         kind: RuleKind::Invariant,
         summary: "A store holds one Project, which `init` makes once.",
-        help: "The store has its Project already, and a run starts where the last one ended: leave `init` out. To start another Project, give another store (`--store`, or `[store] path` in `chidev.toml`).",
+        help: "The store has its Project already, and a run starts where the last one ended: leave `init` out. To start another Project, give another store: `--store`, or a `[store] path` (the person's `.chidev/chidev.local.toml` outranks `chidev.toml`).",
         message: "there is a project already",
         values: &[],
         example: r#"{"op":"init"}"#,
