@@ -10,6 +10,12 @@ and this project adheres to
 
 ### Changed
 
+- `lines` of an Item, a Case or an Assumption's evidence given as a list of
+  another length than two is refused with words that say their form
+  (`[first, last]`, `[n, n]` for one line), not serde's ("invalid length 1,
+  expected a tuple of size 2"). The README says an evidence's `lines` are the
+  first and last line.
+
 - The guide (`docs/guide/PROCEDURE.md`) decides six points a first version left
   to judgement: a question is an Assumption when the requirements' text, the
   repository or general knowledge settles it to one reading, and a Crux
