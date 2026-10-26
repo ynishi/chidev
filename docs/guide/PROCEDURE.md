@@ -31,7 +31,7 @@ take several, one after the other, as long as the Harness role is kept apart.
 |---|---|---|
 | intake | the request, `status`, `view` | opens the change requests, in the requester's words |
 | designer | the requirements and their acceptance examples, the assets (`view`) | puts the Contracts and Interfaces |
-| Harness writer (blind) | the Contracts and Interfaces only, never the code | writes the tests and puts the Harness |
+| Harness writer (blind) | the Contracts, Interfaces, Harnesses and change requests (`view`); never the code or the requirements | writes the tests and puts the Harness |
 | implementer | everything | writes the code, runs the tests, pins it |
 | decision maker | the Crux, the Policy | decides a Crux (`cr_decide`), resolves requests |
 
@@ -45,6 +45,15 @@ Assumption or a Crux) before it is a Case: once the answer gives it a Clause,
 a Case checks it like any other. A Harness writer that finds it cannot write a
 test from the Contracts and Interfaces sends the gap back to the designer.
 
+Not reading the code keeps the tests from fitting the code; it does not keep them
+from sharing a misreading of the requirements with the Contracts. So whoever
+writes the Harness, the designer in a fresh session or another agent, is given
+only what the record holds
+(`{"op":"view","sections":["contracts","interfaces","harnesses","change_requests"]}`:
+the Harnesses so that a put keeps the Cases already there, the change requests
+for the part a put is `for`), not the requirements, the code or the
+conversation that wrote the Contracts.
+
 ## The loop
 
 1. **Intake.** Open one change request for the request as it was given: its
@@ -55,10 +64,17 @@ test from the Contracts and Interfaces sends the gap back to the designer.
    or retire (`targets`) and what must stay (`keep`). Name the container when a
    part adds something (the Contract that takes a new Clause). Keep the
    Contracts, the Interfaces and the Harness of one Context in one part unless
-   there is a reason to split them. For a question that comes up:
-   - the repository and general knowledge answer it: record an Assumption,
+   there is a reason to split them. A question that comes up, now or later in
+   the design, is settled when it comes up:
+   - the text of the requirements, the repository or general knowledge
+     settles it to one reading: there is no choice, so record an Assumption,
      with its evidence, and go on;
-   - a choice has to be made: give the part a `crux` with its options and a
+   - two readings remain: it is a choice, for the decision maker (a Policy
+     line can settle the ones that do not matter much). Open a part for it
+     then, even in the middle of the design. It names what holds the work its
+     answer asks for: the Context, which frames the Clause, the Cases and the
+     code of it, whether they are there yet or not. Give it a `crux` with its
+     options and a
      recommendation. The change an option makes is its `wording` and its
      `targets`: name there the assets that already exist and that choosing it
      would change beyond what the part names (an Interface whose types it
@@ -86,13 +102,24 @@ test from the Contracts and Interfaces sends the gap back to the designer.
      leaves the Items as they are, though it is still a change of the
      Interface, which moves its revision, makes its Pin stale and, where the
      project measures, its mutation and simulation runs too.
+   - An Interface has one Item per declaration a caller uses: for a library,
+     each public function or type it calls; for a program, `main`, with its
+     subcommands, arguments and what it reads and writes in the comments
+     (Clauses promise what they do).
 4. **Harness (blind).** The Harness writer writes the tests from the Contracts
    and Interfaces, and puts the Harness in a `change_set` `for` the part whose
    change that put carries: every Case cites the Items it calls and the
    Clauses it checks. Every Clause added or changed is cited by some Case. A
    put replaces the whole Harness, so put it once per part: the put that adds
    the Cases of an answered Crux, and only those, is applied `for` the part
-   that holds the Crux.
+   that holds the Crux. The acceptance examples the requirements give are run
+   by Cases too. The designer puts each one into a Clause that names its files
+   (for example, "the input `acceptance/a1.stdin` gives the output
+   `acceptance/a1.expected` and exit code 0"); the Case reads those files from
+   the repository and checks that Clause, so the tests the implementer runs
+   before `pin` check the examples as well, and the Harness writer learns of
+   them from the Contract alone. A runner outside the Harness checks nothing
+   chidev records.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. Where the project measures,
    `measure` the Pin (mutation, simulation) and read what it found; see
@@ -113,7 +140,12 @@ test from the Contracts and Interfaces sends the gap back to the designer.
    through 3 to 6.
 8. **Resolve.** `cr_resolve` each part with how it ended, why and who says so,
    then the parent. Resolving is a decision; the checks say afterwards where
-   the record and the work disagree.
+   the record and the work disagree. A part that does not depend on an open
+   Crux may be resolved while the Crux is open: check first that none of its
+   Clauses, Interfaces or Cases takes the answer for granted (the work the
+   answer asks for is done `for` the part that holds the Crux, which names
+   their Context). The part that holds the Crux is not resolved as done until
+   it is decided, and the parent waits for all of its parts.
 
 ## The first version
 
@@ -130,16 +162,15 @@ at first nothing is there but the Project.
   only that and is resolved at once; a resolved request takes no more work, and
   the notes its resolve reports about the whole model (a Context with no
   Interface or Harness yet) are expected while it is being drawn.
-- An interpretation the repository or general knowledge settles is an
-  Assumption of the part whose work it settles (the parent's, if it settles the
-  request as a whole). Keep the requirements and their acceptance examples as
+- An interpretation the text of the requirements, the repository or general
+  knowledge settles is an Assumption of the part whose work it settles (the
+  parent's, if it settles the request as a whole). Keep the requirements and their acceptance examples as
   files in the repository (a copy of what was given, if it came from elsewhere),
   so that an Assumption can cite them by path; the designer puts what an
   example shows into the Contracts (see [Roles](#roles)).
-- A question nothing settles is a part with a Crux and a recommendation. Like
-  any part it names what holds what its answer adds (step 2): the Contract that
-  takes its Clause once that Contract is there, as in the example, or the
-  Context before it is; its options name what choosing them would change. Once it is decided, the work its
+- A question nothing settles is a part with a Crux and a recommendation. It
+  names the Context that holds the work its answer asks for (step 2), and its
+  options name what choosing them would change. Once it is decided, the work its
   answer asks for, the Clause and the Cases that cite it, is applied `for` that
   part. The rest of the work, the Interfaces and the Harness too, is applied
   `for` the parts that ask for it (steps 3 to 6).
@@ -154,12 +185,13 @@ Each operation goes on one line, as `chidev exec` reads them:
 {"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
 {"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
 {"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]}]}
-{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"contract":{"context":"tally","contract":"lines"}}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command","consequence":"a file with one broken line still gives the counts of the others"},{"choice":"the program stops with exit code 2","consequence":"a file with one broken line gives no counts at all"}]}}
+{"op":"cr_open","title":"What a line that is not UTF-8 is","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"not a command","reason":"the counts of the other lines are still printed","confidence":60},"options":[{"choice":"not a command","consequence":"a file with one broken line still gives the counts of the others"},{"choice":"the program stops with exit code 2","consequence":"a file with one broken line gives no counts at all"}]}}
 ```
 
-The requirements (here `REQUIREMENTS.md`) say nothing of a line that is not
-UTF-8, and neither the repository nor general knowledge settles it, so it is a
-Crux; until it is decided, `status` and `check` say so (`cr.awaiting-decision`),
+The requirements (here `REQUIREMENTS.md`) speak of lines of text and say
+nothing of bytes that are not text: whether such a line is one more line that
+is not a command, or input the program refuses, is two readings that nothing
+settles, so it is a Crux; until it is decided, `status` and `check` say so (`cr.awaiting-decision`),
 and only the work that depends on it waits. The Interfaces, the Harness and the
 code of "Lines and counts of tally" follow as steps 3 to 6, the Crux is decided
 (step 7), then the parts and the parent are resolved (step 8).
