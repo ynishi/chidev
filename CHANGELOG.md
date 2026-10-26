@@ -13,13 +13,14 @@ and this project adheres to
 - `lines` of an Item, a Case or an Assumption's evidence given in another form
   than two line numbers (a list of another length, one number) is refused with
   words that say their form (`[first, last]`, `[n, n]` for one line), not
-  serde's ("invalid length 1, expected a tuple of size 2"). The README says an evidence's `lines` are the
-  first and last line.
+  serde's ("invalid length 1, expected a tuple of size 2"). The README says an
+  evidence's `lines` are the first and last line.
 - The guide (`docs/guide/PROCEDURE.md`) says what the designer does with a gap
   the Harness writer sends back (a question of step 2, answered as work `for`
-  the part that holds it, a resolved part reopened first); how the Harness
-  writer finds the part a put is `for` from the ids of a request's targets in
-  `view`; that a comment gaining or losing lines moves the Items after it;
+  the part that holds it, a resolved part reopened first, while its parent is
+  open); that `view` tells Contexts apart but not two parts of one Context, so
+  the designer names by title the part each put is `for` and the part that
+  holds a Crux; that a comment gaining or losing lines moves the Items after it;
   that `mutation.unmeasured` is a note that no run was made; and that a
   Context is based on its Contracts in the change set that puts its first
   Contract. The example's Crux is now how large a count grows; a line that is
@@ -30,7 +31,8 @@ and this project adheres to
   puts the corrected Harness `for` the same part (step 4 no longer reads as one
   put per part), and points to an external check at the `pin` moment with
   `gate = true` for refusing a `pin` while the tests fail, since chidev does not
-  run them (step 5).
+  run them (step 5): the program tests the working tree, so the code is pinned
+  with `code_file`, and its `reads` name at least one section.
 
 - The guide (`docs/guide/PROCEDURE.md`) decides six points a first version left
   to judgement: a question is an Assumption when the requirements' text, the
