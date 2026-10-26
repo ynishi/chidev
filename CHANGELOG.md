@@ -15,6 +15,16 @@ and this project adheres to
   words that say their form (`[first, last]`, `[n, n]` for one line), not
   serde's ("invalid length 1, expected a tuple of size 2"). The README says an evidence's `lines` are the
   first and last line.
+- The guide (`docs/guide/PROCEDURE.md`) says what the designer does with a gap
+  the Harness writer sends back (a question of step 2, answered as work `for`
+  the part that holds it, a resolved part reopened first); how the Harness
+  writer finds the part a put is `for` from the ids of a request's targets in
+  `view`; that a comment gaining or losing lines moves the Items after it;
+  that `mutation.unmeasured` is a note that no run was made; and that a
+  Context is based on its Contracts in the change set that puts its first
+  Contract. The example's Crux is now how large a count grows; a line that is
+  not text is settled by the requirements, an Assumption.
+
 - The guide (`docs/guide/PROCEDURE.md`) lets a Case the implementer finds
   wrong against its Clause go back to the Harness writer with that Clause, who
   puts the corrected Harness `for` the same part (step 4 no longer reads as one
