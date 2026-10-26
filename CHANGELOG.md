@@ -10,6 +10,19 @@ and this project adheres to
 
 ### Changed
 
+- The guide (`docs/guide/PROCEDURE.md`) decides six points a first version left
+  to judgement: a question is an Assumption when the requirements' text, the
+  repository or general knowledge settles it to one reading, and a Crux
+  otherwise; a Crux part is opened when the question comes up, even in the
+  middle of the design, and names the Context that holds the work its answer
+  asks for; an acceptance example is a Clause that names its files, checked by
+  a Case that reads them, so the tests before `pin` check it; an Interface has
+  one Item per declaration a caller uses (`main` for a program); a part that
+  does not depend on an open Crux may be resolved once its Clauses, Interfaces
+  and Cases are checked not to take the answer for granted; and whoever writes
+  the Harness is given only what the record holds (`view` of the Contracts,
+  Interfaces, Harnesses and change requests), the designer in a fresh session.
+
 - The guide (`docs/guide/PROCEDURE.md`) answers what two first versions run
   through it had to guess:
   - the requirements and their acceptance examples are files in the
