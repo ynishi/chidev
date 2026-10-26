@@ -110,20 +110,25 @@ conversation that wrote the Contracts.
    and Interfaces, and puts the Harness in a `change_set` `for` the part whose
    change that put carries: every Case cites the Items it calls and the
    Clauses it checks. Every Clause added or changed is cited by some Case. A
-   put replaces the whole Harness, so put it once per part: the put that adds
-   the Cases of an answered Crux, and only those, is applied `for` the part
-   that holds the Crux. The acceptance examples the requirements give are run
-   by Cases too. The designer puts each one into a Clause that names its files
-   (for example, "the input `acceptance/a1.stdin` gives the output
-   `acceptance/a1.expected` and exit code 0"); the Case reads those files from
-   the repository and checks that Clause, so the tests the implementer runs
-   before `pin` check the examples as well, and the Harness writer learns of
-   them from the Contract alone. A runner outside the Harness checks nothing
-   chidev records.
+   put replaces the whole Harness and is applied `for` one part: the put that
+   adds the Cases of an answered Crux, and only those, is applied `for` the
+   part that holds the Crux. A Case the implementer finds wrong against its
+   Clause goes back to the Harness writer with that Clause, and the writer puts
+   the corrected Harness `for` the same part. The acceptance examples the
+   requirements give are run by Cases too. The designer puts each one into a
+   Clause that names its files (for example, "the input `acceptance/a1.stdin`
+   gives the output `acceptance/a1.expected` and exit code 0"); the Case reads
+   those files from the repository and checks that Clause, so the tests the
+   implementer runs before `pin` check the examples as well, and the Harness
+   writer learns of them from the Contract alone. A runner outside the Harness
+   checks nothing chidev records.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
-   `pin` each Interface's code once they pass. Where the project measures,
-   `measure` the Pin (mutation, simulation) and read what it found; see
-   [Measurements](../../README.md#measurements).
+   `pin` each Interface's code once they pass. chidev does not run the tests
+   itself; to have it refuse a `pin` while they fail, register a program that
+   runs them as an external check at the `pin` moment with `gate = true` (see
+   [External checks](../../README.md#external-checks)). Where the project
+   measures, `measure` the Pin (mutation, simulation) and read what it found;
+   see [Measurements](../../README.md#measurements).
 6. **Check.** `status` and `check`: every Pin fresh, no stale citation, nothing
    out of a request's frame, no finding left that the work should have
    answered. A stale Pin means implement and pin again; a stale citation means
