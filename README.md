@@ -1154,7 +1154,8 @@ Interfaces, Harness implementation, code), not only to the specification.
 - An **Assumption** `{statement, reason, evidence}` is an interpretation settled
   from the repository and general knowledge, so nobody is asked. `evidence` is a
   list of `{"repo":{"path":"src/round.rs","lines":[10,14]}}` (a path relative to
-  the repository, without `..`; `lines` optional) and
+  the repository, without `..`; `lines` optional, the first and last line, as
+  `[16,16]` for one line) and
   `{"knowledge":{"reference":"IEEE 754 roundTiesToEven"}}`. Give them with
   `cr_open.assumptions`, or append later with
   `{"op":"cr_assume","title":..,"statement":..,"reason":..,"evidence":[..]}`.
