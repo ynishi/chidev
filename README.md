@@ -90,8 +90,9 @@ belong):
 {"op":"status"}
 ```
 
-- `init` makes the project (once). `context_add` adds a Context; `uses` (optional)
-  names the Contexts it uses, whose Contracts and Interfaces its Cases may cite.
+- `init` makes the project (once: a second is refused, `project.exists`).
+  `context_add` adds a Context; `uses` (optional) names the Contexts it uses,
+  whose Contracts and Interfaces its Cases may cite.
   `context_uses` replaces that list. `base_on_contract` bases a Context on its
   Contracts (it needs one, and there is no way back: a second one is refused,
   `context.already-based`). The three are edits like a put is, and answer with

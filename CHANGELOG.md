@@ -127,6 +127,9 @@ and this project adheres to
 - A second `base_on_contract` for a Context already based on its Contracts is
   refused by a rule of its own, `context.already-based`, which `explain`
   describes; it was refused before with no rule (`domain.unmapped`).
+- A second `init` on a store that has its Project is refused by a rule of its
+  own, `project.exists`, which `explain` describes; it was refused before with
+  no rule (`app.unmapped`).
 - An Item or a Case whose `lines` pass the end of its code is refused by a rule
   of its own, `interface.lines-outside` or `harness.lines-outside`, which
   `explain` describes; it was refused before with no rule

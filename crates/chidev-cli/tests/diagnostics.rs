@@ -482,6 +482,24 @@ fn basing_a_context_on_its_contracts_again_is_refused_by_a_rule() {
 }
 
 #[test]
+fn a_second_init_is_refused_by_a_rule() {
+    let explained = run(
+        "diag-project-exists-explain",
+        &[json!({"op":"explain","rule":"project.exists"})],
+    );
+    assert!(
+        !explained[0]["help"].as_str().unwrap().is_empty(),
+        "{explained:#?}"
+    );
+    let example: Value =
+        serde_json::from_str(explained[0]["example"].as_str().unwrap()).expect("an operation");
+    let r = after_setup("diag-project-exists", &[example]);
+    let d = one(&r[0]);
+    assert_eq!(d["code"], "project.exists", "{d:#?}");
+    assert_eq!(d["message"], "there is a project already");
+}
+
+#[test]
 fn a_finding_is_a_diagnostic_too_with_its_rule_as_the_code_and_the_help_of_the_rule() {
     let r = after_setup("diag-finding", &[json!({"op":"check"})]);
     let findings = r[0]["findings"].as_array().unwrap();

@@ -24,7 +24,7 @@ use crate::domain::rule::{
     INPUT_RENAME_CONFLICT, INPUT_RENAME_UNKNOWN, INPUT_RENAMES_WITH_ITEMS, INPUT_REPLACES_KEPT,
     INPUT_UNKNOWN_FIELD, INPUT_UNKNOWN_NAME, INPUT_UNKNOWN_OP, INPUT_VIEW_SECTIONS_EMPTY,
     INPUT_WRONG_TYPE, ITEMS_FAILED, ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED,
-    PROJECT_NONE, Rule, RuleKind,
+    PROJECT_EXISTS, PROJECT_NONE, Rule, RuleKind,
 };
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
@@ -599,6 +599,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .with_remedy(Remedy::InitProject, Applicability::Machine);
                 vec![self.diagnostic_of(&v, Names::default()).await]
             }
+            AppError::AlreadyInitialized => {
+                vec![
+                    self.diagnostic_of(&Violation::of(PROJECT_EXISTS), Names::default())
+                        .await,
+                ]
+            }
             AppError::TitleTaken(title) => match rule::rule(CR_TITLE_TAKEN.as_str()) {
                 Some(r) => vec![Diagnostic::of_rule(
                     r,
@@ -801,8 +807,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 findings.iter().map(Diagnostic::of_found).collect()
             }
             AppError::Many(_) => Vec::new(),
-            AppError::AlreadyInitialized
-            | AppError::NotPinned { .. }
+            AppError::NotPinned { .. }
             | AppError::PinCodeNotKept { .. }
             | AppError::Runner(_)
             | AppError::Measurement(_)
