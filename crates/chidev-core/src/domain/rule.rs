@@ -123,6 +123,8 @@ pub const PROJECT_UNKNOWN_CONTEXT: RuleId = RuleId::from_static("project.unknown
 pub const PROJECT_ASSET_RETIRED: RuleId = RuleId::from_static("project.asset-retired");
 /// There is no project to work on.
 pub const PROJECT_NONE: RuleId = RuleId::from_static("project.none");
+/// A store holds one Project.
+pub const PROJECT_EXISTS: RuleId = RuleId::from_static("project.exists");
 /// A change set names one thing twice.
 pub const CHANGE_SET_NAMED_TWICE: RuleId = RuleId::from_static("change-set.named-twice");
 /// A Context based on its Contracts keeps one.
@@ -397,6 +399,15 @@ static RULES: &[Rule] = &[
         message: "there is no project yet",
         values: &[],
         example: r#"{"op":"status"}"#,
+    },
+    Rule {
+        id: PROJECT_EXISTS,
+        kind: RuleKind::Invariant,
+        summary: "A store holds one Project, which `init` makes once.",
+        help: "The store has its Project already, and a run starts where the last one ended: leave `init` out. To start another Project, give another store (`--store`, or `[store] path` in `chidev.toml`).",
+        message: "there is a project already",
+        values: &[],
+        example: r#"{"op":"init"}"#,
     },
     Rule {
         id: CHANGE_SET_NAMED_TWICE,
