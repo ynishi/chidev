@@ -12,14 +12,14 @@ use crate::domain::entity::harness::{HarnessError, SimShapeProblem};
 use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
-    CHANGE_SET_NAMED_TWICE, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET, CR_ALREADY_RESOLVED,
-    CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN,
-    CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN,
-    HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE,
-    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
-    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
-    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
-    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CHANGE_SET_NAMED_TWICE, CONTEXT_ALREADY_BASED, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET,
+    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN,
+    CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED,
+    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
+    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
+    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
+    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
+    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
@@ -232,9 +232,8 @@ impl ContextError {
             ContextError::Contract(e) => e.violation(),
             ContextError::Interface(e) => e.violation(),
             ContextError::Harness(e) => e.violation(),
-            ContextError::UsesItself
-            | ContextError::AlreadyOnContract
-            | ContextError::NoContract => Violation::unmapped(self),
+            ContextError::AlreadyOnContract => Violation::of(CONTEXT_ALREADY_BASED),
+            ContextError::UsesItself | ContextError::NoContract => Violation::unmapped(self),
         }
     }
 }
@@ -587,7 +586,6 @@ mod tests {
         "ChangeRequestError::PolicyRevisionMismatch",
         "ChangeRequestError::UnaskedExpectation",
         "ChangeRequestError::UnspecifiedNotAllowed",
-        "ContextError::AlreadyOnContract",
         "ContextError::NoContract",
         "ContextError::UsesItself",
         "ContractError::DuplicateId",
@@ -761,7 +759,7 @@ mod tests {
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
         assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
-        assert_eq!(STILL_UNMAPPED.len(), 27);
+        assert_eq!(STILL_UNMAPPED.len(), 26);
     }
 
     #[test]

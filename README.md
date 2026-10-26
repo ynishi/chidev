@@ -93,8 +93,9 @@ belong):
 - `init` makes the project (once). `context_add` adds a Context; `uses` (optional)
   names the Contexts it uses, whose Contracts and Interfaces its Cases may cite.
   `context_uses` replaces that list. `base_on_contract` bases a Context on its
-  Contracts (it needs one, and there is no way back). The three are edits like a
-  put is, and answer with `findings` as a put does (see "Triggers and moments").
+  Contracts (it needs one, and there is no way back: a second one is refused,
+  `context.already-based`). The three are edits like a put is, and answer with
+  `findings` as a put does (see "Triggers and moments").
 - `contract_put` makes the Contract or revises it, whole: the `clauses` given are
   the Clauses it has afterwards, a label it had keeps its Clause, a label it
   did not have is new, and one left out is removed. A label is `C` and a number.
