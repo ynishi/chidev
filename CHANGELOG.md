@@ -10,6 +10,22 @@ and this project adheres to
 
 ### Changed
 
+- A Clause's label is its name, not part of what it promises (see
+  `docs/adr/0004-a-clause-label-is-its-name-not-part-of-what-it-promises.md`).
+  Its revision counts changes of its sentence only, as an Item's counts changes
+  of its signature, and a new label alone moves neither the Clause's revision
+  nor the Contract's. So a Clause relabelled keeps its citations current, makes
+  no Pin or simulation stale, and moves nothing for a footprint: a request whose
+  only work is a relabel (or an Item rename) records no work, and resolved as
+  done it gets `cr.resolved-without-work`. A script of a simulation that still
+  prints the old label is a protocol failure on its next run. The stored shape
+  of a Clause is unchanged. In Rust, `Clause` has `label()` and `text()` in
+  place of `content()`, and `ClauseContent` is the pair a caller gives to make
+  or change a Contract.
+- Breaking: a `contract_put` or a `clauses_put` that gives an existing label to
+  two Clauses is refused with `input.rename-conflict` (`side` `label`), where
+  `contract_put` said the Clause id was given twice. The message of
+  `input.replaces-kept` says "another entry" where it said "an item".
 - Breaking: the Crux is a record of its own, with an id, not a part of a change
   request. It is raised in a change request (`raised_in`), optionally from
   findings; its options and its answer have ids, and a recommendation and a
@@ -253,6 +269,22 @@ and this project adheres to
 
 ### Added
 
+- `clauses_put` changes some Clauses of a Contract that exists and leaves the
+  rest, their order and the title as they are: `clauses` set the sentence of a
+  Clause by its label, give a Clause a new label (`replaces`) or add one, and
+  `remove` lists labels to remove. It is also the `change_set` entry
+  `{"put":"clauses",..}`. It is an edit with the trigger `put_clauses`; the
+  answer is the Contract's `id` and `revision`. In Rust, `App::put_clauses`,
+  `ClausesPut`, `PutInput::Clauses` and `EditTrigger::PutClauses` are new, and
+  a `PutDone` of the entry has `kind` `clauses`.
+- `replaces` in a Clause of `contract_put` (`ClauseInput::replaces`): the Clause
+  that had the old label takes the new one and keeps its id, its place and its
+  revision. A name it cannot be carried out for is refused: `input.unknown-name`
+  for a label the Contract does not have (with `field`: `replaces` or
+  `remove`), `input.replaces-kept` and `input.rename-conflict` (with `side`
+  `label`, `replaces` or `remove`). In Rust, `ClauseInput` has a field
+  `replaces`, and `AppError::{ClauseUnknown, ClauseReplacesKept,
+  ClauseRenameConflict}` are new.
 - `cr.keep-targeted` (warning; moments `edit` and `check`) tells a keep that an
   unresolved change request's target breaks for sure when the two meet, not
   after the work, when `cr.keep-moved` can only report it: a request keeps a
