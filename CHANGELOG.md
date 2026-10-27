@@ -80,6 +80,14 @@ and this project adheres to
   words that say their form (`[first, last]`, `[n, n]` for one line), not
   serde's ("invalid length 1, expected a tuple of size 2"). The README says an
   evidence's `lines` are the first and last line.
+- The guide (`docs/guide/PROCEDURE.md`) says, in step 4, which part a Harness
+  put is `for` when the Cases of one Harness follow the Clauses or Items of
+  several parts: the parts go through steps 3 and 4 one after the other, each
+  part's Harness put before the next part's design, and never `for` the parent.
+  A put records the revision of everything each Case cites, so it also brings
+  up the Cases another part's design made stale, and one that cites nothing
+  inside the frame of the part it is `for` is outside it. Step 2 points to it
+  where a Context's work is split.
 - The guide (`docs/guide/PROCEDURE.md`) says, in step 8, that the decision
   maker resolves and `by` names the decision maker, not the role that did the
   work; and, in step 5, to check the gate once by pinning while the new tests
