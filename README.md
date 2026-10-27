@@ -89,6 +89,11 @@ in one transaction:
 An older chidev refuses a file of layout 2 and says which layout it reads, and a
 migrated file cannot be moved back, so copy the store before upgrading.
 
+When a secret or other text that must not stay gets into the store, the guide's
+[Troubleshooting](docs/guide/TROUBLESHOOTING.md#text-that-must-not-stay-in-the-store)
+says what to rotate, what the operations correct, what they do not, and what
+SQLite leaves in the file.
+
 ## Operations
 
 `chidev exec <file> [--store <db>]` reads one JSON object per line, runs each as an
