@@ -83,8 +83,9 @@ Crux names there waits on that question. `view` does not give a request's
    or retire (`targets`) and what must stay (`keep`). Name the container when a
    part adds something (the Contract that takes a new Clause). Keep the
    Contracts, the Interfaces and the Harness of one Context in one part unless
-   there is a reason to split them. Keep the unit to protect: an Item, not the
-   whole Interface, when only its signature must stay. Do not keep what another
+   there is a reason to split them; parts that share a Harness are then taken
+   through steps 3 and 4 one after the other (see step 4). Keep the unit to
+   protect: an Item, not the whole Interface, when only its signature must stay. Do not keep what another
    part targets: a part that keeps an Interface and a part that names one of its
    Items contradict each other. `cr.keep-targeted` in an answer says so; resolve
    the wrong part as `{"superseded":"<new title>"}` and open it again with the
@@ -151,7 +152,22 @@ Crux names there waits on that question. `view` does not give a request's
    cited by some Case. A put replaces the whole Harness and is applied `for`
    one part: the put that adds the Cases of an answered Crux, and only those, is
    applied `for` the part the Crux was raised in. The Cases that follow a
-   part's Clauses are that part's work, so they are inside its frame. A Case
+   part's Clauses are that part's work, so they are inside its frame. When the
+   Cases of one Harness follow the Clauses or Items of several parts, a put
+   `for` one of them is made while no other part's work has left a Case of the
+   Harness stale: a put records the revision of everything each Case cites, so
+   it brings every stale Case up, and one brought up that neither is nor cites
+   anything inside the frame of the part the put is `for` moves outside it. So
+   the parts go through steps 3 and 4 one after the other, each part's Harness
+   put before the next part's design, and a later put `for` an earlier part (a
+   corrected Case, the Cases of an answered Crux) waits until the Harness is put
+   for the parts designed since. A Case that cites the work of two parts is
+   inside both frames and moves in each of their puts. The Harness is not put
+   `for` the parent: its frame is its own targets, not its parts' (see
+   [Attribution and frame](../../README.md#attribution-and-frame)). When another
+   part's design is in already, no put can leave its Cases as they are: make the
+   put, and `cr.out-of-frame` names them; say so in the report the decision
+   maker resolves the part on (step 8). A Case
    the implementer finds wrong against its Clause goes back to the Harness
    writer with that Clause,
    and the writer puts the corrected Harness `for` the same part. The acceptance examples the
