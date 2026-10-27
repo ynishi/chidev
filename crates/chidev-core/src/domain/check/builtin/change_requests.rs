@@ -9,7 +9,8 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::service::change_request::{
-    judged_open, keep_moved, out_of_frame, possible_kinds, resolved_without_work, targets_untouched,
+    judged_open, keep_moved, keep_targeted, out_of_frame, possible_kinds, resolved_without_work,
+    targets_untouched,
 };
 use crate::domain::service::cite::revision_of;
 use crate::domain::service::crux::awaiting_decision;
@@ -289,6 +290,71 @@ impl Check for KeepMoved {
                     &KEEP_MOVED,
                     Some(Subject::ChangeRequest(k.cr)),
                     format!("{} target(s) it keeps have moved", k.moved.len()),
+                )
+                .grounded(grounds)
+            })
+            .collect()
+    }
+}
+
+/// A change request that keeps a target which an open change request names to revise or retire.
+#[derive(Debug, Clone, Copy)]
+pub struct KeepTargeted;
+
+static KEEP_TARGETED: Descriptor = Descriptor {
+    id: RuleId::from_static("cr.keep-targeted"),
+    summary: Cow::Borrowed(
+        "an open change request that keeps a target which an open change request names to revise or retire",
+    ),
+    help: Cow::Borrowed(
+        "One open change request says a target stays as it is, and an open change request (the same one, or \
+           another) names that target, or a part of it, to be revised or retired. The work the second asks for, \
+           done as asked, breaks the keep: the contradiction exists from the moment both are open, and the keep \
+           is reported as moved only after the work, when it is too late to withdraw. The expectations of a \
+           request are a record and cannot be edited, so resolve the wrong one as superseded by a new request \
+           (`{\"superseded\": \"<title>\"}`) with the right expectations, before any work: keep the unit to \
+           protect (an Item, not the whole Interface, when only its signature must stay), and do not keep what \
+           another request targets. The message says which request names which target.",
+    ),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Check]),
+    default_level: Level::Warning,
+    mandatory: false,
+    params: std::borrow::Cow::Borrowed(&[]),
+    executor: Executor::Builtin,
+};
+
+impl Check for KeepTargeted {
+    fn descriptor(&self) -> &'static Descriptor {
+        &KEEP_TARGETED
+    }
+
+    /// One finding for each change request that has a keep broken, about that request, standing on one ground for
+    /// each conflict: a second request naming the same target, or a new target inside the kept one, is a new
+    /// ground.
+    fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
+        keep_targeted(view.change_requests, view.project, view.resolving)
+            .into_iter()
+            .map(|k| {
+                let grounds = k
+                    .conflicts
+                    .iter()
+                    .map(|c| Ground::Targeted {
+                        kept: c.kept,
+                        target: c.target,
+                        by: c.by,
+                    })
+                    .collect();
+                Finding::new(
+                    &KEEP_TARGETED,
+                    Some(Subject::ChangeRequest(k.cr)),
+                    format!(
+                        "{} target(s) it keeps are named as targets by an open change request",
+                        k.conflicts
+                            .iter()
+                            .map(|c| c.kept)
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                    ),
                 )
                 .grounded(grounds)
             })

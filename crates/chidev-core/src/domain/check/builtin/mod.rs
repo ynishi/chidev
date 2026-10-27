@@ -23,8 +23,8 @@ use super::Check;
 use super::level::Moment;
 
 pub use self::change_requests::{
-    AwaitingDecision, IntentMismatch, KeepMoved, OutOfFrame, PolicyLineGone, ResolvedWithoutWork,
-    TargetsUntouched,
+    AwaitingDecision, IntentMismatch, KeepMoved, KeepTargeted, OutOfFrame, PolicyLineGone,
+    ResolvedWithoutWork, TargetsUntouched,
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
@@ -47,6 +47,7 @@ pub fn all() -> &'static [&'static dyn Check] {
         &NoHarness,
         &AwaitingDecision,
         &KeepMoved,
+        &KeepTargeted,
         &OutOfFrame,
         &ResolvedWithoutWork,
         &TargetsUntouched,
@@ -944,6 +945,140 @@ mod tests {
         let mut q = p.clone();
         put_contract(&mut q, "a half rounds to odd");
         assert_eq!(introduced(&was, &run(&KeepMoved, &q, &[], &crs)).len(), 1);
+    }
+
+    #[test]
+    fn a_keep_that_another_request_names_is_introduced_by_the_edit_that_makes_it_and_cleared_by_resolving()
+     {
+        use crate::domain::check::Mention;
+        use crate::domain::vo::answer::DecisionMaker;
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::resolution::Reopening;
+        use crate::domain::vo::timestamp::Timestamp;
+        let p = project();
+        let interface = Target::Interface(iface());
+        let names = |n: u128, item_n: u128| {
+            cr(
+                &p,
+                n,
+                Intent::ChangeBehavior,
+                None,
+                &[(Target::Item(item(item_n)), ExpectKind::Target)],
+            )
+        };
+        let keeping = cr(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            None,
+            &[(interface, ExpectKind::Keep)],
+        );
+        let alone = run(&KeepTargeted, &p, &[], std::slice::from_ref(&keeping));
+        assert!(alone.is_empty());
+        // Opening the request that names an Item of the Interface introduces the finding about the one that keeps.
+        let mut b = names(2, 10);
+        let crs = [keeping.clone(), b.clone()];
+        let was = run(&KeepTargeted, &p, &[], &crs);
+        let found = introduced(&alone, &was);
+        assert_eq!(
+            subjects(&found),
+            [Some(Subject::ChangeRequest(keeping.id()))]
+        );
+        assert_eq!(found[0].level(), crate::domain::check::Level::Warning);
+        assert_eq!(
+            found[0].grounds(),
+            [Ground::Targeted {
+                kept: interface,
+                target: Target::Item(item(10)),
+                by: b.id()
+            }]
+        );
+        assert_eq!(
+            found[0].mentions(),
+            [Mention::Targeted {
+                kept: interface,
+                target: Target::Item(item(10)),
+                by: b.id()
+            }]
+        );
+        // A put that leaves the requests as they are introduces nothing, the same Item moving or not.
+        let mut moved = p.clone();
+        put_interface(&mut moved, "fn a(x: u8)");
+        assert!(introduced(&was, &run(&KeepTargeted, &moved, &[], &crs)).is_empty());
+        // A third request naming another Item of it introduces the finding again.
+        let c = names(3, 11);
+        let widened = [keeping.clone(), b.clone(), c];
+        let found = introduced(&was, &run(&KeepTargeted, &p, &[], &widened));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].grounds().len(), 2);
+        // Two conflicts on the one target it keeps: the message counts the target once.
+        assert!(
+            found[0].message().starts_with("1 target(s) it keeps"),
+            "{}",
+            found[0].message()
+        );
+        // Resolving the one that names it clears the finding, and reopening it introduces it again.
+        resolve_as(&mut b, ResolutionKind::Done, &[]);
+        let cleared = run(&KeepTargeted, &p, &[], &[keeping.clone(), b.clone()]);
+        assert!(cleared.is_empty());
+        b.reopen(Reopening::new(
+            Prose::try_from("it came back").unwrap(),
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(4),
+        ))
+        .unwrap();
+        let again = run(&KeepTargeted, &p, &[], &[keeping, b]);
+        assert_eq!(introduced(&cleared, &again).len(), 1);
+    }
+
+    #[test]
+    fn a_decision_whose_option_names_what_another_keeps_introduces_the_finding_when_it_is_taken() {
+        use crate::domain::service::crux::decide;
+        use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
+        use crate::domain::vo::crux::{CruxKind, Decision};
+        use crate::domain::vo::id::{AnswerId, test_uuid};
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::timestamp::Timestamp;
+        let p = project();
+        let interface = Target::Interface(iface());
+        let keeping = cr(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            None,
+            &[(interface, ExpectKind::Keep)],
+        );
+        let mut b = cr(&p, 2, Intent::ChangeBehavior, None, &[]);
+        let mut q = crux(
+            20,
+            2,
+            CruxKind::Conflict,
+            &[
+                ("leave it", &[]),
+                ("revise it", &[(Target::Item(item(10)), ExpectKind::Target)]),
+            ],
+        );
+        // The options of a question not decided name nothing.
+        let was = run(&KeepTargeted, &p, &[], &[keeping.clone(), b.clone()]);
+        assert!(was.is_empty());
+        let answer = Answer::new(
+            AnswerId::from_uuid(test_uuid(901)),
+            Decision::Chosen {
+                option: q.options()[1].id(),
+                reason: None,
+            },
+            Basis::Arbitrary {
+                reason: Prose::try_from("nothing derives it").unwrap(),
+            },
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(2),
+        );
+        decide(&mut q, &mut b, answer, &p, None).unwrap();
+        let found = introduced(&was, &run(&KeepTargeted, &p, &[], &[keeping.clone(), b]));
+        assert_eq!(
+            subjects(&found),
+            [Some(Subject::ChangeRequest(keeping.id()))]
+        );
     }
 
     #[test]

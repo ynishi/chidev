@@ -380,6 +380,68 @@ pub fn keep_moved(
         .collect()
 }
 
+/// A keep of one open change request that a target of an open change request breaks for sure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Conflict {
+    /// The target kept.
+    pub kept: Target,
+    /// The target named to be revised or retired: the kept one, or a part of it.
+    pub target: Target,
+    /// The change request that names it.
+    pub by: ChangeRequestId,
+}
+
+/// An open change request one of whose keeps an open change request names as a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeepTargeted {
+    /// The change request that keeps.
+    pub cr: ChangeRequestId,
+    /// The keeps broken, in order.
+    pub conflicts: Vec<Conflict>,
+}
+
+/// Every change request of `crs` judged open (see [`judged_open`]) that keeps a target which a change request of
+/// `crs` judged open, itself included, names to revise or retire: the same target, or a part of the Contract,
+/// Interface or Harness it keeps, whose revision then moves. Conflicts in the order of the keeps, then of the
+/// requests, then of their targets. A target the Project does not have now conflicts by being the same alone. The
+/// options of a Crux not decided yet name nothing, so they are not compared. A Context or the Project kept moves only
+/// when an asset or a Context is added or removed, which revising something inside does not do, so only the same
+/// target conflicts with it.
+pub fn keep_targeted(
+    crs: &[ChangeRequest],
+    project: &Project,
+    resolving: Option<ChangeRequestId>,
+) -> Vec<KeepTargeted> {
+    let open: Vec<&ChangeRequest> = crs.iter().filter(|c| judged_open(c, resolving)).collect();
+    // Each target named by an open request, with the Contract, Interface or Harness that holds it now.
+    let named: Vec<(ChangeRequestId, Target, Option<Target>)> = open
+        .iter()
+        .flat_map(|c| {
+            frame(c)
+                .into_iter()
+                .map(|t| (c.id(), t, project.holder_of(t)))
+        })
+        .collect();
+    open.iter()
+        .filter_map(|keeper| {
+            let conflicts: Vec<Conflict> = keeper
+                .expectations()
+                .filter(|(_, e)| e.kind == ExpectKind::Keep)
+                .flat_map(|(kept, _)| {
+                    named
+                        .iter()
+                        .filter(move |(_, target, holder)| *target == kept || *holder == Some(kept))
+                        .map(move |&(by, target, _)| Conflict { kept, target, by })
+                })
+                .collect();
+            (!conflicts.is_empty()).then(|| KeepTargeted {
+                cr: keeper.id(),
+                conflicts,
+            })
+        })
+        .collect()
+}
+
 /// The targets `cr` names to revise or retire, its own and those its decision named: its frame. A container in it
 /// frames everything inside.
 pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
@@ -1499,6 +1561,316 @@ mod tests {
         assert_eq!(c.decided_expects()[0].kind, ExpectKind::Keep);
         assert_eq!(keep_progress(&c, &p).len(), 1);
         assert_eq!(frame(&c), BTreeSet::from([clause()]));
+    }
+
+    // A keep that an open request's target breaks.
+
+    fn conflict(kept: Target, target: Target, by: &ChangeRequest) -> Conflict {
+        Conflict {
+            kept,
+            target,
+            by: by.id(),
+        }
+    }
+
+    #[test]
+    fn a_target_named_by_another_open_request_breaks_the_keep_of_the_same_target() {
+        let p = project();
+        let a = open(&p, 1, Intent::KeepBehavior, &[(clause(), ExpectKind::Keep)]);
+        let b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        let all = [a.clone(), b.clone()];
+        assert_eq!(
+            super::keep_targeted(&all, &p, None),
+            [KeepTargeted {
+                cr: a.id(),
+                conflicts: vec![conflict(clause(), clause(), &b)]
+            }]
+        );
+        // Two keeps that are not named, and a target that is not kept, tell nothing.
+        let c = open(&p, 3, Intent::KeepBehavior, &[(detail(), ExpectKind::Keep)]);
+        assert!(super::keep_targeted(&[b, c], &p, None).is_empty());
+    }
+
+    #[test]
+    fn a_part_of_a_kept_contract_interface_or_harness_that_another_request_names_breaks_the_keep() {
+        let p = project();
+        let keeps =
+            |n: u128, kept: Target| open(&p, n, Intent::KeepBehavior, &[(kept, ExpectKind::Keep)]);
+        let names = |n: u128, target: Target| {
+            open(
+                &p,
+                n,
+                Intent::ChangeBehavior,
+                &[(target, ExpectKind::Target)],
+            )
+        };
+        for (kept, part) in [
+            (interface(), item()),
+            (contract(), clause()),
+            (contract(), detail()),
+            (harness(), case()),
+        ] {
+            let a = keeps(1, kept);
+            let b = names(2, part);
+            assert_eq!(
+                super::keep_targeted(&[a.clone(), b.clone()], &p, None),
+                [KeepTargeted {
+                    cr: a.id(),
+                    conflicts: vec![conflict(kept, part, &b)]
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_not_moved_for_sure_by_a_target_is_not_a_conflict() {
+        let p = project();
+        let keeps =
+            |n: u128, kept: Target| open(&p, n, Intent::KeepBehavior, &[(kept, ExpectKind::Keep)]);
+        let names = |n: u128, target: Target| {
+            open(
+                &p,
+                n,
+                Intent::ChangeBehavior,
+                &[(target, ExpectKind::Target)],
+            )
+        };
+        // A Context moves when an asset is added or removed, not when something inside it is revised.
+        let context = Target::Context(core());
+        for part in [interface(), item(), clause(), contract(), case()] {
+            assert!(
+                super::keep_targeted(&[keeps(1, context), names(2, part)], &p, None).is_empty()
+            );
+        }
+        // A kept Item is not moved by its Interface being revised, nor a kept Clause by its Contract.
+        assert!(
+            super::keep_targeted(&[keeps(1, item()), names(2, interface())], &p, None).is_empty()
+        );
+        assert!(
+            super::keep_targeted(&[keeps(1, clause()), names(2, contract())], &p, None).is_empty()
+        );
+        // The part of another Contract does not break the keep of this one.
+        assert!(
+            super::keep_targeted(&[keeps(1, interface()), names(2, clause())], &p, None).is_empty()
+        );
+        // The same Context is the same target.
+        assert_eq!(
+            super::keep_targeted(&[keeps(1, context), names(2, context)], &p, None).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_target_the_project_does_not_have_conflicts_only_as_the_same_target() {
+        let p = project();
+        let a = open(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            &[(interface(), ExpectKind::Keep), (item(), ExpectKind::Keep)],
+        );
+        let b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(item(), ExpectKind::Target)],
+        );
+        let gone = Project::new(ProjectId::from_uuid(test_uuid(1001)));
+        let all = [a.clone(), b.clone()];
+        assert_eq!(
+            super::keep_targeted(&all, &gone, None),
+            [KeepTargeted {
+                cr: a.id(),
+                conflicts: vec![conflict(item(), item(), &b)]
+            }]
+        );
+    }
+
+    #[test]
+    fn only_requests_judged_open_are_compared_on_either_side() {
+        let p = project();
+        let mut a = open(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            &[(interface(), ExpectKind::Keep)],
+        );
+        let mut b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(item(), ExpectKind::Target)],
+        );
+        let both = |a: &ChangeRequest, b: &ChangeRequest| [a.clone(), b.clone()];
+        assert_eq!(super::keep_targeted(&both(&a, &b), &p, None).len(), 1);
+        // The one that targets is a record.
+        finish(&mut b, &[]).unwrap();
+        assert!(super::keep_targeted(&both(&a, &b), &p, None).is_empty());
+        // Unless it is the one being resolved.
+        assert_eq!(
+            super::keep_targeted(&both(&a, &b), &p, Some(b.id())),
+            [KeepTargeted {
+                cr: a.id(),
+                conflicts: vec![conflict(interface(), item(), &b)]
+            }]
+        );
+        // The one that keeps is a record.
+        let mut b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(item(), ExpectKind::Target)],
+        );
+        finish(&mut a, &[]).unwrap();
+        assert!(super::keep_targeted(&both(&a, &b), &p, None).is_empty());
+        assert_eq!(
+            super::keep_targeted(&both(&a, &b), &p, Some(a.id())).len(),
+            1
+        );
+        // Both resolved: the one being resolved is judged against the other, which is a record.
+        finish(&mut b, &[]).unwrap();
+        assert!(super::keep_targeted(&both(&a, &b), &p, Some(a.id())).is_empty());
+    }
+
+    #[test]
+    fn a_request_that_keeps_a_container_and_names_a_part_of_it_conflicts_with_itself() {
+        let p = project();
+        let a = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[
+                (interface(), ExpectKind::Keep),
+                (item(), ExpectKind::Target),
+            ],
+        );
+        assert_eq!(
+            super::keep_targeted(std::slice::from_ref(&a), &p, None),
+            [KeepTargeted {
+                cr: a.id(),
+                conflicts: vec![conflict(interface(), item(), &a)]
+            }]
+        );
+    }
+
+    #[test]
+    fn what_a_decision_expects_is_compared_and_the_options_not_decided_are_not() {
+        let p = project();
+        let a = open(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            &[(interface(), ExpectKind::Keep)],
+        );
+        let mut b = open(&p, 2, Intent::ChangeBehavior, &[]);
+        let mut crux = crux_with(
+            &b,
+            500,
+            CruxKind::Conflict,
+            vec![
+                ("leave it", BTreeMap::new()),
+                ("revise it", BTreeMap::from([(item(), ExpectKind::Target)])),
+            ],
+        );
+        assert!(super::keep_targeted(&[a.clone(), b.clone()], &p, None).is_empty());
+        decided(&mut b, &mut crux, 1, &p);
+        assert_eq!(
+            super::keep_targeted(&[a.clone(), b.clone()], &p, None),
+            [KeepTargeted {
+                cr: a.id(),
+                conflicts: vec![conflict(interface(), item(), &b)]
+            }]
+        );
+        // The decision keeping a target is a keep as well, for another request's target.
+        let c = open(
+            &p,
+            3,
+            Intent::ChangeBehavior,
+            &[(detail(), ExpectKind::Target)],
+        );
+        let mut d = open(&p, 4, Intent::KeepBehavior, &[]);
+        let mut keeping = crux_with(
+            &d,
+            501,
+            CruxKind::Conflict,
+            vec![
+                ("drop C2", BTreeMap::new()),
+                ("keep C2", BTreeMap::from([(detail(), ExpectKind::Keep)])),
+            ],
+        );
+        decided(&mut d, &mut keeping, 1, &p);
+        assert_eq!(
+            super::keep_targeted(&[c.clone(), d.clone()], &p, None),
+            [KeepTargeted {
+                cr: d.id(),
+                conflicts: vec![conflict(detail(), detail(), &c)]
+            }]
+        );
+    }
+
+    #[test]
+    fn conflicts_come_in_the_order_of_the_keeps_then_of_the_requests_then_of_their_targets() {
+        let p = project();
+        let a = open(
+            &p,
+            1,
+            Intent::KeepBehavior,
+            &[
+                (interface(), ExpectKind::Keep),
+                (contract(), ExpectKind::Keep),
+            ],
+        );
+        let b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(item(), ExpectKind::Target)],
+        );
+        let c = open(
+            &p,
+            3,
+            Intent::ChangeBehavior,
+            &[(item(), ExpectKind::Target), (clause(), ExpectKind::Target)],
+        );
+        let keeper = open(
+            &p,
+            4,
+            Intent::KeepBehavior,
+            &[(harness(), ExpectKind::Keep)],
+        );
+        let d = open(
+            &p,
+            5,
+            Intent::ChangeBehavior,
+            &[(case(), ExpectKind::Target)],
+        );
+        let found = super::keep_targeted(
+            &[keeper.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+            &p,
+            None,
+        );
+        assert_eq!(
+            found,
+            [
+                KeepTargeted {
+                    cr: keeper.id(),
+                    conflicts: vec![conflict(harness(), case(), &d)]
+                },
+                KeepTargeted {
+                    cr: a.id(),
+                    conflicts: vec![
+                        conflict(contract(), clause(), &c),
+                        conflict(interface(), item(), &b),
+                        conflict(interface(), item(), &c),
+                    ]
+                },
+            ]
+        );
     }
 
     // Frame: the work stays inside what the request named.

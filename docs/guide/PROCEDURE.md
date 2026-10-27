@@ -83,7 +83,12 @@ Crux names there waits on that question. `view` does not give a request's
    or retire (`targets`) and what must stay (`keep`). Name the container when a
    part adds something (the Contract that takes a new Clause). Keep the
    Contracts, the Interfaces and the Harness of one Context in one part unless
-   there is a reason to split them. A question that comes up, now or later in
+   there is a reason to split them. Keep the unit to protect: an Item, not the
+   whole Interface, when only its signature must stay. Do not keep what another
+   part targets: a part that keeps an Interface and a part that names one of its
+   Items contradict each other. `cr.keep-targeted` in an answer says so; resolve
+   the wrong part as `{"superseded":"<new title>"}` and open it again with the
+   right `keep`, before any work. A question that comes up, now or later in
    the design, is settled when it comes up:
    - the text of the requirements, the repository or general knowledge
      settles it to one reading: there is no choice, so record an Assumption,

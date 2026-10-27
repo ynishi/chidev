@@ -1346,6 +1346,98 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
     assert_eq!(unworked["level"], "warning");
 }
 
+/// Two parts of one request: one keeps an Interface, the other names an Item of it. Opening the second tells the
+/// contradiction at once, about the part that keeps, naming the part that targets; resolving the one that keeps as
+/// superseded by a part that keeps the Item alone clears it.
+#[test]
+fn a_part_that_names_what_a_sibling_keeps_is_told_when_it_is_opened_and_clears_when_the_keep_is_narrowed()
+ {
+    use serde_json::json;
+    let dir = fresh_dir("keep-targeted");
+    let ops: String = [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        json!({"op":"interface_put","context":"core","name":"accept",
+            "source":"fn accept()\nfn limit()\n",
+            "items":[{"key":"accept","lines":[1,1]},{"key":"limit","lines":[2,2]}]}),
+        json!({"op":"cr_open","title":"Split","intent":"change_behavior"}),
+        // 5: a part that keeps the whole Interface
+        json!({"op":"cr_open","title":"Stop an example","intent":"keep_behavior","parent":"Split",
+            "keep":[{"interface":{"context":"core","interface":"accept"}}]}),
+        // 6: a part that names an Item of it
+        json!({"op":"cr_open","title":"Set the time limit","intent":"change_behavior","parent":"Split",
+            "targets":[{"item":{"context":"core","interface":"accept","key":"limit"}}]}),
+        // 7: where the whole is checked
+        json!({"op":"check"}),
+        // 8, 9: the part that keeps is superseded by one that keeps the Item it needs
+        json!({"op":"cr_open","title":"Stop an example, narrowed","intent":"keep_behavior","parent":"Split",
+            "keep":[{"item":{"context":"core","interface":"accept","key":"accept"}}]}),
+        json!({"op":"cr_resolve","title":"Stop an example",
+            "resolution":{"superseded":"Stop an example, narrowed"},
+            "reason":"it kept more than it needs","by":{"person":"alice"}}),
+        json!({"op":"check"}),
+    ]
+    .iter()
+    .map(|op| format!("{op}\n"))
+    .collect();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    let targeted = |r: &Value| -> Vec<Value> {
+        r["findings"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter(|f| f["rule"] == "cr.keep-targeted")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // opening the part that keeps tells nothing yet
+    assert!(
+        targeted(at(&results, 5)).is_empty(),
+        "{:#?}",
+        at(&results, 5)
+    );
+    // opening the part that names the Item tells it, about the part that keeps
+    let told = targeted(at(&results, 6));
+    assert_eq!(told.len(), 1, "{:#?}", at(&results, 6));
+    assert_eq!(told[0]["level"], "warning");
+    assert!(
+        told[0]["about"]
+            .as_str()
+            .expect("about")
+            .contains("Stop an example"),
+        "{told:#?}"
+    );
+    let said = told[0]["message"].as_str().expect("message");
+    assert!(
+        said.ends_with(
+            ": change request `Set the time limit` targets accept limit (kept: interface accept)"
+        ),
+        "{said}"
+    );
+    // the whole is told the same until it is dealt with
+    assert_eq!(targeted(at(&results, 7)).len(), 1, "{:#?}", at(&results, 7));
+    // the narrower keep is not named by anyone, and the one it supersedes is a record
+    assert!(
+        targeted(at(&results, 8)).is_empty(),
+        "{:#?}",
+        at(&results, 8)
+    );
+    assert_eq!(at(&results, 9)["ok"], true, "{results:#?}");
+    assert!(
+        targeted(at(&results, 9)).is_empty(),
+        "{:#?}",
+        at(&results, 9)
+    );
+    assert!(
+        targeted(at(&results, 10)).is_empty(),
+        "{:#?}",
+        at(&results, 10)
+    );
+}
+
 /// A part names a Contract; the Harness put for it changes the Case that cites a Clause of the Contract and adds
 /// one: that is the part's work, inside its frame, at the put and where the whole is checked. A put for another
 /// request, whose Case cites a Clause outside its frame, is outside it, and resolving that request says so.
@@ -1709,7 +1801,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 27);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 28);
     assert_eq!(entry("cr.resolved-without-work")["level"], "warning");
     assert_eq!(entry("cr.targets-untouched")["level"], "note");
     assert_eq!(

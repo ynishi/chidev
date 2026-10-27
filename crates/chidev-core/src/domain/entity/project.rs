@@ -280,6 +280,26 @@ impl Project {
         }
     }
 
+    /// The Contract, Interface or Harness that holds `target`, when it is a Clause, an Item or a Case. `None` for any
+    /// other target, and for what the Project does not have now.
+    pub fn holder_of(&self, target: Target) -> Option<Target> {
+        match target {
+            Target::Clause(id) => self
+                .contexts()
+                .find_map(|c| c.contract_of(id))
+                .map(|c| Target::Contract(c.id())),
+            Target::Item(id) => self
+                .contexts()
+                .find_map(|c| c.interface_of(id))
+                .map(|i| Target::Interface(i.id())),
+            Target::Case(id) => self
+                .contexts()
+                .find_map(|c| c.harness_of(id))
+                .map(|h| Target::Harness(h.id())),
+            _ => None,
+        }
+    }
+
     /// The Context with this name.
     pub fn context_by_name(&self, name: &ContextName) -> Option<&Context> {
         self.contexts.values().find(|c| c.name() == name)
@@ -1094,6 +1114,41 @@ mod tests {
         );
         assert_eq!(p.context_of_target(Target::Project), None);
         assert_eq!(p.context_of_target(Target::Clause(clause(99))), None);
+    }
+
+    #[test]
+    fn a_clause_an_item_and_a_case_are_held_by_their_contract_interface_and_harness() {
+        let mut p = project();
+        put_harness(&mut p, &[10], &[11]).unwrap();
+        assert_eq!(
+            p.holder_of(Target::Clause(clause(11))),
+            Some(Target::Contract(ContractId::from_uuid(test_uuid(102))))
+        );
+        assert_eq!(
+            p.holder_of(Target::Item(item(20))),
+            Some(Target::Interface(InterfaceId::from_uuid(test_uuid(201))))
+        );
+        assert_eq!(
+            p.holder_of(Target::Case(CaseId::from_uuid(test_uuid(50)))),
+            Some(Target::Harness(HarnessId::from_uuid(test_uuid(103))))
+        );
+        // The assets, the Context, the Project and what is not there are held by none of the three.
+        assert_eq!(
+            p.holder_of(Target::Interface(InterfaceId::from_uuid(test_uuid(101)))),
+            None
+        );
+        assert_eq!(
+            p.holder_of(Target::Contract(ContractId::from_uuid(test_uuid(102)))),
+            None
+        );
+        assert_eq!(p.holder_of(Target::Context(ctx_id(1))), None);
+        assert_eq!(p.holder_of(Target::Project), None);
+        assert_eq!(p.holder_of(Target::Clause(clause(99))), None);
+        assert_eq!(p.holder_of(Target::Item(item(99))), None);
+        assert_eq!(
+            p.holder_of(Target::Case(CaseId::from_uuid(test_uuid(99)))),
+            None
+        );
     }
 
     #[test]

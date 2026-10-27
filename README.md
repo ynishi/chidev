@@ -1030,7 +1030,17 @@ does not know (`change` and `remove` of earlier versions, and `crux`, among them
   the request in the requester's words and the split, and is closed when its
   parts are.
 - `keep`: the targets that must stay as they are; the revision recorded at
-  `cr_open` is compared, whoever moved the target.
+  `cr_open` is compared, whoever moved the target. A keep that an unresolved
+  request's target breaks for sure is told when the two meet, not after the work:
+  `cr.keep-targeted`, about the request that keeps, in the answer of the edit that
+  made them meet (`cr_open`, `cr_crux_decide`, `cr_reopen`) and in `check`. It
+  names the request that targets, the target and the target kept. Breaking for sure
+  is the same target, or a Clause, Item or Case of a Contract, Interface or
+  Harness that is kept (its revision moves with any of its parts). A kept Context
+  is not told for a target inside it, nor a kept Item for the Interface that holds
+  it; `cr.keep-moved` tells those after the work. To fix it, resolve the wrong request as
+  `{"superseded":"<new title>"}` and open the new one with the right `keep` (the
+  Item, not the whole Interface, when only its signature must stay).
 - Each option of a Crux raised in the request takes the same `targets` / `keep` lists
   (and `wording`, the exact new text of the definitions, and `consequence`, free text
   saying what else choosing it affects). When a Crux is decided, the lists of the
@@ -1137,6 +1147,7 @@ moved under `keep_moved`. The checks:
 |---|---|---|
 | `cr.awaiting-decision` | warning | a Crux has no decision, whether or not the request it was raised in is resolved |
 | `cr.keep-moved` | warning | an unresolved request, or the one being resolved, keeps a target and it moved |
+| `cr.keep-targeted` | warning | an unresolved request keeps a target that an unresolved request (itself included) names to revise or retire: the same target, or a Clause, Item or Case of the Contract, Interface or Harness it keeps |
 | `cr.out-of-frame` | warning | the work for an unresolved request, or for the one being resolved, moved something it did not name (a Case that cites what it names is inside) |
 | `cr.resolved-without-work` | warning | resolved as `done`, yet no change set `for` it or its parts moved anything |
 | `cr.targets-untouched` | note | resolved as `done`, with work, yet a target it named was never touched by it or its parts |
