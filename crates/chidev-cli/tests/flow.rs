@@ -1533,6 +1533,49 @@ fn the_cases_that_follow_a_framed_clause_are_inside_the_frame_and_resolving_tell
 }
 
 #[test]
+fn a_change_set_applied_again_for_a_request_is_ok_and_adds_no_work() {
+    use serde_json::json;
+    let dir = fresh_dir("change-set-again");
+    let stock = json!({"put":"contract","context":"core","name":"stock","title":"Stock",
+        "clauses":[{"label":"C1","text":"a unit is reserved"}]});
+    let reword = json!({"op":"change_set","for":"Reword stock","puts":[
+        {"put":"contract","context":"core","name":"stock","title":"Stock",
+            "clauses":[{"label":"C1","text":"a unit is reserved, once"}]}]});
+    let ops: String = [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        json!({"op":"change_set","puts":[stock]}),
+        json!({"op":"cr_open","title":"Reword stock","intent":"change_behavior",
+            "targets":[{"clause":{"context":"core","contract":"stock","label":"C1"}}]}),
+        // 5, 6: the same change set twice: the second moves nothing
+        reword.clone(),
+        reword,
+        json!({"op":"status"}),
+    ]
+    .iter()
+    .map(|op| format!("{op}\n"))
+    .collect();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    assert_eq!(at(&results, 5)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 6)["ok"], true, "{results:#?}");
+    let status = at(&results, 7);
+    let request = status["change_requests"]
+        .as_array()
+        .expect("change requests")
+        .iter()
+        .find(|c| c["title"] == "Reword stock")
+        .expect("the request");
+    // the work holds the change set that moved the Clause, once: the second one is no work
+    let work = request["work"].as_array().expect("work");
+    assert_eq!(work.len(), 1, "{work:#?}");
+    assert!(
+        !work[0]["moved"].as_array().expect("moved").is_empty(),
+        "{work:#?}"
+    );
+}
+
+#[test]
 fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
     let dir = fresh_dir("every-kind");
     let ops = [
