@@ -31,7 +31,7 @@ use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
-use crate::domain::vo::footprint::{Footprint, Move};
+use crate::domain::vo::footprint::{Citations, Footprint, Move};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId,
@@ -866,11 +866,38 @@ struct MoveDoc {
     within: Vec<TargetRefDoc>,
 }
 
-/// What one change set applied for a change request moved, and the store revision it was kept at.
+/// The Items and Clauses a moved Case cited and the containers of those, by the id of the Case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CitationsDoc {
+    case: String,
+    cites: Vec<TargetRefDoc>,
+    within: Vec<TargetRefDoc>,
+}
+
+/// The targets as they are kept in a move.
+fn target_refs(targets: &[Target]) -> Vec<TargetRefDoc> {
+    targets
+        .iter()
+        .map(|t| {
+            let (target, id) = target_doc(t);
+            TargetRefDoc { target, id }
+        })
+        .collect()
+}
+
+/// The targets of a move, as they were kept.
+fn targets_of(refs: &[TargetRefDoc]) -> Result<Vec<Target>, Bad> {
+    refs.iter().map(|t| target_of(&t.target, &t.id)).collect()
+}
+
+/// What one change set applied for a change request moved, and the store revision it was kept at. The Cases it
+/// moved keep what they cited; a footprint kept before that was recorded has none, and is read as citing nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FootprintDoc {
     store_revision: u64,
     moves: Vec<MoveDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    citations: Vec<CitationsDoc>,
 }
 
 impl From<&Footprint> for FootprintDoc {
@@ -885,15 +912,17 @@ impl From<&Footprint> for FootprintDoc {
                     MoveDoc {
                         target,
                         id,
-                        within: m
-                            .within()
-                            .iter()
-                            .map(|t| {
-                                let (target, id) = target_doc(t);
-                                TargetRefDoc { target, id }
-                            })
-                            .collect(),
+                        within: target_refs(m.within()),
                     }
+                })
+                .collect(),
+            citations: f
+                .citations()
+                .iter()
+                .map(|(case, c)| CitationsDoc {
+                    case: case.as_uuid().to_string(),
+                    cites: target_refs(c.cites()),
+                    within: target_refs(c.within()),
                 })
                 .collect(),
         }
@@ -908,15 +937,23 @@ impl TryFrom<&FootprintDoc> for Footprint {
             .moves
             .iter()
             .map(|m| {
-                let within = m
-                    .within
-                    .iter()
-                    .map(|t| target_of(&t.target, &t.id))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, Bad>(Move::new(target_of(&m.target, &m.id)?, within))
+                Ok::<_, Bad>(Move::new(
+                    target_of(&m.target, &m.id)?,
+                    targets_of(&m.within)?,
+                ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Footprint::new(d.store_revision, moves))
+        let citations = d
+            .citations
+            .iter()
+            .map(|c| {
+                Ok::<_, Bad>((
+                    CaseId::from_uuid(uuid(&c.case)?),
+                    Citations::new(targets_of(&c.cites)?, targets_of(&c.within)?),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(Footprint::new(d.store_revision, moves).with_citations(citations))
     }
 }
 

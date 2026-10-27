@@ -445,8 +445,10 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   the Contract, Interface, Harness, Context or Project whose revision moved because
   something in it was added or removed), each with the containers it was in. The
   answer is the same; `findings` includes `cr.out-of-frame` when the set left the
-  frame (see "Change requests"). A set without `for`, a put or a retire alone,
-  belongs to no request: it records nothing, shows in no request's `targets`, and
+  frame (see "Change requests"; a Case that cites a Clause or an Item the frame
+  holds is inside it, and the footprint keeps what each Case it moved cited). A
+  set without `for`, a put or a retire alone, belongs to no request: it records
+  nothing, shows in no request's `targets`, and
   is judged by revision only for the `keep` of requests. A Context added by
   `context_add` (and not by a set `for` a request) is such a move too.
 
@@ -505,7 +507,9 @@ Programs receive one JSON document on stdin and return one on stdout. The reques
 is `protocol` 2: it has the `moment` the program is asked at (`edit`, `pin`,
 `resolve` or `check`; version 1 called it `hook` and said `put` for `edit`), the
 `rules`, `read_at`, `params` and the `model`. It does not say which operation asked:
-a program is told when it is asked. A response with no findings is
+a program is told when it is asked. (Which request a `cr_resolve` is resolving is
+a concern of the builtin checks, which judge it though the model has it resolved;
+it is not sent.) A response with no findings is
 `{"protocol":2,"findings":[]}`; a response of `protocol` 1 is accepted as well (its
 form did not change), and any other version is a failed run. Diagnostics
 go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`,
@@ -1120,7 +1124,9 @@ removing a feature):
 (`kind` is `target` or `keep`). `status` shows each request with its `situation`,
 `issuer`, `state`, `resolution` and `history`, the ids of the Cruxes raised in it
 (`cruxes`), its `targets` with what the work did to each, its `keep` with whether
-each moved, its `work` and its `out_of_frame`. It lists every Crux under `cruxes` (the
+each moved, its `work` and its `out_of_frame` (the moves of its work outside its
+frame, by the rule of "Attribution and frame": a Case that cites what the frame
+holds is inside). It lists every Crux under `cruxes` (the
 record `view` gives, with the request it was raised in by its title as `raised_in`),
 each Crux that has no decision under `awaiting` (its id, `raised_in`, the question,
 kind, options with what each names and its `consequence`, the recommendation with its
@@ -1130,8 +1136,8 @@ moved under `keep_moved`. The checks:
 | check | level | says |
 |---|---|---|
 | `cr.awaiting-decision` | warning | a Crux has no decision, whether or not the request it was raised in is resolved |
-| `cr.keep-moved` | warning | an unresolved request keeps a target and it moved |
-| `cr.out-of-frame` | warning | the work for an unresolved request moved something it did not name |
+| `cr.keep-moved` | warning | an unresolved request, or the one being resolved, keeps a target and it moved |
+| `cr.out-of-frame` | warning | the work for an unresolved request, or for the one being resolved, moved something it did not name (a Case that cites what it names is inside) |
 | `cr.resolved-without-work` | warning | resolved as `done`, yet no change set `for` it or its parts moved anything |
 | `cr.targets-untouched` | note | resolved as `done`, with work, yet a target it named was never touched by it or its parts |
 | `cr.intent-mismatch` | note | the intent and the targets disagree |
@@ -1174,14 +1180,34 @@ the same commit). That ties the work to the request that asked for it:
   stay in its frame, and **the frame is the request's own**: a parent's targets
   neither widen nor bound its parts. A footprint that moved a target outside the
   frame of the request it was applied for is reported as `cr.out-of-frame` (a
-  warning) for that request, by the put that did it and by `check` for as long as
-  it lasts, and `status` lists it as
-  `out_of_frame` of that request next to its `work` (each footprint's
-  `store_revision` and the targets it moved). A request with no targets has all its
+  warning) for that request, by the put that did it, by `cr_resolve` when the
+  request is resolved, and by `check` for as long as it lasts, and `status` lists
+  it as `out_of_frame` of that request next to its `work` (each footprint's
+  `store_revision` and the targets it moved). A put and a resolve judge the whole
+  model, as every check of their moment does, so their findings also name the
+  other open requests that are out of frame. A request with no targets has all its
   work out of frame. A container that moved only because something inside it moved
   within the frame (the Contract that took a Clause, the Context that took an asset)
   is not outside. A resolved request is a record: it takes no more work (until it
-  is reopened) and is not reported for its frame.
+  is reopened) and `check` and `status` do not report it for its frame; the
+  resolution itself is told (the checks of the `resolve` moment judge the request
+  being resolved although it is resolved by then: `cr.out-of-frame`,
+  `cr.keep-moved` and `cr.intent-mismatch`).
+- **The frame includes the Cases that cite what it frames.** A Case that a change
+  set moved (made, changed or retired) is inside the frame when it cites a Clause
+  or an Item that is, or is inside, a target the frame names: revising a Clause
+  makes the Cases that cite it stale, and bringing them up to it is the same work.
+  One citation is enough: a Case that cites a framed Clause is inside though its
+  other citations are not. The citations are those recorded in the footprint when
+  the work was applied (a Case the set changed counts what it cited before the set
+  and after it, so a set that retires a framed Clause and moves its Cases off it
+  still has them inside; one that was made counts after, one that was retired
+  counts before), so later work cannot move earlier work in or out of the frame. A
+  footprint recorded before citations were kept is judged by containment alone.
+  The Harness that moved only because such a Case moved is covered as any
+  container is. For a move outside the frame: name the target when the request is
+  opened, apply the change set `for` the request it belongs to, or take the change
+  back.
 - A new Clause or Item is a move of its own: a frame that names only the other
   Clauses of the Contract has it outside, so name the Contract when the request
   adds to it.

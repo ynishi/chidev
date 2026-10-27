@@ -351,12 +351,24 @@ pub struct KeepMoved {
     pub moved: Vec<Target>,
 }
 
+/// Whether `cr` is judged as a request still open: it is not resolved, or it is the one `resolving` names, the one a
+/// resolution is being made for, which the state read has resolved already. Every check of change requests that runs
+/// at the `resolve` moment selects its requests with this, so none of them misses the one being resolved.
+pub fn judged_open(cr: &ChangeRequest, resolving: Option<ChangeRequestId>) -> bool {
+    !cr.is_resolved() || Some(cr.id()) == resolving
+}
+
 /// Every unresolved change request in `crs` that keeps a target and the target has moved on in `project`, whoever
 /// moved it: a keep is judged by the revision alone. A resolved one is a record: what changes after it is another
-/// change request's business.
-pub fn keep_moved(crs: &[ChangeRequest], project: &Project) -> Vec<KeepMoved> {
+/// change request's business. The one named by `resolving` is the one a resolution is being made for: it is judged
+/// although the state read already has it resolved.
+pub fn keep_moved(
+    crs: &[ChangeRequest],
+    project: &Project,
+    resolving: Option<ChangeRequestId>,
+) -> Vec<KeepMoved> {
     crs.iter()
-        .filter(|c| !c.is_resolved())
+        .filter(|c| judged_open(c, resolving))
         .filter_map(|cr| {
             let moved: Vec<Target> = keep_progress(cr, project)
                 .into_iter()
@@ -404,16 +416,26 @@ pub struct OutOfFrame {
 /// inside, a target the frame names. A container that moved only because something inside it moved within the
 /// frame (a Contract that took a new Clause, the Context that holds a new asset) is not outside. The work of a part
 /// is judged for the part, not again for its parent. A request with no frame has all its work outside.
-pub fn out_of_frame(crs: &[ChangeRequest]) -> Vec<OutOfFrame> {
+///
+/// A moved Case is also inside when any one of the Items and Clauses it cites, as the footprint recorded them, is
+/// inside the frame (a citation is inside when it is, or is inside, a target the frame names): the Cases that follow
+/// a Clause are the work of revising it. A footprint is judged from itself alone, so the Project is not read; a
+/// footprint recorded without citations is judged by containment only. The request named by `resolving` is judged
+/// although it is resolved: it is the one a resolution is being made for.
+pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -> Vec<OutOfFrame> {
     crs.iter()
-        .filter(|c| !c.is_resolved() && !c.work().is_empty())
+        .filter(|c| judged_open(c, resolving) && !c.work().is_empty())
         .filter_map(|cr| {
             let frame = frame(cr);
-            let inside = |m: &Move| frame.iter().any(|container| m.is_inside(*container));
             // Each change set on its own: a container is covered by what moved inside it in the same set.
             let mut moved = BTreeSet::new();
             let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
+                let inside = |m: &Move| {
+                    frame.iter().any(|container| {
+                        m.is_inside(*container) || footprint.cites_inside(m.target(), *container)
+                    })
+                };
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
                     covered.insert(m.target());
@@ -442,13 +464,13 @@ mod tests {
     use crate::domain::entity::context::Context;
     use crate::domain::entity::crux::CruxDraft;
     use crate::domain::service::crux::decide;
-    use crate::domain::service::footprint::moves_between;
+    use crate::domain::service::footprint::footprint_between;
     use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::crux::{CruxKind, CruxOption, Decision};
-    use crate::domain::vo::footprint::Footprint;
+    use crate::domain::vo::footprint::{Citations, Footprint};
     use crate::domain::vo::id::{
         AnswerId, CaseId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId, HarnessId,
         InterfaceId, ItemId, ProjectId, test_uuid,
@@ -466,15 +488,19 @@ mod tests {
     /// [`super::keep_moved`] for the change requests given.
     fn keep_moved<const N: usize>(crs: [&ChangeRequest; N], p: &Project) -> Vec<KeepMoved> {
         let all: Vec<ChangeRequest> = crs.into_iter().cloned().collect();
-        super::keep_moved(&all, p)
+        super::keep_moved(&all, p, None)
+    }
+
+    /// [`super::out_of_frame`] with no request being resolved.
+    fn out_of_frame(crs: &[ChangeRequest]) -> Vec<OutOfFrame> {
+        super::out_of_frame(crs, None)
     }
 
     /// What a change set `for` `c` does: `change` is made to `p`, and what it moved is recorded as work of `c`.
     fn work(p: &mut Project, c: &mut ChangeRequest, at: u64, change: impl FnOnce(&mut Project)) {
         let before = p.clone();
         change(p);
-        c.record_work(Footprint::new(at, moves_between(&before, p)))
-            .unwrap();
+        c.record_work(footprint_between(at, &before, p)).unwrap();
     }
 
     fn clause() -> Target {
@@ -566,22 +592,57 @@ mod tests {
     }
 
     fn put_harness(p: &mut Project, body: &str) {
+        put_cases(p, body, &[(40, "t", &[])]);
+    }
+
+    /// The Harness with the Cases given, each its number, its name, and the numbers of the Clauses it cites besides
+    /// the Item `a`.
+    fn put_cases(p: &mut Project, body: &str, cases: &[(u128, &str, &[u128])]) {
         p.put_harness(
             core(),
             HarnessId::from_uuid(test_uuid(400)),
             Source::new(format!("{body}\n")),
+            cases
+                .iter()
+                .map(|(n, name, clauses)| {
+                    (
+                        CaseId::from_uuid(test_uuid(*n)),
+                        CaseName::try_from(*name).unwrap(),
+                        LineRange::new(1, 1).unwrap(),
+                        CaseCites::new(
+                            BTreeMap::from([(ItemId::from_uuid(test_uuid(10)), Revision::first())]),
+                            clauses
+                                .iter()
+                                .map(|c| (ClauseId::from_uuid(test_uuid(*c)), Revision::first()))
+                                .collect(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    }
+
+    /// The contract with its second clause alone.
+    fn put_second_only(p: &mut Project) {
+        p.put_contract(
+            core(),
+            ContractId::from_uuid(test_uuid(300)),
+            Title::try_from("T").unwrap(),
             vec![(
-                CaseId::from_uuid(test_uuid(40)),
-                CaseName::try_from("t").unwrap(),
-                LineRange::new(1, 1).unwrap(),
-                CaseCites::new(
-                    BTreeMap::from([(ItemId::from_uuid(test_uuid(10)), Revision::first())]),
-                    BTreeMap::new(),
-                )
-                .unwrap(),
+                ClauseId::from_uuid(test_uuid(31)),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C2").unwrap(),
+                    ClauseText::try_from("a refusal is InvalidDiscount").unwrap(),
+                ),
             )],
         )
         .unwrap();
+    }
+
+    fn harness() -> Target {
+        Target::Harness(HarnessId::from_uuid(test_uuid(400)))
     }
 
     fn context(id: ContextId, name: &str) -> Context {
@@ -1413,7 +1474,7 @@ mod tests {
         });
         let all = [mine.clone(), other];
         assert_eq!(
-            super::keep_moved(&all, &p),
+            super::keep_moved(&all, &p, None),
             [KeepMoved {
                 cr: mine.id(),
                 moved: vec![clause()]
@@ -1577,6 +1638,173 @@ mod tests {
         assert_eq!(out_of_frame(std::slice::from_ref(&c)).len(), 1);
         finish(&mut c, &[]).unwrap();
         assert!(out_of_frame(std::slice::from_ref(&c)).is_empty());
+    }
+
+    // Frame: the Cases that follow what the request frames.
+
+    /// A Project whose Case `t` (40) cites the Clause C1 (30) and the Item `a`.
+    fn project_with_a_case_on_c1() -> Project {
+        let mut p = project();
+        put_cases(&mut p, "fn t() {}", &[(40, "t", &[30])]);
+        p
+    }
+
+    #[test]
+    fn the_cases_that_follow_a_framed_contract_are_inside_its_frame() {
+        let mut p = project_with_a_case_on_c1();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(contract(), ExpectKind::Target)],
+        );
+        // the Harness is put again: the Case that cites C1 of the Contract changes, and one is added
+        work(&mut p, &mut c, 2, |p| {
+            put_cases(
+                p,
+                "fn t() { 1 }\nfn u() {}",
+                &[(40, "t", &[30]), (41, "u", &[31])],
+            )
+        });
+        let case_moves: Vec<Target> = c.work()[0]
+            .targets()
+            .filter(|t| matches!(t, Target::Case(_)))
+            .collect();
+        assert_eq!(case_moves.len(), 2, "{:?}", c.work());
+        assert!(out_of_frame(std::slice::from_ref(&c)).is_empty());
+    }
+
+    #[test]
+    fn a_case_that_cites_nothing_the_frame_holds_is_outside_it() {
+        // the Case cites the Item `a` and, from now on, C2; the request is about C1 alone
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        work(&mut p, &mut c, 2, |p| {
+            put_cases(p, "fn t() { 1 }", &[(40, "t", &[31])])
+        });
+        let found = out_of_frame(std::slice::from_ref(&c));
+        assert_eq!(found[0].moved, [harness(), case()]);
+    }
+
+    #[test]
+    fn one_citation_inside_the_frame_is_enough() {
+        let mut p = project();
+        put_cases(&mut p, "fn t() {}", &[(40, "t", &[31])]);
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // the Case cites C2 (outside) and the Item `a` (outside) before, and C1 (inside) as well after
+        work(&mut p, &mut c, 2, |p| {
+            put_cases(p, "fn t() { 1 }", &[(40, "t", &[30, 31])])
+        });
+        assert!(out_of_frame(std::slice::from_ref(&c)).is_empty());
+    }
+
+    #[test]
+    fn a_case_that_is_retired_stays_inside_through_what_it_cited() {
+        let mut p = project_with_a_case_on_c1();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // the Harness goes with its Case, which is not in the Project any more to say what it cited
+        work(&mut p, &mut c, 2, |p| {
+            p.retire_harness(core(), HarnessId::from_uuid(test_uuid(400)))
+                .unwrap();
+        });
+        assert!(c.work()[0].targets().any(|t| t == case()));
+        assert!(out_of_frame(std::slice::from_ref(&c)).is_empty());
+    }
+
+    #[test]
+    fn a_change_set_that_retires_a_framed_clause_and_moves_its_cases_off_it_keeps_them_inside() {
+        let mut p = project_with_a_case_on_c1();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // the Case is moved to C2 and C1 goes, in one change set: the Case is judged by what it cited before it too
+        work(&mut p, &mut c, 2, |p| {
+            put_cases(p, "fn t() { 1 }", &[(40, "t", &[31])]);
+            put_second_only(p);
+        });
+        assert!(c.work()[0].targets().any(|t| t == case()));
+        assert!(c.work()[0].targets().any(|t| t == clause()));
+        assert!(out_of_frame(std::slice::from_ref(&c)).is_empty());
+    }
+
+    #[test]
+    fn a_footprint_recorded_without_citations_is_judged_by_containment_alone() {
+        let p = project_with_a_case_on_c1();
+        let within = vec![Target::Project, Target::Context(core()), harness()];
+        let frame = [(clause(), ExpectKind::Target)];
+        let mut old = open(&p, 1, Intent::ChangeBehavior, &frame);
+        old.record_work(Footprint::new(2, vec![Move::new(case(), within.clone())]))
+            .unwrap();
+        assert_eq!(out_of_frame(std::slice::from_ref(&old))[0].moved, [case()]);
+        // the same move with what the Case cited is inside
+        let mut new = open(&p, 2, Intent::ChangeBehavior, &frame);
+        new.record_work(
+            Footprint::new(2, vec![Move::new(case(), within)]).with_citations(BTreeMap::from([(
+                CaseId::from_uuid(test_uuid(40)),
+                Citations::new(
+                    vec![clause()],
+                    vec![Target::Project, Target::Context(core()), contract()],
+                ),
+            )])),
+        )
+        .unwrap();
+        assert!(out_of_frame(std::slice::from_ref(&new)).is_empty());
+    }
+
+    // Resolving: the request being resolved is judged although the state read has it resolved.
+
+    #[test]
+    fn the_request_being_resolved_is_judged_for_its_frame_and_its_keeps() {
+        let mut p = project();
+        let mut mine = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target), (detail(), ExpectKind::Keep)],
+        );
+        work(&mut p, &mut mine, 2, |p| {
+            put_contract(p, "a half rounds to even");
+            put_interface(p, 100, 10, "fn a(x: u8)");
+        });
+        // the Clause it keeps moved, whoever moved it: the revision alone
+        work(&mut p, &mut mine, 3, |p| {
+            put_both(p, "a half rounds to even", "a refusal is InvalidRate");
+        });
+        finish(&mut mine, &[]).unwrap();
+        let all = [mine.clone()];
+        // as a record it is not judged ...
+        assert!(super::out_of_frame(&all, None).is_empty());
+        assert!(super::keep_moved(&all, &p, None).is_empty());
+        // ... but it is when it is the one being resolved, and no other is
+        let other = ChangeRequestId::from_uuid(test_uuid(2));
+        assert!(super::out_of_frame(&all, Some(other)).is_empty());
+        assert!(super::keep_moved(&all, &p, Some(other)).is_empty());
+        assert_eq!(super::out_of_frame(&all, Some(mine.id())).len(), 1);
+        assert_eq!(
+            super::keep_moved(&all, &p, Some(mine.id())),
+            [KeepMoved {
+                cr: mine.id(),
+                moved: vec![detail()]
+            }]
+        );
     }
 
     #[test]

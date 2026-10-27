@@ -638,12 +638,9 @@ fn refuse_cited(
         .flat_map(|c| c.harnesses())
         .flat_map(|h| h.cases())
     {
-        let cites = case.cites();
-        let hit: Vec<Target> = cites
-            .items()
-            .keys()
-            .map(|i| Target::Item(*i))
-            .chain(cites.clauses().keys().map(|k| Target::Clause(*k)))
+        let hit: Vec<Target> = case
+            .cites()
+            .targets()
             .filter(|t| going.contains(t))
             .collect();
         if !hit.is_empty() {

@@ -640,6 +640,7 @@ mod tests {
                 measurements: runs,
                 measure_settings: &BTreeMap::new(),
                 sim_settings: settings,
+                resolving: None,
             },
             &Params::default(),
         )
@@ -926,6 +927,7 @@ mod tests {
             measurements: runs,
             measure_settings: &BTreeMap::new(),
             sim_settings: &none(),
+            resolving: None,
         };
         assert_eq!(SimStale.run(&view, &Params::default()).len(), 1);
     }
@@ -1008,6 +1010,7 @@ mod tests {
                 measurements: runs,
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &same,
+                resolving: None,
             },
             &Params::default(),
         );

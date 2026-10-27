@@ -1230,6 +1230,36 @@ fn last_status(results: &[Value]) -> &Value {
 }
 
 #[test]
+fn resolving_a_request_whose_intent_and_targets_disagree_is_told_so() {
+    let dir = fresh_dir("intent-at-resolve");
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        // 4: it keeps the behaviour, yet names a Clause to revise
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Keeps wrongly\",\"intent\":\"keep_behavior\",",
+            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Keeps wrongly\",\"resolution\":\"wont_do\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    // the resolution is told, although the request is resolved in the state the checks read
+    let told = at(&results, 5)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .any(|f| f["rule"] == "cr.intent-mismatch");
+    assert!(told, "{results:#?}");
+}
+
+#[test]
 fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
     let dir = fresh_dir("parts-and-keeps");
     let ops = [
@@ -1295,6 +1325,16 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
     );
     assert_eq!(at(&results, 10)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+    // the resolution itself is told the keep moved: the request is resolved in the state the checks read, and is
+    // judged all the same
+    let kept = at(&results, 10)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|f| f["rule"] == "cr.keep-moved")
+        .cloned()
+        .expect("cr.keep-moved is found when the request is resolved");
+    assert_eq!(kept["level"], "warning");
     // no work was applied for either: the checks of the resolve hook say so
     let unworked = at(&results, 10)["findings"]
         .as_array()
@@ -1304,6 +1344,100 @@ fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
         .cloned()
         .expect("found");
     assert_eq!(unworked["level"], "warning");
+}
+
+/// A part names a Contract; the Harness put for it changes the Case that cites a Clause of the Contract and adds
+/// one: that is the part's work, inside its frame, at the put and where the whole is checked. A put for another
+/// request, whose Case cites a Clause outside its frame, is outside it, and resolving that request says so.
+#[test]
+fn the_cases_that_follow_a_framed_clause_are_inside_the_frame_and_resolving_tells_what_is_outside()
+{
+    use serde_json::json;
+    let dir = fresh_dir("frame-follows-cites");
+    let stock = |c1: &str| {
+        json!({"put":"contract","context":"core","name":"stock","title":"Stock",
+            "clauses":[{"label":"C1","text":c1},{"label":"C7","text":"a unit is released"}]})
+    };
+    let interface = json!({"put":"interface","context":"core","name":"stock",
+        "source":"fn reserve()\nfn release()\n",
+        "items":[{"key":"reserve","lines":[1,1]},{"key":"release","lines":[2,2]}]});
+    let case = |name: &str, line: u64, item: &str, label: &str| {
+        json!({"name":name,"lines":[line,line],"items":[{"interface":"stock","key":item}],
+            "clauses":[{"contract":"stock","label":label}]})
+    };
+    let harness = |cases: Vec<Value>| {
+        let source: String = cases
+            .iter()
+            .map(|c| format!("fn {}() {{}}\n", c["name"].as_str().expect("name")))
+            .collect();
+        json!({"put":"harness","context":"core","name":"stock-tests","source":source,"cases":cases})
+    };
+    let reserve_refuses = case("reserve_refuses", 1, "reserve", "C1");
+    let reserve_twice = case("reserve_twice", 2, "reserve", "C1");
+    let release_frees = case("release_frees", 3, "release", "C7");
+    let reserve_thrice = case("reserve_thrice", 4, "reserve", "C1");
+    let ops: String = [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        // 3: the stock, in a change set for no request
+        json!({"op":"change_set","puts":[stock("a unit is reserved"), interface,
+            harness(vec![reserve_refuses.clone()])]}),
+        // 4, 5: a part that names the Contract, and one that names the Clause C7 alone
+        json!({"op":"cr_open","title":"Reword stock","intent":"change_behavior",
+            "targets":[{"contract":{"context":"core","contract":"stock"}}]}),
+        json!({"op":"cr_open","title":"Release only","intent":"change_behavior",
+            "targets":[{"clause":{"context":"core","contract":"stock","label":"C7"}}]}),
+        // 6: the Contract is reworded and the Harness put for it: the Case that cites C1 changes, one is added
+        json!({"op":"change_set","for":"Reword stock","puts":[stock("a unit is reserved, once"),
+            harness(vec![reserve_refuses.clone(), reserve_twice.clone()])]}),
+        // 7: where the whole is checked
+        json!({"op":"check"}),
+        // 8: a Harness put for the other request adds a Case that cites C7 and a Case that cites C1 only
+        json!({"op":"change_set","for":"Release only","puts":[
+            harness(vec![reserve_refuses, reserve_twice, release_frees, reserve_thrice])]}),
+        // 9: resolving it tells what is outside its frame
+        json!({"op":"cr_resolve","title":"Release only","resolution":"done",
+            "reason":"release is checked","by":{"person":"alice"}}),
+    ]
+    .iter()
+    .map(|op| format!("{op}\n"))
+    .collect();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    let outside = |r: &Value| -> Vec<Value> {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["rule"] == "cr.out-of-frame")
+            .cloned()
+            .collect()
+    };
+    let about = |f: &Value| f["about"].as_str().expect("about").to_string();
+    // the put for the part is inside its frame: the Case it changed and the Case it added follow the Contract's Clause
+    assert!(
+        outside(at(&results, 6)).is_empty(),
+        "{:#?}",
+        at(&results, 6)
+    );
+    // and so it is where the whole is checked, for that request
+    assert!(
+        outside(at(&results, 7))
+            .iter()
+            .all(|f| !about(f).contains("Reword stock")),
+        "{:#?}",
+        at(&results, 7)
+    );
+    // the other request names C7: the Case that cites C7 is inside and covers the Harness, and the Case added that
+    // cites C1 only is outside
+    let at_put = outside(at(&results, 8));
+    assert_eq!(at_put.len(), 1, "{:#?}", at(&results, 8));
+    assert!(about(&at_put[0]).contains("Release only"));
+    // resolving is told the same, as a warning
+    let at_resolve = outside(at(&results, 9));
+    assert_eq!(at_resolve.len(), 1, "{:#?}", at(&results, 9));
+    assert_eq!(at_resolve[0]["level"], "warning");
+    assert!(about(&at_resolve[0]).contains("Release only"));
 }
 
 #[test]

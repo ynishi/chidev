@@ -330,6 +330,7 @@ mod fixture {
                 measurements: &[],
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
+                resolving: None,
             },
             &Params::default(),
         )
@@ -597,13 +598,11 @@ mod tests {
         p: &mut crate::domain::entity::project::Project,
         change: impl FnOnce(&mut crate::domain::entity::project::Project),
     ) {
-        use crate::domain::service::footprint::moves_between;
-        use crate::domain::vo::footprint::Footprint;
+        use crate::domain::service::footprint::footprint_between;
 
         let before = p.clone();
         change(p);
-        c.record_work(Footprint::new(2, moves_between(&before, p)))
-            .unwrap();
+        c.record_work(footprint_between(2, &before, p)).unwrap();
     }
 
     #[test]
@@ -879,8 +878,7 @@ mod tests {
     }
 
     use crate::domain::check::{Ground, LineState, introduced};
-    use crate::domain::service::footprint::moves_between;
-    use crate::domain::vo::footprint::Footprint;
+    use crate::domain::service::footprint::footprint_between;
 
     #[test]
     fn a_citation_that_moves_on_is_introduced_by_the_put_that_moved_it_and_not_again_by_one_that_did_not()
@@ -970,8 +968,7 @@ mod tests {
         let mut d = c.clone();
         let mut r = p.clone();
         put_interface(&mut r, "fn a(x: u16)");
-        d.record_work(Footprint::new(3, moves_between(&p, &r)))
-            .unwrap();
+        d.record_work(footprint_between(3, &p, &r)).unwrap();
         let found = introduced(&was, &run(&OutOfFrame, &r, &[], std::slice::from_ref(&d)));
         assert_eq!(found.len(), 1);
         assert!(

@@ -198,6 +198,41 @@ and this project adheres to
   `reopen_change_request` return their value in `Checked`, with the findings.
   `Store::commit` takes a `Gated` (made only in `app::commit`) and not `Changes`.
   `ExternalCall.hook` is `ExternalCall.moment`, and `ExternalCall.protocol` is 2.
+- The frame of a change request follows citations: a Case that a change set
+  moved (made, changed or retired) is inside the frame when it cites a Clause or
+  an Item that is, or is inside, a target the frame names, and one such citation
+  is enough. Before, a Harness put `for` a part that named a Contract was
+  reported `cr.out-of-frame` for the Cases that follow its Clauses, which were
+  not inside the Contract. The citations are recorded in the footprint when the
+  work is applied (a Case the set changed counts what it cited before the set
+  and after it, a Case made counts after, a Case retired counts before), so a
+  later put cannot move earlier work in or out of the frame; a footprint kept
+  without them is judged by containment alone. The README's "Attribution and
+  frame" and the guide's step 4 say so.
+- `cr.out-of-frame` also runs at the `resolve` moment (its moments are `edit`,
+  `resolve` and `check`), still a warning, and its help no longer offers to name
+  the target in `targets` after the fact: it says to name the target when the
+  request is opened, to apply the change set `for` the request it belongs to, or
+  to take the change back.
+- In Rust (`chidev-core`, a public API change): a `Footprint` has `citations`, a
+  map from each Case it moved to the Items and Clauses that Case cites and the
+  containers they lie in (`Citations`, `Footprint::with_citations`,
+  `Footprint::cites_inside`); `moves_between` is `footprint_between` and returns
+  the footprint; `out_of_frame` and `keep_moved` take
+  `resolving: Option<ChangeRequestId>`; `CheckView` has `resolving`;
+  `judged_open` is public. A footprint kept by the store carries its
+  `citations` (left out when empty; the change request document stays at its
+  schema, which is not released).
+
+### Fixed
+
+- The checks of the `resolve` moment judge the request being resolved. They read
+  the model with it already resolved, and `cr.keep-moved`, `cr.intent-mismatch`
+  and `cr.out-of-frame` skip a resolved request, so `cr.keep-moved` and
+  `cr.intent-mismatch`, which declare that moment, never spoke of the request
+  being resolved. `cr_resolve` now names the request it resolves to the builtin
+  checks (not to an external one: the external protocol is unchanged), and they
+  judge it.
 
 ### Removed
 

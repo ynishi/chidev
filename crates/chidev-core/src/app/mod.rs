@@ -441,6 +441,7 @@ fn view<'a>(
         measurements: &[],
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
+        resolving: None,
     }
 }
 
@@ -1608,7 +1609,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Digest::of(code.as_bytes()),
         )?;
         let delta = ModelDelta::new().with_pin(pin, code.to_string());
-        let findings = self.commit_confirm(ConfirmTrigger::Pin, at, delta).await?;
+        let findings = self
+            .commit_confirm(ConfirmTrigger::Pin, at, delta, None)
+            .await?;
         Ok(Checked {
             value: id,
             findings,
@@ -2015,9 +2018,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             now,
         );
         resolve(&mut cr, resolution, &crs, &cruxes).map_err(|e| AppError::on(&cr, e))?;
+        let resolving = cr.id();
         let delta = ModelDelta::new().with_change_request(cr);
         let findings = self
-            .commit_confirm(ConfirmTrigger::ResolveChangeRequest, at, delta)
+            .commit_confirm(
+                ConfirmTrigger::ResolveChangeRequest,
+                at,
+                delta,
+                Some(resolving),
+            )
             .await?;
         Ok(Checked {
             value: (),
@@ -2123,6 +2132,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 measurements: &measured.measurements,
                 measure_settings: &measured.settings,
                 sim_settings: &measured.sim_settings,
+                resolving: None,
             },
         );
         let mut found = self.found(&run.findings, p, crs, &[]).await?;
@@ -2229,7 +2239,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .map(|c| c.title().to_string())
                 .unwrap_or_else(|| id.to_string())
         };
-        let out_of_frame = out_of_frame(&crs);
+        let out_of_frame = out_of_frame(&crs, None);
         let mut records = Vec::with_capacity(crs.len());
         for c in &crs {
             let mut work = Vec::with_capacity(c.work().len());
@@ -2290,7 +2300,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             });
         }
         let mut moved = Vec::new();
-        for k in keep_moved(&crs, &p) {
+        for k in keep_moved(&crs, &p, None) {
             let Some(cr) = crs.iter().find(|c| c.id() == k.cr) else {
                 continue;
             };

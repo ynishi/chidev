@@ -520,16 +520,24 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// Keeps a confirmation. The checks of the moment of `trigger` run on the model with `delta` laid on it, and
     /// judge it whole: everything they find is reported, and a mandatory check or an external gate refuses for
     /// any of it.
+    ///
+    /// `resolving` is the change request the confirmation resolves, for the checks that judge only unresolved
+    /// requests to judge it too (the state they read has it resolved already); none for any other confirmation. It
+    /// is for the builtin checks: an external check is not told (see [`CheckView::resolving`]).
     pub(super) async fn commit_confirm(
         &mut self,
         trigger: ConfirmTrigger,
         at: StoreRevision,
         delta: ModelDelta,
+        resolving: Option<ChangeRequestId>,
     ) -> Result<Vec<Found>, AppError> {
         let moment = trigger.moment();
         let before = self.read_state(at).await?;
         let after = delta.apply(&before);
-        let view = after.view();
+        let view = CheckView {
+            resolving,
+            ..after.view()
+        };
         let run = self.registry.run(moment, at, &view);
         let reported = run.findings.clone();
         let gating = Gating::Confirm {
