@@ -97,7 +97,7 @@ async fn clause_of(app: &App<SqliteStore, Counter>, label: &str) -> Clause {
     p.contexts()
         .flat_map(|c| c.contracts())
         .flat_map(|k| k.clauses())
-        .find(|c| c.content().label().to_string() == label)
+        .find(|c| c.label().to_string() == label)
         .cloned()
         .unwrap()
 }
@@ -233,6 +233,7 @@ async fn an_asset_and_its_name_are_kept_together() {
             &[ClauseInput {
                 label: "C1".to_string(),
                 text: "push then pop".to_string(),
+                replaces: None,
             }],
         )
         .await
@@ -283,6 +284,7 @@ fn clauses(labels: &[&str]) -> Vec<ClauseInput> {
         .map(|l| ClauseInput {
             label: (*l).to_string(),
             text: format!("{l} holds"),
+            replaces: None,
         })
         .collect()
 }
@@ -823,7 +825,7 @@ mod checks {
                     Finding::new(
                         &FORBIDDEN,
                         Some(Subject::Clause(cl.id())),
-                        format!("clause {}", cl.content().label()),
+                        format!("clause {}", cl.label()),
                     )
                 })
                 .collect()
@@ -834,6 +836,7 @@ mod checks {
         vec![ClauseInput {
             label: "C1".to_string(),
             text: "push then pop".to_string(),
+            replaces: None,
         }]
     }
 
@@ -890,10 +893,12 @@ mod checks {
                 ClauseInput {
                     label: "C1".to_string(),
                     text: c1.to_string(),
+                    replaces: None,
                 },
                 ClauseInput {
                     label: "C7".to_string(),
                     text: "C7 holds".to_string(),
+                    replaces: None,
                 },
             ]
         };
@@ -1320,6 +1325,7 @@ mod judged {
         let clause = |label: &str, text: &str| ClauseInput {
             label: label.to_string(),
             text: text.to_string(),
+            replaces: None,
         };
         app.put_contract(
             "core",

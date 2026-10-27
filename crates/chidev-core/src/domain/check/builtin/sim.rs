@@ -73,7 +73,7 @@ fn label_of(project: &Project, id: ClauseId) -> Option<ClauseLabel> {
         .contexts()
         .find_map(|c| c.contract_of(id))
         .and_then(|k| k.clause(id))
-        .map(|c| c.content().label())
+        .map(|c| c.label())
 }
 
 /// A sim Harness kept in a shape the protocol does not run: the store has it from before a put was held to the
@@ -191,7 +191,7 @@ impl Check for SimUncitedClause {
                         out.push(Finding::new(
                             &SIM_UNCITED_CLAUSE,
                             Some(Subject::Clause(clause.id())),
-                            format!("no sim case cites clause {}", clause.content().label()),
+                            format!("no sim case cites clause {}", clause.label()),
                         ));
                     }
                 }

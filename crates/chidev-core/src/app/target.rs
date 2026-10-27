@@ -184,11 +184,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let k = c.contract_of(id)?;
                     let cl = k.clause(id)?;
-                    Some((
-                        c.name().to_string(),
-                        k.id(),
-                        cl.content().label().to_string(),
-                    ))
+                    Some((c.name().to_string(), k.id(), cl.label().to_string()))
                 });
                 match found {
                     Some((context, contract, label)) => Some(TargetInput::Clause(ClauseRef {
@@ -266,7 +262,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let k = c.contract_of(id)?;
                     let cl = k.clause(id)?;
-                    Some((k.id().as_uuid(), cl.content().label().to_string()))
+                    Some((k.id().as_uuid(), cl.label().to_string()))
                 });
                 match found {
                     Some((asset, what)) => {

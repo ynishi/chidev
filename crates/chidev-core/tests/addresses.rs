@@ -143,6 +143,7 @@ async fn fixture(registry: Registry) -> (App<SqliteStore, Counter>, PathBuf) {
         &[ClauseInput {
             label: "C1".into(),
             text: "push stores an item".into(),
+            replaces: None,
         }],
     )
     .await

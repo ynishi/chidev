@@ -109,7 +109,7 @@ impl Check for UncitedClause {
                 Finding::new(
                     &UNCITED_CLAUSE,
                     Some(Subject::Clause(cl.id())),
-                    format!("no case cites clause {}", cl.content().label()),
+                    format!("no case cites clause {}", cl.label()),
                 )
             })
             .collect()

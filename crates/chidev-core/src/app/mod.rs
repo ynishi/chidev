@@ -12,8 +12,8 @@
 
 mod change_set;
 pub use self::change_set::{
-    ChangeSetDone, ChangeSetInput, ContractPut, HarnessPut, InterfacePut, ItemsInput, PutDone,
-    PutInput, RetireInput,
+    ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, HarnessPut, InterfacePut, ItemsInput,
+    PutDone, PutInput, RetireInput,
 };
 use self::change_set::{only_put, only_setting};
 mod check;
@@ -251,6 +251,45 @@ pub enum AppError {
         /// The label looked for.
         label: String,
     },
+    /// A Clause put names a label, to replace or to remove, that the Contract does not have.
+    #[error("the contract `{contract}` has no clause {label} to {field}")]
+    ClauseUnknown {
+        /// The Context.
+        context: String,
+        /// The Contract.
+        contract: String,
+        /// The label looked for.
+        label: String,
+        /// Where it is named: `replaces` or `remove`.
+        field: &'static str,
+    },
+    /// A Clause of a put replaces a label that the same put still gives to a Clause.
+    #[error(
+        "the contract `{contract}` replaces the clause {label} and still has a clause with that label"
+    )]
+    ClauseReplacesKept {
+        /// The Context.
+        context: String,
+        /// The Contract.
+        contract: String,
+        /// The label replaced.
+        label: String,
+    },
+    /// A label is named twice in a Clause put.
+    #[error(
+        "the clause {label} of the contract `{contract}` is named more than once in the put (by `{side}`)"
+    )]
+    ClauseRenameConflict {
+        /// The Context.
+        context: String,
+        /// The Contract.
+        contract: String,
+        /// The label named twice.
+        label: String,
+        /// Where it is named: `label` (two Clauses are given it), `replaces` (two Clauses replace it) or `remove`
+        /// (it is removed and also given, replaced or removed again).
+        side: &'static str,
+    },
     /// The Harness has no Case with this name.
     #[error("the harness `{harness}` has no case named `{name}`")]
     UnknownCase {
@@ -452,6 +491,11 @@ pub struct ClauseInput {
     pub label: String,
     /// Its sentence.
     pub text: String,
+    /// The label it had before, when it is given a new one: the Clause keeps its id and its citations, and a new
+    /// label alone moves no revision. Without it, a Clause whose label is one the Contract has keeps that id, and
+    /// any other is new. The label replaced must not be given to a Clause of the same put, and is replaced by one
+    /// Clause at most.
+    pub replaces: Option<String>,
 }
 
 /// An Item of an Interface, as found in the code: the name it is known by and the lines it is declared on. Its
@@ -1405,8 +1449,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(only_setting(done))
     }
 
-    /// Makes or revises the Contract named `name` of the Context `context`. A Clause keeps its id when its label
-    /// is one the Contract has.
+    /// Makes or revises the Contract named `name` of the Context `context`: `clauses` are all of the Clauses it has
+    /// afterwards. A Clause keeps its id when its label (or the one it `replaces`) is one the Contract has.
     pub async fn put_contract(
         &mut self,
         context: &str,
@@ -1421,6 +1465,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             clauses: clauses.to_vec(),
         });
         let done = self.apply_one(EditTrigger::PutContract, put).await?;
+        only_put(done, ContractId::from_uuid)
+    }
+
+    /// Changes some Clauses of the Contract named `contract` of the Context `context`, which must exist. Each of
+    /// `clauses` sets the sentence of the Clause with its label, or (with `replaces`) gives the Clause with the
+    /// old label a new label and its sentence, or (a label the Contract does not have) appends a new Clause;
+    /// `remove` names the labels of Clauses to remove. The Clauses not named stay as they are, in their order, and
+    /// so does the title.
+    pub async fn put_clauses(
+        &mut self,
+        context: &str,
+        contract: &str,
+        clauses: &[ClauseInput],
+        remove: &[String],
+    ) -> Result<Checked<Put<ContractId>>, AppError> {
+        let put = PutInput::Clauses(ClausesPut {
+            context: context.to_string(),
+            contract: contract.to_string(),
+            clauses: clauses.to_vec(),
+            remove: remove.to_vec(),
+        });
+        let done = self.apply_one(EditTrigger::PutClauses, put).await?;
         only_put(done, ContractId::from_uuid)
     }
 

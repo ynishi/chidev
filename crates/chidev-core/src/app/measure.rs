@@ -516,7 +516,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 continue;
             };
             let contract = self.name_of(contract.id().as_uuid()).await?;
-            names.insert(id, format!("{contract}:{}", clause.content().label()));
+            names.insert(id, format!("{contract}:{}", clause.label()));
         }
         Ok(names)
     }

@@ -119,7 +119,12 @@ Crux names there waits on that question. `view` does not give a request's
    option chosen become expectations of the part, so the work the answer asks
    for is `for` the part too; if the part cannot take it (it is resolved, or
    what the answer changes is outside what it names), open a new request for
-   it. Keep an Item's id across a rename with `replaces`. Raise a Context to
+   it. Keep an Item's id across a rename with `replaces`, and a Clause's id
+   across a new label the same way. To change some Clauses of a Contract (reword
+   one, add one, remove one) put only those with `clauses_put`, or the `clauses`
+   entry of the set: the Clauses not named stay as they are, so a Clause
+   meant to stay cannot change by a slip. Use `contract_put` to make a Contract,
+   to change its title or to put its Clauses in another order. Raise a Context to
    `contract` basis when its behaviour needs promises a signature cannot carry.
    See [Change sets](../../README.md#change-sets).
    - Write an Interface's `source` as a caller sees it, since the Harness

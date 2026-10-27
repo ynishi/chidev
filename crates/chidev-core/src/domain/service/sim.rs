@@ -70,7 +70,7 @@ pub fn cited_in(project: &Project, case: &Case) -> Vec<CitedIn> {
             let clause = contract.clause(*id)?;
             Some(CitedIn {
                 contract: contract.id(),
-                label: clause.content().label(),
+                label: clause.label(),
                 clause: *id,
             })
         })

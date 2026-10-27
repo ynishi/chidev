@@ -760,6 +760,44 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 }];
                 vec![self.unknown_name("clause", label, &names, scope)]
             }
+            AppError::ClauseUnknown {
+                context,
+                contract,
+                label,
+                field,
+            } => {
+                let names = self.member_names(context, "contract", contract).await;
+                let scope = vec![DiagSubject {
+                    kind: "contract",
+                    name: contract.clone(),
+                }];
+                let mut d = self.unknown_name("clause", label, &names, scope);
+                // The label is not a Clause to cite or to add: the operation that would add it is not the mend.
+                d.suggestions.clear();
+                d.values.insert("field".to_string(), json!(field));
+                vec![d]
+            }
+            AppError::ClauseReplacesKept {
+                context,
+                contract,
+                label,
+            } => vec![contract_put_rule(
+                INPUT_REPLACES_KEPT,
+                (context, contract),
+                &[("key", Some(label)), ("field", Some("label"))],
+                e,
+            )],
+            AppError::ClauseRenameConflict {
+                context,
+                contract,
+                label,
+                side,
+            } => vec![contract_put_rule(
+                INPUT_RENAME_CONFLICT,
+                (context, contract),
+                &[("key", Some(label)), ("side", Some(side))],
+                e,
+            )],
             AppError::UnknownCase {
                 context,
                 harness,
@@ -936,11 +974,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             .await
                             .is_ok_and(|n| n == asset)
                         {
-                            out.extend(
-                                k.clauses()
-                                    .iter()
-                                    .map(|cl| cl.content().label().to_string()),
-                            );
+                            out.extend(k.clauses().iter().map(|cl| cl.label().to_string()));
                         }
                     }
                 }
@@ -1248,6 +1282,28 @@ fn interface_put_rule(
     values: &[(&'static str, Option<&str>)],
     error: &AppError,
 ) -> Diagnostic {
+    asset_put_rule(rule, "interface", at, values, error)
+}
+
+/// The diagnostic of a rule about the put of a Contract (`at`: its Context and name), as [`interface_put_rule`] is
+/// for an Interface.
+fn contract_put_rule(
+    rule: RuleId,
+    at: (&str, &str),
+    values: &[(&'static str, Option<&str>)],
+    error: &AppError,
+) -> Diagnostic {
+    asset_put_rule(rule, "contract", at, values, error)
+}
+
+/// The diagnostic of a rule about the put of an asset of `kind` (`at`: its Context and name).
+fn asset_put_rule(
+    rule: RuleId,
+    kind: &'static str,
+    at: (&str, &str),
+    values: &[(&'static str, Option<&str>)],
+    error: &AppError,
+) -> Diagnostic {
     match rule::rule(rule.as_str()) {
         Some(r) => Diagnostic::of_rule(
             r,
@@ -1257,7 +1313,7 @@ fn interface_put_rule(
                     name: at.0.to_string(),
                 },
                 DiagSubject {
-                    kind: "interface",
+                    kind,
                     name: at.1.to_string(),
                 },
             ],

@@ -153,6 +153,7 @@ fn clauses(text: &str) -> Vec<ClauseInput> {
     vec![ClauseInput {
         label: "C1".into(),
         text: text.into(),
+        replaces: None,
     }]
 }
 
@@ -1018,10 +1019,12 @@ async fn populate(app: &mut App<SqliteStore, Counter, FakeExecutor>) {
             ClauseInput {
                 label: "C1".into(),
                 text: "push then pop returns the value".into(),
+                replaces: None,
             },
             ClauseInput {
                 label: "C2".into(),
                 text: "pop on empty is an error".into(),
+                replaces: None,
             },
         ],
     )

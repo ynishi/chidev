@@ -82,10 +82,12 @@ async fn put_clauses(app: &mut App<SqliteStore, Counter>, first: &str, second: &
             ClauseInput {
                 label: "C1".into(),
                 text: first.into(),
+                replaces: None,
             },
             ClauseInput {
                 label: "C2".into(),
                 text: second.into(),
+                replaces: None,
             },
         ],
     )

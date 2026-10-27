@@ -73,6 +73,8 @@ triggers! {
         BaseOnContract = "base_on_contract",
         /// [`App::put_contract`](super::App::put_contract).
         PutContract = "put_contract",
+        /// [`App::put_clauses`](super::App::put_clauses).
+        PutClauses = "put_clauses",
         /// [`App::put_interface`](super::App::put_interface) and [`App::put_interface_of`](super::App::put_interface_of).
         PutInterface = "put_interface",
         /// [`App::put_harness`](super::App::put_harness) and [`App::put_harness_of`](super::App::put_harness_of).
@@ -733,6 +735,10 @@ mod tests {
             Some(Moment::Edit)
         );
         assert_eq!(
+            Trigger::Edit(EditTrigger::PutClauses).moment(),
+            Some(Moment::Edit)
+        );
+        assert_eq!(
             Trigger::Confirm(ConfirmTrigger::Pin).moment(),
             Some(Moment::Pin)
         );
@@ -757,6 +763,10 @@ mod tests {
         let words: BTreeSet<&str> = all.iter().map(Trigger::word).collect();
         assert_eq!(words.len(), all.len(), "a word names two triggers");
         assert_eq!(Trigger::from_word("put"), None);
+        assert_eq!(
+            Trigger::from_word("put_clauses"),
+            Some(Trigger::Edit(EditTrigger::PutClauses))
+        );
     }
 
     /// A word written by an earlier version stays readable, though no use case runs under it now; the use cases of the
