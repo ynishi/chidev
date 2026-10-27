@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::domain::rule::UNMAPPED;
 use crate::domain::vo::finding::RuleId;
-use crate::domain::vo::id::{ChangeRequestId, ContextId};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -82,20 +82,24 @@ pub enum Remedy {
         /// The change requests whose parent it is and that are open.
         parts: Vec<ChangeRequestId>,
     },
-    /// Answer the crux of this change request.
+    /// Answer this crux of this change request.
     AnswerCrux {
         /// The change request.
         change_request: ChangeRequestId,
+        /// The crux that has no decision.
+        crux: CruxId,
     },
     /// Reopen this change request, if the work goes on.
     ReopenChangeRequest {
         /// The change request.
         change_request: ChangeRequestId,
     },
-    /// Open a new change request whose crux supersedes this one's.
+    /// Raise a new crux that supersedes this one.
     SupersedeCrux {
-        /// The change request whose answer is to be replaced.
+        /// The change request the crux was raised in; the new crux is raised in it too.
         change_request: ChangeRequestId,
+        /// The crux whose decision is to be replaced.
+        crux: CruxId,
     },
     /// Put this line in the decision Policy.
     PutPolicyLine {
@@ -228,9 +232,9 @@ impl Violation {
                 Remedy::ResolveParts { parts } => {
                     out.extend(parts.iter().map(|c| Party::ChangeRequest(*c)));
                 }
-                Remedy::AnswerCrux { change_request }
+                Remedy::AnswerCrux { change_request, .. }
                 | Remedy::ReopenChangeRequest { change_request }
-                | Remedy::SupersedeCrux { change_request } => {
+                | Remedy::SupersedeCrux { change_request, .. } => {
                     out.push(Party::ChangeRequest(*change_request));
                 }
                 Remedy::PutPolicyLine { line } => out.push(Party::PolicyLine(*line)),

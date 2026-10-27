@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft};
+use crate::domain::entity::change_request::{
+    ChangeRequest, ChangeRequestDraft, DecidedExpectation,
+};
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
@@ -32,8 +34,8 @@ use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Footprint, Move};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
-    CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
-    PinId, ProjectId,
+    AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId,
+    ItemId, PinId, ProjectId,
 };
 use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::item_key::ItemKey;
@@ -726,8 +728,8 @@ pub(crate) struct ChangeRequestDoc {
     parent: Option<String>,
     issuer: Option<String>,
     expects: Vec<ExpectDoc>,
-    /// What the options chosen expect, with the revision each target had at the decision.
-    decided_expects: Vec<ExpectDoc>,
+    /// What the options chosen expect, with the revision each target had at the decision and the answer that asked.
+    decided_expects: Vec<DecidedExpectDoc>,
     /// The interpretations it records; a document without them is from before they existed and does not load.
     assumptions: Vec<AssumptionDoc>,
     /// The findings it deals with.
@@ -1047,6 +1049,17 @@ struct ExpectDoc {
     recorded: u64,
 }
 
+/// What a decision asked of a target, once recorded in the change request: as [`ExpectDoc`], with the id of the answer
+/// of the decision that asked for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DecidedExpectDoc {
+    target: TargetDoc,
+    id: Option<String>,
+    kind: ExpectKindDoc,
+    recorded: u64,
+    answer: String,
+}
+
 /// What a Crux option expects of a target when it is chosen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct OptionExpectDoc {
@@ -1102,6 +1115,47 @@ fn expect_docs(expects: &BTreeMap<Target, Expectation>) -> Vec<ExpectDoc> {
             }
         })
         .collect()
+}
+
+fn decided_expect_docs(expects: &[DecidedExpectation]) -> Vec<DecidedExpectDoc> {
+    expects
+        .iter()
+        .map(|e| {
+            let (target, id) = target_doc(&e.target);
+            DecidedExpectDoc {
+                target,
+                id,
+                kind: e.kind.into(),
+                recorded: e.recorded.number(),
+                answer: e.answer.as_uuid().to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The decided expectations in `docs`, in their order; a target twice for one answer is refused: a decision asks a
+/// target once. Several decisions may ask the same target.
+fn decided_expects_of(docs: &[DecidedExpectDoc]) -> Result<Vec<DecidedExpectation>, Bad> {
+    let mut out: Vec<DecidedExpectation> = Vec::with_capacity(docs.len());
+    for d in docs {
+        let expectation = DecidedExpectation {
+            target: target_of(&d.target, &d.id)?,
+            kind: d.kind.into(),
+            recorded: revision(d.recorded)?,
+            answer: AnswerId::from_uuid(uuid(&d.answer)?),
+        };
+        if out
+            .iter()
+            .any(|e| e.target == expectation.target && e.answer == expectation.answer)
+        {
+            return Err(format!(
+                "{:?} is expected twice by one decision",
+                expectation.target
+            ));
+        }
+        out.push(expectation);
+    }
+    Ok(out)
 }
 
 /// The expectations in `docs`; a target twice is refused: a target has one expectation.
@@ -1245,7 +1299,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             parent: c.parent().map(|p| p.as_uuid().to_string()),
             issuer: c.issuer().map(|i| i.to_string()),
             expects: expect_docs(c.expects()),
-            decided_expects: expect_docs(c.decided_expects()),
+            decided_expects: decided_expect_docs(c.decided_expects()),
             assumptions: c.assumptions().iter().map(AssumptionDoc::from).collect(),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             work: c.work().iter().map(FootprintDoc::from).collect(),
@@ -1259,7 +1313,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
 
     fn try_from(d: ChangeRequestDoc) -> Result<ChangeRequest, Bad> {
         let expects = expects_of(&d.expects)?;
-        let decided_expects = expects_of(&d.decided_expects)?;
+        let decided_expects = decided_expects_of(&d.decided_expects)?;
         let draft = ChangeRequestDraft {
             title: Title::try_from(d.title.as_str()).map_err(bad)?,
             situation: prose(&d.situation)?,

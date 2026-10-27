@@ -1283,7 +1283,9 @@ Interfaces, Harness implementation, code), not only to the specification.
   expectations, in the same commit: each is recorded with the revision it has then;
   one an earlier decision recorded with the same kind keeps its first revision, one
   the request itself asks with the same kind is not added a second time, and one asked
-  with another kind, by the request or by an earlier decision, is refused. They are
+  with another kind, by the request or by an earlier decision, is refused. A Crux that
+  supersedes a decision taken in the same request takes that decision's expectations
+  back first, in the same commit, so it may ask the opposite of a target. They are
   part of the request's frame (see "Attribution and frame"), and the work goes `for`
   the request. A Crux of a resolved request takes only a withdrawal: any other
   decision is refused (`cr.already-resolved`) until the request is reopened. A store

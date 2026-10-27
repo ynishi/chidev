@@ -11,7 +11,9 @@
 //! options are numbered in order, and the choice a recommendation and a decision named by text is replaced by the id of
 //! the option with that text. A text that matches no option, and a `supersedes` that names a change request without a
 //! Crux, cannot be moved, and fail the migration. Every change request document is rewritten as schema 3 (it does not
-//! hold a Crux). The store's revision and the model's are not touched: the model means what it did.
+//! hold a Crux), and each expectation it recorded for a decision (`decided_expects`) is given the id of the answer
+//! that the Crux it came from now has: a change request held one Crux, so every one of them was asked by that
+//! decision; one recorded with no answer to name cannot be moved, and fails the migration. The store's revision and the model's are not touched: the model means what it did.
 //!
 //! All of it is one transaction that takes the write lock first. A failure of any kind rolls it back, and the file is
 //! as it was.
@@ -119,6 +121,36 @@ struct Held {
     title: String,
     document: serde_json::Value,
     crux: Option<OldCrux>,
+}
+
+/// Gives each expectation recorded for a decision in the document of `held` the id of the answer `answer`, the one
+/// of the Crux the change request held (none: it held none, or it was not answered).
+fn name_the_answer(held: &mut Held, answer: Option<&str>) -> Result<(), Failure> {
+    let id = &held.id;
+    let Some(recorded) = held
+        .document
+        .get_mut("decided_expects")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    let answer = answer.ok_or_else(|| {
+        data(format!(
+            "the change request {id} records what a decision expects, but it has no answered crux to name"
+        ))
+    })?;
+    for entry in recorded {
+        let entry = entry.as_object_mut().ok_or_else(|| {
+            data(format!(
+                "an expectation of the change request {id} is not a document"
+            ))
+        })?;
+        entry.insert("answer".to_string(), serde_json::json!(answer));
+    }
+    Ok(())
 }
 
 fn data(message: impl Into<String>) -> Failure {
@@ -279,7 +311,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Failure> {
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<Result<_, _>>()?
     };
-    let held: Vec<Held> = rows
+    let mut held: Vec<Held> = rows
         .iter()
         .map(|(id, stored, doc)| take_crux(id, *stored, doc))
         .collect::<Result<_, _>>()?;
@@ -293,6 +325,16 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Failure> {
         if let (Some(old), Some(id)) = (&h.crux, crux_of.get(&h.id)) {
             cruxes.push(moved(h, old, *id, &crux_of)?);
         }
+    }
+    for h in &mut held {
+        let answer = cruxes
+            .iter()
+            .find(|c| c.raised_in == h.id)
+            .and_then(|c| match &c.state {
+                StateDoc::Answered(a) => Some(a.id.as_str()),
+                StateDoc::Open => None,
+            });
+        name_the_answer(h, answer)?;
     }
     let requests: Vec<(&str, String)> = held
         .iter()

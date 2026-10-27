@@ -15,7 +15,7 @@ use crate::domain::vo::assumption::Assumption;
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::finding::FindingRef;
 use crate::domain::vo::footprint::Footprint;
-use crate::domain::vo::id::{ChangeRequestId, CruxId, CruxOptionId};
+use crate::domain::vo::id::{AnswerId, ChangeRequestId, CruxId, CruxOptionId};
 use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
@@ -33,6 +33,9 @@ pub enum ChangeRequestError {
     /// Two options are the same choice.
     #[error("the option `{0}` is given twice")]
     DuplicateOption(Choice),
+    /// Two options have the same id.
+    #[error("the option id {0} is given twice")]
+    DuplicateOptionId(CruxOptionId),
     /// A recommendation or a decision names an option that the Crux does not have.
     #[error("the option {0} is not one of the options of the crux")]
     NotAnOption(CruxOptionId),
@@ -42,14 +45,16 @@ pub enum ChangeRequestError {
     /// The change request is resolved; it takes no more decisions and no more assumptions.
     #[error("the change request is resolved")]
     AlreadyResolved,
-    /// A Crux raised in the change request has no decision yet, so the change request cannot be resolved, whatever
-    /// the resolution.
-    #[error("a crux raised in the change request has no decision yet")]
-    Undecided,
+    /// A Crux raised in the change request has no decision yet (the first such, the one named), so the change request
+    /// cannot be resolved, whatever the resolution.
+    #[error("the crux {0}, raised in the change request, has no decision yet")]
+    Undecided(CruxId),
     /// The Crux is answered already. An answer is an external input that cannot be reproduced, so it is never
     /// rewritten: a different decision is a new Crux that supersedes this one.
-    #[error("the crux is answered already; a different decision is a new crux that supersedes it")]
-    AlreadyAnswered,
+    #[error(
+        "the crux {0} is answered already; a different decision is a new crux that supersedes it"
+    )]
+    AlreadyAnswered(CruxId),
     /// A Crux is to supersede a Crux that does not exist.
     #[error("the crux {0} that the crux supersedes does not exist")]
     SupersedesUnknown(CruxId),
@@ -85,8 +90,9 @@ pub enum ChangeRequestError {
         /// The change requests whose parent it is and that are not resolved.
         children: Vec<ChangeRequestId>,
     },
-    /// A stored expectation was not asked by any decision of the Cruxes raised in the change request.
-    #[error("{0:?} is not an expectation the decision asks")]
+    /// A stored expectation does not name the answer of a Crux raised in the change request, or that answer's
+    /// decision does not ask it.
+    #[error("{0:?} is not an expectation the decision it names asks")]
     UnaskedExpectation(Target),
     /// The option chosen asks of a target the other of being revised or retired and kept, where the change request
     /// (or an earlier decision) asks it already.
@@ -153,6 +159,32 @@ fn distinct(addresses: Vec<FindingRef>) -> Vec<FindingRef> {
     out
 }
 
+/// What a decision asked of a target, once it was recorded in the change request: the target, the kind, the revision
+/// the target had at the decision, and the answer of the decision that asked for it. One is kept per decision and
+/// target, so that what a decision asked can be taken back when a Crux supersedes that decision without losing what
+/// another decision still asks of the same target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecidedExpectation {
+    /// The target asked.
+    pub target: Target,
+    /// What is asked.
+    pub kind: ExpectKind,
+    /// The revision the target had when the decision was taken.
+    pub recorded: Revision,
+    /// The answer of the decision that asked for it.
+    pub answer: AnswerId,
+}
+
+impl DecidedExpectation {
+    /// The expectation, without the answer that asked it.
+    pub fn expectation(&self) -> Expectation {
+        Expectation {
+            kind: self.kind,
+            recorded: self.recorded,
+        }
+    }
+}
+
 /// A request that the definitions change, or a confirmation that they need not: whatever is there now does not
 /// satisfy. It names the targets it asks to be revised or retired and the targets to keep (each with the revision it
 /// had, so a keep that moved is seen). It may be part of a broader request, which need not name any target. A Crux
@@ -174,8 +206,9 @@ pub struct ChangeRequest {
     parent: Option<ChangeRequestId>,
     issuer: Option<Issuer>,
     expects: BTreeMap<Target, Expectation>,
-    /// What the options chosen expect, with the revision each target had when it was decided.
-    decided_expects: BTreeMap<Target, Expectation>,
+    /// What the options chosen expect: one entry per decision and target, with the revision the target had when it
+    /// was decided, in the order they were recorded. Two decisions may ask the same target.
+    decided_expects: Vec<DecidedExpectation>,
     assumptions: Vec<Assumption>,
     addresses: Vec<FindingRef>,
     /// What the change sets applied for it moved, in the order they were kept.
@@ -195,7 +228,7 @@ impl ChangeRequest {
             parent: draft.parent.filter(|p| *p != id),
             issuer: draft.issuer,
             expects: draft.expects,
-            decided_expects: BTreeMap::new(),
+            decided_expects: Vec::new(),
             assumptions: draft.assumptions,
             addresses: distinct(draft.addresses),
             work: Vec::new(),
@@ -212,7 +245,7 @@ impl ChangeRequest {
     pub(crate) fn restore(
         id: ChangeRequestId,
         draft: ChangeRequestDraft,
-        decided_expects: BTreeMap<Target, Expectation>,
+        decided_expects: Vec<DecidedExpectation>,
         work: Vec<Footprint>,
         history: Vec<Transition>,
     ) -> Result<ChangeRequest, ChangeRequestError> {
@@ -275,19 +308,42 @@ impl ChangeRequest {
         &self.expects
     }
 
-    /// What the options chosen for the Cruxes raised in it expect of targets, with the revision each had when the
-    /// Crux was decided. Empty until decided, and when the decisions expect nothing more.
-    pub fn decided_expects(&self) -> &BTreeMap<Target, Expectation> {
+    /// What the options chosen for the Cruxes raised in it expect of targets: one entry for each decision and target,
+    /// with the revision the target had when the Crux was decided and the answer that asked for it. Empty until
+    /// decided, and when the decisions expect nothing more. A target several decisions ask has an entry for each.
+    pub fn decided_expects(&self) -> &[DecidedExpectation] {
         &self.decided_expects
     }
 
-    /// Every expectation that holds now: its own, then those the decisions asked. A target is in one of them, or in
-    /// both with the same kind: a decision that would add it to the other with another kind is refused.
+    /// Every expectation that holds now, one for each target: its own, then those the decisions asked. A target is
+    /// in one of them, or in both with the same kind: a decision that would add it to the other with another kind is
+    /// refused. A target several decisions ask is given once, with the earliest revision recorded for it, so that a
+    /// keep is judged against the oldest of them.
     pub fn expectations(&self) -> impl Iterator<Item = (Target, Expectation)> + '_ {
-        self.expects
+        let own = self.expects.iter().map(|(t, e)| (*t, *e));
+        let mut decided: BTreeMap<Target, Expectation> = BTreeMap::new();
+        for d in self
+            .decided_expects
             .iter()
-            .chain(&self.decided_expects)
-            .map(|(t, e)| (*t, *e))
+            .filter(|d| !self.expects.contains_key(&d.target))
+        {
+            decided
+                .entry(d.target)
+                .and_modify(|e| e.recorded = e.recorded.min(d.recorded))
+                .or_insert_with(|| d.expectation());
+        }
+        own.chain(decided)
+    }
+
+    /// The kind asked of `target` now, by the request or by a decision, leaving out what the decision with the answer
+    /// `leaving_out` asked: that decision is about to be superseded, so what it asked no longer stands.
+    pub fn kind_asked(&self, target: &Target, leaving_out: Option<AnswerId>) -> Option<ExpectKind> {
+        self.expects.get(target).map(|e| e.kind).or_else(|| {
+            self.decided_expects
+                .iter()
+                .find(|d| d.target == *target && Some(d.answer) != leaving_out)
+                .map(|d| d.kind)
+        })
     }
 
     /// The interpretations it records, in the order they were made.
@@ -336,46 +392,63 @@ impl ChangeRequest {
         &self.history
     }
 
-    /// Records what the option chosen for a Crux raised in it expects: each target in `asked` takes its kind and the
-    /// revision in `now`, the one it has as the decision is taken (a target missing from `now` is gone: it is not
-    /// recorded). A target recorded already with the same kind keeps the revision it was first recorded at, and a
-    /// keep goes on being compared with that one; a target this request asks itself with the same kind is not
-    /// recorded again. A target that is asked with another kind, by the request or by an earlier decision, is
-    /// refused, and nothing is recorded. A resolved request is a closed record and takes no more (until it is
-    /// reopened).
+    /// Records what the option chosen for a Crux raised in it expects, for the decision with the answer `answer`: each
+    /// target in `asked` is recorded with its kind and the revision in `now`, the one it has as the decision is taken
+    /// (a target missing from `now` is gone: it is not recorded). The entry is the decision's own: a target another
+    /// decision asks with the same kind has an entry of each, each with its revision, so that taking one decision
+    /// back leaves what the other asks. A target this request asks itself with the same kind is not recorded, and
+    /// one this decision recorded already is not recorded twice. A target that is asked with another kind, by the
+    /// request or by another decision that stands, is refused, and nothing is recorded. A resolved request is a
+    /// closed record and takes no more (until it is reopened).
     pub fn record_decided_expects(
         &mut self,
         asked: &BTreeMap<Target, ExpectKind>,
         now: &BTreeMap<Target, Revision>,
+        answer: AnswerId,
     ) -> Result<(), ChangeRequestError> {
         if self.is_resolved() {
             return Err(ChangeRequestError::AlreadyResolved);
         }
         let mut add = Vec::new();
         for (target, kind) in asked {
-            let held = self
-                .expects
-                .get(target)
-                .or_else(|| self.decided_expects.get(target));
-            match held {
-                Some(e) if e.kind != *kind => {
+            match self.kind_asked(target, None) {
+                Some(held) if held != *kind => {
                     return Err(ChangeRequestError::ExpectationConflict(*target));
                 }
-                Some(_) => {}
-                None => {
-                    if let Some(recorded) = now.get(target) {
-                        add.push((
-                            *target,
-                            Expectation {
-                                kind: *kind,
-                                recorded: *recorded,
-                            },
-                        ));
-                    }
-                }
+                _ => {}
+            }
+            if self.expects.contains_key(target)
+                || self
+                    .decided_expects
+                    .iter()
+                    .any(|d| d.target == *target && d.answer == answer)
+            {
+                continue;
+            }
+            if let Some(recorded) = now.get(target) {
+                add.push(DecidedExpectation {
+                    target: *target,
+                    kind: *kind,
+                    recorded: *recorded,
+                    answer,
+                });
             }
         }
         self.decided_expects.extend(add);
+        Ok(())
+    }
+
+    /// Takes back what the decision with the answer `answer` asked: its decided expectations are removed, and the
+    /// others stay, even those of the same targets. Used when a Crux supersedes that decision; what the request asks
+    /// itself is never touched. A resolved request is a closed record and takes none back (until it is reopened).
+    pub fn take_back_decided_expects(
+        &mut self,
+        answer: AnswerId,
+    ) -> Result<(), ChangeRequestError> {
+        if self.is_resolved() {
+            return Err(ChangeRequestError::AlreadyResolved);
+        }
+        self.decided_expects.retain(|d| d.answer != answer);
         Ok(())
     }
 
@@ -424,6 +497,10 @@ mod tests {
 
     fn prose(s: &str) -> Prose {
         Prose::try_from(s).unwrap()
+    }
+
+    fn answer(n: u128) -> AnswerId {
+        AnswerId::from_uuid(test_uuid(900 + n))
     }
 
     fn line() -> Target {
@@ -530,17 +607,16 @@ mod tests {
     fn a_decision_records_the_revisions_of_what_the_option_expects_and_leaves_its_own() {
         let mut c = cr();
         let later = Revision::first().next();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Target), &now(later))
+        c.record_decided_expects(&asks(detail(), ExpectKind::Target), &now(later), answer(1))
             .unwrap();
         assert_eq!(
             c.decided_expects(),
-            &BTreeMap::from([(
-                detail(),
-                Expectation {
-                    kind: ExpectKind::Target,
-                    recorded: later
-                }
-            )])
+            [DecidedExpectation {
+                target: detail(),
+                kind: ExpectKind::Target,
+                recorded: later,
+                answer: answer(1)
+            }]
         );
         // What it was opened with keeps its revision: it holds whatever is decided.
         assert_eq!(c.expects()[&line()], change_at_first());
@@ -551,31 +627,90 @@ mod tests {
     fn an_option_may_name_a_target_or_a_keep_and_records_the_kind() {
         for kind in [ExpectKind::Target, ExpectKind::Keep] {
             let mut c = cr();
-            c.record_decided_expects(&asks(detail(), kind), &now(Revision::first()))
+            c.record_decided_expects(&asks(detail(), kind), &now(Revision::first()), answer(1))
                 .unwrap();
-            assert_eq!(c.decided_expects()[&detail()].kind, kind);
+            assert_eq!(c.decided_expects()[0].kind, kind);
         }
     }
 
     #[test]
     fn a_target_gone_when_decided_is_not_recorded() {
         let mut c = cr();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Target), &BTreeMap::new())
-            .unwrap();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Target),
+            &BTreeMap::new(),
+            answer(1),
+        )
+        .unwrap();
         assert!(c.decided_expects().is_empty());
     }
 
     #[test]
-    fn a_target_asked_again_with_the_same_kind_keeps_the_revision_it_was_first_recorded_at() {
+    fn a_target_two_decisions_ask_with_the_same_kind_has_an_entry_of_each_at_its_own_revision() {
         let mut c = cr();
         let first = Revision::first();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first))
+        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first), answer(1))
             .unwrap();
         // A later decision asks the same, when the target has moved on.
-        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first.next()))
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Keep),
+            &now(first.next()),
+            answer(2),
+        )
+        .unwrap();
+        let held: Vec<(AnswerId, Revision)> = c
+            .decided_expects()
+            .iter()
+            .map(|d| (d.answer, d.recorded))
+            .collect();
+        assert_eq!(held, [(answer(1), first), (answer(2), first.next())]);
+        // It is expected once, from the earliest revision, so a keep is judged against it.
+        let expected: Vec<_> = c.expectations().filter(|(t, _)| *t == detail()).collect();
+        assert_eq!(
+            expected,
+            [(
+                detail(),
+                Expectation {
+                    kind: ExpectKind::Keep,
+                    recorded: first
+                }
+            )]
+        );
+        // The same decision never records a target twice.
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Keep),
+            &now(first.next().next()),
+            answer(2),
+        )
+        .unwrap();
+        assert_eq!(c.decided_expects().len(), 2);
+    }
+
+    #[test]
+    fn taking_back_one_of_two_decisions_that_ask_a_target_leaves_what_the_other_asks() {
+        let mut c = cr();
+        let first = Revision::first();
+        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first), answer(1))
             .unwrap();
-        assert_eq!(c.decided_expects().len(), 1);
-        assert_eq!(c.decided_expects()[&detail()].recorded, first);
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Keep),
+            &now(first.next()),
+            answer(2),
+        )
+        .unwrap();
+        c.take_back_decided_expects(answer(1)).unwrap();
+        assert_eq!(
+            c.decided_expects(),
+            [DecidedExpectation {
+                target: detail(),
+                kind: ExpectKind::Keep,
+                recorded: first.next(),
+                answer: answer(2)
+            }]
+        );
+        assert_eq!(c.kind_asked(&detail(), None), Some(ExpectKind::Keep));
+        // With the second left out too, nothing asks it.
+        assert_eq!(c.kind_asked(&detail(), Some(answer(2))), None);
     }
 
     #[test]
@@ -584,6 +719,7 @@ mod tests {
         c.record_decided_expects(
             &asks(line(), ExpectKind::Target),
             &now(Revision::first().next()),
+            answer(1),
         )
         .unwrap();
         assert!(c.decided_expects().is_empty());
@@ -597,16 +733,64 @@ mod tests {
         // The request asks `line` to be revised.
         let both = BTreeMap::from([(detail(), ExpectKind::Target), (line(), ExpectKind::Keep)]);
         assert_eq!(
-            c.record_decided_expects(&both, &now(Revision::first())),
+            c.record_decided_expects(&both, &now(Revision::first()), answer(1)),
             Err(ChangeRequestError::ExpectationConflict(line()))
         );
         assert!(c.decided_expects().is_empty());
         // An earlier decision asked `detail` to be revised.
-        c.record_decided_expects(&asks(detail(), ExpectKind::Target), &now(Revision::first()))
-            .unwrap();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Target),
+            &now(Revision::first()),
+            answer(1),
+        )
+        .unwrap();
         assert_eq!(
-            c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(Revision::first())),
+            c.record_decided_expects(
+                &asks(detail(), ExpectKind::Keep),
+                &now(Revision::first()),
+                answer(2)
+            ),
             Err(ChangeRequestError::ExpectationConflict(detail()))
+        );
+        assert_eq!(c.decided_expects().len(), 1);
+    }
+
+    #[test]
+    fn taking_back_a_decision_removes_what_it_asked_and_nothing_else() {
+        let mut c = cr();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Target),
+            &now(Revision::first()),
+            answer(1),
+        )
+        .unwrap();
+        let other = Target::Clause(ClauseId::from_uuid(test_uuid(32)));
+        c.record_decided_expects(
+            &asks(other, ExpectKind::Keep),
+            &BTreeMap::from([(other, Revision::first())]),
+            answer(2),
+        )
+        .unwrap();
+        c.take_back_decided_expects(answer(1)).unwrap();
+        assert_eq!(c.decided_expects().len(), 1);
+        assert_eq!(c.decided_expects()[0].answer, answer(2));
+        // What it was opened with is not a decision's.
+        assert_eq!(c.expects()[&line()], change_at_first());
+        // The kind a taken-back target was asked with is free again, and a decision can leave its own out.
+        assert_eq!(c.kind_asked(&detail(), None), None);
+        assert_eq!(c.kind_asked(&other, Some(answer(2))), None);
+        assert_eq!(
+            c.kind_asked(&other, Some(answer(1))),
+            Some(ExpectKind::Keep)
+        );
+        assert_eq!(
+            c.kind_asked(&line(), Some(answer(1))),
+            Some(ExpectKind::Target)
+        );
+        c.resolve(done()).unwrap();
+        assert_eq!(
+            c.take_back_decided_expects(answer(2)),
+            Err(ChangeRequestError::AlreadyResolved)
         );
         assert_eq!(c.decided_expects().len(), 1);
     }
@@ -616,7 +800,11 @@ mod tests {
         let mut c = cr();
         c.resolve(done()).unwrap();
         assert_eq!(
-            c.record_decided_expects(&asks(detail(), ExpectKind::Target), &now(Revision::first())),
+            c.record_decided_expects(
+                &asks(detail(), ExpectKind::Target),
+                &now(Revision::first()),
+                answer(1)
+            ),
             Err(ChangeRequestError::AlreadyResolved)
         );
         assert!(c.decided_expects().is_empty());
@@ -625,7 +813,7 @@ mod tests {
     #[test]
     fn a_stored_history_alternates_between_resolving_and_reopening() {
         let restore =
-            |history| ChangeRequest::restore(id(1), draft(), BTreeMap::new(), Vec::new(), history);
+            |history| ChangeRequest::restore(id(1), draft(), Vec::new(), Vec::new(), history);
         let resolved = || Transition::Resolved(done());
         let reopened = || Transition::Reopened(reopening());
         assert!(restore(vec![resolved(), reopened(), resolved()]).is_ok());
@@ -646,10 +834,15 @@ mod tests {
 
     #[test]
     fn a_stored_change_request_keeps_the_expectations_it_recorded() {
-        let recorded = BTreeMap::from([(detail(), change_at_first())]);
+        let recorded = vec![DecidedExpectation {
+            target: detail(),
+            kind: ExpectKind::Target,
+            recorded: Revision::first(),
+            answer: answer(1),
+        }];
         let c = ChangeRequest::restore(id(1), draft(), recorded.clone(), Vec::new(), Vec::new())
             .unwrap();
-        assert_eq!(c.decided_expects(), &recorded);
+        assert_eq!(c.decided_expects(), recorded);
     }
 
     #[test]

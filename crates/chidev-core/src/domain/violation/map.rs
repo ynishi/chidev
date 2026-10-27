@@ -38,15 +38,21 @@ impl ChangeRequestError {
                     Applicability::Review,
                 )
             }
-            ChangeRequestError::Undecided => {
+            ChangeRequestError::Undecided(crux) => {
                 Violation::of(CR_CRUX_UNANSWERED).on(here).with_remedy(
-                    Remedy::AnswerCrux { change_request: on },
+                    Remedy::AnswerCrux {
+                        change_request: on,
+                        crux: *crux,
+                    },
                     Applicability::Placeholder,
                 )
             }
-            ChangeRequestError::AlreadyAnswered => {
+            ChangeRequestError::AlreadyAnswered(crux) => {
                 Violation::of(CR_CRUX_ANSWERED).on(here).with_remedy(
-                    Remedy::SupersedeCrux { change_request: on },
+                    Remedy::SupersedeCrux {
+                        change_request: on,
+                        crux: *crux,
+                    },
                     Applicability::Review,
                 )
             }
@@ -84,6 +90,7 @@ impl ChangeRequestError {
             }
             ChangeRequestError::NoOption
             | ChangeRequestError::DuplicateOption(_)
+            | ChangeRequestError::DuplicateOptionId(_)
             | ChangeRequestError::UnspecifiedNotAllowed(_)
             | ChangeRequestError::PolicyRevisionMismatch { .. }
             | ChangeRequestError::NotResolved
@@ -419,11 +426,12 @@ mod tests {
         match e {
             ChangeRequestError::NoOption => "NoOption",
             ChangeRequestError::DuplicateOption(_) => "DuplicateOption",
+            ChangeRequestError::DuplicateOptionId(_) => "DuplicateOptionId",
             ChangeRequestError::NotAnOption(_) => "NotAnOption",
             ChangeRequestError::UnspecifiedNotAllowed(_) => "UnspecifiedNotAllowed",
             ChangeRequestError::AlreadyResolved => "AlreadyResolved",
-            ChangeRequestError::Undecided => "Undecided",
-            ChangeRequestError::AlreadyAnswered => "AlreadyAnswered",
+            ChangeRequestError::Undecided(_) => "Undecided",
+            ChangeRequestError::AlreadyAnswered(_) => "AlreadyAnswered",
             ChangeRequestError::SupersedesUnknown(_) => "SupersedesUnknown",
             ChangeRequestError::SupersedesUnanswered(_) => "SupersedesUnanswered",
             ChangeRequestError::UnknownPolicyLine(_) => "UnknownPolicyLine",
@@ -443,11 +451,12 @@ mod tests {
         vec![
             ChangeRequestError::NoOption,
             ChangeRequestError::DuplicateOption(choice()),
+            ChangeRequestError::DuplicateOptionId(CruxOptionId::from_uuid(test_uuid(8))),
             ChangeRequestError::NotAnOption(CruxOptionId::from_uuid(test_uuid(8))),
             ChangeRequestError::UnspecifiedNotAllowed("model"),
             ChangeRequestError::AlreadyResolved,
-            ChangeRequestError::Undecided,
-            ChangeRequestError::AlreadyAnswered,
+            ChangeRequestError::Undecided(crux(2)),
+            ChangeRequestError::AlreadyAnswered(crux(2)),
             ChangeRequestError::SupersedesUnknown(crux(2)),
             ChangeRequestError::SupersedesUnanswered(crux(2)),
             ChangeRequestError::UnknownPolicyLine(line("P1")),
@@ -578,6 +587,7 @@ mod tests {
     /// leaves this list, and a new variant that is not mapped has to be added to it.
     const STILL_UNMAPPED: &[&str] = &[
         "ChangeRequestError::DuplicateOption",
+        "ChangeRequestError::DuplicateOptionId",
         "ChangeRequestError::ExpectationConflict",
         "ChangeRequestError::HistoryOutOfOrder",
         "ChangeRequestError::NoOption",
@@ -758,8 +768,8 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 19 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
-        assert_eq!(STILL_UNMAPPED.len(), 26);
+        assert_eq!(gives().len(), 20 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
+        assert_eq!(STILL_UNMAPPED.len(), 27);
     }
 
     #[test]
@@ -805,12 +815,13 @@ mod tests {
             )]
         );
 
-        let undecided = ChangeRequestError::Undecided.violation(cr(1));
+        let undecided = ChangeRequestError::Undecided(crux(4)).violation(cr(1));
         assert_eq!(undecided.rule().as_str(), "cr.crux-unanswered");
         assert_eq!(
             undecided.remedies()[0].0,
             Remedy::AnswerCrux {
-                change_request: cr(1)
+                change_request: cr(1),
+                crux: crux(4)
             }
         );
 
@@ -835,12 +846,14 @@ mod tests {
             }
         );
 
+        let answered = ChangeRequestError::AlreadyAnswered(crux(5)).violation(cr(1));
+        assert_eq!(answered.rule().as_str(), "cr.crux-answered");
         assert_eq!(
-            ChangeRequestError::AlreadyAnswered
-                .violation(cr(1))
-                .rule()
-                .as_str(),
-            "cr.crux-answered"
+            answered.remedies()[0].0,
+            Remedy::SupersedeCrux {
+                change_request: cr(1),
+                crux: crux(5)
+            }
         );
         assert_eq!(
             ChangeRequestError::ReferenceUnknown(cr(9))

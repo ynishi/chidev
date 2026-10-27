@@ -13,7 +13,16 @@ use crate::domain::vo::crux::Decision;
 use crate::domain::vo::id::CruxId;
 
 /// Gives `crux` its answer, once, and records in `cr` what the option chosen asks of targets, each at the revision it
-/// has in `project` now. `cr` is the change request `crux` was raised in.
+/// has in `project` now, with the answer that asked for it. `cr` is the change request `crux` was raised in.
+/// `replaced` is the Crux `crux` supersedes, as the caller found it (none when `crux` supersedes none, or the Crux it
+/// names is not there).
+///
+/// A decision that replaces another takes back what the one replaced asked: when `replaced` was raised in `cr` too,
+/// the expectations recorded from its answer are removed from `cr` before those of this decision are recorded, so
+/// that the new decision may ask of a target the other kind than the old one did. A withdrawal replaces nothing (it
+/// ends the question, it does not give another decision), so it takes nothing back. A Crux replaced that was raised in
+/// another change request leaves that change request's expectations as they are: they are its history, and what this
+/// decision asks is recorded in `cr`, the change request this Crux was raised in.
 ///
 /// An answer on the basis of a Policy line must cite a line the Policy of `project` has, at the revision it has now
 /// (the line applied is the line as it reads at the decision). A Crux that is answered already takes no other
@@ -22,7 +31,7 @@ use crate::domain::vo::id::CruxId;
 /// A resolved change request is a closed record: the question it was raised in may still be withdrawn, which asks
 /// nothing of any target, and any other decision is refused (`AlreadyResolved`) until the change request is
 /// reopened. A target the option asks to be kept, or revised, with the other kind than `cr` or an earlier decision
-/// asks it, is refused (see [`ChangeRequest::record_decided_expects`]).
+/// (not one taken back) asks it, is refused (see [`ChangeRequest::record_decided_expects`]).
 ///
 /// Nothing is changed when it is refused.
 pub fn decide(
@@ -30,12 +39,22 @@ pub fn decide(
     cr: &mut ChangeRequest,
     answer: Answer,
     project: &Project,
+    replaced: Option<&Crux>,
 ) -> Result<(), ChangeRequestError> {
     debug_assert_eq!(
         crux.raised_in(),
         cr.id(),
         "the Crux is decided in its change request"
     );
+    debug_assert!(
+        replaced.is_none_or(|q| Some(q.id()) == crux.supersedes()),
+        "the Crux replaced is the one it supersedes"
+    );
+    // A decision is never rewritten, whatever the basis of the new one and the state of the change request: that is
+    // said first.
+    if !crux.is_open() {
+        return Err(ChangeRequestError::AlreadyAnswered(crux.id()));
+    }
     if let Basis::Policy {
         line,
         policy_revision,
@@ -52,20 +71,28 @@ pub fn decide(
             });
         }
     }
-    // A decision is never rewritten, whatever the state of the change request: that is said first.
-    if !crux.is_open() {
-        return Err(ChangeRequestError::AlreadyAnswered);
-    }
     let withdrawn = matches!(answer.decision(), Decision::Withdrawn);
     if cr.is_resolved() && !withdrawn {
         return Err(ChangeRequestError::AlreadyResolved);
     }
+    let answer_id = answer.id();
     let mut answered = crux.clone();
     answered.answer(answer)?;
     if !cr.is_resolved() {
+        // The request is changed on a copy, so that the take-back and the record are one step: either both stand or
+        // neither does.
+        let mut next = cr.clone();
+        if !withdrawn
+            && let Some(replaced_answer) = replaced
+                .filter(|q| q.raised_in() == cr.id())
+                .and_then(Crux::answer_given)
+        {
+            next.take_back_decided_expects(replaced_answer.id())?;
+        }
         let asked = answered.decided_expects();
         let now = revisions_now(project, asked.keys().copied());
-        cr.record_decided_expects(&asked, &now)?;
+        next.record_decided_expects(&asked, &now, answer_id)?;
+        *cr = next;
     }
     *crux = answered;
     Ok(())
@@ -261,7 +288,7 @@ mod tests {
         };
         // The policy has no lines yet.
         assert_eq!(
-            decide(&mut q, &mut c, on("P1", p.policy().revision()), &p),
+            decide(&mut q, &mut c, on("P1", p.policy().revision()), &p, None),
             Err(ChangeRequestError::UnknownPolicyLine(line_id("P1")))
         );
         assert!(q.is_open());
@@ -272,11 +299,11 @@ mod tests {
         .unwrap();
         // A line it does not have, and a revision it is not at, are refused.
         assert_eq!(
-            decide(&mut q, &mut c, on("P2", p.policy().revision()), &p),
+            decide(&mut q, &mut c, on("P2", p.policy().revision()), &p, None),
             Err(ChangeRequestError::UnknownPolicyLine(line_id("P2")))
         );
         assert_eq!(
-            decide(&mut q, &mut c, on("P1", Revision::first()), &p),
+            decide(&mut q, &mut c, on("P1", Revision::first()), &p, None),
             Err(ChangeRequestError::PolicyRevisionMismatch {
                 recorded: Revision::first(),
                 now: p.policy().revision()
@@ -296,6 +323,7 @@ mod tests {
                 basis.clone(),
             ),
             &p,
+            None,
         )
         .unwrap();
         assert_eq!(q.answer_given().map(Answer::basis), Some(&basis));
@@ -306,16 +334,17 @@ mod tests {
         let p = project();
         let mut c = cr();
         let mut q = crux_in(&c, 500, CruxKind::Ambiguity);
-        decide(&mut q, &mut c, chosen(2), &p).unwrap();
+        decide(&mut q, &mut c, chosen(2), &p, None).unwrap();
         assert!(!q.is_open());
         let recorded = c.decided_expects();
         assert_eq!(recorded.len(), 2);
-        assert_eq!(recorded[&clause(31)].kind, ExpectKind::Target);
-        assert_eq!(recorded[&clause(30)].kind, ExpectKind::Keep);
+        let kind_of = |t| recorded.iter().find(|d| d.target == t).map(|d| d.kind);
+        assert_eq!(kind_of(clause(31)), Some(ExpectKind::Target));
+        assert_eq!(kind_of(clause(30)), Some(ExpectKind::Keep));
         // An option that asks nothing records nothing.
         let mut c = cr();
         let mut q = crux_in(&c, 500, CruxKind::Ambiguity);
-        decide(&mut q, &mut c, chosen(1), &p).unwrap();
+        decide(&mut q, &mut c, chosen(1), &p, None).unwrap();
         assert!(c.decided_expects().is_empty());
     }
 
@@ -324,13 +353,13 @@ mod tests {
         let p = project();
         let mut c = cr();
         let mut q = crux_in(&c, 500, CruxKind::Ambiguity);
-        decide(&mut q, &mut c, chosen(2), &p).unwrap();
-        let asked = c.decided_expects().clone();
+        decide(&mut q, &mut c, chosen(2), &p, None).unwrap();
+        let asked = c.decided_expects().to_vec();
         assert_eq!(
-            decide(&mut q, &mut c, chosen(1), &p),
-            Err(ChangeRequestError::AlreadyAnswered)
+            decide(&mut q, &mut c, chosen(1), &p, None),
+            Err(ChangeRequestError::AlreadyAnswered(q.id()))
         );
-        assert_eq!(c.decided_expects(), &asked);
+        assert_eq!(c.decided_expects(), asked);
         assert_eq!(q.decision(), Some(chosen(2).decision()));
     }
 
@@ -341,11 +370,11 @@ mod tests {
         let mut q = crux_in(&c, 500, CruxKind::Model);
         let free = answer_on(Decision::Unspecified { keep: Vec::new() }, arbitrary());
         assert_eq!(
-            decide(&mut q, &mut c, free, &p),
+            decide(&mut q, &mut c, free, &p, None),
             Err(ChangeRequestError::UnspecifiedNotAllowed("model"))
         );
         assert_eq!(
-            decide(&mut q, &mut c, chosen(9), &p),
+            decide(&mut q, &mut c, chosen(9), &p, None),
             Err(ChangeRequestError::NotAnOption(option(9)))
         );
         assert!(q.is_open() && c.decided_expects().is_empty());
@@ -368,7 +397,7 @@ mod tests {
         );
         let mut q = crux_in(&c, 500, CruxKind::Ambiguity);
         assert_eq!(
-            decide(&mut q, &mut c, chosen(2), &p),
+            decide(&mut q, &mut c, chosen(2), &p, None),
             Err(ChangeRequestError::ExpectationConflict(clause(31)))
         );
         assert!(q.is_open() && c.decided_expects().is_empty());
@@ -388,7 +417,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            decide(&mut q, &mut c, chosen(2), &p),
+            decide(&mut q, &mut c, chosen(2), &p, None),
             Err(ChangeRequestError::AlreadyResolved)
         );
         assert!(q.is_open());
@@ -397,6 +426,7 @@ mod tests {
             &mut c,
             answer_on(Decision::Withdrawn, arbitrary()),
             &p,
+            None,
         )
         .unwrap();
         assert!(!q.is_open());
@@ -409,7 +439,7 @@ mod tests {
         ))
         .unwrap();
         let mut again = crux_in(&c, 501, CruxKind::Ambiguity);
-        decide(&mut again, &mut c, chosen(2), &p).unwrap();
+        decide(&mut again, &mut c, chosen(2), &p, None).unwrap();
         assert_eq!(c.decided_expects().len(), 2);
     }
 
@@ -418,7 +448,7 @@ mod tests {
         let p = project();
         let mut c = cr();
         let mut q = crux_in(&c, 500, CruxKind::Ambiguity);
-        decide(&mut q, &mut c, chosen(1), &p).unwrap();
+        decide(&mut q, &mut c, chosen(1), &p, None).unwrap();
         c.resolve(Resolution::new(
             ResolutionKind::Done,
             prose("done"),
@@ -428,8 +458,8 @@ mod tests {
         .unwrap();
         for again in [chosen(2), answer_on(Decision::Withdrawn, arbitrary())] {
             assert_eq!(
-                decide(&mut q, &mut c, again, &p),
-                Err(ChangeRequestError::AlreadyAnswered)
+                decide(&mut q, &mut c, again, &p, None),
+                Err(ChangeRequestError::AlreadyAnswered(q.id()))
             );
         }
     }
@@ -446,9 +476,10 @@ mod tests {
             &mut c,
             answer_on(Decision::Withdrawn, arbitrary()),
             &p,
+            None,
         )
         .unwrap();
-        decide(&mut chosen_one, &mut c, chosen(1), &p).unwrap();
+        decide(&mut chosen_one, &mut c, chosen(1), &p, None).unwrap();
         // It does not exist.
         let ghost = CruxId::from_uuid(test_uuid(99));
         assert_eq!(
@@ -468,13 +499,180 @@ mod tests {
         assert_eq!(check_supersedes(chosen_one.id(), Some(&chosen_one)), Ok(()));
     }
 
+    /// A Crux raised in `cr` with one option (1) that asks `asks`, and the Crux `replaces` if it has one.
+    fn crux_asking(
+        cr: &ChangeRequest,
+        id: u128,
+        asks: &[(Target, ExpectKind)],
+        replaces: Option<&Crux>,
+    ) -> Crux {
+        Crux::raise(
+            CruxId::from_uuid(test_uuid(id)),
+            CruxDraft {
+                raised_in: cr.id(),
+                findings: Vec::new(),
+                kind: CruxKind::Ambiguity,
+                question: prose("How is a half rounded?"),
+                options: vec![CruxOption::new(
+                    option(1),
+                    Choice::try_from("this").unwrap(),
+                    None,
+                    asks.iter().copied().collect(),
+                    None,
+                )],
+                recommended: None,
+                importance: None,
+                supersedes: replaces.map(Crux::id),
+            },
+        )
+        .unwrap()
+    }
+
+    /// An answer with the id `id` that chooses the option 1.
+    fn chosen_with(id: u128) -> Answer {
+        Answer::new(
+            AnswerId::from_uuid(test_uuid(id)),
+            Decision::Chosen {
+                option: option(1),
+                reason: None,
+            },
+            arbitrary(),
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(5),
+        )
+    }
+
+    #[test]
+    fn a_crux_that_supersedes_a_decision_of_the_same_request_takes_back_what_it_asked() {
+        let p = project();
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[(clause(30), ExpectKind::Target)], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        assert_eq!(c.decided_expects()[0].kind, ExpectKind::Target);
+        // Another decision, which stands.
+        let mut other = crux_asking(&c, 503, &[(clause(31), ExpectKind::Keep)], None);
+        decide(&mut other, &mut c, chosen_with(903), &p, None).unwrap();
+        // The Crux that supersedes `a` keeps what `a` asked to be revised: not a clash, as `a` no longer stands.
+        let mut b = crux_asking(&c, 502, &[(clause(30), ExpectKind::Keep)], Some(&a));
+        decide(&mut b, &mut c, chosen_with(902), &p, Some(&a)).unwrap();
+        let held = c.decided_expects();
+        assert_eq!(held.len(), 2);
+        let of = |t| held.iter().find(|d| d.target == t).unwrap();
+        assert_eq!(of(clause(30)).kind, ExpectKind::Keep);
+        assert_eq!(of(clause(30)).answer, AnswerId::from_uuid(test_uuid(902)));
+        assert_eq!(of(clause(31)).answer, AnswerId::from_uuid(test_uuid(903)));
+        // Without the Crux it replaces, the same decision is the clash it was.
+        let mut c2 = cr();
+        let mut a2 = crux_asking(&c2, 501, &[(clause(30), ExpectKind::Target)], None);
+        decide(&mut a2, &mut c2, chosen_with(901), &p, None).unwrap();
+        let mut b2 = crux_asking(&c2, 502, &[(clause(30), ExpectKind::Keep)], Some(&a2));
+        assert_eq!(
+            decide(&mut b2, &mut c2, chosen_with(902), &p, None),
+            Err(ChangeRequestError::ExpectationConflict(clause(30)))
+        );
+    }
+
+    #[test]
+    fn a_crux_that_supersedes_one_of_two_decisions_that_keep_a_target_leaves_the_keep_of_the_other()
+    {
+        let p = project();
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[(clause(30), ExpectKind::Keep)], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        // An independent Crux asks the same keep: it is recorded as its own entry.
+        let mut b = crux_asking(&c, 502, &[(clause(30), ExpectKind::Keep)], None);
+        decide(&mut b, &mut c, chosen_with(902), &p, None).unwrap();
+        assert_eq!(c.decided_expects().len(), 2);
+        // A third supersedes the first and asks something else.
+        let mut third = crux_asking(&c, 503, &[(clause(31), ExpectKind::Target)], Some(&a));
+        decide(&mut third, &mut c, chosen_with(903), &p, Some(&a)).unwrap();
+        let held = c.decided_expects();
+        assert_eq!(held.len(), 2);
+        let keep = held.iter().find(|d| d.target == clause(30)).unwrap();
+        assert_eq!(keep.kind, ExpectKind::Keep);
+        assert_eq!(keep.answer, AnswerId::from_uuid(test_uuid(902)));
+        assert_eq!(c.kind_asked(&clause(30), None), Some(ExpectKind::Keep));
+    }
+
+    #[test]
+    fn a_supersession_is_one_step_and_a_withdrawal_replaces_nothing() {
+        let p = project();
+        // The new decision clashes with what the request itself asks of C2 (31): it is refused, and what `a` asked is
+        // not taken back.
+        let mut c = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(1)),
+            ChangeRequestDraft {
+                title: Title::try_from("T").unwrap(),
+                situation: None,
+                intent: Intent::ChangeBehavior,
+                parent: None,
+                issuer: None,
+                expects: crate::domain::service::change_request::expectations_now(
+                    &p,
+                    [(clause(31), ExpectKind::Keep)],
+                ),
+                assumptions: Vec::new(),
+                addresses: Vec::new(),
+            },
+        );
+        let mut a = crux_asking(&c, 501, &[(clause(30), ExpectKind::Target)], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        let held = c.decided_expects().to_vec();
+        let mut b = crux_asking(&c, 502, &[(clause(31), ExpectKind::Target)], Some(&a));
+        assert_eq!(
+            decide(&mut b, &mut c, chosen_with(902), &p, Some(&a)),
+            Err(ChangeRequestError::ExpectationConflict(clause(31)))
+        );
+        assert!(b.is_open());
+        assert_eq!(c.decided_expects(), held);
+        assert_eq!(held.len(), 1);
+        // A withdrawal ends the question and gives no other decision: what `a` asked stands.
+        let mut w = crux_asking(&c, 503, &[], Some(&a));
+        decide(
+            &mut w,
+            &mut c,
+            answer_on(Decision::Withdrawn, arbitrary()),
+            &p,
+            Some(&a),
+        )
+        .unwrap();
+        assert_eq!(c.decided_expects(), held);
+    }
+
+    #[test]
+    fn a_crux_that_supersedes_a_decision_of_another_request_leaves_that_request_alone() {
+        let p = project();
+        let mut elsewhere = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(2)),
+            ChangeRequestDraft {
+                title: Title::try_from("Elsewhere").unwrap(),
+                situation: None,
+                intent: Intent::ChangeBehavior,
+                parent: None,
+                issuer: None,
+                expects: BTreeMap::new(),
+                assumptions: Vec::new(),
+                addresses: Vec::new(),
+            },
+        );
+        let mut a = crux_asking(&elsewhere, 501, &[(clause(30), ExpectKind::Target)], None);
+        decide(&mut a, &mut elsewhere, chosen_with(901), &p, None).unwrap();
+        let history = elsewhere.clone();
+        let mut here = cr();
+        // The request here asks nothing of C1 yet; the replaced decision is another request's.
+        let mut b = crux_asking(&here, 502, &[(clause(30), ExpectKind::Keep)], Some(&a));
+        decide(&mut b, &mut here, chosen_with(902), &p, Some(&a)).unwrap();
+        assert_eq!(here.decided_expects()[0].kind, ExpectKind::Keep);
+        assert_eq!(elsewhere, history);
+    }
+
     #[test]
     fn the_cruxes_awaiting_a_decision_are_the_open_ones() {
         let p = project();
         let mut c = cr();
         let mut answered = crux_in(&c, 501, CruxKind::Ambiguity);
         let open = crux_in(&c, 502, CruxKind::Conflict);
-        decide(&mut answered, &mut c, chosen(1), &p).unwrap();
+        decide(&mut answered, &mut c, chosen(1), &p, None).unwrap();
         let all = [answered, open.clone()];
         assert_eq!(awaiting_decision(&all), [&open]);
     }

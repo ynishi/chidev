@@ -412,7 +412,7 @@ async fn each_kind_of_decision_is_taken_once_and_the_option_chosen_asks_its_targ
         .unwrap();
     let asked = cr(&app).await;
     assert_eq!(asked.decided_expects().len(), 2);
-    let kinds: Vec<ExpectKind> = asked.decided_expects().values().map(|e| e.kind).collect();
+    let kinds: Vec<ExpectKind> = asked.decided_expects().iter().map(|e| e.kind).collect();
     assert!(kinds.contains(&ExpectKind::Target) && kinds.contains(&ExpectKind::Keep));
     let answer = app.store().crux(by_option.id).await.unwrap().unwrap();
     assert_eq!(
@@ -503,7 +503,7 @@ async fn an_option_chosen_that_clashes_with_what_an_earlier_decision_asked_is_re
             .is_open(),
         "the Crux stays open"
     );
-    // the same kind is no clash, and what the first recorded stays as it was recorded
+    // the same kind is no clash: what the first recorded stays as it was recorded, and the third records its own
     let mut again = ask(
         "Round halves",
         CruxKind::Ambiguity,
@@ -516,7 +516,12 @@ async fn an_option_chosen_that_clashes_with_what_an_earlier_decision_asked_is_re
         .await
         .unwrap();
     let after = app.store().change_requests().await.unwrap().remove(0);
-    assert_eq!(after.decided_expects(), recorded.decided_expects());
+    assert_eq!(after.decided_expects().len(), 2);
+    assert_eq!(after.decided_expects()[0], recorded.decided_expects()[0]);
+    assert_eq!(
+        after.decided_expects()[1].target,
+        recorded.decided_expects()[0].target
+    );
 }
 
 #[tokio::test]
@@ -870,4 +875,322 @@ async fn status_lists_the_cruxes_by_id_and_the_open_ones_as_awaiting_a_decision(
             .state,
         "decided"
     );
+}
+
+/// The target of `title` as `RaiseCruxInput` would name it: one option, asking for the Clause `label` to be revised
+/// (`kind` target) or kept (`kind` keep).
+fn asking_of(cr: &str, option_name: &str, label: &str, kind: ExpectKind) -> RaiseCruxInput {
+    let mut input = ask(cr, CruxKind::Ambiguity, vec![option(option_name)]);
+    match kind {
+        ExpectKind::Target => input.options[0].targets = vec![clause(label)],
+        ExpectKind::Keep => input.options[0].keep = vec![clause(label)],
+    }
+    input
+}
+
+async fn request_titled(
+    app: &Test,
+    title: &str,
+) -> chidev_core::domain::entity::change_request::ChangeRequest {
+    app.store()
+        .change_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.title().as_str() == title)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_crux_that_supersedes_a_decision_in_the_same_request_takes_back_what_that_decision_asked()
+{
+    let mut app = project().await;
+    // A decision asks for C1 to be revised.
+    let first = raise(
+        &mut app,
+        &asking_of("Round halves", "reword C1", "C1", ExpectKind::Target),
+    )
+    .await;
+    decide(&mut app, &first.id.to_string(), &chosen(&first, 0))
+        .await
+        .unwrap();
+    let before = request_titled(&app, "Round halves").await;
+    assert_eq!(before.decided_expects().len(), 1);
+
+    // A Crux that does not supersede it cannot ask for C1 to be kept: refused when raised, as `cr_open` refuses it.
+    let at = revision(&app).await;
+    let clash = asking_of("Round halves", "leave C1", "C1", ExpectKind::Keep);
+    let err = app.raise_crux(&clash).await.unwrap_err();
+    assert!(
+        matches!(&err, AppError::Input(m) if m.contains("target and kept")),
+        "{err:?}"
+    );
+    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    // Nor can one that supersedes another decision than the one that asked.
+    let other = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("up")]),
+    )
+    .await;
+    decide(&mut app, &other.id.to_string(), &chosen(&other, 0))
+        .await
+        .unwrap();
+    let mut wrong = clash.clone();
+    wrong.supersedes = Some(other.id.to_string());
+    let err = app.raise_crux(&wrong).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert!(
+        revision(&app).await > at,
+        "the Crux `up` was raised and decided"
+    );
+
+    // One that supersedes the decision that asked for C1 may ask the opposite of it: that decision no longer stands.
+    let mut keeps = clash.clone();
+    keeps.supersedes = Some(first.id.to_string());
+    let second = raise(&mut app, &keeps).await;
+    // Raising changed nothing in the request; the old decision stands until the new one is taken.
+    assert_eq!(
+        request_titled(&app, "Round halves").await.decided_expects(),
+        before.decided_expects()
+    );
+    decide(&mut app, &second.id.to_string(), &chosen(&second, 0))
+        .await
+        .unwrap();
+    let after = request_titled(&app, "Round halves").await;
+    let kept = app.store().crux(second.id).await.unwrap().unwrap();
+    let answer = kept.answer_given().unwrap().id();
+    assert_eq!(after.decided_expects().len(), 1);
+    let held = &after.decided_expects()[0];
+    assert_eq!(held.kind, ExpectKind::Keep);
+    assert_eq!(held.answer, answer);
+    // The store reads back whole: every decided expectation names an answer that asked for it.
+    app.status().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_crux_that_supersedes_one_of_two_decisions_that_keep_a_target_leaves_the_keep_of_the_other()
+ {
+    let mut app = project().await;
+    // A decision keeps C1.
+    let first = raise(
+        &mut app,
+        &asking_of("Round halves", "leave C1", "C1", ExpectKind::Keep),
+    )
+    .await;
+    decide(&mut app, &first.id.to_string(), &chosen(&first, 0))
+        .await
+        .unwrap();
+    let kept_first = request_titled(&app, "Round halves").await;
+    assert_eq!(kept_first.decided_expects().len(), 1);
+    let first_revision = kept_first.decided_expects()[0].recorded;
+    // C1 moves on, and an independent Crux keeps it as it is now.
+    app.put_contract(
+        "core",
+        "rounding",
+        "Rounding",
+        &[
+            ClauseInput {
+                label: "C1".into(),
+                text: "a half rounds to even".into(),
+            },
+            ClauseInput {
+                label: "C2".into(),
+                text: "a total is whole cents".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let second = raise(
+        &mut app,
+        &asking_of("Round halves", "leave C1 again", "C1", ExpectKind::Keep),
+    )
+    .await;
+    decide(&mut app, &second.id.to_string(), &chosen(&second, 0))
+        .await
+        .unwrap();
+    let both = request_titled(&app, "Round halves").await;
+    assert_eq!(both.decided_expects().len(), 2);
+    let second_answer = app
+        .store()
+        .crux(second.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .answer_given()
+        .unwrap()
+        .id();
+    let second_revision = both
+        .decided_expects()
+        .iter()
+        .find(|d| d.answer == second_answer)
+        .unwrap()
+        .recorded;
+    assert!(second_revision > first_revision);
+    // The keep is judged against the earliest revision: C1 moved since the first decision.
+    let status = app.status().await.unwrap();
+    let request = status
+        .change_requests
+        .iter()
+        .find(|c| c.title == "Round halves")
+        .unwrap();
+    assert_eq!(request.keep.len(), 1);
+    assert!(request.keep[0].moved);
+
+    // A third Crux supersedes the first decision and asks for C2 to be revised.
+    let mut third = asking_of("Round halves", "reword C2", "C2", ExpectKind::Target);
+    third.supersedes = Some(first.id.to_string());
+    let third = raise(&mut app, &third).await;
+    decide(&mut app, &third.id.to_string(), &chosen(&third, 0))
+        .await
+        .unwrap();
+    let after = request_titled(&app, "Round halves").await;
+    let keeps: Vec<_> = after
+        .decided_expects()
+        .iter()
+        .filter(|d| d.kind == ExpectKind::Keep)
+        .collect();
+    // The second keep stands, with its own revision.
+    assert_eq!(keeps.len(), 1);
+    assert_eq!(keeps[0].answer, second_answer);
+    assert_eq!(keeps[0].recorded, second_revision);
+    assert_eq!(after.decided_expects().len(), 2);
+    let status = app.status().await.unwrap();
+    let request = status
+        .change_requests
+        .iter()
+        .find(|c| c.title == "Round halves")
+        .unwrap();
+    assert_eq!(request.keep.len(), 1);
+    assert!(!request.keep[0].moved);
+    // The store reads back whole.
+    app.status().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_crux_that_supersedes_a_decision_of_another_request_leaves_that_request_as_it_is() {
+    let mut app = project().await;
+    app.open_change_request(&request("Other")).await.unwrap();
+    let first = raise(
+        &mut app,
+        &asking_of("Other", "reword C2", "C2", ExpectKind::Target),
+    )
+    .await;
+    decide(&mut app, &first.id.to_string(), &chosen(&first, 0))
+        .await
+        .unwrap();
+    let other_before = request_titled(&app, "Other").await;
+    // Raised in `Round halves`, it replaces the decision taken in `Other`; what that decision asked stays there.
+    let mut keeps = asking_of("Round halves", "leave C2", "C2", ExpectKind::Keep);
+    keeps.supersedes = Some(first.id.to_string());
+    let second = raise(&mut app, &keeps).await;
+    decide(&mut app, &second.id.to_string(), &chosen(&second, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        request_titled(&app, "Other").await.decided_expects(),
+        other_before.decided_expects()
+    );
+    let here = request_titled(&app, "Round halves").await;
+    assert_eq!(here.decided_expects().len(), 1);
+    let answer = app
+        .store()
+        .crux(second.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .answer_given()
+        .unwrap()
+        .id();
+    let held = &here.decided_expects()[0];
+    assert_eq!((held.kind, held.answer), (ExpectKind::Keep, answer));
+    app.status().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_decision_that_supersedes_one_and_is_refused_takes_nothing_back() {
+    let mut app = project().await;
+    // The request itself asks C2 to be revised.
+    let mut asked = request("Asks C2");
+    asked.targets = vec![clause("C2")];
+    app.open_change_request(&asked).await.unwrap();
+    let first = raise(
+        &mut app,
+        &asking_of("Asks C2", "reword C1", "C1", ExpectKind::Target),
+    )
+    .await;
+    decide(&mut app, &first.id.to_string(), &chosen(&first, 0))
+        .await
+        .unwrap();
+    // The replacement is refused at raising when it clashes with the request's own expectations.
+    let mut clash = asking_of("Asks C2", "leave C2", "C2", ExpectKind::Keep);
+    clash.supersedes = Some(first.id.to_string());
+    let err = app.raise_crux(&clash).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert_eq!(
+        request_titled(&app, "Asks C2")
+            .await
+            .decided_expects()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn the_suggestion_for_an_open_or_an_answered_crux_names_that_crux_only() {
+    let mut app = project().await;
+    let a = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("up")]),
+    )
+    .await;
+    let b = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("down")]),
+    )
+    .await;
+    let c = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("even")]),
+    )
+    .await;
+    // The request has three Cruxes open: resolving it names one, and the suggestion decides that one.
+    let err = app
+        .resolve_change_request("Round halves", &ResolutionInput::Done, "why", &alice())
+        .await
+        .unwrap_err();
+    let told = &app.diagnose(&err).await[0];
+    assert_eq!(told.code, "cr.crux-unanswered");
+    assert_eq!(told.suggestions.len(), 1, "{:?}", told.suggestions);
+    let named = told.suggestions[0].op["crux"].as_str().unwrap().to_string();
+    assert!([&a, &b, &c].iter().any(|q| q.id.to_string() == named));
+
+    // Two Cruxes answered: deciding the second again is refused, and the suggestion replaces that one, not the first.
+    decide(&mut app, &a.id.to_string(), &chosen(&a, 0))
+        .await
+        .unwrap();
+    decide(&mut app, &b.id.to_string(), &chosen(&b, 0))
+        .await
+        .unwrap();
+    let err = decide(&mut app, &b.id.to_string(), &chosen(&b, 0))
+        .await
+        .unwrap_err();
+    let told = &app.diagnose(&err).await[0];
+    assert_eq!(told.code, "cr.crux-answered");
+    assert_eq!(told.suggestions.len(), 1, "{:?}", told.suggestions);
+    assert_eq!(told.suggestions[0].op["op"], "cr_crux_raise");
+    assert_eq!(
+        told.suggestions[0].op["supersedes"],
+        b.id.to_string().as_str()
+    );
+    // A withdrawn Crux has no decision to replace: there is nothing to suggest.
+    decide(&mut app, &c.id.to_string(), &DecisionInput::Withdrawn)
+        .await
+        .unwrap();
+    let err = decide(&mut app, &c.id.to_string(), &chosen(&c, 0))
+        .await
+        .unwrap_err();
+    let told = &app.diagnose(&err).await[0];
+    assert_eq!(told.code, "cr.crux-answered");
+    assert!(told.suggestions.is_empty(), "{:?}", told.suggestions);
 }

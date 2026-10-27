@@ -2283,6 +2283,13 @@ mod tests {
         );
         // what the decision asked stays in the request, which is decided
         assert_eq!(by("answered question").decided_expects().len(), 1);
+        // and names the answer that asked for it: the one the Crux was moved with
+        assert!(
+            by("answered question")
+                .decided_expects()
+                .iter()
+                .all(|e| e.answer == answer.id())
+        );
         assert_eq!(state_of(by("answered question"), &cruxes).word(), "decided");
         // the one that supersedes points at the Crux of the request it named
         let redecided = crux_titled(&cruxes, &crs, "redecided");
@@ -2453,6 +2460,32 @@ mod tests {
                     old_crux("fail", None, serde_json::Value::Null),
                     none,
                     done,
+                ),
+            )],
+        );
+        let was = snapshot(&path);
+        assert!(matches!(
+            SqliteStore::open(&path).await.map(|_| ()),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(snapshot(&path), was);
+    }
+
+    #[tokio::test]
+    async fn a_store_of_layout_1_with_a_recorded_expectation_and_no_answer_to_name_is_not_moved() {
+        // What a decision asked is recorded, but the request holds no answered question: nothing to name.
+        let none = serde_json::json!([]);
+        let path = layout_1_store(
+            "migrate-unnamed",
+            &[(
+                1,
+                2,
+                old_request(
+                    1,
+                    "no question",
+                    serde_json::Value::Null,
+                    serde_json::json!([{ "target": "clause", "id": uid(31), "kind": "target", "recorded": 2 }]),
+                    none,
                 ),
             )],
         );

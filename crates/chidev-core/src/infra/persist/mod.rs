@@ -429,6 +429,7 @@ pub(crate) mod fixture {
                 1_700_000_000_123,
             ),
             p,
+            None,
         )
         .unwrap();
         // An open question raised from findings, in a request that was resolved without it: a record of what was.
@@ -620,7 +621,14 @@ pub(crate) mod fixture {
         ] {
             let mut cr = open(n, title);
             let mut q = superseding(n, &cr, kind);
-            decide(&mut q, &mut cr, answer(n, decision, basis, alice(), at), p).unwrap();
+            decide(
+                &mut q,
+                &mut cr,
+                answer(n, decision, basis, alice(), at),
+                p,
+                None,
+            )
+            .unwrap();
             crs.push(cr);
             cruxes.push(q);
         }

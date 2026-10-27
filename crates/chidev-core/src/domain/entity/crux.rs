@@ -84,13 +84,16 @@ pub struct Crux {
 }
 
 impl Crux {
-    /// An open Crux: one option at least, no choice twice, the recommendation among the options. Only its own rules
+    /// An open Crux: one option at least, no option id and no choice twice, the recommendation among the options. Only its own rules
     /// are read here; the change request it is raised in, and the Crux it supersedes, are other records.
     pub fn raise(id: CruxId, draft: CruxDraft) -> Result<Crux, ChangeRequestError> {
         if draft.options.is_empty() {
             return Err(ChangeRequestError::NoOption);
         }
         for (k, o) in draft.options.iter().enumerate() {
+            if draft.options[..k].iter().any(|p| p.id() == o.id()) {
+                return Err(ChangeRequestError::DuplicateOptionId(o.id()));
+            }
             if draft.options[..k].iter().any(|p| p.choice() == o.choice()) {
                 return Err(ChangeRequestError::DuplicateOption(o.choice().clone()));
             }
@@ -219,7 +222,7 @@ impl Crux {
     /// one is refused whatever it says, and the first stays.
     pub fn answer(&mut self, answer: Answer) -> Result<(), ChangeRequestError> {
         if !self.is_open() {
-            return Err(ChangeRequestError::AlreadyAnswered);
+            return Err(ChangeRequestError::AlreadyAnswered(self.id));
         }
         match answer.decision() {
             Decision::Chosen { option, .. } if self.option(*option).is_none() => {
@@ -352,6 +355,24 @@ mod tests {
             Crux::raise(CruxId::from_uuid(test_uuid(500)), twice),
             Err(ChangeRequestError::DuplicateOption(choice("up")))
         );
+        // The same id for two options with other choices: the id names one option, so it is refused on its own.
+        let mut same_id = draft(CruxKind::Ambiguity);
+        same_id.options.push(CruxOption::new(
+            option_id(1),
+            choice("down"),
+            None,
+            BTreeMap::new(),
+            None,
+        ));
+        assert_eq!(
+            Crux::raise(CruxId::from_uuid(test_uuid(500)), same_id.clone()),
+            Err(ChangeRequestError::DuplicateOptionId(option_id(1)))
+        );
+        // A stored Crux is read by the same rules.
+        assert_eq!(
+            Crux::restore(CruxId::from_uuid(test_uuid(500)), same_id, CruxState::Open),
+            Err(ChangeRequestError::DuplicateOptionId(option_id(1)))
+        );
         let mut stray = draft(CruxKind::Ambiguity);
         stray.recommended = Some(Recommended::new(option_id(9), None, None));
         assert_eq!(
@@ -400,7 +421,10 @@ mod tests {
             free,
             answer_of(Decision::Withdrawn),
         ] {
-            assert_eq!(c.answer(again), Err(ChangeRequestError::AlreadyAnswered));
+            assert_eq!(
+                c.answer(again),
+                Err(ChangeRequestError::AlreadyAnswered(c.id()))
+            );
         }
         assert_eq!(c.answer_given(), Some(&first));
         assert_eq!(c.state().word(), "answered");
@@ -490,6 +514,24 @@ mod tests {
             Err(ChangeRequestError::UnspecifiedNotAllowed("model"))
         );
         // a recommendation outside the options, and no option at all
+        // The same id for two options with other choices: the id names one option, so it is refused on its own.
+        let mut same_id = draft(CruxKind::Ambiguity);
+        same_id.options.push(CruxOption::new(
+            option_id(1),
+            choice("down"),
+            None,
+            BTreeMap::new(),
+            None,
+        ));
+        assert_eq!(
+            Crux::raise(CruxId::from_uuid(test_uuid(500)), same_id.clone()),
+            Err(ChangeRequestError::DuplicateOptionId(option_id(1)))
+        );
+        // A stored Crux is read by the same rules.
+        assert_eq!(
+            Crux::restore(CruxId::from_uuid(test_uuid(500)), same_id, CruxState::Open),
+            Err(ChangeRequestError::DuplicateOptionId(option_id(1)))
+        );
         let mut stray = draft(CruxKind::Ambiguity);
         stray.recommended = Some(Recommended::new(option_id(9), None, None));
         assert_eq!(

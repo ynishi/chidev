@@ -1106,57 +1106,38 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     )
                 })
                 .collect(),
-            Remedy::AnswerCrux { change_request } => {
-                // One for each Crux raised in the change request that is still open; a placeholder for the id when
-                // the store has none to name.
-                let mut ids: Vec<String> = cruxes
-                    .iter()
-                    .filter(|q| q.raised_in() == *change_request && q.is_open())
-                    .map(|q| q.id().to_string())
-                    .collect();
-                if ids.is_empty() {
-                    ids.push("<the crux id>".to_string());
-                }
-                ids.into_iter()
-                    .map(|id| {
-                        suggest(
-                            json!({"op": "cr_crux_decide", "crux": id,
-                                "option": "<one of its option ids>",
-                                "basis": {"arbitrary": "<why>"}, "by": by}),
-                            how,
-                        )
-                    })
-                    .collect()
-            }
+            // The Crux the violation is about, and no other: the change request may have several.
+            Remedy::AnswerCrux { crux, .. } => vec![suggest(
+                json!({"op": "cr_crux_decide", "crux": crux.to_string(),
+                    "option": "<one of its option ids>",
+                    "basis": {"arbitrary": "<why>"}, "by": by}),
+                how,
+            )],
             Remedy::ReopenChangeRequest { change_request } => vec![suggest(
                 json!({"op": "cr_reopen", "title": title(change_request),
                     "reason": "<why the work goes on>", "by": by}),
                 how,
             )],
-            Remedy::SupersedeCrux { change_request } => {
-                // One for each Crux raised in the change request whose decision can be replaced.
-                let mut ids: Vec<String> = cruxes
+            Remedy::SupersedeCrux {
+                change_request,
+                crux,
+            } => {
+                // The Crux the violation is about, and no other. A decision that cannot be replaced (a withdrawal)
+                // gets none: the new Crux would be refused.
+                if cruxes
                     .iter()
-                    .filter(|q| {
-                        q.raised_in() == *change_request
-                            && check_supersedes(q.id(), Some(*q)).is_ok()
-                    })
-                    .map(|q| q.id().to_string())
-                    .collect();
-                if ids.is_empty() {
-                    ids.push("<the crux id>".to_string());
+                    .find(|q| q.id() == *crux)
+                    .is_some_and(|q| check_supersedes(q.id(), Some(q)).is_err())
+                {
+                    return Vec::new();
                 }
-                ids.into_iter()
-                    .map(|id| {
-                        suggest(
-                            json!({"op": "cr_crux_raise", "in": title(change_request),
-                                "question": "<the question>", "kind": "ambiguity",
-                                "options": [{"choice": "<the new choice>"}],
-                                "supersedes": id}),
-                            how,
-                        )
-                    })
-                    .collect()
+                vec![suggest(
+                    json!({"op": "cr_crux_raise", "in": title(change_request),
+                        "question": "<the question>", "kind": "ambiguity",
+                        "options": [{"choice": "<the new choice>"}],
+                        "supersedes": crux.to_string()}),
+                    how,
+                )]
             }
             Remedy::PutPolicyLine { line } => {
                 let mut lines: Vec<Json> = p

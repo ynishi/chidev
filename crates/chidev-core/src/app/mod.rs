@@ -73,7 +73,7 @@ use crate::domain::service::change_request::{
     out_of_frame, raised_in, resolve, state_of, target_progress,
 };
 use crate::domain::service::cite::stale_cites;
-use crate::domain::service::crux::{awaiting_decision, check_supersedes, decide};
+use crate::domain::service::crux::{check_supersedes, decide};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::violation::Violation;
 use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
@@ -1720,8 +1720,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub async fn raise_crux(&mut self, c: &RaiseCruxInput) -> Result<Checked<Raised>, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let (_, cruxes) = self.requests_and_cruxes().await?;
-        let cr = self.change_request_titled(&c.cr).await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        let cr = crs
+            .into_iter()
+            .find(|r| r.title().as_str() == c.cr.trim())
+            .ok_or_else(|| AppError::UnknownChangeRequest(c.cr.clone()))?;
         let refused = |error: ChangeRequestError| AppError::on(&cr, error);
         if cr.is_resolved() {
             return Err(refused(ChangeRequestError::AlreadyResolved));
@@ -1732,6 +1735,22 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 "at most one option is recommended".to_string(),
             ));
         }
+        // The Crux replaced is read first: what its decision asked of targets does not stand once this Crux is
+        // decided, so the options are read against what stands without it.
+        let supersedes = match &c.supersedes {
+            None => None,
+            Some(text) => {
+                let replaced = CruxId::from_uuid(uuid_of("a crux", text)?);
+                check_supersedes(replaced, cruxes.iter().find(|q| q.id() == replaced))
+                    .map_err(refused)?;
+                Some(replaced)
+            }
+        };
+        let leaving_out = supersedes
+            .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced))
+            .filter(|q| q.raised_in() == cr.id())
+            .and_then(Crux::answer_given)
+            .map(Answer::id);
         let id = CruxId::from_uuid(self.ids.next_uuid());
         let mut options = Vec::with_capacity(c.options.len());
         let mut recommended = None;
@@ -1744,13 +1763,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 for r in refs {
                     let target = self.target_of(&p, r).await?;
                     let twice = expects.insert(target, kind).is_some();
+                    // What the request asks itself, and what the decisions taken in it ask and still stand.
                     let clashes = cr
-                        .expects()
-                        .get(&target)
-                        .is_some_and(|asked| asked.kind != kind);
+                        .kind_asked(&target, leaving_out)
+                        .is_some_and(|asked| asked != kind);
                     if twice || clashes {
                         return Err(AppError::Input(format!(
-                            "{} is a target and kept, or given twice, by the change request and the option `{}`",
+                            "{} is a target and kept, or given twice, by the change request (or a decision taken in it) and the option `{}`",
                             self.describe(&p, target).await?,
                             o.choice
                         )));
@@ -1779,15 +1798,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for f in &c.findings {
             findings.push(self.finding_ref(&p, f).await?);
         }
-        let supersedes = match &c.supersedes {
-            None => None,
-            Some(text) => {
-                let replaced = CruxId::from_uuid(uuid_of("a crux", text)?);
-                check_supersedes(replaced, cruxes.iter().find(|q| q.id() == replaced))
-                    .map_err(refused)?;
-                Some(replaced)
-            }
-        };
         let crux = Crux::raise(
             id,
             CruxDraft {
@@ -1841,8 +1851,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let wanted = CruxId::from_uuid(uuid_of("a crux", crux)?);
         let (crs, cruxes) = self.requests_and_cruxes().await?;
         let mut crux = cruxes
-            .into_iter()
+            .iter()
             .find(|q| q.id() == wanted)
+            .cloned()
             .ok_or_else(|| AppError::Input(format!("no crux has the id `{wanted}`")))?;
         let mut cr = crs
             .into_iter()
@@ -1889,7 +1900,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             now,
         );
         let before = cr.clone();
-        match decide(&mut crux, &mut cr, answer, &p) {
+        let replaced = crux
+            .supersedes()
+            .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced));
+        match decide(&mut crux, &mut cr, answer, &p, replaced) {
             Ok(()) => {}
             // A target the option asks the other of than the change request does: the refusal that raising a
             // Crux gives for the same clash.
@@ -2131,11 +2145,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// Every change request and every Crux, read together and checked against each other
     /// ([`check_requests_and_cruxes`]): a pair that does not fit is a store that cannot be read (`Corrupt`), as a
     /// record the domain refuses is. The one way a use case reads them.
+    ///
+    /// The two are read one after the other, not in one transaction, so a commit of another process in between can
+    /// leave a pair that does not fit though each is sound (a change request opened and a Crux raised in it, read as
+    /// the Crux alone). That is a conflict, as a change during any use case's reads is, and not a corrupt store: the
+    /// revision of the store says which.
     async fn requests_and_cruxes(&self) -> Result<(Vec<ChangeRequest>, Vec<Crux>), AppError> {
+        let at = self.store.revision().await?;
         let crs = self.store.change_requests().await?;
         let cruxes = self.store.cruxes().await?;
-        check_requests_and_cruxes(&crs, &cruxes)
-            .map_err(|e| AppError::Store(StoreError::Corrupt(e.to_string())))?;
+        if let Err(e) = check_requests_and_cruxes(&crs, &cruxes) {
+            if self.store.revision().await? != at {
+                return Err(AppError::Store(StoreError::Conflict));
+            }
+            return Err(AppError::Store(StoreError::Corrupt(e.to_string())));
+        }
         Ok((crs, cruxes))
     }
 
@@ -2279,10 +2303,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for q in &cruxes {
             told.push(self.crux_status(&p, &crs, &title_of, q).await?);
         }
-        let awaiting = awaiting_decision(&cruxes)
-            .into_iter()
-            .filter_map(|q| told.iter().find(|t| t.id == q.id().to_string()))
-            .map(|t| AwaitingStatus {
+        // `told` is in the order of `cruxes`, one for each.
+        let awaiting = cruxes
+            .iter()
+            .zip(&told)
+            .filter(|(q, _)| q.is_open())
+            .map(|(_, t)| AwaitingStatus {
                 crux: t.id.clone(),
                 raised_in: t.raised_in.clone(),
                 question: t.question.clone(),
