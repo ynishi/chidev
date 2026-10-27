@@ -364,12 +364,15 @@ impl ChangeRequest {
     }
 
     /// Records what a change set applied for it moved. A resolved change request is a closed record and takes no
-    /// more work (until it is reopened).
+    /// more work (until it is reopened). A change set that moved nothing (the same puts applied again) is no work:
+    /// its footprint is not kept, so the work holds only footprints that moved something.
     pub fn record_work(&mut self, footprint: Footprint) -> Result<(), ChangeRequestError> {
         if self.is_resolved() {
             return Err(ChangeRequestError::AlreadyResolved);
         }
-        self.work.push(footprint);
+        if !footprint.moves().is_empty() {
+            self.work.push(footprint);
+        }
         Ok(())
     }
 

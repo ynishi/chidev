@@ -1411,6 +1411,10 @@ mod tests {
         let p = project();
         let mut c = cr(&p);
         c.record_work(Footprint::new(2, Vec::new())).unwrap();
+        assert!(
+            c.work().is_empty(),
+            "a footprint that moved nothing is not kept"
+        );
         assert!(!has_work(&c, &[]));
         finish(&mut c, &[]).unwrap();
         assert_eq!(resolved_without_work(&[c.clone()]), [c.id()]);

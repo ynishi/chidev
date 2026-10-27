@@ -230,6 +230,10 @@ and this project adheres to
 
 ### Fixed
 
+- A `change_set` `for` a request that moves nothing (the same puts applied again)
+  no longer adds an empty footprint to the request's `work`: it is applied and
+  answers `ok`, and the work holds only footprints that moved something. A
+  footprint that moved nothing kept in a store before stays as it was.
 - The checks of the `resolve` moment judge the request being resolved. They read
   the model with it already resolved, and `cr.keep-moved`, `cr.intent-mismatch`
   and `cr.out-of-frame` skip a resolved request, so `cr.keep-moved` and

@@ -1170,7 +1170,9 @@ is one set, not a series of puts that has to be ordered around the citations.
 ### Attribution and frame
 
 A `change_set` with `for` records its footprint for the request (what it moved, in
-the same commit). That ties the work to the request that asked for it:
+the same commit). That ties the work to the request that asked for it. A set that
+moves nothing (the same puts applied again) is applied and answers `ok`, but it is
+no work and records no footprint:
 
 - What the work did to a `target` is read from the footprints recorded for the
   request or for its parts, children and their children (the requests that name

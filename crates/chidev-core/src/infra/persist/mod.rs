@@ -796,7 +796,12 @@ mod tests {
             ],
         ))
         .unwrap();
-        cr.record_work(Footprint::new(9, Vec::new())).unwrap();
+        cr.record_work(Footprint::new(
+            9,
+            vec![Move::new(context, vec![Target::Project])],
+        ))
+        .unwrap();
+        assert_eq!(cr.work().len(), 2);
         let text = encode_change_request(&cr).unwrap();
         let read = decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap();
         assert_eq!(read.work(), cr.work());
