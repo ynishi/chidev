@@ -156,7 +156,12 @@ Crux names there waits on that question. `view` does not give a request's
    those files from the repository and checks that Clause, so the tests the
    implementer runs before `pin` check the examples as well, and the Harness
    writer learns of them from the Contract alone. A runner outside the Harness
-   checks nothing chidev records.
+   checks nothing chidev records. chidev keeps the Clause, not the files it
+   names: when a request changes what such a file holds (a new line of the
+   expected output), reword the Clause as well, saying in it what changed, so
+   that its revision moves, the Cases that cite it are checked again, and the
+   request that names it as a target has touched it. A change to the file alone
+   is not seen.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. chidev does not run the tests
    itself; to have it refuse a `pin` while they fail, register a program that
