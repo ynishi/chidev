@@ -351,6 +351,13 @@ pub struct KeepMoved {
     pub moved: Vec<Target>,
 }
 
+/// Whether `cr` is judged as a request still open: it is not resolved, or it is the one `resolving` names, the one a
+/// resolution is being made for, which the state read has resolved already. Every check of change requests that runs
+/// at the `resolve` moment selects its requests with this, so none of them misses the one being resolved.
+pub fn judged_open(cr: &ChangeRequest, resolving: Option<ChangeRequestId>) -> bool {
+    !cr.is_resolved() || Some(cr.id()) == resolving
+}
+
 /// Every unresolved change request in `crs` that keeps a target and the target has moved on in `project`, whoever
 /// moved it: a keep is judged by the revision alone. A resolved one is a record: what changes after it is another
 /// change request's business. The one named by `resolving` is the one a resolution is being made for: it is judged
@@ -361,7 +368,7 @@ pub fn keep_moved(
     resolving: Option<ChangeRequestId>,
 ) -> Vec<KeepMoved> {
     crs.iter()
-        .filter(|c| !c.is_resolved() || Some(c.id()) == resolving)
+        .filter(|c| judged_open(c, resolving))
         .filter_map(|cr| {
             let moved: Vec<Target> = keep_progress(cr, project)
                 .into_iter()
@@ -417,7 +424,7 @@ pub struct OutOfFrame {
 /// although it is resolved: it is the one a resolution is being made for.
 pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -> Vec<OutOfFrame> {
     crs.iter()
-        .filter(|c| (!c.is_resolved() || Some(c.id()) == resolving) && !c.work().is_empty())
+        .filter(|c| judged_open(c, resolving) && !c.work().is_empty())
         .filter_map(|cr| {
             let frame = frame(cr);
             let inside = |m: &Move| {
@@ -586,22 +593,7 @@ mod tests {
     }
 
     fn put_harness(p: &mut Project, body: &str) {
-        p.put_harness(
-            core(),
-            HarnessId::from_uuid(test_uuid(400)),
-            Source::new(format!("{body}\n")),
-            vec![(
-                CaseId::from_uuid(test_uuid(40)),
-                CaseName::try_from("t").unwrap(),
-                LineRange::new(1, 1).unwrap(),
-                CaseCites::new(
-                    BTreeMap::from([(ItemId::from_uuid(test_uuid(10)), Revision::first())]),
-                    BTreeMap::new(),
-                )
-                .unwrap(),
-            )],
-        )
-        .unwrap();
+        put_cases(p, body, &[(40, "t", &[])]);
     }
 
     /// The Harness with the Cases given, each its number, its name, and the numbers of the Clauses it cites besides

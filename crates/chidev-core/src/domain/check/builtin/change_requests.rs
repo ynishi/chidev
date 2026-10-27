@@ -9,7 +9,7 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::service::change_request::{
-    keep_moved, out_of_frame, possible_kinds, resolved_without_work, targets_untouched,
+    judged_open, keep_moved, out_of_frame, possible_kinds, resolved_without_work, targets_untouched,
 };
 use crate::domain::service::cite::revision_of;
 use crate::domain::service::crux::awaiting_decision;
@@ -375,10 +375,10 @@ impl Check for IntentMismatch {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        // A resolved one is a record.
+        // A resolved one is a record, except the one this commit resolves.
         view.change_requests
             .iter()
-            .filter(|c| !c.is_resolved())
+            .filter(|c| judged_open(c, view.resolving))
             .filter_map(|c| {
                 let names = |kind: ExpectKind| kind == ExpectKind::Target;
                 // A parent only aggregates: it need not name a target.

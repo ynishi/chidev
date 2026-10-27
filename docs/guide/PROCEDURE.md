@@ -141,8 +141,9 @@ Crux names there waits on that question. `view` does not give a request's
    cited by some Case. A put replaces the whole Harness and is applied `for`
    one part: the put that adds the Cases of an answered Crux, and only those, is
    applied `for` the part the Crux was raised in. The Cases that follow a
-   part's Clauses are that part's work, so they are inside its frame. A Case the implementer finds
-   wrong against its Clause goes back to the Harness writer with that Clause,
+   part's Clauses are that part's work, so they are inside its frame. A Case
+   the implementer finds wrong against its Clause goes back to the Harness
+   writer with that Clause,
    and the writer puts the corrected Harness `for` the same part. The acceptance examples the
    requirements give are run by Cases too. The designer puts each one into a
    Clause that names its files (for example, "the input `acceptance/a1.stdin`

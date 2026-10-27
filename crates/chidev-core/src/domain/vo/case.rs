@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use super::id::{ClauseId, ItemId};
 use super::revision::Revision;
+use super::target::Target;
 
 /// Why a name or a set of citations is not the content of a Case.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -90,6 +91,14 @@ impl CaseCites {
     /// The Clauses it cites, with the revision each was cited at.
     pub fn clauses(&self) -> &BTreeMap<ClauseId, Revision> {
         &self.clauses
+    }
+
+    /// What it cites as targets: the Items, then the Clauses, each in the order of its id.
+    pub fn targets(&self) -> impl Iterator<Item = Target> + '_ {
+        self.items
+            .keys()
+            .map(|i| Target::Item(*i))
+            .chain(self.clauses.keys().map(|c| Target::Clause(*c)))
     }
 }
 

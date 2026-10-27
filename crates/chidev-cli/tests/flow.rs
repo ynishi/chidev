@@ -1230,6 +1230,36 @@ fn last_status(results: &[Value]) -> &Value {
 }
 
 #[test]
+fn resolving_a_request_whose_intent_and_targets_disagree_is_told_so() {
+    let dir = fresh_dir("intent-at-resolve");
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "a discount above 50% is refused",
+            "a refused discount is an InvalidDiscount",
+        ),
+        // 4: it keeps the behaviour, yet names a Clause to revise
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Keeps wrongly\",\"intent\":\"keep_behavior\",",
+            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}\n"
+        )
+        .to_string(),
+        "{\"op\":\"cr_resolve\",\"title\":\"Keeps wrongly\",\"resolution\":\"wont_do\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+    ]
+    .concat();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    // the resolution is told, although the request is resolved in the state the checks read
+    let told = at(&results, 5)["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .any(|f| f["rule"] == "cr.intent-mismatch");
+    assert!(told, "{results:#?}");
+}
+
+#[test]
 fn a_part_is_resolved_before_its_parent_and_a_kept_clause_must_stay_as_it_is() {
     let dir = fresh_dir("parts-and-keeps");
     let ops = [

@@ -8,7 +8,7 @@ use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
 
 /// Every target of `project` with the revision it has and the containers it is in (the Project first).
-fn tree(project: &Project) -> BTreeMap<Target, (Revision, Vec<Target>)> {
+fn tree(project: &Project) -> Tree {
     let mut out = BTreeMap::new();
     out.insert(Target::Project, (project.revision(), Vec::new()));
     for context in project.contexts() {
@@ -45,32 +45,17 @@ fn tree(project: &Project) -> BTreeMap<Target, (Revision, Vec<Target>)> {
     out
 }
 
-/// What each Case cites: the Items and Clauses, and the containers of those.
-type Cited = BTreeMap<Target, (BTreeSet<Target>, BTreeSet<Target>)>;
+/// Every target of a Project with the revision it has and the containers it is in, as `tree` gives it.
+type Tree = BTreeMap<Target, (Revision, Vec<Target>)>;
 
-/// What each Case of `project` cites, the Items and Clauses, and the containers of those, as `tree` has them.
-fn citations(project: &Project, tree: &BTreeMap<Target, (Revision, Vec<Target>)>) -> Cited {
-    let mut out = BTreeMap::new();
-    for context in project.contexts() {
-        for harness in context.harnesses() {
-            for case in harness.cases() {
-                let cites = case.cites();
-                let cited = cites
-                    .items()
-                    .keys()
-                    .map(|i| Target::Item(*i))
-                    .chain(cites.clauses().keys().map(|c| Target::Clause(*c)))
-                    .collect::<BTreeSet<_>>();
-                let within = cited
-                    .iter()
-                    .filter_map(|t| tree.get(t))
-                    .flat_map(|(_, within)| within.iter().copied())
-                    .collect::<BTreeSet<_>>();
-                out.insert(Target::Case(case.id()), (cited, within));
-            }
-        }
-    }
-    out
+/// What each Case of `project` cites: the Items and Clauses.
+fn citations(project: &Project) -> BTreeMap<Target, Vec<Target>> {
+    project
+        .contexts()
+        .flat_map(|c| c.harnesses())
+        .flat_map(|h| h.cases())
+        .map(|case| (Target::Case(case.id()), case.cites().targets().collect()))
+        .collect()
 }
 
 /// The targets that moved from `before` to `after`: the ones made, the ones whose revision went up, and the ones
@@ -83,14 +68,17 @@ fn citations(project: &Project, tree: &BTreeMap<Target, (Revision, Vec<Target>)>
 /// Cases off it still counts them as citing it.
 pub fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
     let (was, now) = (tree(before), tree(after));
-    let (was_cites, now_cites) = (citations(before, &was), citations(after, &now));
-    let with_cites = |m: Move, from: &[&Cited]| {
+    let (was_cites, now_cites) = (citations(before), citations(after));
+    // What the Case `m` moved cites on each side given, with the containers of each as that side has them.
+    let with_cites = |m: Move, sides: &[(&Tree, &BTreeMap<Target, Vec<Target>>)]| {
         let mut cited = BTreeSet::new();
         let mut within = BTreeSet::new();
-        for side in from {
-            if let Some((c, w)) = side.get(&m.target()) {
-                cited.extend(c.iter().copied());
-                within.extend(w.iter().copied());
+        for (tree, cites) in sides {
+            for t in cites.get(&m.target()).into_iter().flatten() {
+                cited.insert(*t);
+                if let Some((_, w)) = tree.get(t) {
+                    within.extend(w.iter().copied());
+                }
             }
         }
         m.with_cites(cited.into_iter().collect(), within.into_iter().collect())
@@ -99,9 +87,9 @@ pub fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
     for (target, (revision, within)) in &now {
         if was.get(target).map(|(r, _)| r) != Some(revision) {
             let sides: &[_] = if was.contains_key(target) {
-                &[&was_cites, &now_cites]
+                &[(&was, &was_cites), (&now, &now_cites)]
             } else {
-                &[&now_cites]
+                &[(&now, &now_cites)]
             };
             moves.push(with_cites(Move::new(*target, within.clone()), sides));
         }
@@ -110,7 +98,7 @@ pub fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
         if !now.contains_key(target) {
             moves.push(with_cites(
                 Move::new(*target, within.clone()),
-                &[&was_cites],
+                &[(&was, &was_cites)],
             ));
         }
     }
