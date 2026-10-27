@@ -25,5 +25,8 @@ directory is read by the command or shipped with it.
      check, the `kind` and the `moments` it runs at (see
      [Triggers and moments](../../README.md#triggers-and-moments)).
 
+When something has gone wrong with a store, such as a secret kept in it, see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 When this guide and the README or the RustDoc disagree, they win: the guide
 describes a way of working, they describe what the command does.

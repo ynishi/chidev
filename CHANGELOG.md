@@ -285,6 +285,14 @@ and this project adheres to
 
 ### Added
 
+- The guide has a troubleshooting document (`docs/guide/TROUBLESHOOTING.md`)
+  for text that must not stay in a project's store, such as a secret: rotate
+  first, then, per table, what the operations correct (the live model, the Pins,
+  the latest external and judged reports) and what no operation corrects
+  (change requests, Cruxes, measurements, the evidence of each check run, the
+  names of retired things), what a person can do meanwhile, what SQLite leaves
+  in the file, and a store file committed to git. The README, the guide's README
+  and `SECURITY.md` link to it.
 - `clauses_put` changes some Clauses of a Contract that exists and leaves the
   rest, their order and the title as they are: `clauses` set the sentence of a
   Clause by its label, give a Clause a new label (`replaces`) or add one, and

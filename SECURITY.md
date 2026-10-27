@@ -48,7 +48,9 @@ chidev actually exercises.
 
 Out of scope: anything that assumes the attacker already controls the
 application embedding chidev, and bugs in third-party software — report
-those upstream.
+those upstream. A secret a project put into its own store is not a vulnerability
+of chidev; what to do about it is in the guide's
+[Troubleshooting](docs/guide/TROUBLESHOOTING.md#text-that-must-not-stay-in-the-store).
 
 ## Safe harbour
 
