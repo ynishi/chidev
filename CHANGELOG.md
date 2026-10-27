@@ -64,6 +64,10 @@ and this project adheres to
   words that say their form (`[first, last]`, `[n, n]` for one line), not
   serde's ("invalid length 1, expected a tuple of size 2"). The README says an
   evidence's `lines` are the first and last line.
+- The guide (`docs/guide/PROCEDURE.md`) says, in step 4, that chidev keeps a
+  Clause and not the example files it names: a request that changes what such a
+  file holds rewords the Clause as well, saying what changed, so that its
+  revision moves and the Cases that cite it are checked again.
 - The guide (`docs/guide/PROCEDURE.md`) says what the designer does with a gap
   the Harness writer sends back (a question of step 2, answered as work `for`
   the part that holds it, a resolved part reopened first, while its parent is
@@ -249,6 +253,19 @@ and this project adheres to
 
 ### Added
 
+- `cr.keep-targeted` (warning; moments `edit` and `check`) tells a keep that an
+  unresolved change request's target breaks for sure when the two meet, not
+  after the work, when `cr.keep-moved` can only report it: a request keeps a
+  target and an unresolved request (itself included) names the same target to
+  revise or retire, or a Clause, Item or Case of the Contract, Interface or
+  Harness that is kept. It is about the request that keeps, and its message
+  names the request that targets and the targets. The edit that makes them meet
+  (`cr_open`, `cr_crux_decide`, `cr_reopen`) is told in its own answer. To fix
+  it, resolve the wrong request as superseded by a new one with the right
+  `keep`. In Rust, `Ground::Targeted` and `Mention::Targeted` are new variants
+  of the public enums, `service::change_request::keep_targeted` returns the
+  `KeepTargeted` and `Conflict` it is made of, and `Project::holder_of` gives
+  the Contract, Interface or Harness that holds a Clause, an Item or a Case.
 - `chidev schema external-call` and `chidev schema external-reply` print the
   JSON Schema of the request an external check is sent and of the reply it
   gives, derived from the types that write and read them; the lists of a

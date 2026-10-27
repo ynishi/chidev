@@ -5,7 +5,7 @@ use super::level::Level;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::service::pin::StaleReason;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
-use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
+use crate::domain::vo::id::{ChangeRequestId, ContractId, HarnessId, InterfaceId};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -43,6 +43,15 @@ pub enum Mention {
     Harness(HarnessId),
     /// A Contract.
     Contract(ContractId),
+    /// A change request that names a target to revise or retire which breaks a keep of the subject.
+    Targeted {
+        /// The target the subject keeps.
+        kept: Target,
+        /// The target the other request names: the kept one, or a part of it.
+        target: Target,
+        /// The change request that names it.
+        by: ChangeRequestId,
+    },
 }
 
 /// Whether a policy line a decision rests on is gone, or still there with another text.
@@ -95,6 +104,16 @@ pub enum Ground {
         /// The revision of the store the change set was kept at.
         at: u64,
     },
+    /// A target a change request keeps, which an open change request names to revise or retire: the same target, or
+    /// a part of it whose revision then moves it.
+    Targeted {
+        /// The target kept.
+        kept: Target,
+        /// The target the other request names.
+        target: Target,
+        /// The change request that names it.
+        by: ChangeRequestId,
+    },
     /// A policy line a decision rests on.
     PolicyLine {
         /// The line.
@@ -141,7 +160,7 @@ impl Finding {
 
     /// What the message goes on to name, in order; empty for most findings. Derived from the grounds, so that
     /// what a Pin moved on is held once: a `Pin` ground names the thing that moved (the pinned Interface is the
-    /// subject of the finding).
+    /// subject of the finding), and a `Targeted` ground names the request and the target in conflict.
     pub fn mentions(&self) -> Vec<Mention> {
         self.grounds
             .iter()
@@ -155,6 +174,11 @@ impl Finding {
                     StaleReason::Contract(id) => Some(Mention::Contract(*id)),
                     StaleReason::UsedInterface(id) => Some(Mention::Interface(*id)),
                 },
+                Ground::Targeted { kept, target, by } => Some(Mention::Targeted {
+                    kept: *kept,
+                    target: *target,
+                    by: *by,
+                }),
                 _ => None,
             })
             .collect()

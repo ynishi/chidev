@@ -2432,7 +2432,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 rule: f.rule().clone(),
                 level: f.level(),
                 state: f.state_in(crs),
-                message: self.worded(f, pending).await?,
+                message: self.worded(f, p, crs, pending).await?,
                 help: self
                     .registry
                     .help_of(f.rule())
@@ -2447,9 +2447,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(out)
     }
 
-    /// The message of a finding, with the names of the things it mentions written after it
-    /// (`the code was pinned against what has moved: contract `rounding` changed`).
-    async fn worded(&self, f: &Finding, pending: &[AssetName]) -> Result<String, AppError> {
+    /// The message of a finding, with the things it mentions written after it, each by its own wording
+    /// (`the code was pinned against what has moved: contract `rounding` changed`; `1 target(s) it keeps are named
+    /// as targets by an open change request: change request `set the limit` targets accept limit (kept: interface
+    /// accept)`).
+    async fn worded(
+        &self,
+        f: &Finding,
+        p: &Project,
+        crs: &[ChangeRequest],
+        pending: &[AssetName],
+    ) -> Result<String, AppError> {
         let mentions = f.mentions();
         if mentions.is_empty() {
             return Ok(f.message().to_string());
@@ -2460,6 +2468,16 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Mention::Interface(id) => ("interface", id.as_uuid()),
                 Mention::Harness(id) => ("harness", id.as_uuid()),
                 Mention::Contract(id) => ("contract", id.as_uuid()),
+                Mention::Targeted { kept, target, by } => {
+                    said.push(format!(
+                        "{} targets {} (kept: {})",
+                        self.describe_subject(p, crs, Subject::ChangeRequest(*by), pending)
+                            .await?,
+                        self.describe_in(p, *target, pending).await?,
+                        self.describe_in(p, *kept, pending).await?,
+                    ));
+                    continue;
+                }
             };
             said.push(format!(
                 "{kind} `{}` changed",
