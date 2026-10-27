@@ -1721,6 +1721,16 @@ struct ChangeSetOut<'a> {
     findings: Vec<FindingOut<'a>>,
 }
 
+/// The result of a put of one asset (`contract_put`, `clauses_put`, `interface_put`, `harness_put`): the asset's id
+/// and the revision it has after the put.
+#[derive(Debug, Serialize)]
+struct AssetPutOut<'a> {
+    op: &'static str,
+    id: String,
+    revision: u64,
+    findings: Vec<FindingOut<'a>>,
+}
+
 /// The result of `status`.
 #[derive(Debug, Serialize)]
 struct StatusOut<'a> {
@@ -2526,7 +2536,12 @@ where
         } => {
             let clauses = clause_inputs(clauses);
             let done = app.put_contract(&context, &name, &title, &clauses).await?;
-            json!({ "op": "contract_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
+            to_value(&AssetPutOut {
+                op: "contract_put",
+                id: done.value.id.to_string(),
+                revision: done.value.revision.number(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::ClausesPut {
             context,
@@ -2538,7 +2553,12 @@ where
             let done = app
                 .put_clauses(&context, &contract, &clauses, &remove)
                 .await?;
-            json!({ "op": "clauses_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
+            to_value(&AssetPutOut {
+                op: "clauses_put",
+                id: done.value.id.to_string(),
+                revision: done.value.revision.number(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::InterfacePut {
             context,
@@ -2560,7 +2580,12 @@ where
             let done = app
                 .put_interface_of(&context, &name, &source, items)
                 .await?;
-            json!({ "op": "interface_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
+            to_value(&AssetPutOut {
+                op: "interface_put",
+                id: done.value.id.to_string(),
+                revision: done.value.revision.number(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::HarnessPut {
             context,
@@ -2584,7 +2609,12 @@ where
             let done = app
                 .put_harness_of(&context, &name, kind, &builds, &source, &cases)
                 .await?;
-            json!({ "op": "harness_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
+            to_value(&AssetPutOut {
+                op: "harness_put",
+                id: done.value.id.to_string(),
+                revision: done.value.revision.number(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::ContextRetire { context } => {
             let done = app.retire_context(&context).await?;
