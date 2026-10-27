@@ -858,12 +858,34 @@ struct TargetRefDoc {
     id: Option<String>,
 }
 
-/// A target a change set moved, with the containers it was in (the outermost first).
+/// A target a change set moved, with the containers it was in (the outermost first). A moved Case also keeps the
+/// Items and Clauses it cited and the containers of those; left out for any other move, and for a footprint kept
+/// before they were recorded, which is read as citing nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MoveDoc {
     target: TargetDoc,
     id: Option<String>,
     within: Vec<TargetRefDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cites: Vec<TargetRefDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cites_within: Vec<TargetRefDoc>,
+}
+
+/// The targets as they are kept in a move.
+fn target_refs(targets: &[Target]) -> Vec<TargetRefDoc> {
+    targets
+        .iter()
+        .map(|t| {
+            let (target, id) = target_doc(t);
+            TargetRefDoc { target, id }
+        })
+        .collect()
+}
+
+/// The targets of a move, as they were kept.
+fn targets_of(refs: &[TargetRefDoc]) -> Result<Vec<Target>, Bad> {
+    refs.iter().map(|t| target_of(&t.target, &t.id)).collect()
 }
 
 /// What one change set applied for a change request moved, and the store revision it was kept at.
@@ -885,14 +907,9 @@ impl From<&Footprint> for FootprintDoc {
                     MoveDoc {
                         target,
                         id,
-                        within: m
-                            .within()
-                            .iter()
-                            .map(|t| {
-                                let (target, id) = target_doc(t);
-                                TargetRefDoc { target, id }
-                            })
-                            .collect(),
+                        within: target_refs(m.within()),
+                        cites: target_refs(m.cites()),
+                        cites_within: target_refs(m.cites_within()),
                     }
                 })
                 .collect(),
@@ -908,12 +925,10 @@ impl TryFrom<&FootprintDoc> for Footprint {
             .moves
             .iter()
             .map(|m| {
-                let within = m
-                    .within
-                    .iter()
-                    .map(|t| target_of(&t.target, &t.id))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, Bad>(Move::new(target_of(&m.target, &m.id)?, within))
+                Ok::<_, Bad>(
+                    Move::new(target_of(&m.target, &m.id)?, targets_of(&m.within)?)
+                        .with_cites(targets_of(&m.cites)?, targets_of(&m.cites_within)?),
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Footprint::new(d.store_revision, moves))

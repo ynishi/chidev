@@ -272,7 +272,7 @@ impl Check for KeepMoved {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        keep_moved(view.change_requests, view.project)
+        keep_moved(view.change_requests, view.project, view.resolving)
             .into_iter()
             .map(|k| {
                 // Each target that moved, with the revision it has now (none when it is gone): it moving on
@@ -307,11 +307,12 @@ static OUT_OF_FRAME: Descriptor = Descriptor {
     ),
     help: Cow::Borrowed(
         "The targets a change request names are its frame, and naming a container frames everything inside it. \
-           A change set applied for the request moved a target outside that frame. The frame is the request's own: \
-           a parent's targets neither widen nor bound its parts. Either the change was meant (name the target in \
-           `targets`, or apply the change set for the request it belongs to) or it should be taken back.",
+           A Case that cites a Clause or an Item inside the frame is inside it too. A change set applied for the \
+           request moved a target outside that frame. The frame is the request's own: a parent's targets neither \
+           widen nor bound its parts. Either the change was meant (name the target when the request is opened, or \
+           apply the change set `for` the request it belongs to) or it should be taken back.",
     ),
-    moments: Cow::Borrowed(&[Moment::Edit, Moment::Check]),
+    moments: Cow::Borrowed(&[Moment::Edit, Moment::Resolve, Moment::Check]),
     default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
@@ -324,7 +325,7 @@ impl Check for OutOfFrame {
     }
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        out_of_frame(view.change_requests)
+        out_of_frame(view.change_requests, view.resolving)
             .into_iter()
             .map(|o| {
                 // The ground is the footprint, not the Project as it is now: a put that moves the same target

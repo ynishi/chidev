@@ -330,6 +330,7 @@ mod fixture {
                 measurements: &[],
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
+                resolving: None,
             },
             &Params::default(),
         )

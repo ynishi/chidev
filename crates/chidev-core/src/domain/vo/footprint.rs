@@ -5,16 +5,38 @@ use super::target::Target;
 /// A target a change set moved: it was made, its revision went up, or it went. It keeps the containers it is in
 /// (the Project first, then the Context, then the asset) as they were when it moved, so that whether it is inside a
 /// frame can be read later, when the target is gone and the Project cannot say where it was.
+///
+/// A moved Case also keeps what it cites (see [`Move::with_cites`]), as the model had it when the change set was
+/// applied, so that whether the Case is inside a frame through a citation can be read later too. A move of anything
+/// else cites nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Move {
     target: Target,
     within: Vec<Target>,
+    cites: Vec<Target>,
+    cites_within: Vec<Target>,
 }
 
 impl Move {
-    /// A move of `target`, which is inside `within`, the outermost first (the Project is the first of them).
+    /// A move of `target`, which is inside `within`, the outermost first (the Project is the first of them). It
+    /// cites nothing.
     pub fn new(target: Target, within: Vec<Target>) -> Move {
-        Move { target, within }
+        Move {
+            target,
+            within,
+            cites: Vec::new(),
+            cites_within: Vec::new(),
+        }
+    }
+
+    /// This move of a Case, which cites `cites` (Items and Clauses), the containers of which are `cites_within`
+    /// (the Contracts, the Interfaces, the Contexts and the Project they are in). The change set may have changed
+    /// what the Case cites: they are the citations before it and after it together, so that a Case is not taken
+    /// out of a frame by the change that moved it.
+    pub fn with_cites(mut self, cites: Vec<Target>, cites_within: Vec<Target>) -> Move {
+        self.cites = cites;
+        self.cites_within = cites_within;
+        self
     }
 
     /// The target that moved.
@@ -27,9 +49,25 @@ impl Move {
         &self.within
     }
 
+    /// The Items and Clauses a moved Case cites, as recorded; none for a move of anything else, and none for a
+    /// footprint kept before citations were recorded.
+    pub fn cites(&self) -> &[Target] {
+        &self.cites
+    }
+
+    /// The containers of what it cites, the Project first, as recorded.
+    pub fn cites_within(&self) -> &[Target] {
+        &self.cites_within
+    }
+
     /// Whether the target is `container` or inside it.
     pub fn is_inside(&self, container: Target) -> bool {
         self.target == container || self.within.contains(&container)
+    }
+
+    /// Whether any one of the citations is `container` or inside it.
+    pub fn cites_inside(&self, container: Target) -> bool {
+        self.cites.contains(&container) || self.cites_within.contains(&container)
     }
 }
 

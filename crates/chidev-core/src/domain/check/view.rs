@@ -7,7 +7,7 @@ use crate::domain::entity::crux::Crux;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::id::{HarnessId, InterfaceId};
+use crate::domain::vo::id::{ChangeRequestId, HarnessId, InterfaceId};
 
 /// The model a check is run on: one state of it. It is everything a check may look at, so that a check is a
 /// function of it alone. A check never sees two states; what a change introduced is found by running the checks
@@ -34,6 +34,11 @@ pub struct CheckView<'a> {
     /// The same for the sim Harnesses: what the settings digest of a simulation of each is now, when the runner
     /// can say it (no runner, no layout for the script, or no `[measure.sim]` for the Context: absent).
     pub sim_settings: &'a BTreeMap<HarnessId, String>,
+    /// The change request this state is the resolution of: set only when the use case that resolves one runs the
+    /// checks, on the state with it already resolved. The checks that judge only unresolved requests judge this one
+    /// too, so that the resolution is told what was left (`cr.keep-moved`, `cr.out-of-frame`). None in every other
+    /// state.
+    pub resolving: Option<ChangeRequestId>,
 }
 
 /// A change to the model, as the states on either side of it: what the use case read, and what it would keep.

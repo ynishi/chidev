@@ -1,6 +1,6 @@
 //! What a change set moved: the targets whose revision differs between the Project before it and the one it leaves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::entity::project::Project;
 use crate::domain::vo::footprint::Move;
@@ -45,21 +45,73 @@ fn tree(project: &Project) -> BTreeMap<Target, (Revision, Vec<Target>)> {
     out
 }
 
+/// What each Case cites: the Items and Clauses, and the containers of those.
+type Cited = BTreeMap<Target, (BTreeSet<Target>, BTreeSet<Target>)>;
+
+/// What each Case of `project` cites, the Items and Clauses, and the containers of those, as `tree` has them.
+fn citations(project: &Project, tree: &BTreeMap<Target, (Revision, Vec<Target>)>) -> Cited {
+    let mut out = BTreeMap::new();
+    for context in project.contexts() {
+        for harness in context.harnesses() {
+            for case in harness.cases() {
+                let cites = case.cites();
+                let cited = cites
+                    .items()
+                    .keys()
+                    .map(|i| Target::Item(*i))
+                    .chain(cites.clauses().keys().map(|c| Target::Clause(*c)))
+                    .collect::<BTreeSet<_>>();
+                let within = cited
+                    .iter()
+                    .filter_map(|t| tree.get(t))
+                    .flat_map(|(_, within)| within.iter().copied())
+                    .collect::<BTreeSet<_>>();
+                out.insert(Target::Case(case.id()), (cited, within));
+            }
+        }
+    }
+    out
+}
+
 /// The targets that moved from `before` to `after`: the ones made, the ones whose revision went up, and the ones
 /// that are gone, each with the containers it was in (as `after` has it, or as `before` had it for one that is
 /// gone), in the order of the targets. A container whose revision moved because something in it was added or
 /// removed is a move of its own.
+///
+/// A Case that moved also carries what it cites: in `after` for one that was made, in `before` for one that is
+/// gone, and in both together for one that was changed, so that a change set that retires a Clause and moves the
+/// Cases off it still counts them as citing it.
 pub fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
     let (was, now) = (tree(before), tree(after));
+    let (was_cites, now_cites) = (citations(before, &was), citations(after, &now));
+    let with_cites = |m: Move, from: &[&Cited]| {
+        let mut cited = BTreeSet::new();
+        let mut within = BTreeSet::new();
+        for side in from {
+            if let Some((c, w)) = side.get(&m.target()) {
+                cited.extend(c.iter().copied());
+                within.extend(w.iter().copied());
+            }
+        }
+        m.with_cites(cited.into_iter().collect(), within.into_iter().collect())
+    };
     let mut moves = Vec::new();
     for (target, (revision, within)) in &now {
         if was.get(target).map(|(r, _)| r) != Some(revision) {
-            moves.push(Move::new(*target, within.clone()));
+            let sides: &[_] = if was.contains_key(target) {
+                &[&was_cites, &now_cites]
+            } else {
+                &[&now_cites]
+            };
+            moves.push(with_cites(Move::new(*target, within.clone()), sides));
         }
     }
     for (target, (_, within)) in &was {
         if !now.contains_key(target) {
-            moves.push(Move::new(*target, within.clone()));
+            moves.push(with_cites(
+                Move::new(*target, within.clone()),
+                &[&was_cites],
+            ));
         }
     }
     moves.sort_by_key(Move::target);
@@ -72,9 +124,16 @@ mod tests {
 
     use super::*;
     use crate::domain::entity::context::Context;
+    use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-    use crate::domain::vo::id::{ClauseId, ContextId, ContractId, ProjectId, test_uuid};
+    use crate::domain::vo::id::{
+        CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
+        test_uuid,
+    };
+    use crate::domain::vo::item_key::ItemKey;
+    use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
+    use crate::domain::vo::source::Source;
     use crate::domain::vo::title::Title;
 
     fn core() -> ContextId {
@@ -173,6 +232,101 @@ mod tests {
                 .iter()
                 .any(|m| m.target() == Target::Contract(contract_id()))
         );
+    }
+
+    fn item_id() -> ItemId {
+        ItemId::from_uuid(test_uuid(10))
+    }
+
+    fn harness_id() -> HarnessId {
+        HarnessId::from_uuid(test_uuid(400))
+    }
+
+    /// The Harness with the Cases given, each its number and the Clauses (numbers) it cites besides the Item.
+    fn put_cases(p: &mut Project, body: &str, cases: &[(u128, &[u128])]) {
+        p.put_harness(
+            core(),
+            harness_id(),
+            Source::new(format!("{body}\n")),
+            cases
+                .iter()
+                .map(|(n, clauses)| {
+                    (
+                        CaseId::from_uuid(test_uuid(*n)),
+                        CaseName::try_from("t").unwrap(),
+                        LineRange::new(1, 1).unwrap(),
+                        CaseCites::new(
+                            BTreeMap::from([(item_id(), Revision::first())]),
+                            clauses
+                                .iter()
+                                .map(|c| (clause_id(*c), Revision::first()))
+                                .collect(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    }
+
+    fn with_an_interface() -> Project {
+        let mut p = project();
+        p.put_interface(
+            core(),
+            InterfaceId::from_uuid(test_uuid(100)),
+            Source::new("fn a()\n".to_string()),
+            vec![(
+                item_id(),
+                ItemKey::try_from("fn a").unwrap(),
+                LineRange::new(1, 1).unwrap(),
+            )],
+        )
+        .unwrap();
+        p
+    }
+
+    fn move_of(moves: &[Move], target: Target) -> &Move {
+        moves.iter().find(|m| m.target() == target).unwrap()
+    }
+
+    #[test]
+    fn a_moved_case_carries_what_it_cited_before_and_after_the_change_set_and_nothing_else_does() {
+        let mut before = with_an_interface();
+        put_cases(&mut before, "fn t() {}", &[(40, &[30]), (41, &[31])]);
+        let mut after = before.clone();
+        // 40 now cites C2 (it cited C1), 41 is gone, 42 is new and cites C1
+        put_cases(&mut after, "fn t() { 1 }", &[(40, &[31]), (42, &[30])]);
+        let moves = moves_between(&before, &after);
+        let (item, c1, c2) = (
+            Target::Item(item_id()),
+            Target::Clause(clause_id(30)),
+            Target::Clause(clause_id(31)),
+        );
+        let (core, contract) = (Target::Context(core()), Target::Contract(contract_id()));
+        let case = |n: u128| Target::Case(CaseId::from_uuid(test_uuid(n)));
+        // changed: before and after together
+        let changed = move_of(&moves, case(40));
+        assert_eq!(changed.cites(), [c1, c2, item]);
+        assert!(changed.cites_inside(contract) && changed.cites_inside(core));
+        assert!(changed.cites_inside(Target::Interface(InterfaceId::from_uuid(test_uuid(100)))));
+        // retired: before
+        let gone = move_of(&moves, case(41));
+        assert_eq!(gone.cites(), [c2, item]);
+        assert!(!gone.cites_inside(c1));
+        // added: after
+        let made = move_of(&moves, case(42));
+        assert_eq!(made.cites(), [c1, item]);
+        assert!(!made.cites_inside(c2));
+        // a Harness, a Contract, a Clause: no citations
+        for other in [Target::Harness(harness_id()), contract] {
+            assert!(
+                moves
+                    .iter()
+                    .filter(|m| m.target() == other)
+                    .all(|m| m.cites().is_empty() && m.cites_within().is_empty())
+            );
+        }
     }
 
     #[test]
