@@ -174,7 +174,10 @@ Crux names there waits on that question. `view` does not give a request's
    `reads` of at least one section (see
    [External checks](../../README.md#external-checks)). The program runs the
    tests of the working tree, not the code the `pin` gives, so the gate holds
-   when that code is the tree's: pin it with `code_file`. Where the project
+   when that code is the tree's: pin it with `code_file`. Check the gate once
+   before relying on it: `pin` the code while the new tests still fail, and see
+   it refused (`"ok":false`, the external check at level `error` with the failing
+   tests in its evidence); then write the code and pin again. Where the project
    measures, `measure` the Pin (mutation, simulation) and read what it found;
    see [Measurements](../../README.md#measurements).
 6. **Check.** `status` and `check`: every Pin fresh, no stale citation, nothing
@@ -198,10 +201,13 @@ Crux names there waits on that question. `view` does not give a request's
    the model cannot be left unspecified.) Then the work the answer asks for
    goes through 3 to 6, `for` the part the Crux was raised in.
 8. **Resolve.** `cr_resolve` each part with how it ended, why and who says so,
-   then the parent. Resolving is a decision; the checks say afterwards where
-   the record and the work disagree. A part is not resolved, however it would
-   end, while a Crux raised in it has no decision, and the parent waits for all
-   of its parts.
+   then the parent. The decision maker resolves (see Roles), on the
+   implementer's report that the work is done and the checks of step 6 are
+   clean; `by` names the decision maker, as for a decision (`{"role":..}` or
+   `{"person":..}`), not the role that did the work. Resolving is a decision;
+   the checks say afterwards where the record and the work disagree. A part is
+   not resolved, however it would end, while a Crux raised in it has no
+   decision, and the parent waits for all of its parts.
 
 ## The first version
 

@@ -80,6 +80,10 @@ and this project adheres to
   words that say their form (`[first, last]`, `[n, n]` for one line), not
   serde's ("invalid length 1, expected a tuple of size 2"). The README says an
   evidence's `lines` are the first and last line.
+- The guide (`docs/guide/PROCEDURE.md`) says, in step 8, that the decision
+  maker resolves and `by` names the decision maker, not the role that did the
+  work; and, in step 5, to check the gate once by pinning while the new tests
+  still fail and seeing the `pin` refused.
 - The guide (`docs/guide/PROCEDURE.md`) says, in step 4, that chidev keeps a
   Clause and not the example files it names: a request that changes what such a
   file holds rewords the Clause as well, saying what changed, so that its
