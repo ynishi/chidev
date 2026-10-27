@@ -19,6 +19,7 @@ use super::{
 };
 use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::Context;
+use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::service::footprint::footprint_between;
@@ -47,8 +48,25 @@ pub struct ContractPut {
     pub name: String,
     /// Its title.
     pub title: String,
-    /// Its Clauses; one keeps its id when its label is one the Contract has.
+    /// All of its Clauses, in order; one keeps its id when its label (or the one it `replaces`) is one the Contract
+    /// has.
     pub clauses: Vec<ClauseInput>,
+}
+
+/// Some Clauses of a Contract that exists to change: the others stay as they are, in their order, and so does the
+/// title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClausesPut {
+    /// The Context's name.
+    pub context: String,
+    /// The Contract's name.
+    pub contract: String,
+    /// The Clauses to set. One whose label the Contract has gets the sentence given; one that `replaces` a label
+    /// the Contract has takes the Clause's place with the new label and the sentence; any other is new, and is
+    /// appended after the Clauses the Contract has, in the order given.
+    pub clauses: Vec<ClauseInput>,
+    /// The labels of the Clauses to remove.
+    pub remove: Vec<String>,
 }
 
 /// An Interface to make or revise.
@@ -123,6 +141,8 @@ pub enum PutInput {
     },
     /// A Contract.
     Contract(ContractPut),
+    /// Some Clauses of a Contract that exists.
+    Clauses(ClausesPut),
     /// An Interface.
     Interface(InterfacePut),
     /// A Harness.
@@ -175,7 +195,7 @@ pub struct ChangeSetInput {
 /// What one put of a change set came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutDone {
-    /// `context`, `uses`, `base_on_contract`, `contract`, `interface` or `harness`.
+    /// `context`, `uses`, `base_on_contract`, `contract`, `clauses`, `interface` or `harness`.
     pub kind: &'static str,
     /// The Context's name.
     pub context: String,
@@ -328,6 +348,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     let done = self.contract_put(&p, &mut plan, c).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
+                PutInput::Clauses(c) => {
+                    let done = self.clauses_put(&p, &mut plan, c).await;
+                    keep_or_note(done, &mut puts, &mut problems);
+                }
                 PutInput::Interface(i) => {
                     let found = found.get(&n).map(Vec::as_slice);
                     let done = self.interface_put(&p, &mut plan, i, found).await;
@@ -356,7 +380,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     Ok(context) => puts.push(AssetPut::BaseOnContract { context }),
                     Err(e) => problems.push(e),
                 },
-                PutInput::Context { .. } | PutInput::Contract(_) | PutInput::Interface(_) => {}
+                PutInput::Context { .. }
+                | PutInput::Contract(_)
+                | PutInput::Clauses(_)
+                | PutInput::Interface(_) => {}
             }
         }
         let mut retires = Vec::new();
@@ -487,36 +514,180 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .await?,
         );
         let old = p.context(ctx).and_then(|x| x.contract(id));
-        let mut given = Vec::with_capacity(c.clauses.len());
-        for cl in &c.clauses {
-            let label = ClauseLabel::try_from(cl.label.as_str()).map_err(input)?;
-            let text = ClauseText::try_from(cl.text.as_str()).map_err(input)?;
-            let clause = match old.and_then(|k| k.clause_by_label(label)) {
-                Some(k) => k.id(),
-                None => ClauseId::from_uuid(self.ids.next_uuid()),
-            };
-            given.push((clause, ClauseContent::new(label, text)));
-        }
+        let given = self.clause_list((&c.context, &c.name), old, &c.clauses, &[], true)?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
-        plan.clauses.insert(
-            id,
-            given
-                .iter()
-                .map(|(clause, content)| (content.label(), *clause))
-                .collect(),
+        Ok(contract_asset(plan, (ctx, id), &c.name, title, given))
+    }
+
+    /// Some Clauses of a Contract to change: the Contract as it is, with the Clauses given set and the ones to remove
+    /// gone. The Contract must exist.
+    async fn clauses_put(
+        &mut self,
+        p: &Project,
+        plan: &mut Plan,
+        c: &ClausesPut,
+    ) -> Result<AssetPut, AppError> {
+        let ctx = context_id(p, &c.context)?;
+        let id = ContractId::from_uuid(
+            self.reserve(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
+                .await?,
         );
-        for (clause, content) in &given {
-            plan.words.insert(
-                Target::Clause(*clause),
-                format!("{} {}", c.name, content.label()),
-            );
+        let old =
+            p.context(ctx)
+                .and_then(|x| x.contract(id))
+                .ok_or_else(|| AppError::UnknownAsset {
+                    context: c.context.clone(),
+                    kind: AssetKind::Contract.word(),
+                    name: c.contract.clone(),
+                })?;
+        let given = self.clause_list(
+            (&c.context, &c.contract),
+            Some(old),
+            &c.clauses,
+            &c.remove,
+            false,
+        )?;
+        Ok(contract_asset(
+            plan,
+            (ctx, id),
+            &c.contract,
+            old.title().clone(),
+            given,
+        ))
+    }
+
+    /// The Clauses a Contract has after a put, with the ids they have: `at` is the Context and the Contract's name,
+    /// `old` the Contract as it is, if it is. With `whole`, `given` are all of them, in order, and the Clauses of
+    /// `old` that are not named are gone. Without, `given` are set in `old`: a Clause of `old` that is named keeps
+    /// its place, one that is not named stays, one in `remove` is gone, and a new one comes after. A Clause keeps
+    /// the id of the one that has its label, or the one it `replaces`.
+    ///
+    /// Every problem of the put that is about the names is found, not the first: a label or a `replaces` that
+    /// cannot be read, a label that is given twice, a `replaces` of a label the Contract does not have, named by
+    /// two Clauses or still given, a `remove` of a label it does not have or that is also given, replaced or
+    /// removed.
+    fn clause_list(
+        &mut self,
+        at: (&str, &str),
+        old: Option<&Contract>,
+        given: &[ClauseInput],
+        remove: &[String],
+        whole: bool,
+    ) -> Result<Vec<(ClauseId, ClauseContent)>, AppError> {
+        let (context, contract) = (at.0.to_string(), at.1.to_string());
+        let mut problems = Vec::new();
+        let mut edits = Vec::with_capacity(given.len());
+        for cl in given {
+            let read = ClauseLabel::try_from(cl.label.as_str())
+                .map_err(input)
+                .and_then(|label| {
+                    let text = ClauseText::try_from(cl.text.as_str()).map_err(input)?;
+                    let replaces = cl
+                        .replaces
+                        .as_deref()
+                        .map(ClauseLabel::try_from)
+                        .transpose()
+                        .map_err(input)?;
+                    Ok(Given {
+                        label,
+                        text,
+                        replaces,
+                    })
+                });
+            match read {
+                Ok(edit) => edits.push(edit),
+                Err(e) => problems.push(e),
+            }
         }
-        Ok(AssetPut::Contract {
-            context: ctx,
-            id,
-            title,
-            clauses: given,
-        })
+        let mut removed = Vec::with_capacity(remove.len());
+        for label in remove {
+            match ClauseLabel::try_from(label.as_str()) {
+                Ok(label) => removed.push(label),
+                Err(e) => problems.push(input(e)),
+            }
+        }
+
+        let has = |label: ClauseLabel| old.is_some_and(|k| k.clause_by_label(label).is_some());
+        let unknown = |label: ClauseLabel, field| AppError::ClauseUnknown {
+            context: context.clone(),
+            contract: contract.clone(),
+            label: label.to_string(),
+            field,
+        };
+        let conflict = |label: ClauseLabel, side| AppError::ClauseRenameConflict {
+            context: context.clone(),
+            contract: contract.clone(),
+            label: label.to_string(),
+            side,
+        };
+        for (n, edit) in edits.iter().enumerate() {
+            let earlier = &edits[..n];
+            // A label the Contract does not have, given twice, is the domain's to refuse (`DuplicateLabel`).
+            if has(edit.label) && earlier.iter().any(|e| e.label == edit.label) {
+                problems.push(conflict(edit.label, "label"));
+            }
+            let Some(was) = edit.replaces else {
+                continue;
+            };
+            if earlier.iter().any(|e| e.replaces == Some(was)) {
+                problems.push(conflict(was, "replaces"));
+            } else if !has(was) {
+                problems.push(unknown(was, "replaces"));
+            } else if was != edit.label && edits.iter().any(|e| e.label == was) {
+                problems.push(AppError::ClauseReplacesKept {
+                    context: context.clone(),
+                    contract: contract.clone(),
+                    label: was.to_string(),
+                });
+            }
+        }
+        for (n, label) in removed.iter().enumerate() {
+            if removed[..n].contains(label)
+                || edits
+                    .iter()
+                    .any(|e| e.label == *label || e.replaces == Some(*label))
+            {
+                problems.push(conflict(*label, "remove"));
+            } else if !has(*label) {
+                problems.push(unknown(*label, "remove"));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(one_or_many(problems));
+        }
+
+        let mut fresh = || ClauseId::from_uuid(self.ids.next_uuid());
+        let kept = |edit: &Given| {
+            old.and_then(|k| k.clause_by_label(edit.replaces.unwrap_or(edit.label)))
+                .map(|k| k.id())
+        };
+        let content = |edit: &Given| ClauseContent::new(edit.label, edit.text.clone());
+        if whole {
+            return Ok(edits
+                .iter()
+                .map(|e| (kept(e).unwrap_or_else(&mut fresh), content(e)))
+                .collect());
+        }
+        let mut list: Vec<(ClauseId, ClauseContent)> = old
+            .map(|k| {
+                k.clauses()
+                    .iter()
+                    .filter(|c| !removed.contains(&c.label()))
+                    .map(|c| (c.id(), ClauseContent::new(c.label(), c.text().clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for edit in &edits {
+            match kept(edit) {
+                Some(id) => {
+                    if let Some(slot) = list.iter_mut().find(|(i, _)| *i == id) {
+                        slot.1 = content(edit);
+                    }
+                }
+                None => list.push((fresh(), content(edit))),
+            }
+        }
+        Ok(list)
     }
 
     /// The Items the provider finds for each Interface put that gives none, by the index of the put in the set. It
@@ -1032,6 +1203,44 @@ fn renamed(
         .collect())
 }
 
+/// A Clause of a put as it is read: its label, its sentence, and the label it replaces.
+struct Given {
+    label: ClauseLabel,
+    text: ClauseText,
+    replaces: Option<ClauseLabel>,
+}
+
+/// The Contract `id` of `ctx` to put with `clauses` as its whole list of Clauses, in order. The plan gets all of
+/// them, the ones the put did not name included: a Case of the same set cites any of them by its label as it is
+/// then.
+fn contract_asset(
+    plan: &mut Plan,
+    (ctx, id): (ContextId, ContractId),
+    name: &str,
+    title: Title,
+    clauses: Vec<(ClauseId, ClauseContent)>,
+) -> AssetPut {
+    plan.clauses.insert(
+        id,
+        clauses
+            .iter()
+            .map(|(clause, content)| (content.label(), *clause))
+            .collect(),
+    );
+    for (clause, content) in &clauses {
+        plan.words.insert(
+            Target::Clause(*clause),
+            format!("{name} {}", content.label()),
+        );
+    }
+    AssetPut::Contract {
+        context: ctx,
+        id,
+        title,
+        clauses,
+    }
+}
+
 /// The error of several problems: the one, or all of them.
 fn one_or_many(problems: Vec<AppError>) -> AppError {
     match problems.as_slice() {
@@ -1084,6 +1293,12 @@ fn put_done(put: &PutInput, before: &Project, plan: &Plan, after: &Project) -> P
             &c.context,
             Some(AssetKind::Contract),
             Some(&c.name),
+        ),
+        PutInput::Clauses(c) => (
+            "clauses",
+            &c.context,
+            Some(AssetKind::Contract),
+            Some(&c.contract),
         ),
         PutInput::Interface(i) => (
             "interface",

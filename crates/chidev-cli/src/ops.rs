@@ -8,14 +8,14 @@ use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, CaseInput,
-    ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxKind,
-    CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput,
-    EvidenceStatus, FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut,
-    ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue,
-    PinState, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput,
-    RecommendedStatus, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
-    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
-    SubjectInput, TargetInput, TransitionStatus, ViewInput,
+    ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef, ClausesPut, ContractPut,
+    CruxKind, CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic,
+    EvidenceInput, EvidenceStatus, FindingInput, Found, HarnessKind, HarnessPut, Importance,
+    Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect,
+    OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
+    RecommendationInput, RecommendedStatus, RenameInput, ReportInput, ReportedFinding,
+    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding,
+    RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -41,12 +41,27 @@ enum Op {
     ContextUses { context: String, uses: Vec<String> },
     /// Bases a Context on its Contracts.
     BaseOnContract { context: String },
-    /// Makes or revises a Contract.
+    /// Makes or revises a Contract: `clauses` are all of the Clauses it has afterwards, in order. A Clause keeps its
+    /// id when its label is one the Contract has, or when it `replaces` one (the label it had before, now given a
+    /// new one: its citations stay, and a new label alone moves no revision). To change some Clauses and leave the
+    /// rest as they are, use `clauses_put`.
     ContractPut {
         context: String,
         name: String,
         title: String,
         clauses: Vec<ClauseDto>,
+    },
+    /// Changes some Clauses of a Contract that exists, and leaves the others, the order and the title as they are.
+    /// A Clause in `clauses` whose label the Contract has gets the sentence given; one that `replaces` a label the
+    /// Contract has takes that Clause's place with the new label and the sentence; any other is new and comes after
+    /// the Clauses the Contract has. `remove` lists the labels of Clauses to remove.
+    ClausesPut {
+        context: String,
+        contract: String,
+        #[serde(default)]
+        clauses: Vec<ClauseDto>,
+        #[serde(default)]
+        remove: Vec<String>,
     },
     /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
     /// project's root); exactly one is given. `items` may be left out: the provider of the language its
@@ -90,7 +105,8 @@ enum Op {
     /// Puts and retires several assets as one change: the rules of the project are checked once, on the state it
     /// ends in, so a Harness can be put without the Cases that cite a Clause the same change removes, and can cite
     /// a Clause the same change makes. All of it is applied, or none (and the error names every problem). Each
-    /// entry of `puts` is tagged with `put` (`contract`, `interface`, `harness`, `uses`, `base_on_contract`) and
+    /// entry of `puts` is tagged with `put` (`contract`, `clauses`, `interface`, `harness`, `uses`,
+    /// `base_on_contract`) and
     /// has the fields of the operation of that name without `op`; each entry of `retires` is tagged with `retire`
     /// (`context`, `contract`, `interface`, `harness`). `for` is the title of the change request the work is
     /// applied for: the targets the set moves are recorded as that request's work in the same commit, and `status`
@@ -255,6 +271,15 @@ enum PutDto {
         title: String,
         clauses: Vec<ClauseDto>,
     },
+    /// As `clauses_put`.
+    Clauses {
+        context: String,
+        contract: String,
+        #[serde(default)]
+        clauses: Vec<ClauseDto>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     /// As `interface_put`.
     Interface {
         context: String,
@@ -332,6 +357,17 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             name,
             title,
             clauses: clause_inputs(clauses),
+        }),
+        PutDto::Clauses {
+            context,
+            contract,
+            clauses,
+            remove,
+        } => PutInput::Clauses(ClausesPut {
+            context,
+            contract,
+            clauses: clause_inputs(clauses),
+            remove,
         }),
         PutDto::Interface {
             context,
@@ -462,6 +498,7 @@ fn clause_inputs(clauses: Vec<ClauseDto>) -> Vec<ClauseInput> {
         .map(|c| ClauseInput {
             label: c.label,
             text: c.text,
+            replaces: c.replaces,
         })
         .collect()
 }
@@ -2148,6 +2185,8 @@ fn targets_of(refs: Vec<RefDto>) -> Result<Vec<TargetInput>, AppError> {
 struct ClauseDto {
     label: String,
     text: String,
+    #[serde(default)]
+    replaces: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2488,6 +2527,18 @@ where
             let clauses = clause_inputs(clauses);
             let done = app.put_contract(&context, &name, &title, &clauses).await?;
             json!({ "op": "contract_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
+        }
+        Op::ClausesPut {
+            context,
+            contract,
+            clauses,
+            remove,
+        } => {
+            let clauses = clause_inputs(clauses);
+            let done = app
+                .put_clauses(&context, &contract, &clauses, &remove)
+                .await?;
+            json!({ "op": "clauses_put", "id": done.value.id.to_string(), "revision": done.value.revision.number(), "findings": findings_out(&done.findings) })
         }
         Op::InterfacePut {
             context,

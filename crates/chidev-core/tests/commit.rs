@@ -84,6 +84,7 @@ fn clauses() -> Vec<ClauseInput> {
     vec![ClauseInput {
         label: "C1".into(),
         text: "push then pop".into(),
+        replaces: None,
     }]
 }
 
@@ -737,6 +738,20 @@ async fn the_checks_a_use_case_ran_are_recorded_under_its_trigger() {
         .unwrap();
     let runs = new_runs(&app, &mut seen).await;
     only(&runs, Moment::Edit, Trigger::Edit(EditTrigger::PutContract));
+    app.put_clauses(
+        "core",
+        "stack",
+        &[ClauseInput {
+            label: "C2".into(),
+            text: "pop of an empty stack fails".into(),
+            replaces: None,
+        }],
+        &[],
+    )
+    .await
+    .unwrap();
+    let runs = new_runs(&app, &mut seen).await;
+    only(&runs, Moment::Edit, Trigger::Edit(EditTrigger::PutClauses));
     app.put_interface(
         "core",
         "api",

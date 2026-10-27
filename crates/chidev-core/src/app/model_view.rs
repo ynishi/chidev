@@ -529,8 +529,8 @@ impl ModelView {
                             .iter()
                             .map(|cl| ClauseView {
                                 id: cl.id().to_string(),
-                                label: cl.content().label().to_string(),
-                                text: cl.content().text().as_str().to_string(),
+                                label: cl.label().to_string(),
+                                text: cl.text().as_str().to_string(),
                                 revision: cl.revision().number(),
                             })
                             .collect(),

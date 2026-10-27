@@ -73,8 +73,9 @@ impl TryFrom<&str> for ClauseText {
     }
 }
 
-/// What a Clause says: its label and its sentence. Two Clauses with equal content say the same thing, whatever
-/// form (Markdown, JSON) they came in.
+/// A Clause as written: the name it is known by and the sentence it promises. This is the pair a caller gives to
+/// make or change a Contract. Only the sentence is what the Clause promises; the label is its name, so a Clause
+/// kept under a new label has the same promise.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClauseContent {
     label: ClauseLabel,
@@ -95,6 +96,11 @@ impl ClauseContent {
     /// The sentence.
     pub fn text(&self) -> &ClauseText {
         &self.text
+    }
+
+    /// The label and the sentence, taken apart.
+    pub fn into_parts(self) -> (ClauseLabel, ClauseText) {
+        (self.label, self.text)
     }
 }
 

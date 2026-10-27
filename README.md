@@ -128,6 +128,48 @@ belong):
   the Clauses it has afterwards, a label it had keeps its Clause, a label it
   did not have is new, and one left out is removed. A label is `C` and a number.
   The answer has the asset's `id` and `revision`.
+  - A Clause is known by its id, and its label is the name a person uses for it, as
+    an Item's key is. Its revision counts changes of its sentence only: a Clause
+    given another label by `replaces` (`{"label":"C5","text":"..","replaces":"C2"}`)
+    keeps its id, its place in the order and its revision, and so does the Contract,
+    if nothing else differs, so the Cases that cite it stay current and nothing goes
+    stale. The label replaced must not be given to a Clause of the same put
+    (`input.replaces-kept`), is replaced by one Clause at most, and is a label the
+    Contract has (`input.rename-conflict`, `input.unknown-name`). A label the Contract
+    has, given by two Clauses, is `input.rename-conflict` too. A Harness put that
+    still cites the old label is refused with the unknown clause
+    (`input.unknown-name`); the citations already kept are by id and stay.
+- `clauses_put` changes some Clauses of a Contract that exists and leaves the rest as
+  it is:
+
+  ```json
+  {"op":"clauses_put","context":"pricing","contract":"discount",
+   "clauses":[{"label":"C1","text":"a discount over 100% is refused"},
+              {"label":"C4","text":"a discount is not given twice","replaces":"C2"},
+              {"label":"C9","text":"a new promise"}],
+   "remove":["C3"]}
+  ```
+
+  - A Clause in `clauses` whose label the Contract has gets the sentence given (the
+    same sentence moves nothing). One with `replaces` takes the place of the Clause
+    that has the old label, with the new label and the sentence, and keeps its id. A
+    label the Contract does not have, without `replaces`, is a new Clause, after the
+    Clauses the Contract has, in the order given. `remove` lists the labels of Clauses
+    to remove; a Clause that a Case cites and that goes is refused as it is when
+    `contract_put` leaves it out. The Clauses not named stay, in their order, and so
+    does the title: to change the title, or to put the Clauses in another order, use
+    `contract_put`. The Contract must exist (`contract_put` makes it).
+  - It is refused, with nothing changed and every problem of the entry said, when a
+    `replaces` or a `remove` is a label the Contract does not have
+    (`input.unknown-name`, with the Contract's labels as `did_you_mean` and `field`
+    saying which of the two), when the label a `replaces` names is also given as a
+    label of the same entry (`input.replaces-kept`), and when a label is named twice:
+    given by two Clauses, replaced by two, or removed and also given, replaced or
+    removed again (`input.rename-conflict`, with `side` `label`, `replaces` or
+    `remove`). A result with two Clauses of one label is refused by the domain.
+  - The answer has the Contract's `id` and `revision`, as `contract_put` has. It is an
+    edit with a trigger of its own (`put_clauses`), and in a `change_set` it is the
+    entry `{"put":"clauses",..}` (see "Change sets").
 - `interface_put` is the same for an Interface: `source` is its code, and each
   item has its `key`, the first and last `lines` it is on (from 1) and, when it is
   renamed, `replaces` (the key it had) to keep its id. Lines past the end of
@@ -394,8 +436,9 @@ checked once, on the state it ends in, and all of it is applied or none of it.
 ```
 
 - Each entry of `puts` has the fields of the operation of that name without `op`,
-  and a `put` that says which: `context`, `contract`, `interface`, `harness`, `uses`
-  (`context`, `uses`) or `base_on_contract` (`context`). Each entry of `retires`
+  and a `put` that says which: `context`, `contract`, `clauses`, `interface`,
+  `harness`, `uses` (`context`, `uses`) or `base_on_contract` (`context`). Each entry
+  of `retires`
   has the fields of the retire operation and a `retire`: `context`, `contract`,
   `interface` or `harness`.
 - An `interface` entry takes `source_file` and a `harness` entry takes
@@ -404,6 +447,13 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   the text read, not the path). The files are all read before anything is applied;
   when several entries have a file that cannot be used, the set is refused with
   each of them named.
+- `{"put":"clauses","context":"core","contract":"stock","clauses":[..],"remove":[..]}`
+  changes some Clauses of a Contract that exists, as `clauses_put` does. A Case of a
+  Harness in the same set can cite a label the entry adds or gives to a Clause (the
+  Clauses it did not name are cited by their labels too), and what the entry moved is
+  the Clauses whose sentence changed, the Clauses added or removed, and the Contract. A
+  Contract named by a `contract` entry and a `clauses` entry in one set is named twice,
+  and refused.
 - `{"put":"context","name":"billing","uses":["ledger"]}` adds a Context, as
   `context_add` does (`uses` is optional; the Project goes to its next revision).
   It is applied first, so the same set can put the Context's first Contract,
@@ -875,7 +925,10 @@ sim: findings=<n>
   protocol this document describes. chidev resolves each name to the Clause's id,
   among the Clauses the `sweep` Case cites, when it records the run: **the record
   holds Clause ids, not names or labels**, and the rules read ids, so a label
-  renumbered later does not move an old finding.
+  renumbered later does not move an old finding. A new label moves no revision (see
+  `contract_put`), so `sim.stale` does not warn ahead: a script that still prints the
+  old label is a protocol failure on its next run, and the label to print is the one
+  `status` and `view` show.
 - `FINDING`: after step *k* (from 1) of this case a promise of the Clause did not
   hold. The case must be the one the script was started for.
 - `UNREACHED`: this case never reached the situation the Clause needs. A Clause is
@@ -1222,6 +1275,13 @@ the same commit). That ties the work to the request that asked for it:
 - A new Clause or Item is a move of its own: a frame that names only the other
   Clauses of the Contract has it outside, so name the Contract when the request
   adds to it.
+- **A new name moves nothing.** A Clause given another label, or an Item another key,
+  keeps its id and its revision (and its Contract's or Interface's), so the footprint
+  of the set that did it is empty: it is outside no frame, it breaks no `keep` of the
+  Clause or its container, and no citation goes stale. A request whose only work is
+  such a rename has no work: resolved as done, it is `cr.resolved-without-work`, and
+  a Clause or Item it names as a target reads `not touched yet` (`cr.targets-untouched`
+  when the request has other work).
 
 ### Crux, Policy and Assumption
 
@@ -1480,7 +1540,13 @@ as a sentence to be parsed:
   `input.view-sections-empty`. An `interface_put` that
   leaves `items` out has its own: `input.items-required`, `items.no-provider`,
   `items.protocol`, `items.failed`, and for `renames` `input.rename-unknown`,
-  `input.rename-conflict`, `input.replaces-kept`, `input.renames-with-items`.
+  `input.rename-conflict`, `input.replaces-kept`, `input.renames-with-items`. A
+  `clauses_put`, or a `contract_put` with `replaces`, has `input.unknown-name` for a
+  `replaces` or `remove` label the Contract does not have (`values.field` says which),
+  `input.replaces-kept` and `input.rename-conflict` (`values.side`: `label`,
+  `replaces` or `remove`). The subjects of the last two are the Context and the
+  Contract; the subject of `input.unknown-name` is the Contract, as for an unknown
+  cited label.
 - A change refused by checks keeps its `findings` beside the diagnostics, and a
   finding in any result has the same fields (`code` is its rule, `help` its rule's).
   A refusal that has no rule of its own yet is `domain.unmapped` (or `app.unmapped`),

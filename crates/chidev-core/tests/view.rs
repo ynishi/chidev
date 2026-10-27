@@ -45,6 +45,7 @@ async fn project(name: &str) -> App<SqliteStore, Counter> {
         vec![ClauseInput {
             label: "C1".into(),
             text: text.into(),
+            replaces: None,
         }]
     };
     app.put_contract("base", "rules", "Rules", &clause("a half rounds up"))

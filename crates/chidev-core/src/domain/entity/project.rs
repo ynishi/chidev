@@ -568,7 +568,7 @@ fn clause_record(context: &ContextName, k: &Contract, c: &Clause, at: Revision) 
         Target::Clause(c.id()),
         context.clone(),
         k.id().as_uuid(),
-        c.content().label().to_string(),
+        c.label().to_string(),
         c.revision(),
         at,
     )

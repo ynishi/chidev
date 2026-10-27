@@ -416,8 +416,8 @@ impl From<&Contract> for ContractDoc {
                 .map(|c| ClauseDoc {
                     id: c.id().as_uuid().to_string(),
                     revision: c.revision().number(),
-                    label: c.content().label().to_string(),
-                    text: c.content().text().as_str().to_string(),
+                    label: c.label().to_string(),
+                    text: c.text().as_str().to_string(),
                 })
                 .collect(),
         }

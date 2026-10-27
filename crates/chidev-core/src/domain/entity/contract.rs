@@ -2,18 +2,21 @@
 
 use thiserror::Error;
 
-use crate::domain::vo::clause::{ClauseContent, ClauseLabel};
+use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::id::{ClauseId, ContractId};
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::title::Title;
 
 /// One promise of a Contract. It is known by its id, so a citation of it survives a new label or a reworded
-/// sentence; its revision says whether the promise changed since a citation was made.
+/// sentence. Its label is the name a person uses for it, as an Item's key is, and is not part of what it
+/// promises: its revision says whether the sentence changed since a citation was made, and a new label alone
+/// does not move it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clause {
     id: ClauseId,
+    label: ClauseLabel,
     revision: Revision,
-    content: ClauseContent,
+    text: ClauseText,
 }
 
 impl Clause {
@@ -22,14 +25,19 @@ impl Clause {
         self.id
     }
 
-    /// How many times its content has changed, from 1.
+    /// The name it is known by.
+    pub fn label(&self) -> ClauseLabel {
+        self.label
+    }
+
+    /// How many times its sentence has changed, from 1. A new label does not count.
     pub fn revision(&self) -> Revision {
         self.revision
     }
 
-    /// What it says.
-    pub fn content(&self) -> &ClauseContent {
-        &self.content
+    /// The sentence it promises.
+    pub fn text(&self) -> &ClauseText {
+        &self.text
     }
 }
 
@@ -45,7 +53,8 @@ pub enum ContractError {
 }
 
 /// What a Context promises. The Contract is its content (a title and Clauses in order), not a text in some form:
-/// the same content read from Markdown or from JSON is the same Contract.
+/// the same content read from Markdown or from JSON is the same Contract. Its revision counts changes of the
+/// title, of the sentence of a Clause, of the order and of the set of Clauses; a new label alone is none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contract {
     id: ContractId,
@@ -83,10 +92,14 @@ impl Contract {
             title,
             clauses: clauses
                 .into_iter()
-                .map(|(id, content)| Clause {
-                    id,
-                    revision: Revision::first(),
-                    content,
+                .map(|(id, content)| {
+                    let (label, text) = content.into_parts();
+                    Clause {
+                        id,
+                        label,
+                        revision: Revision::first(),
+                        text,
+                    }
                 })
                 .collect(),
         })
@@ -108,10 +121,14 @@ impl Contract {
             title,
             clauses: clauses
                 .into_iter()
-                .map(|(id, revision, content)| Clause {
-                    id,
-                    revision,
-                    content,
+                .map(|(id, revision, content)| {
+                    let (label, text) = content.into_parts();
+                    Clause {
+                        id,
+                        label,
+                        revision,
+                        text,
+                    }
                 })
                 .collect(),
         })
@@ -144,13 +161,15 @@ impl Contract {
 
     /// The Clause with this label.
     pub fn clause_by_label(&self, label: ClauseLabel) -> Option<&Clause> {
-        self.clauses.iter().find(|c| c.content.label() == label)
+        self.clauses.iter().find(|c| c.label == label)
     }
 
-    /// Gives the Contract new content. A Clause whose id was there keeps its revision when its content is the
-    /// same and goes to the next one when it differs; a new id starts at the first; an id left out is gone. The
-    /// Contract goes to its next revision when anything differs (the title, a Clause, the order, a Clause added
-    /// or gone) and stays when nothing does. Content that breaks a rule changes nothing.
+    /// Gives the Contract new content. A Clause whose id was there keeps its revision when its sentence is the
+    /// same and goes to the next one when it differs; a new id starts at the first; an id left out is gone. A
+    /// Clause takes the label it is given, and a new label alone moves no revision, as a new key moves none of
+    /// an Item. The Contract goes to its next revision when anything else differs (the title, the sentence of a
+    /// Clause, the order, a Clause added or gone) and stays when nothing does. Content that breaks a rule
+    /// changes nothing.
     pub fn revise(
         &mut self,
         title: Title,
@@ -160,15 +179,17 @@ impl Contract {
         let revised: Vec<Clause> = clauses
             .into_iter()
             .map(|(id, content)| {
+                let (label, text) = content.into_parts();
                 let revision = match self.clause(id) {
                     None => Revision::first(),
-                    Some(old) if old.content == content => old.revision,
+                    Some(old) if old.text == text => old.revision,
                     Some(old) => old.revision.next(),
                 };
                 Clause {
                     id,
+                    label,
                     revision,
-                    content,
+                    text,
                 }
             })
             .collect();
@@ -177,7 +198,7 @@ impl Contract {
             && revised
                 .iter()
                 .zip(&self.clauses)
-                .all(|(new, old)| new.id == old.id && new.content == old.content);
+                .all(|(new, old)| new.id == old.id && new.text == old.text);
         if !same {
             self.revision = self.revision.next();
         }
@@ -231,7 +252,7 @@ mod tests {
         assert_eq!(c.title().as_str(), "Stack");
         assert_eq!(revisions(&c), [1, 1]);
         assert_eq!(
-            c.clause(cid(2)).unwrap().content().text().as_str(),
+            c.clause(cid(2)).unwrap().text().as_str(),
             "an empty stack has no top"
         );
         let c1 = ClauseLabel::try_from("C1").unwrap();
@@ -293,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_label_is_a_change_of_the_clause_but_not_of_its_id() {
+    fn a_new_label_alone_moves_no_revision_and_keeps_the_id() {
         let mut c = stack();
         c.revise(
             title("Stack"),
@@ -303,7 +324,28 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(c.clause(cid(1)).unwrap().content().label().number(), 3);
+        assert_eq!(c.clause(cid(1)).unwrap().label().number(), 3);
+        assert_eq!(c.revision(), Revision::first());
+        assert_eq!(revisions(&c), [1, 1]);
+        let c3 = ClauseLabel::try_from("C3").unwrap();
+        assert_eq!(c.clause_by_label(c3).unwrap().id(), cid(1));
+        let c1 = ClauseLabel::try_from("C1").unwrap();
+        assert!(c.clause_by_label(c1).is_none());
+    }
+
+    #[test]
+    fn a_new_label_with_a_new_sentence_moves_the_clause_and_the_contract() {
+        let mut c = stack();
+        c.revise(
+            title("Stack"),
+            vec![
+                (cid(1), content("C3", "pop gives back the last push")),
+                (cid(2), content("C2", "an empty stack has no top")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.clause(cid(1)).unwrap().label().number(), 3);
+        assert_eq!(c.revision().number(), 2);
         assert_eq!(revisions(&c), [2, 1]);
     }
 

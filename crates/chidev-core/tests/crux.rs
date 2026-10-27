@@ -84,10 +84,12 @@ async fn project() -> Test {
             ClauseInput {
                 label: "C1".into(),
                 text: "a half rounds up".into(),
+                replaces: None,
             },
             ClauseInput {
                 label: "C2".into(),
                 text: "a total is whole cents".into(),
+                replaces: None,
             },
         ],
     )
@@ -992,10 +994,12 @@ async fn a_crux_that_supersedes_one_of_two_decisions_that_keep_a_target_leaves_t
             ClauseInput {
                 label: "C1".into(),
                 text: "a half rounds to even".into(),
+                replaces: None,
             },
             ClauseInput {
                 label: "C2".into(),
                 text: "a total is whole cents".into(),
+                replaces: None,
             },
         ],
     )
