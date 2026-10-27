@@ -2,7 +2,7 @@
 
 use super::descriptor::Descriptor;
 use super::level::Level;
-use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestState};
+use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::service::pin::StaleReason;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
@@ -199,7 +199,7 @@ impl Finding {
             .iter()
             .filter(|c| c.addresses().contains(&self.at))
         {
-            if cr.state() != ChangeRequestState::Resolved {
+            if !cr.is_resolved() {
                 return FindingState::Addressed;
             }
             state = FindingState::Decided;
@@ -254,7 +254,6 @@ mod tests {
                 parent: None,
                 issuer: None,
                 expects: BTreeMap::new(),
-                crux: None,
                 assumptions: Vec::new(),
                 addresses,
             },

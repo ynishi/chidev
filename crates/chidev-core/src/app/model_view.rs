@@ -19,18 +19,22 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::crux::{CruxKind, Importance};
+use crate::domain::service::change_request::state_of;
+use crate::domain::vo::answer::Basis;
+use crate::domain::vo::crux::{CruxKind, Decision, Importance};
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::finding::{Subject, SubjectKind};
+use crate::domain::vo::finding::{FindingRef, Subject, SubjectKind};
 use crate::domain::vo::id::ContextId;
 use crate::domain::vo::model_section::ModelSection;
 
 /// The version of the view. It is its own: the stored documents have a schema of their own, and the two change
 /// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
 /// request's `lines` became `expects`, each with a kind. Version 3: the kinds of an expectation are `target` and
-/// `keep`; `change` and `remove` are gone.)
-pub const VIEW_VERSION: u32 = 3;
+/// `keep`; `change` and `remove` are gone. Version 4: the Crux is a record of its own, in the section `cruxes`, and a
+/// change request no longer has a `crux`.)
+pub const VIEW_VERSION: u32 = 4;
 
 /// The whole model as an agent is shown it, read when the store stood at `store_revision`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -39,6 +43,10 @@ pub struct ModelView {
     store_revision: u64,
     contexts: Vec<ContextView>,
     change_requests: Vec<ChangeRequestView>,
+    /// Left out when there is none, so that the whole view of a model without a Crux is the bytes it was without the
+    /// section.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cruxes: Vec<CruxView>,
 }
 
 /// A Context, with its assets.
@@ -129,23 +137,24 @@ pub struct CiteView {
     revision: u64,
 }
 
-/// A change request: how it stands among the others, what it asks and the question it holds. Its `situation`, its
-/// issuer and its Assumptions are not in it. They are the request in the words of whoever asked and the readings of
-/// those words, and what a reader of the view is to rely on of them has been put into the Contracts: a Harness writer
-/// who reads only the view writes the tests from the promises, not from the requirements (see the guide, Roles).
+/// A change request: how it stands among the others and what it asks. Its `situation`, its issuer and its
+/// Assumptions are not in it. They are the request in the words of whoever asked and the readings of those words,
+/// and what a reader of the view is to rely on of them has been put into the Contracts: a Harness writer who reads
+/// only the view writes the tests from the promises, not from the requirements (see the guide, Roles). The questions
+/// that stop it are the Cruxes raised in it, in `cruxes`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ChangeRequestView {
     id: String,
-    /// What is asked; for a request that holds a Crux, the question.
+    /// What is asked.
     title: String,
     /// `change_behavior` or `keep_behavior`.
     intent: &'static str,
-    /// `open`, `decided` or `resolved`.
+    /// `open`, `decided` (it has Cruxes and every one has a decision) or `resolved`.
     state: &'static str,
     /// The id of the request it is a part of; left out for one that is no part. Left out, not `null`, so that the
-    /// entry of a request with neither a parent nor a Crux is the bytes it was before the field was added. A stamp
-    /// taken over the change requests (a judged finding about them or the Project, an external run that reads them)
-    /// is stale once when any request has a parent or a Crux, as it is after any change of what it was taken over.
+    /// entry of a request without a parent is the bytes it was before the field was added. A stamp taken over the
+    /// change requests (a judged finding about them or the Project, an external run that reads them) is stale once
+    /// when any request has a parent, as it is after any change of what it was taken over.
     #[serde(skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     /// What it asks of targets (to revise or retire, or to keep), each with the revision the target had when the
@@ -153,17 +162,22 @@ pub struct ChangeRequestView {
     expects: Vec<ExpectView>,
     /// The findings it deals with.
     addresses: Vec<AddressView>,
-    /// The question it holds for the decision maker; left out, as `parent` is, for a request that holds none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    crux: Option<CruxView>,
 }
 
-/// A Crux: the kind of question, its options, the recommendation and, once decided, the decision.
+/// A Crux: a question that stops the change request it was raised in until a decision maker has decided it. It is
+/// a record of its own, beside the change requests (`cruxes`), and points at the change request by id.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CruxView {
+    id: String,
+    /// The id of the change request it stops.
+    raised_in: String,
+    /// The findings it was raised from; none for a question that arises from the text of the change request.
+    findings: Vec<AddressView>,
     /// The kind of question: `ambiguity`, `conflict`, `model` or `disagreement`.
     #[schemars(schema_with = "crux_kind_schema")]
     kind: &'static str,
+    /// The question.
+    question: String,
     /// `low`, `normal` or `high`; none when it was not given.
     #[schemars(schema_with = "importance_schema")]
     importance: Option<&'static str>,
@@ -171,11 +185,76 @@ pub struct CruxView {
     options: Vec<CruxOptionView>,
     /// The option recommended; none when there is none.
     recommended: Option<RecommendedView>,
-    /// The id of the request whose decision this one replaces; none when it replaces none.
+    /// The id of the Crux whose decision this one replaces; none when it replaces none.
     supersedes: Option<String>,
-    /// The decision, in the words `status` gives it (the choice, `in other words: …` or `left unspecified`); none
-    /// while it is undecided. Only what was decided: the work it asks for is in the Contracts.
-    decision: Option<String>,
+    /// `open` (no decision yet) or `answered`.
+    #[schemars(schema_with = "crux_state_schema")]
+    state: &'static str,
+    /// The decision, once taken; none while the Crux is open. Only what was decided: the work it asks for is in the
+    /// Contracts and in the change request it was raised in.
+    answer: Option<AnswerView>,
+}
+
+/// The decision of a Crux: what was decided, what it rests on, who said so (a claim, which nothing checks) and when.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct AnswerView {
+    id: String,
+    decision: DecisionView,
+    basis: BasisView,
+    by: MakerView,
+    /// When, in milliseconds since the epoch.
+    at: u64,
+}
+
+/// What was decided about a Crux: `{"chosen": {"option": <option id>, "reason": …}}`, `{"worded": {"wording": …,
+/// "reason": …}}`, `{"unspecified": [<what must still hold>]}` or `"withdrawn"`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionView {
+    /// One of the options.
+    Chosen {
+        /// The id of the option.
+        option: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// The behaviour in the decision maker's own words.
+    Worded {
+        /// The behaviour.
+        wording: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// The behaviour left free, as long as these hold.
+    Unspecified(Vec<String>),
+    /// The question is not needed any more.
+    Withdrawn,
+}
+
+/// What a decision rests on.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BasisView {
+    /// A line of the decision Policy, and the revision of the Policy it was applied at.
+    Policy {
+        /// The line (`P1`).
+        line: String,
+        /// The revision of the Policy.
+        policy_revision: u64,
+    },
+    /// Nothing derives it; the reason it went this way.
+    Arbitrary {
+        /// Why.
+        reason: String,
+    },
+}
+
+/// Who decided: a role or a person, as they said.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct MakerView {
+    /// `role` or `person`.
+    kind: &'static str,
+    name: String,
 }
 
 /// The schema of a Crux's `kind`: the word of one of the kinds.
@@ -194,9 +273,16 @@ fn importance_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "enum": words })
 }
 
+/// The schema of a Crux's `state`: `open` or `answered`.
+fn crux_state_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "enum": ["open", "answered"] })
+}
+
 /// An option of a Crux.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CruxOptionView {
+    /// Its id, which a recommendation and a decision point at.
+    id: String,
     choice: String,
     /// The wording the option would give; none when it gives none.
     wording: Option<String>,
@@ -220,7 +306,8 @@ pub struct OptionExpectView {
 /// The option a Crux recommends, why, and how sure (0 to 100).
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct RecommendedView {
-    choice: String,
+    /// The id of the option recommended.
+    option: String,
     reason: Option<String>,
     confidence: Option<u8>,
 }
@@ -255,7 +342,7 @@ pub struct SubjectView {
 }
 
 /// The part of the model that was asked for: the Contexts asked for, each with its metadata and the sections asked
-/// for, and the change requests when they were. A section that was not asked for is left out, not empty: an absent
+/// for, and the change requests and the Cruxes when they were. A section that was not asked for is left out, not empty: an absent
 /// key says "not requested", `[]` says "none".
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ModelSlice {
@@ -267,6 +354,10 @@ pub struct ModelSlice {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Vec<ChangeRequestView>")]
     change_requests: Option<Vec<ChangeRequestView>>,
+    /// The Cruxes; present only when they were asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<CruxView>")]
+    cruxes: Option<Vec<CruxView>>,
 }
 
 /// A Context in a [`ModelSlice`]: what names it, and the sections that were asked for.
@@ -298,7 +389,7 @@ pub struct ContextSlice {
 pub(crate) struct ViewSelection {
     /// The Contexts to take; none: every Context.
     pub(crate) contexts: Option<BTreeSet<ContextId>>,
-    /// The sections to take in each Context, and whether to take the change requests.
+    /// The sections to take in each Context, and whether to take the change requests and the Cruxes.
     pub(crate) sections: BTreeSet<ModelSection>,
 }
 
@@ -306,6 +397,90 @@ pub(crate) struct ViewSelection {
 /// nothing would make every entry look unchanged, which is why there is no way for it to.
 fn stamp<T: Serialize + ?Sized>(entry: &T) -> Digest {
     Digest::of(&serde_json::to_vec(entry).unwrap_or_default())
+}
+
+/// A finding a change request addresses or a Crux was raised from.
+fn address_view(a: &FindingRef) -> AddressView {
+    AddressView {
+        rule: a.rule().to_string(),
+        subject: a.subject().map(|s| SubjectView {
+            kind: s.kind().word(),
+            id: s.as_uuid().to_string(),
+        }),
+    }
+}
+
+/// A Crux as the view shows it. Every id is the id the record has; a reader that follows `raised_in` finds the change
+/// request in `change_requests`, and the option a decision `chosen` in the `options` of the Crux.
+fn crux_view(x: &Crux) -> CruxView {
+    CruxView {
+        id: x.id().to_string(),
+        raised_in: x.raised_in().to_string(),
+        findings: x.findings().iter().map(address_view).collect(),
+        kind: x.kind().word(),
+        question: x.question().as_str().to_string(),
+        importance: x.importance().map(|i| i.word()),
+        options: x
+            .options()
+            .iter()
+            .map(|o| CruxOptionView {
+                id: o.id().to_string(),
+                choice: o.choice().as_str().to_string(),
+                wording: o.change().map(|w| w.as_str().to_string()),
+                expects: o
+                    .expects()
+                    .iter()
+                    .map(|(t, k)| OptionExpectView {
+                        target: t.word(),
+                        id: t.as_uuid().map(|u| u.to_string()),
+                        kind: k.word(),
+                    })
+                    .collect(),
+                consequence: o.consequence().map(|w| w.as_str().to_string()),
+            })
+            .collect(),
+        recommended: x.recommended().map(|r| RecommendedView {
+            option: r.option().to_string(),
+            reason: r.reason().map(|w| w.as_str().to_string()),
+            confidence: r.confidence().map(|c| c.percent()),
+        }),
+        supersedes: x.supersedes().map(|s| s.to_string()),
+        state: x.state().word(),
+        answer: x.answer_given().map(|a| AnswerView {
+            id: a.id().to_string(),
+            decision: match a.decision() {
+                Decision::Chosen { option, reason } => DecisionView::Chosen {
+                    option: option.to_string(),
+                    reason: reason.as_ref().map(|r| r.as_str().to_string()),
+                },
+                Decision::Worded { wording, reason } => DecisionView::Worded {
+                    wording: wording.as_str().to_string(),
+                    reason: reason.as_ref().map(|r| r.as_str().to_string()),
+                },
+                Decision::Unspecified { keep } => {
+                    DecisionView::Unspecified(keep.iter().map(|k| k.as_str().to_string()).collect())
+                }
+                Decision::Withdrawn => DecisionView::Withdrawn,
+            },
+            basis: match a.basis() {
+                Basis::Policy {
+                    line,
+                    policy_revision,
+                } => BasisView::Policy {
+                    line: line.to_string(),
+                    policy_revision: policy_revision.number(),
+                },
+                Basis::Arbitrary { reason } => BasisView::Arbitrary {
+                    reason: reason.as_str().to_string(),
+                },
+            },
+            by: MakerView {
+                kind: a.by().word(),
+                name: a.by().name().to_string(),
+            },
+            at: a.at().millis(),
+        }),
+    }
 }
 
 impl ContextView {
@@ -316,12 +491,14 @@ impl ContextView {
 }
 
 impl ModelView {
-    /// The view of `project` and `crs`, read when the store stood at `store_revision`. `names` are the names a
-    /// person gave the assets, by id; an asset with none is shown by its id.
+    /// The view of `project`, `crs` and the Cruxes `cruxes` raised in them, read when the store stood at
+    /// `store_revision`. `names` are the names a person gave the assets, by id; an asset with none is shown by its
+    /// id.
     pub fn build(
         store_revision: u64,
         project: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
         names: &BTreeMap<Uuid, String>,
     ) -> ModelView {
         let name = |id: Uuid| names.get(&id).cloned().unwrap_or_else(|| id.to_string());
@@ -425,7 +602,7 @@ impl ModelView {
                 id: c.id().to_string(),
                 title: c.title().to_string(),
                 intent: c.intent().word(),
-                state: c.state().word(),
+                state: state_of(c, cruxes).word(),
                 expects: c
                     .expects()
                     .iter()
@@ -436,47 +613,8 @@ impl ModelView {
                         recorded: e.recorded.number(),
                     })
                     .collect(),
-                addresses: c
-                    .addresses()
-                    .iter()
-                    .map(|a| AddressView {
-                        rule: a.rule().to_string(),
-                        subject: a.subject().map(|s| SubjectView {
-                            kind: s.kind().word(),
-                            id: s.as_uuid().to_string(),
-                        }),
-                    })
-                    .collect(),
+                addresses: c.addresses().iter().map(address_view).collect(),
                 parent: c.parent().map(|p| p.to_string()),
-                crux: c.crux().map(|x| CruxView {
-                    kind: x.kind().word(),
-                    importance: x.importance().map(|i| i.word()),
-                    options: x
-                        .options()
-                        .iter()
-                        .map(|o| CruxOptionView {
-                            choice: o.choice().as_str().to_string(),
-                            wording: o.change().map(|w| w.as_str().to_string()),
-                            expects: o
-                                .expects()
-                                .iter()
-                                .map(|(t, k)| OptionExpectView {
-                                    target: t.word(),
-                                    id: t.as_uuid().map(|u| u.to_string()),
-                                    kind: k.word(),
-                                })
-                                .collect(),
-                            consequence: o.consequence().map(|w| w.as_str().to_string()),
-                        })
-                        .collect(),
-                    recommended: x.recommended().map(|r| RecommendedView {
-                        choice: r.choice().as_str().to_string(),
-                        reason: r.reason().map(|w| w.as_str().to_string()),
-                        confidence: r.confidence().map(|c| c.percent()),
-                    }),
-                    supersedes: x.supersedes().map(|s| s.to_string()),
-                    decision: x.answer().map(|a| super::decision_text(a.decision())),
-                }),
             })
             .collect();
         ModelView {
@@ -484,6 +622,7 @@ impl ModelView {
             store_revision,
             contexts,
             change_requests,
+            cruxes: cruxes.iter().map(crux_view).collect(),
         }
     }
 
@@ -519,6 +658,7 @@ impl ModelView {
             version: self.version,
             contexts,
             change_requests: takes(ModelSection::ChangeRequests).then_some(self.change_requests),
+            cruxes: takes(ModelSection::Cruxes).then_some(self.cruxes),
         }
     }
 
@@ -540,7 +680,17 @@ impl ModelView {
             Subject::Clause(_) => self.clauses().find(|c| c.id == id).map(stamp),
             Subject::Case(_) => self.cases().find(|c| c.id == id).map(stamp),
             Subject::ChangeRequest(_) => {
-                self.change_requests.iter().find(|c| c.id == id).map(stamp)
+                self.change_requests.iter().find(|c| c.id == id).map(|c| {
+                    let raised: Vec<&CruxView> =
+                        self.cruxes.iter().filter(|q| q.raised_in == id).collect();
+                    // The Cruxes raised in a request are a part of what it is: it is stamped with them. One without
+                    // any is stamped as it was before there were Cruxes, so that the saved findings about it hold.
+                    if raised.is_empty() {
+                        stamp(c)
+                    } else {
+                        stamp(&(c, raised))
+                    }
+                })
             }
         }
     }
@@ -555,8 +705,14 @@ impl ModelView {
             SubjectKind::Item => stamp(&self.items().collect::<Vec<_>>()),
             SubjectKind::Clause => stamp(&self.clauses().collect::<Vec<_>>()),
             SubjectKind::Case => stamp(&self.cases().collect::<Vec<_>>()),
-            SubjectKind::ChangeRequest => stamp(&self.change_requests),
-            SubjectKind::Project => stamp(&(&self.contexts, &self.change_requests)),
+            // The Cruxes belong to the change requests they are raised in. A model without a Crux is stamped as it
+            // was before there were Cruxes.
+            SubjectKind::ChangeRequest if self.cruxes.is_empty() => stamp(&self.change_requests),
+            SubjectKind::ChangeRequest => stamp(&(&self.change_requests, &self.cruxes)),
+            SubjectKind::Project if self.cruxes.is_empty() => {
+                stamp(&(&self.contexts, &self.change_requests))
+            }
+            SubjectKind::Project => stamp(&(&self.contexts, &self.change_requests, &self.cruxes)),
         }
     }
 
@@ -584,13 +740,14 @@ impl ModelView {
 }
 
 impl ModelSlice {
-    /// A slice of no Context and no change request, for a test that needs a value to carry.
+    /// A slice of no Context, no change request and no Crux, for a test that needs a value to carry.
     #[cfg(test)]
     pub(super) fn empty(version: u32) -> ModelSlice {
         ModelSlice {
             version,
             contexts: Vec::new(),
             change_requests: None,
+            cruxes: None,
         }
     }
 
@@ -607,6 +764,11 @@ impl ModelSlice {
     /// The change requests; none when they were not taken.
     pub(super) fn change_requests(&self) -> Option<&[ChangeRequestView]> {
         self.change_requests.as_deref()
+    }
+
+    /// The Cruxes; none when they were not taken.
+    pub(super) fn cruxes(&self) -> Option<&[CruxView]> {
+        self.cruxes.as_deref()
     }
 
     /// Whether a Context with this id is in the slice.

@@ -1,38 +1,41 @@
-//! Schemas 1 and 2 of the stored documents. These types are a versioned storage format, not a copy of the domain: they
+//! Schemas 1 and 2 of the Project and Pin documents, and schema 3 of the change request document. These types are a versioned storage format, not a copy of the domain: they
 //! must stay readable as the domain changes, and they reach the domain only through its `restore` functions, which
 //! re-check every rule.
 //!
 //! Schema 2 differs from schema 1 in the Items of a Project's Interfaces alone: an Item is kept by its key, not by
-//! its signature (the Interface derives the signature from its code and the Item's lines). The Pin and change
-//! request documents have the same shape in both. A Project document of schema 1 is converted on these types, in
+//! its signature (the Interface derives the signature from its code and the Item's lines). The Pin documents have
+//! the same shape in both. A Project document of schema 1 is converted on these types, in
 //! [`ProjectDoc::convert_schema_1`], before the domain is built from it: that is the one place the old shape is known.
+//!
+//! The change request document is schema 3 since the Crux became a record of its own (see [`super::crux`]): it no
+//! longer holds one. A change request document of an earlier schema is read only by the migration to layout 2 of the
+//! store (see [`super::layout2`]), which moves its Crux out of it; this module never reads one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+use crate::domain::entity::change_request::{
+    ChangeRequest, ChangeRequestDraft, DecidedExpectation,
+};
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::interface::{Interface, InterfaceError};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, DecisionMaker};
+use crate::domain::vo::answer::DecisionMaker;
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::case::{CaseCites, CaseName};
-use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-use crate::domain::vo::confidence::Confidence;
-use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Footprint, Move};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
-    CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
-    PinId, ProjectId,
+    AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId,
+    ItemId, PinId, ProjectId,
 };
 use crate::domain::vo::intent::{Intent, Issuer};
 use crate::domain::vo::item_key::ItemKey;
@@ -49,8 +52,11 @@ use crate::domain::vo::target::{ExpectKind, Expectation, Target};
 use crate::domain::vo::timestamp::Timestamp;
 use crate::domain::vo::title::Title;
 
-/// The schema number these documents are written with.
+/// The schema number the Project and Pin documents are written with.
 pub(crate) const SCHEMA: u32 = 2;
+
+/// The schema number the change request documents are written with.
+pub(crate) const CR_SCHEMA: u32 = 3;
 
 /// The schema before an Item was kept by its key.
 const SCHEMA_1: u32 = 1;
@@ -58,15 +64,15 @@ const SCHEMA_1: u32 = 1;
 /// Why a stored document cannot be read as the model.
 pub(crate) type Bad = String;
 
-fn bad(e: impl std::fmt::Display) -> Bad {
+pub(super) fn bad(e: impl std::fmt::Display) -> Bad {
     e.to_string()
 }
 
-fn uuid(text: &str) -> Result<Uuid, Bad> {
+pub(super) fn uuid(text: &str) -> Result<Uuid, Bad> {
     Uuid::parse_str(text).map_err(|e| format!("`{text}` is not an id: {e}"))
 }
 
-fn revision(number: u64) -> Result<Revision, Bad> {
+pub(super) fn revision(number: u64) -> Result<Revision, Bad> {
     Revision::restore(number).ok_or_else(|| "a revision is 0".to_string())
 }
 
@@ -74,7 +80,7 @@ fn lines(first: usize, last: usize) -> Result<LineRange, Bad> {
     LineRange::new(first, last).map_err(bad)
 }
 
-fn prose(text: &Option<String>) -> Result<Option<Prose>, Bad> {
+pub(super) fn prose(text: &Option<String>) -> Result<Option<Prose>, Bad> {
     text.as_deref()
         .map(|t| Prose::try_from(t).map_err(bad))
         .transpose()
@@ -710,21 +716,20 @@ impl TryFrom<PinDoc> for Pin {
 
 // ---------------------------------------------------------- ChangeRequest
 
-/// A change request, with its Crux (and the answer to it) and its Assumptions.
+/// A change request, with its Assumptions. The Crux raised in it is a document of its own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChangeRequestDoc {
     pub schema: u32,
-    id: String,
+    pub(super) id: String,
     title: String,
     situation: Option<String>,
     intent: IntentDoc,
     parent: Option<String>,
     issuer: Option<String>,
     expects: Vec<ExpectDoc>,
-    crux: Option<CruxDoc>,
-    /// What the option decided expects, with the revision each target had at the decision.
-    decided_expects: Vec<ExpectDoc>,
+    /// What the options chosen expect, with the revision each target had at the decision and the answer that asked.
+    decided_expects: Vec<DecidedExpectDoc>,
     /// The interpretations it records; a document without them is from before they existed and does not load.
     assumptions: Vec<AssumptionDoc>,
     /// The findings it deals with.
@@ -772,14 +777,14 @@ struct ReopeningDoc {
     at: u64,
 }
 
-fn maker_doc(by: &DecisionMaker) -> MakerDoc {
+pub(super) fn maker_doc(by: &DecisionMaker) -> MakerDoc {
     match by {
         DecisionMaker::Role(n) => MakerDoc::Role(n.to_string()),
         DecisionMaker::Person(n) => MakerDoc::Person(n.to_string()),
     }
 }
 
-fn maker_of(by: &MakerDoc) -> Result<DecisionMaker, Bad> {
+pub(super) fn maker_of(by: &MakerDoc) -> Result<DecisionMaker, Bad> {
     match by {
         MakerDoc::Role(n) => DecisionMaker::role(n),
         MakerDoc::Person(n) => DecisionMaker::person(n),
@@ -917,7 +922,7 @@ impl TryFrom<&FootprintDoc> for Footprint {
 
 /// A finding a change request addresses: the rule, and what it is about.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AddressDoc {
+pub(super) struct AddressDoc {
     rule: String,
     subject: Option<SubjectDoc>,
 }
@@ -998,7 +1003,7 @@ enum IntentDoc {
 /// The kind of a target. Every kind has an id but the Project, whose `id` is null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TargetDoc {
+pub(super) enum TargetDoc {
     Project,
     Context,
     Contract,
@@ -1011,7 +1016,7 @@ enum TargetDoc {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ExpectKindDoc {
+pub(super) enum ExpectKindDoc {
     Target,
     Keep,
 }
@@ -1044,15 +1049,26 @@ struct ExpectDoc {
     recorded: u64,
 }
 
-/// What a Crux option expects of a target when it is chosen.
+/// What a decision asked of a target, once recorded in the change request: as [`ExpectDoc`], with the id of the answer
+/// of the decision that asked for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OptionExpectDoc {
+struct DecidedExpectDoc {
     target: TargetDoc,
     id: Option<String>,
     kind: ExpectKindDoc,
+    recorded: u64,
+    answer: String,
 }
 
-fn target_doc(t: &Target) -> (TargetDoc, Option<String>) {
+/// What a Crux option expects of a target when it is chosen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct OptionExpectDoc {
+    pub(super) target: TargetDoc,
+    pub(super) id: Option<String>,
+    pub(super) kind: ExpectKindDoc,
+}
+
+pub(super) fn target_doc(t: &Target) -> (TargetDoc, Option<String>) {
     let id = |u: Uuid| Some(u.to_string());
     match t {
         Target::Project => (TargetDoc::Project, None),
@@ -1101,6 +1117,47 @@ fn expect_docs(expects: &BTreeMap<Target, Expectation>) -> Vec<ExpectDoc> {
         .collect()
 }
 
+fn decided_expect_docs(expects: &[DecidedExpectation]) -> Vec<DecidedExpectDoc> {
+    expects
+        .iter()
+        .map(|e| {
+            let (target, id) = target_doc(&e.target);
+            DecidedExpectDoc {
+                target,
+                id,
+                kind: e.kind.into(),
+                recorded: e.recorded.number(),
+                answer: e.answer.as_uuid().to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The decided expectations in `docs`, in their order; a target twice for one answer is refused: a decision asks a
+/// target once. Several decisions may ask the same target.
+fn decided_expects_of(docs: &[DecidedExpectDoc]) -> Result<Vec<DecidedExpectation>, Bad> {
+    let mut out: Vec<DecidedExpectation> = Vec::with_capacity(docs.len());
+    for d in docs {
+        let expectation = DecidedExpectation {
+            target: target_of(&d.target, &d.id)?,
+            kind: d.kind.into(),
+            recorded: revision(d.recorded)?,
+            answer: AnswerId::from_uuid(uuid(&d.answer)?),
+        };
+        if out
+            .iter()
+            .any(|e| e.target == expectation.target && e.answer == expectation.answer)
+        {
+            return Err(format!(
+                "{:?} is expected twice by one decision",
+                expectation.target
+            ));
+        }
+        out.push(expectation);
+    }
+    Ok(out)
+}
+
 /// The expectations in `docs`; a target twice is refused: a target has one expectation.
 fn expects_of(docs: &[ExpectDoc]) -> Result<BTreeMap<Target, Expectation>, Bad> {
     let mut out = BTreeMap::new();
@@ -1118,7 +1175,9 @@ fn expects_of(docs: &[ExpectDoc]) -> Result<BTreeMap<Target, Expectation>, Bad> 
 }
 
 /// The expectations of a Crux option; a target twice is refused.
-fn option_expects_of(docs: &[OptionExpectDoc]) -> Result<BTreeMap<Target, ExpectKind>, Bad> {
+pub(super) fn option_expects_of(
+    docs: &[OptionExpectDoc],
+) -> Result<BTreeMap<Target, ExpectKind>, Bad> {
     let mut out = BTreeMap::new();
     for d in docs {
         let target = target_of(&d.target, &d.id)?;
@@ -1131,61 +1190,31 @@ fn option_expects_of(docs: &[OptionExpectDoc]) -> Result<BTreeMap<Target, Expect
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CruxKindDoc {
+pub(super) enum CruxKindDoc {
     Ambiguity,
     Conflict,
     Model,
     Disagreement,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CruxDoc {
-    kind: CruxKindDoc,
-    options: Vec<OptionDoc>,
-    recommended: Option<RecommendedDoc>,
-    importance: Option<ImportanceDoc>,
-    /// The id of the change request whose answered Crux this one replaces.
-    supersedes: Option<String>,
-    answer: Option<AnswerDoc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecommendedDoc {
-    choice: String,
-    reason: Option<String>,
-    confidence: Option<u64>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ImportanceDoc {
+pub(super) enum ImportanceDoc {
     Low,
     Normal,
     High,
 }
 
-/// The answer to a Crux: the decision, what it rests on, who gave it, and when (milliseconds since the epoch).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnswerDoc {
-    decision: DecisionDoc,
-    basis: AnswerBasisDoc,
-    by: MakerDoc,
-    at: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AnswerBasisDoc {
+pub(super) enum AnswerBasisDoc {
     Policy { line: String, policy_revision: u64 },
     Arbitrary { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MakerDoc {
+pub(super) enum MakerDoc {
     Role(String),
     Person(String),
 }
@@ -1208,96 +1237,6 @@ enum EvidenceDoc {
     Knowledge {
         reference: String,
     },
-}
-
-impl From<&Decision> for DecisionDoc {
-    fn from(d: &Decision) -> DecisionDoc {
-        match d {
-            Decision::Chosen(r) => DecisionDoc::Chosen(ReasonedDoc::from(r)),
-            Decision::Worded { wording, reason } => DecisionDoc::Worded {
-                wording: wording.to_string(),
-                reason: reason.as_ref().map(|p| p.to_string()),
-            },
-            Decision::Unspecified { keep } => DecisionDoc::Unspecified {
-                keep: keep.iter().map(|p| p.to_string()).collect(),
-            },
-        }
-    }
-}
-
-impl TryFrom<&DecisionDoc> for Decision {
-    type Error = Bad;
-
-    fn try_from(d: &DecisionDoc) -> Result<Decision, Bad> {
-        Ok(match d {
-            DecisionDoc::Chosen(r) => Decision::Chosen(Reasoned::try_from(r)?),
-            DecisionDoc::Worded { wording, reason } => Decision::Worded {
-                wording: Prose::try_from(wording.as_str()).map_err(bad)?,
-                reason: prose(reason)?,
-            },
-            DecisionDoc::Unspecified { keep } => Decision::Unspecified {
-                keep: keep
-                    .iter()
-                    .map(|k| Prose::try_from(k.as_str()).map_err(bad))
-                    .collect::<Result<_, _>>()?,
-            },
-        })
-    }
-}
-
-impl From<&Answer> for AnswerDoc {
-    fn from(a: &Answer) -> AnswerDoc {
-        AnswerDoc {
-            decision: DecisionDoc::from(a.decision()),
-            basis: match a.basis() {
-                AnswerBasis::Policy {
-                    line,
-                    policy_revision,
-                } => AnswerBasisDoc::Policy {
-                    line: line.to_string(),
-                    policy_revision: policy_revision.number(),
-                },
-                AnswerBasis::Arbitrary { reason } => AnswerBasisDoc::Arbitrary {
-                    reason: reason.to_string(),
-                },
-            },
-            by: match a.by() {
-                DecisionMaker::Role(n) => MakerDoc::Role(n.to_string()),
-                DecisionMaker::Person(n) => MakerDoc::Person(n.to_string()),
-            },
-            at: a.at().millis(),
-        }
-    }
-}
-
-impl TryFrom<&AnswerDoc> for Answer {
-    type Error = Bad;
-
-    fn try_from(d: &AnswerDoc) -> Result<Answer, Bad> {
-        let basis = match &d.basis {
-            AnswerBasisDoc::Policy {
-                line,
-                policy_revision,
-            } => AnswerBasis::Policy {
-                line: PolicyLineId::try_from(line.as_str()).map_err(bad)?,
-                policy_revision: revision(*policy_revision)?,
-            },
-            AnswerBasisDoc::Arbitrary { reason } => AnswerBasis::Arbitrary {
-                reason: Prose::try_from(reason.as_str()).map_err(bad)?,
-            },
-        };
-        let by = match &d.by {
-            MakerDoc::Role(n) => DecisionMaker::role(n),
-            MakerDoc::Person(n) => DecisionMaker::person(n),
-        }
-        .map_err(bad)?;
-        Ok(Answer::new(
-            Decision::try_from(&d.decision)?,
-            basis,
-            by,
-            Timestamp::from_millis(d.at),
-        ))
-    }
 }
 
 impl From<&Assumption> for AssumptionDoc {
@@ -1346,57 +1285,10 @@ impl TryFrom<&AssumptionDoc> for Assumption {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OptionDoc {
-    choice: String,
-    change: Option<String>,
-    expects: Vec<OptionExpectDoc>,
-    consequence: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReasonedDoc {
-    choice: String,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DecisionDoc {
-    Chosen(ReasonedDoc),
-    Worded {
-        wording: String,
-        reason: Option<String>,
-    },
-    Unspecified {
-        keep: Vec<String>,
-    },
-}
-
-impl From<&Reasoned> for ReasonedDoc {
-    fn from(r: &Reasoned) -> ReasonedDoc {
-        ReasonedDoc {
-            choice: r.choice().to_string(),
-            reason: r.reason().map(|p| p.to_string()),
-        }
-    }
-}
-
-impl TryFrom<&ReasonedDoc> for Reasoned {
-    type Error = Bad;
-
-    fn try_from(d: &ReasonedDoc) -> Result<Reasoned, Bad> {
-        Ok(Reasoned::new(
-            Choice::try_from(d.choice.as_str()).map_err(bad)?,
-            prose(&d.reason)?,
-        ))
-    }
-}
-
 impl From<&ChangeRequest> for ChangeRequestDoc {
     fn from(c: &ChangeRequest) -> ChangeRequestDoc {
         ChangeRequestDoc {
-            schema: SCHEMA,
+            schema: CR_SCHEMA,
             id: c.id().as_uuid().to_string(),
             title: c.title().to_string(),
             situation: c.situation().map(|p| p.to_string()),
@@ -1407,48 +1299,7 @@ impl From<&ChangeRequest> for ChangeRequestDoc {
             parent: c.parent().map(|p| p.as_uuid().to_string()),
             issuer: c.issuer().map(|i| i.to_string()),
             expects: expect_docs(c.expects()),
-            crux: c.crux().map(|q| CruxDoc {
-                kind: match q.kind() {
-                    CruxKind::Ambiguity => CruxKindDoc::Ambiguity,
-                    CruxKind::Conflict => CruxKindDoc::Conflict,
-                    CruxKind::Model => CruxKindDoc::Model,
-                    CruxKind::Disagreement => CruxKindDoc::Disagreement,
-                },
-                options: q
-                    .options()
-                    .iter()
-                    .map(|o| OptionDoc {
-                        choice: o.choice().to_string(),
-                        change: o.change().map(|p| p.to_string()),
-                        expects: o
-                            .expects()
-                            .iter()
-                            .map(|(t, k)| {
-                                let (target, id) = target_doc(t);
-                                OptionExpectDoc {
-                                    target,
-                                    id,
-                                    kind: (*k).into(),
-                                }
-                            })
-                            .collect(),
-                        consequence: o.consequence().map(|p| p.to_string()),
-                    })
-                    .collect(),
-                recommended: q.recommended().map(|r| RecommendedDoc {
-                    choice: r.choice().to_string(),
-                    reason: r.reason().map(|p| p.to_string()),
-                    confidence: r.confidence().map(|c| u64::from(c.percent())),
-                }),
-                importance: q.importance().map(|i| match i {
-                    Importance::Low => ImportanceDoc::Low,
-                    Importance::Normal => ImportanceDoc::Normal,
-                    Importance::High => ImportanceDoc::High,
-                }),
-                supersedes: q.supersedes().map(|s| s.as_uuid().to_string()),
-                answer: q.answer().map(AnswerDoc::from),
-            }),
-            decided_expects: expect_docs(c.decided_expects()),
+            decided_expects: decided_expect_docs(c.decided_expects()),
             assumptions: c.assumptions().iter().map(AssumptionDoc::from).collect(),
             addresses: c.addresses().iter().map(AddressDoc::from).collect(),
             work: c.work().iter().map(FootprintDoc::from).collect(),
@@ -1462,57 +1313,7 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
 
     fn try_from(d: ChangeRequestDoc) -> Result<ChangeRequest, Bad> {
         let expects = expects_of(&d.expects)?;
-        let decided_expects = expects_of(&d.decided_expects)?;
-        let crux = match &d.crux {
-            None => None,
-            Some(q) => {
-                let mut options = Vec::with_capacity(q.options.len());
-                for o in &q.options {
-                    options.push(CruxOption::new(
-                        Choice::try_from(o.choice.as_str()).map_err(bad)?,
-                        prose(&o.change)?,
-                        option_expects_of(&o.expects)?,
-                        prose(&o.consequence)?,
-                    ));
-                }
-                let kind = match q.kind {
-                    CruxKindDoc::Ambiguity => CruxKind::Ambiguity,
-                    CruxKindDoc::Conflict => CruxKind::Conflict,
-                    CruxKindDoc::Model => CruxKind::Model,
-                    CruxKindDoc::Disagreement => CruxKind::Disagreement,
-                };
-                let recommended = q
-                    .recommended
-                    .as_ref()
-                    .map(|r| {
-                        Ok::<_, Bad>(Recommended::new(
-                            Choice::try_from(r.choice.as_str()).map_err(bad)?,
-                            prose(&r.reason)?,
-                            r.confidence
-                                .map(|c| Confidence::try_from(c).map_err(bad))
-                                .transpose()?,
-                        ))
-                    })
-                    .transpose()?;
-                let importance = q.importance.map(|i| match i {
-                    ImportanceDoc::Low => Importance::Low,
-                    ImportanceDoc::Normal => Importance::Normal,
-                    ImportanceDoc::High => Importance::High,
-                });
-                let supersedes = q
-                    .supersedes
-                    .as_deref()
-                    .map(|s| Ok::<_, Bad>(ChangeRequestId::from_uuid(uuid(s)?)))
-                    .transpose()?;
-                Some(Crux::new(kind, options, recommended, importance, supersedes).map_err(bad)?)
-            }
-        };
-        let answer = d
-            .crux
-            .as_ref()
-            .and_then(|q| q.answer.as_ref())
-            .map(Answer::try_from)
-            .transpose()?;
+        let decided_expects = decided_expects_of(&d.decided_expects)?;
         let draft = ChangeRequestDraft {
             title: Title::try_from(d.title.as_str()).map_err(bad)?,
             situation: prose(&d.situation)?,
@@ -1531,7 +1332,6 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
                 .map(|i| Issuer::try_from(i).map_err(bad))
                 .transpose()?,
             expects,
-            crux,
             assumptions: d
                 .assumptions
                 .iter()
@@ -1546,7 +1346,6 @@ impl TryFrom<ChangeRequestDoc> for ChangeRequest {
         ChangeRequest::restore(
             ChangeRequestId::from_uuid(uuid(&d.id)?),
             draft,
-            answer,
             decided_expects,
             d.work
                 .iter()

@@ -33,7 +33,12 @@ take several, one after the other, as long as the Harness role is kept apart.
 | designer | the requirements and their acceptance examples, the assets (`view`) | puts the Contracts and Interfaces |
 | Harness writer (blind) | the Contracts, Interfaces, Harnesses and change requests (`view`); never the code or the requirements | writes the tests and puts the Harness |
 | implementer | everything | writes the code, runs the tests, pins it |
-| decision maker | the Crux, the Policy | decides a Crux (`cr_decide`), resolves requests |
+| decision maker | the Crux, the Policy | decides a Crux (`cr_crux_decide`), resolves requests |
+
+The decision maker is a role that applies the Policy, an answering agent, or a
+person. The authority to decide is managed outside chidev: chidev keeps `by` as
+the decision maker declared it and checks nothing against it (see
+[Crux, Policy and Assumption](../../README.md#crux-policy-and-assumption)).
 
 The Harness writer is blind so that the tests check what the Contracts promise,
 not what the code happens to do. A role that has read the implementation does
@@ -47,7 +52,7 @@ test from the Contracts and Interfaces sends the gap back to the designer, who
 treats it as a question of step 2: a Clause where the requirements settle it,
 an Assumption where an interpretation does, a Crux where two readings remain,
 or a comment of the Interface reworded where it says more than any Clause
-promises. The answer is work `for` the part that holds it, and the Harness
+promises. The answer is work `for` the part the question was raised in, and the Harness
 writer then puts the Cases that check it. A resolved part takes no work:
 `cr_reopen` it first, or open a new request. Reopening leaves a resolved parent
 resolved, so reopen a part while its parent is still open.
@@ -56,16 +61,17 @@ Not reading the code keeps the tests from fitting the code; it does not keep the
 from sharing a misreading of the requirements with the Contracts. So whoever
 writes the Harness, the designer in a fresh session or another agent, is given
 only what the record holds
-(`{"op":"view","sections":["contracts","interfaces","harnesses","change_requests"]}`:
+(`{"op":"view","sections":["contracts","interfaces","harnesses","change_requests","cruxes"]}`:
 the Harnesses so that a put keeps the Cases already there, the change requests
-for the part a put is `for`), not the requirements, the code or the
-conversation that wrote the Contracts. A request names its targets by id
+for the part a put is `for`, the Cruxes for the questions a part waits on), not
+the requirements, the code or the conversation that wrote the Contracts. A request names its targets by id
 (`expects`, each with its `id`), and the same `view` gives each Context and
-asset its id beside its name, and each request its `parent` and its `crux` (the
-options and, once decided, the decision): the part a put is `for` is the one
-whose parent is the request and whose target holds the change, and a part with
-a `crux` holds the question. `view` does not give a request's `situation` or
-Assumptions.
+asset its id beside its name, and each request its `parent`: the part a put is
+`for` is the one whose parent is the request and whose target holds the change.
+The `cruxes` give each question with the id of the request it stops
+(`raised_in`), its options and, once decided, the decision: a part that some
+Crux names there waits on that question. `view` does not give a request's
+`situation` or Assumptions.
 
 ## The loop
 
@@ -83,29 +89,34 @@ Assumptions.
      settles it to one reading: there is no choice, so record an Assumption,
      with its evidence, and go on;
    - two readings remain: it is a choice, for the decision maker (a Policy
-     line can settle the ones that do not matter much). Open a part for it
-     then, even in the middle of the design. It names what holds the work its
-     answer asks for: the Context, which frames the Clause, the Cases and the
-     code of it, whether they are there yet or not. Give it a `crux` with its
-     options and a
-     recommendation. The change an option makes is its `wording` and its
-     `targets`: name there the assets that already exist and that choosing it
-     would change beyond what the part names (an Interface whose types it
-     changes); a target has to exist when the request opens. Say in its
-     `consequence` what else choosing it affects (what a user of the program
-     sees, what is not there yet to be named). The work that depends on the
-     answer waits: the Clause that promises the point, the Cases that check
-     it, and the code that keeps it. The rest goes on. The code written
-     meanwhile still does something at that point, but nothing promises it;
-     it is not the answer, and the answer's work may change it.
+     line can settle the ones that do not matter much). Raise it with
+     `cr_crux_raise` in the request it came up in, even in the middle of the
+     design; it does not get a part of its own. Give it its `kind`, its
+     `question`, its `options` and a recommendation. The change an option makes
+     is its `wording` and its `targets`: name there the assets that already
+     exist and that choosing it would change beyond what the request names (an
+     Interface whose types it changes); a target has to exist when the Crux is
+     raised. Say in its `consequence` what else choosing it affects (what a
+     user of the program sees, what is not there yet to be named). The request
+     waits: it is not resolved, however it would end, until its Cruxes are
+     decided. The work that depends on the answer waits as well: the Clause that
+     promises the point, the Cases that check it, and the code that keeps it.
+     The rest goes on, in the other parts; work that should not wait for the
+     answer belongs in a request of its own. The code written meanwhile still
+     does something at that point, but nothing promises it; it is not the
+     answer, and the answer's work may change it.
 
    See [Change requests](../../README.md#change-requests) and
    [Crux, Policy and Assumption](../../README.md#crux-policy-and-assumption).
 3. **Design.** Make the change as a `change_set` `for` the part: the Contracts
    and the Interfaces it asks for, in one operation, checked on the state it
-   ends in. Keep an Item's id across a rename with `replaces`. Raise a Context
-   to `contract` basis when its behaviour needs promises a signature cannot
-   carry. See [Change sets](../../README.md#change-sets).
+   ends in. When a Crux raised in the part is decided, the targets of the
+   option chosen become expectations of the part, so the work the answer asks
+   for is `for` the part too; if the part cannot take it (it is resolved, or
+   what the answer changes is outside what it names), open a new request for
+   it. Keep an Item's id across a rename with `replaces`. Raise a Context to
+   `contract` basis when its behaviour needs promises a signature cannot carry.
+   See [Change sets](../../README.md#change-sets).
    - Write an Interface's `source` as a caller sees it, since the Harness
      writer has nothing else to call it from: the path a caller writes (the
      crate and module), and for a program, its name, its arguments and what it
@@ -125,12 +136,13 @@ Assumptions.
 4. **Harness (blind).** The Harness writer writes the tests from the Contracts
    and Interfaces, and puts the Harness in a `change_set` `for` the part whose
    change that put carries: every Case cites the Items it calls and the
-   Clauses it checks. Every Clause added or changed is cited by some Case. A
-   put replaces the whole Harness and is applied `for` one part: the put that
-   adds the Cases of an answered Crux, and only those, is applied `for` the
-   part that holds the Crux. A Case the implementer finds wrong against its
-   Clause goes back to the Harness writer with that Clause, and the writer puts
-   the corrected Harness `for` the same part. The acceptance examples the
+   Clauses it checks. It reads `cruxes` in `view` to see which part a question
+   stops and, once decided, what was decided. Every Clause added or changed is
+   cited by some Case. A put replaces the whole Harness and is applied `for`
+   one part: the put that adds the Cases of an answered Crux, and only those, is
+   applied `for` the part the Crux was raised in. A Case the implementer finds
+   wrong against its Clause goes back to the Harness writer with that Clause,
+   and the writer puts the corrected Harness `for` the same part. The acceptance examples the
    requirements give are run by Cases too. The designer puts each one into a
    Clause that names its files (for example, "the input `acceptance/a1.stdin`
    gives the output `acceptance/a1.expected` and exit code 0"); the Case reads
@@ -154,24 +166,25 @@ Assumptions.
    pinned Interface: it says no run was made, not that the work missed
    something. A stale Pin means implement and pin again; a stale citation means
    bring the tests up to the target, then put the Harness again. An edit (a put,
-   a retire, `context_add`, `items_rekey`, a change request opened or decided)
-   says only what that edit broke (a citation it made stale, a Pin it left
+   a retire, `context_add`, `items_rekey`, a change request opened, a Crux
+   raised or decided) says only what that edit broke (a citation it made stale, a Pin it left
    behind), so a Clause no Case cites yet, or a Context with no Interface, is
    not said while the Contracts, Interfaces and Harness are still being put: it
    is said here, and by `pin` and `cr_resolve`. To read one Context's share of
    it, `{"op":"check","context":"<name>"}`; `outside` says how many findings
    belong to no Context in particular, so none is lost by narrowing.
-7. **Decide.** The decision maker answers each Crux with `cr_decide`: by a line
-   of the Policy, or with a reason. Then the work the answer asks for goes
-   through 3 to 6.
+7. **Decide.** The decision maker (a role that applies the Policy, an answering
+   agent, or a person) decides each Crux with `cr_crux_decide`: by a line of
+   the Policy, or with a reason. Deciding that the behaviour is left
+   unspecified, or withdrawing a question that is not needed any more, is a
+   decision too; a Crux is not left without one. (A question about the words of
+   the model cannot be left unspecified.) Then the work the answer asks for
+   goes through 3 to 6, `for` the part the Crux was raised in.
 8. **Resolve.** `cr_resolve` each part with how it ended, why and who says so,
    then the parent. Resolving is a decision; the checks say afterwards where
-   the record and the work disagree. A part that does not depend on an open
-   Crux may be resolved while the Crux is open: check first that none of its
-   Clauses, Interfaces or Cases takes the answer for granted (the work the
-   answer asks for is done `for` the part that holds the Crux, which names
-   their Context). The part that holds the Crux is not resolved as done until
-   it is decided, and the parent waits for all of its parts.
+   the record and the work disagree. A part is not resolved, however it would
+   end, while a Crux raised in it has no decision, and the parent waits for all
+   of its parts.
 
 ## The first version
 
@@ -198,12 +211,12 @@ at first nothing is there but the Project.
   files in the repository (a copy of what was given, if it came from elsewhere),
   so that an Assumption can cite them by path; the designer puts what an
   example shows into the Contracts (see [Roles](#roles)).
-- A question nothing settles is a part with a Crux and a recommendation. It
-  names the Context that holds the work its answer asks for (step 2), and its
-  options name what choosing them would change. Once it is decided, the work its
-  answer asks for, the Clause and the Cases that cite it, is applied `for` that
-  part. The rest of the work, the Interfaces and the Harness too, is applied
-  `for` the parts that ask for it (steps 3 to 6).
+- A question nothing settles is a Crux with a recommendation, raised in the part
+  it came up in (step 2). That part names the Context that holds the work its
+  answer asks for, and the options name what choosing them would change. Once
+  it is decided, the work its answer asks for, the Clause and the Cases that cite
+  it, is applied `for` that part. The rest of the work, the Interfaces and the
+  Harness too, is applied `for` the parts that ask for it (steps 3 to 6).
 
 Each operation goes on one line, as `chidev exec` reads them:
 
@@ -215,19 +228,28 @@ Each operation goes on one line, as `chidev exec` reads them:
 {"op":"cr_resolve","title":"Add the tally Context","resolution":"done","reason":"the Context is in","by":{"role":"orchestrator"}}
 {"op":"cr_open","title":"Lines and counts of tally","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"assumptions":[{"statement":"a command is + or - and a name, separated by exactly one space","reason":"the requirements give the form, and their example uses one space","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]},{"statement":"a line whose bytes are not text is a line that is not a command","reason":"the requirements say a line that is not a command of this form is not used","evidence":[{"repo":{"path":"REQUIREMENTS.md"}}]}]}
 {"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"}]},{"put":"base_on_contract","context":"tally"}]}
-{"op":"cr_open","title":"How large a count grows","intent":"change_behavior","parent":"First version of tally","targets":[{"context":"tally"}],"crux":{"kind":"ambiguity","importance":"normal","recommended":{"choice":"the program stops with exit code 2","reason":"no count it prints is wrong","confidence":60},"options":[{"choice":"the program stops with exit code 2","consequence":"input that takes a count past the largest gives no counts at all"},{"choice":"the count stays at the largest","consequence":"the other counts are printed, and that one is printed too low with nothing to say so"}]}}
+{"op":"cr_crux_raise","in":"Lines and counts of tally","question":"What happens when a count would grow past the largest the program can hold?","kind":"ambiguity","importance":"normal","options":[{"choice":"the program stops with exit code 2","consequence":"input that takes a count past the largest gives no counts at all","recommended":{"reason":"no count it prints is wrong","confidence":60}},{"choice":"the count stays at the largest","consequence":"the other counts are printed, and that one is printed too low with nothing to say so"}]}
+{"op":"cr_crux_decide","crux":"<crux id>","option":"<option id>","reason":"no count it prints is wrong","basis":{"arbitrary":"nothing in the Policy covers a count that passes the largest"},"by":{"person":"alice"}}
+{"op":"change_set","for":"Lines and counts of tally","puts":[{"put":"contract","context":"tally","name":"lines","title":"Lines","clauses":[{"label":"C1","text":"a line is + or - and a name, separated by exactly one space"},{"label":"C2","text":"input that takes a count past the largest it can hold stops the program with exit code 2"}]}]}
 ```
+
+`<crux id>` and `<option id>` stand for the ids that the result of
+`cr_crux_raise` gives (the Crux's and the chosen option's); everything else is
+written as it is.
 
 The requirements (here `REQUIREMENTS.md`) say that a count never goes below 0
 and nothing of how large it may grow. A program keeps a count in a number of
 some size, and whether one past the largest stays there or stops the program
-is two readings that nothing settles, so it is a Crux; until it is decided,
-`status` and `check` say so (`cr.awaiting-decision`), and only the work that
-depends on it waits. A line whose bytes are not text, by contrast, is settled
-by the text: the requirements say a line that is not a command of this form is
-not used, and that is such a line, so it is an Assumption. The Interfaces, the
-Harness and the code of "Lines and counts of tally" follow as steps 3 to 6, the
-Crux is decided (step 7), then the parts and the parent are resolved (step 8).
+is two readings that nothing settles, so it is a Crux, raised in the part that
+holds the counts. Until it is decided, `status` and `check` say so
+(`cr.awaiting-decision`), the part cannot be resolved, and only the work that
+depends on it waits; once it is decided (step 7), the part gets a Clause that
+promises the answer (the last line). A line whose bytes are not text, by
+contrast, is settled by the text: the requirements say a line that is not a
+command of this form is not used, and that is such a line, so it is an
+Assumption. The Interfaces, the Harness and the code of "Lines and counts of
+tally" follow as steps 3 to 6, then the parts and the parent are resolved
+(step 8).
 
 ## Never
 
@@ -238,8 +260,10 @@ Crux is decided (step 7), then the parts and the parent are resolved (step 8).
   `for`, `items_rekey`, is run while the request it belongs to is open, and its
   resolution says so.
 - Put a Harness from a role that has read the implementation.
-- Decide a Crux for the decision maker, or answer with a choice the Crux does
-  not offer (an own wording is a decision maker's, not an agent's).
+- Decide a Crux in the name of a decision maker you are not (`by` is a claim
+  that nothing checks, so it is kept true), or answer with a choice the Crux
+  does not offer (an own wording is the decision maker's, not the role at
+  work's).
 - Pin code whose tests do not pass.
 - Put a Harness again without changing the tests to make a stale citation go
   away: putting it says the Cases are written against the targets as they are

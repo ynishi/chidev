@@ -36,8 +36,8 @@ impl ExternalModelView {
 }
 
 /// Writes the slice with the bytes it had before it was typed: the fields of the top level in the order they are
-/// declared (`version`, `contexts`, `change_requests`, the last only when it was requested), and each Context and the
-/// change requests through a JSON value, whose keys are in the order of their names.
+/// declared (`version`, `contexts`, `change_requests`, `cruxes`, the last two only when they were requested), and each
+/// Context, the change requests and the Cruxes through a JSON value, whose keys are in the order of their names.
 ///
 /// The bytes are not for show. The digest of this document is kept with an external run as its `input_stamp` and
 /// compared with the digest of the document of the model now, so a different order of keys would make every saved
@@ -50,12 +50,17 @@ impl Serialize for ExternalModelView {
             .iter()
             .map(by_name::<_, S::Error>)
             .collect::<Result<Vec<_>, _>>()?;
-        let len = 2 + usize::from(slice.change_requests().is_some());
+        let len = 2
+            + usize::from(slice.change_requests().is_some())
+            + usize::from(slice.cruxes().is_some());
         let mut model = serializer.serialize_struct("ExternalModelView", len)?;
         model.serialize_field("version", &slice.version())?;
         model.serialize_field("contexts", &contexts)?;
         if let Some(requests) = slice.change_requests() {
             model.serialize_field("change_requests", &by_name::<_, S::Error>(requests)?)?;
+        }
+        if let Some(cruxes) = slice.cruxes() {
+            model.serialize_field("cruxes", &by_name::<_, S::Error>(cruxes)?)?;
         }
         model.end()
     }

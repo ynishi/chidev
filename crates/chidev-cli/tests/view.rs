@@ -21,12 +21,17 @@ fn fresh_dir(name: &str) -> PathBuf {
 
 /// Runs `ops` through `chidev exec` in a project of its own; the result of each, in order.
 fn run(name: &str, ops: &[Value]) -> Vec<Value> {
-    let dir = fresh_dir(name);
+    exec_in(&fresh_dir(name), ops)
+}
+
+/// Runs `ops` through `chidev exec` in the project `dir` as it is, so that a run can go on from the ids an earlier one
+/// gave back.
+fn exec_in(dir: &Path, ops: &[Value]) -> Vec<Value> {
     let file = dir.join("ops.jsonl");
     let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
     std::fs::write(&file, text).expect("a file");
     let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
-        .current_dir(&dir)
+        .current_dir(dir)
         .arg("exec")
         .arg(&file)
         .arg("--store")
@@ -62,19 +67,25 @@ fn setup() -> Vec<Value> {
 
 /// The setup, then `more`; the results of `more`.
 fn after_setup(name: &str, more: &[Value]) -> Vec<Value> {
+    after_setup_in(name, more).1
+}
+
+/// [`after_setup`], and the directory of the project, to go on in.
+fn after_setup_in(name: &str, more: &[Value]) -> (PathBuf, Vec<Value>) {
+    let dir = fresh_dir(name);
     let mut ops = setup();
     let skip = ops.len();
     ops.extend(more.iter().cloned());
-    let results = run(name, &ops);
+    let results = exec_in(&dir, &ops);
     assert!(
         results[..skip].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
-    results[skip..].to_vec()
+    (dir, results[skip..].to_vec())
 }
 
 #[test]
-fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_it_was_asked_in() {
+fn a_change_request_in_the_view_names_its_parent_but_not_the_words_it_was_asked_in() {
     let view = json!({"op":"view","sections":["change_requests"]});
     let r = after_setup(
         "view-cr-structure",
@@ -84,14 +95,7 @@ fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_
                 "assumptions":[{"statement":"a reading","reason":"why",
                     "evidence":[{"knowledge":{"reference":"general"}}]}]}),
             json!({"op":"cr_open","title":"How a half rounds","intent":"change_behavior",
-                "parent":"First version","targets":[{"context":"core"}],
-                "crux":{"kind":"ambiguity","importance":"normal",
-                    "recommended":{"choice":"up","reason":"the usual way","confidence":60},
-                    "options":[{"choice":"up","consequence":"0.5 gives 1"},
-                        {"choice":"even","targets":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}]}]}}),
-            view.clone(),
-            json!({"op":"cr_decide","title":"How a half rounds","choice":"up",
-                "basis":{"arbitrary":"x"},"by":{"person":"alice"}}),
+                "parent":"First version","targets":[{"context":"core"}]}),
             view,
         ],
     );
@@ -108,35 +112,155 @@ fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_
     let parent = by_title("First version");
     let part = by_title("How a half rounds");
     assert_eq!(part["parent"], parent["id"]);
-    // a request that is no part and holds no question has neither key, as it had none before
+    // a request that is no part has no `parent`, as it had none before; and none holds a Crux, which is a record of
+    // its own
     assert!(parent.get("parent").is_none(), "{parent}");
-    assert!(parent.get("crux").is_none(), "{parent}");
-    let crux = &part["crux"];
-    assert_eq!(crux["kind"], "ambiguity");
-    assert_eq!(crux["importance"], "normal");
-    assert_eq!(crux["recommended"]["choice"], "up");
-    assert_eq!(crux["recommended"]["confidence"], 60);
-    assert_eq!(crux["options"][0]["consequence"], "0.5 gives 1");
-    assert_eq!(crux["options"][1]["expects"][0]["target"], "clause");
-    assert_eq!(crux["decision"], Value::Null);
-    // the words it was asked in, and their readings, are not given
     for c in requests {
+        assert!(c.get("crux").is_none(), "{c}");
+        // the words it was asked in, and their readings, are not given
         for key in ["situation", "issuer", "assumptions"] {
             assert!(c.get(key).is_none(), "{key}: {c}");
         }
     }
-    let decided = r[4]["view"]["change_requests"]
+    assert!(r[2]["view"].get("cruxes").is_none(), "{}", r[2]["view"]);
+    let schema = schema(&["view"]);
+    keys_fit(&r[2]["view"], &schema, &schema, "view");
+}
+
+#[test]
+fn the_cruxes_of_the_view_are_a_section_of_their_own_with_their_options_and_decisions() {
+    let view = json!({"op":"view","sections":["change_requests","cruxes"],"contexts":[]});
+    let raise = |kind: &str, question: &str| {
+        json!({"op":"cr_crux_raise","in":"How a half rounds","kind":kind,"question":question,
+            "options":[{"choice":"up"},{"choice":"even"}]})
+    };
+    let (dir, r) = after_setup_in(
+        "view-cruxes",
+        &[
+            json!({"op":"cr_open","title":"First version","intent":"change_behavior"}),
+            json!({"op":"cr_open","title":"How a half rounds","intent":"change_behavior",
+                "parent":"First version","targets":[{"context":"core"}]}),
+            json!({"op":"cr_crux_raise","in":"How a half rounds","kind":"ambiguity","importance":"normal",
+                "question":"Which way does a half round?",
+                "findings":[{"rule":"cite.uncited-clause","clause":{"contract":"rounding","label":"C1","context":"core"}},
+                    {"rule":"context.no-harness"}],
+                "options":[{"choice":"up","consequence":"0.5 gives 1",
+                        "recommended":{"reason":"the usual way","confidence":60}},
+                    {"choice":"even","wording":"C1: a half rounds to even",
+                        "targets":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}]}]}),
+            raise("model", "Is a Cart a Basket?"),
+            raise("conflict", "Which promise holds?"),
+            raise("disagreement", "Does the test read the promise?"),
+            view.clone(),
+        ],
+    );
+    assert!(r.iter().all(|x| x["ok"] == true), "{r:#?}");
+    let id = |n: usize| r[n]["crux"].as_str().expect("the id of a Crux").to_string();
+    let option = |n: usize, k: usize| {
+        r[n]["options"][k]["id"]
+            .as_str()
+            .expect("an option id")
+            .to_string()
+    };
+    let open = &r[6]["view"];
+    let cruxes = open["cruxes"].as_array().expect("the cruxes");
+    assert_eq!(cruxes.len(), 4);
+    let find = |view: &'_ Value, id: &str| -> Value {
+        view["cruxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no crux {id}"))
+    };
+    let asked = find(open, &id(2));
+    let part = open["change_requests"]
         .as_array()
         .unwrap()
         .iter()
         .find(|c| c["title"] == "How a half rounds")
         .expect("the part");
-    assert_eq!(decided["crux"]["decision"], "up");
-    // both views, with a parent and a Crux undecided and decided, are in the shape the schema of the view gives,
-    // and its words for a Crux are the domain's
+    assert_eq!(asked["raised_in"], part["id"]);
+    assert_eq!(asked["kind"], "ambiguity");
+    assert_eq!(asked["importance"], "normal");
+    assert_eq!(asked["question"], "Which way does a half round?");
+    assert_eq!(asked["findings"][0]["rule"], "cite.uncited-clause");
+    assert_eq!(asked["findings"][0]["subject"]["kind"], "clause");
+    assert_eq!(asked["findings"][1]["subject"], Value::Null);
+    assert_eq!(asked["options"][0]["id"], option(2, 0));
+    assert_eq!(asked["options"][0]["choice"], "up");
+    assert_eq!(asked["options"][0]["consequence"], "0.5 gives 1");
+    assert_eq!(asked["options"][1]["wording"], "C1: a half rounds to even");
+    assert_eq!(asked["options"][1]["expects"][0]["target"], "clause");
+    assert_eq!(asked["options"][1]["expects"][0]["kind"], "target");
+    assert_eq!(asked["recommended"]["option"], option(2, 0));
+    assert_eq!(asked["recommended"]["reason"], "the usual way");
+    assert_eq!(asked["recommended"]["confidence"], 60);
+    assert_eq!(asked["supersedes"], Value::Null);
+    assert_eq!(asked["state"], "open");
+    assert_eq!(asked["answer"], Value::Null);
+    // the request that is stopped holds no Crux of its own in the view
+    assert!(
+        part.get("crux").is_none() && part.get("cruxes").is_none(),
+        "{part}"
+    );
+    assert_eq!(part["state"], "open");
+
+    // each kind of decision, in the words of the view
+    let by = json!({"person":"alice"});
+    let basis = json!({"arbitrary":"settled"});
+    let more = exec_in(
+        &dir,
+        &[
+            json!({"op":"cr_crux_decide","crux":id(2),"option":option(2, 0),"reason":"the usual way",
+                "basis":basis,"by":by}),
+            json!({"op":"cr_crux_decide","crux":id(3),"wording":"a Cart is a Basket","basis":basis,"by":by}),
+            json!({"op":"cr_crux_decide","crux":id(4),"unspecified":["a total is whole cents"],
+                "basis":basis,"by":by}),
+            json!({"op":"cr_crux_decide","crux":id(5),"withdrawn":true,"basis":basis,"by":by}),
+            view,
+        ],
+    );
+    assert!(more.iter().all(|x| x["ok"] == true), "{more:#?}");
+    let answered = &more[4]["view"];
+    let answer = |n: usize| find(answered, &id(n))["answer"].clone();
+    assert_eq!(
+        answer(2)["decision"],
+        json!({"chosen": {"option": option(2, 0), "reason": "the usual way"}})
+    );
+    assert_eq!(
+        answer(3)["decision"],
+        json!({"worded": {"wording": "a Cart is a Basket", "reason": null}})
+    );
+    assert_eq!(
+        answer(4)["decision"],
+        json!({"unspecified": ["a total is whole cents"]})
+    );
+    assert_eq!(answer(5)["decision"], json!("withdrawn"));
+    for n in 2..=5 {
+        assert_eq!(find(answered, &id(n))["state"], "answered");
+        assert!(answer(n)["id"].is_string());
+        assert_eq!(
+            answer(n)["basis"],
+            json!({"arbitrary": {"reason": "settled"}})
+        );
+        assert_eq!(answer(n)["by"], json!({"kind": "person", "name": "alice"}));
+        assert!(answer(n)["at"].as_u64().expect("a time") > 0);
+    }
+    // every Crux has a decision, so the request is decided
+    let part = answered["change_requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["title"] == "How a half rounds")
+        .expect("the part");
+    assert_eq!(part["state"], "decided");
+
+    // both views are in the shape the schema of the view gives, and its words for a Crux are the domain's
     let schema = schema(&["view"]);
-    for at in [2, 4] {
-        keys_fit(&r[at]["view"], &schema, &schema, "view");
+    for view in [open, answered] {
+        keys_fit(view, &schema, &schema, "view");
     }
     let crux = &schema["$defs"]["CruxView"]["properties"];
     let kinds: Vec<&str> = CruxKind::ALL.iter().map(|k| k.word()).collect();
@@ -144,6 +268,15 @@ fn a_change_request_in_the_view_names_its_parent_and_its_crux_but_not_the_words_
     let mut importances: Vec<Value> = Importance::ALL.iter().map(|i| json!(i.word())).collect();
     importances.push(Value::Null);
     assert_eq!(crux["importance"]["enum"], json!(importances));
+    assert_eq!(crux["state"]["enum"], json!(["open", "answered"]));
+    // the cruxes are a section the operation names, and `change_requests` can be read without them
+    let alone = after_setup(
+        "view-cruxes-alone",
+        &[json!({"op":"view","sections":["cruxes"]})],
+    );
+    assert_eq!(alone[0]["view"]["cruxes"], json!([]));
+    assert!(alone[0]["view"].get("change_requests").is_none());
+    keys_fit(&alone[0]["view"], &schema, &schema, "view");
 }
 
 /// The one diagnostic of a refused result.
@@ -177,7 +310,7 @@ fn a_view_gives_the_sections_of_the_contexts_asked_for_and_the_revision_it_was_r
     assert_eq!(v["ok"], true, "{v:#?}");
     assert_eq!(v["op"], "view");
     assert!(v["store_revision"].is_u64());
-    assert_eq!(v["view"]["version"], 3);
+    assert_eq!(v["view"]["version"], 4);
     assert_eq!(context_names(v), ["core"]);
     let core = &v["view"]["contexts"][0];
     for key in ["id", "name", "basis", "uses"] {
@@ -402,13 +535,13 @@ fn the_schema_of_the_view_describes_the_view_an_operation_gives() {
         schema["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
     );
-    assert_eq!(schema["title"], "chidev-view 3");
-    assert_eq!(schema["$id"], "urn:chidev:schema:view:3");
+    assert_eq!(schema["title"], "chidev-view 4");
+    assert_eq!(schema["$id"], "urn:chidev:schema:view:4");
 
     let r = after_setup(
         "view-schema",
         &[
-            json!({"op":"view","sections":["contracts","interfaces","harnesses","change_requests"]}),
+            json!({"op":"view","sections":["contracts","interfaces","harnesses","change_requests","cruxes"]}),
             json!({"op":"view","sections":["contracts"],"contexts":["extra"]}),
             json!({"op":"view","sections":["change_requests"],"contexts":[]}),
         ],

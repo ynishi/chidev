@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
@@ -19,6 +20,9 @@ pub struct CheckView<'a> {
     pub pins: &'a [Pin],
     /// Every change request, as the use case would leave them.
     pub change_requests: &'a [ChangeRequest],
+    /// Every Crux, as the use case would leave them. A change request does not hold its Cruxes: those raised in it
+    /// are the ones here whose `raised_in` is its id.
+    pub cruxes: &'a [Crux],
     /// The latest measurement of each subject (an Interface for a mutation run, a sim Harness for a simulation)
     /// and kind that has one. The moments of a change give none: a measurement is read by the on-demand moment, and a
     /// change does not move it.
@@ -37,9 +41,9 @@ pub struct CheckView<'a> {
 /// reported. A use case that confirms (a pin, a resolution) or a person who asks gives one [`CheckView`].
 #[derive(Debug, Clone, Copy)]
 pub struct Change<'a> {
-    /// The state before the change: the Project, the Pins and the change requests as the store has them.
+    /// The state before the change: the Project, the Pins, the change requests and the Cruxes as the store has them.
     pub before: CheckView<'a>,
-    /// The state the use case would keep. The Pins and the change requests may differ from `before` when the
-    /// change records something with them (the work of a change request).
+    /// The state the use case would keep. The Pins, the change requests and the Cruxes may differ from `before` when
+    /// the change records something with them (the work of a change request, the decision of a Crux).
     pub after: CheckView<'a>,
 }

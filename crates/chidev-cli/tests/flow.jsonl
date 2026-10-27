@@ -11,8 +11,9 @@
 {"op":"pin","context":"receipt","interface":"print","code":"pub fn print(lines: &[u64]) -> String { total(lines).to_string() }"}
 {"op":"status"}
 {"op":"cr_open","title":"Fair totals","intent":"change_behavior","issuer":"customer support","situation":"Customers say the totals favour the shop."}
-{"op":"cr_open","title":"How is a half cent rounded?","intent":"change_behavior","parent":"Fair totals","issuer":"designer","situation":"C1 rounds half up, which favours the shop.","targets":[{"clause":{"context":"pricing","contract":"rounding","label":"C1"}}],"crux":{"kind":"ambiguity","options":[{"choice":"half up"},{"choice":"half to even","wording":"C1: a total is rounded half to even to whole cents","consequence":"the rounding cases and the receipt change"}],"recommended":{"choice":"half to even","reason":"no bias over many totals","confidence":70}}}
-{"op":"cr_decide","title":"How is a half cent rounded?","choice":"half to even","reason":"fair to the customer over many totals","basis":{"arbitrary":"the shop accepts the cost of fairness"},"by":{"person":"alice"}}
+{"op":"cr_open","title":"How is a half cent rounded?","intent":"change_behavior","parent":"Fair totals","issuer":"designer","situation":"C1 rounds half up, which favours the shop.","targets":[{"clause":{"context":"pricing","contract":"rounding","label":"C1"}}]}
+{"op":"cr_crux_raise","in":"How is a half cent rounded?","question":"How is a half cent rounded?","kind":"ambiguity","options":[{"choice":"half up"},{"choice":"half to even","wording":"C1: a total is rounded half to even to whole cents","consequence":"the rounding cases and the receipt change","recommended":{"reason":"no bias over many totals","confidence":70}}]}
+{"op":"cr_crux_decide","crux":"@15.crux","option":"@15.option(half to even)","reason":"fair to the customer over many totals","basis":{"arbitrary":"the shop accepts the cost of fairness"},"by":{"person":"alice"}}
 {"op":"status"}
 {"op":"change_set","for":"How is a half cent rounded?","puts":[{"put":"contract","context":"pricing","name":"rounding","title":"Rounding of a total","clauses":[{"label":"C1","text":"a total is rounded half to even to whole cents"},{"label":"C2","text":"a total of no lines is zero"}]}]}
 {"op":"check"}

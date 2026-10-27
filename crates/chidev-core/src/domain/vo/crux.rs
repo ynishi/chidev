@@ -1,11 +1,12 @@
-//! The values of a Crux, a choice that can be derived neither from the repository and general knowledge (that is an
-//! Assumption) nor from the Project's decision Policy, so a decision maker must pick: its kind, its options, the
-//! recommendation and importance that let a Policy settle it, and the decision taken.
+//! The values of a Crux, a question that can be derived neither from the repository and general knowledge (that is an
+//! Assumption) nor from the Project's decision Policy, so a decision maker must answer it: its kind, its options,
+//! the recommendation and importance that let a Policy settle it, and the decision taken.
 
 use std::collections::BTreeMap;
 
 use super::choice::Choice;
 use super::confidence::Confidence;
+use super::id::CruxOptionId;
 use super::prose::Prose;
 use super::target::{ExpectKind, Target};
 
@@ -48,10 +49,13 @@ impl CruxKind {
     }
 }
 
-/// One answer a Crux offers: the choice, the change it makes to the definitions (in words, and as the targets it
-/// names: to revise or retire, or to keep; none when it names nothing more), and what else it affects.
+/// One answer a Crux offers: its id, the choice, the change it makes to the definitions (in words, and as the
+/// targets it names: to revise or retire, or to keep; none when it names nothing more), and what else it affects.
+/// A recommendation and a decision point at an option by its id, so the text of the choice can be corrected without
+/// breaking either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CruxOption {
+    id: CruxOptionId,
     choice: Choice,
     change: Option<Prose>,
     expects: BTreeMap<Target, ExpectKind>,
@@ -62,17 +66,24 @@ impl CruxOption {
     /// An option. `expects` is what the option asks of targets once it is chosen, besides what the change request
     /// asks, which holds whatever is chosen (one kind for each target).
     pub fn new(
+        id: CruxOptionId,
         choice: Choice,
         change: Option<Prose>,
         expects: BTreeMap<Target, ExpectKind>,
         consequence: Option<Prose>,
     ) -> CruxOption {
         CruxOption {
+            id,
             choice,
             change,
             expects,
             consequence,
         }
+    }
+
+    /// Its id.
+    pub fn id(&self) -> CruxOptionId {
+        self.id
     }
 
     /// The choice.
@@ -130,28 +141,28 @@ impl Importance {
 /// is not a decision: a Policy line may take it, a decision maker may not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recommended {
-    choice: Choice,
+    option: CruxOptionId,
     reason: Option<Prose>,
     confidence: Option<Confidence>,
 }
 
 impl Recommended {
-    /// A recommendation.
+    /// A recommendation of the option with this id. Whether the Crux has that option is read by the Crux.
     pub fn new(
-        choice: Choice,
+        option: CruxOptionId,
         reason: Option<Prose>,
         confidence: Option<Confidence>,
     ) -> Recommended {
         Recommended {
-            choice,
+            option,
             reason,
             confidence,
         }
     }
 
-    /// The choice recommended.
-    pub fn choice(&self) -> &Choice {
-        &self.choice
+    /// The option recommended.
+    pub fn option(&self) -> CruxOptionId {
+        self.option
     }
 
     /// Why.
@@ -165,35 +176,16 @@ impl Recommended {
     }
 }
 
-/// A choice with the reason it was taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reasoned {
-    choice: Choice,
-    reason: Option<Prose>,
-}
-
-impl Reasoned {
-    /// A choice and why.
-    pub fn new(choice: Choice, reason: Option<Prose>) -> Reasoned {
-        Reasoned { choice, reason }
-    }
-
-    /// The choice.
-    pub fn choice(&self) -> &Choice {
-        &self.choice
-    }
-
-    /// Why.
-    pub fn reason(&self) -> Option<&Prose> {
-        self.reason.as_ref()
-    }
-}
-
 /// What was decided, apart from the basis, the decision maker and the time (see `Answer`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// One of the options, and why.
-    Chosen(Reasoned),
+    Chosen {
+        /// The option, by id; the Crux checks that it has it.
+        option: CruxOptionId,
+        /// Why.
+        reason: Option<Prose>,
+    },
     /// None of the options: the behaviour in the decision maker's own words, and why.
     Worded {
         /// The behaviour.
@@ -201,16 +193,21 @@ pub enum Decision {
         /// Why.
         reason: Option<Prose>,
     },
-    /// The behaviour is left free, as long as these still hold (none: nothing more).
+    /// The behaviour is left free, as long as these still hold (none: nothing more). A Crux of kind `model` cannot be
+    /// left unspecified.
     Unspecified {
         /// What must still hold.
         keep: Vec<Prose>,
     },
+    /// The question is not needed any more. Any kind of Crux may be withdrawn. Why is the reason of the basis, which
+    /// every answer has.
+    Withdrawn,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::vo::id::test_uuid;
 
     #[test]
     fn a_model_question_is_never_unspecified() {
@@ -230,13 +227,10 @@ mod tests {
 
     #[test]
     fn a_recommendation_keeps_its_confidence() {
-        let r = Recommended::new(
-            Choice::try_from("up").unwrap(),
-            None,
-            Some(Confidence::try_from(85).unwrap()),
-        );
+        let option = CruxOptionId::from_uuid(test_uuid(5));
+        let r = Recommended::new(option, None, Some(Confidence::try_from(85).unwrap()));
         assert_eq!(r.confidence().map(Confidence::percent), Some(85));
-        assert_eq!(r.choice().as_str(), "up");
+        assert_eq!(r.option(), option);
         assert!(r.reason().is_none());
     }
 }

@@ -62,6 +62,33 @@ store is, not register a program to run or a command to measure with. A table or
 key that is not known, or a table in a file that may not hold it, is refused with the
 file named.
 
+### The store's layout
+
+The tables of the store have a layout, a number the file keeps (`PRAGMA
+user_version`); it is 2. A file that is made now has layout 2. A file of layout 1
+held a Crux inside its change request, and it is migrated once, when it is opened,
+in one transaction:
+
+- Each change request that held a Crux gives a Crux of its own. Its `raised_in` is
+  that request, its `findings` are none (it was not raised from a finding), its
+  `question` is the request's title, which stood for it, and its options are
+  numbered in order. A recommendation and a decision that named an option by the text
+  of its choice now name the option's id, and the decision has an id. A `supersedes`,
+  which named a change request, names the Crux of that request. The change request
+  documents are rewritten without their Crux. The revision of the store and of the
+  model do not move: the model means what it did.
+- What cannot be moved stops the opening, and the file is as it was: a text that is
+  none of the options of its Crux, a `supersedes` that names a request with no
+  Crux, a record that cannot be read, records that do not fit together afterwards.
+  The error says what did not match.
+- A request resolved otherwise than as `done` whose Crux was never decided is moved
+  as it was, a record of what was; `cr.awaiting-decision` reports the Crux.
+- What was saved before is stale once where the Cruxes are in what it was stamped
+  over (see `view` under "Operations").
+
+An older chidev refuses a file of layout 2 and says which layout it reads, and a
+migrated file cannot be moved back, so copy the store before upgrading.
+
 ## Operations
 
 `chidev exec <file> [--store <db>]` reads one JSON object per line, runs each as an
@@ -229,7 +256,7 @@ belong):
   ```
 
   - `sections` is required and names at least one of `contracts`, `interfaces`,
-    `harnesses` and `change_requests`. There is no default that reads every
+    `harnesses`, `change_requests` and `cruxes`. There is no default that reads every
     section: leaving the field out is `input.missing-field` (`name` is
     `sections`), `[]` is `input.view-sections-empty`, and a word that is not a
     section is `input.invalid` (with `did_you_mean`).
@@ -237,13 +264,15 @@ belong):
     reads none, and a name the Project does not have is `input.unknown-name`. A
     field `view` does not take (a misspelled `contexts`) is `input.unknown-field`,
     not a view of every Context. The
-    change requests belong to the Project, not to a Context, so they come whenever
-    `change_requests` is a section, whatever `contexts` says.
+    change requests and the Cruxes belong to the Project, not to a Context, so they
+    come whenever `change_requests` or `cruxes` is a section, whatever `contexts`
+    says.
   - The result is the envelope of an operation (`ok`, `line`, `op`) with the
     `store_revision` the model was read at and the `view`. `view` is
-    `{"version":3,"contexts":[..],"change_requests":[..]}`: a Context always comes with
-    its `id`, `name`, `basis` and `uses`, and with the sections asked for only. A
-    section that was not asked for has no key; one that was and is empty is `[]`.
+    `{"version":4,"contexts":[..],"change_requests":[..],"cruxes":[..]}`: a Context
+    always comes with its `id`, `name`, `basis` and `uses`, and with the sections
+    asked for only. A section that was not asked for has no key; one that was and is
+    empty is `[]`.
     `chidev schema view` describes this value of `view` (see "Protocol `chidev-exec 1`").
   - It is the part of the model that `check_rules` gives a judged rule and that an
     external check is sent, entry for entry, so a reader of a view sees what a rule
@@ -251,20 +280,31 @@ belong):
     implementer that is to write code from the Contracts and Interfaces, and not
     from the tests that will check it, is given `["contracts","interfaces"]`, and
     nothing of the Harnesses (their source, Cases or citations) is in what it reads.
-  - A change request comes with its `parent` (an id) and its `crux` (the kind, the
-    options, the recommendation and, once decided, the `decision`), each only when it
-    has one (a request with neither is written as it was before), but not with its
-    `situation`, its issuer or its Assumptions: those are the request in the words of
-    whoever asked and the readings of those words, and what is to be relied on of them
-    is in the Contracts. A Harness writer given the view learns which part a put is
-    for and which part holds a question. The words of a Crux (an option's wording and
-    consequence, the reason of the recommendation, a decision in other words) are
-    given as whoever raised or decided it wrote them, so they say no more of the
-    requirements than that person put there.
-  - Once any request has a parent or a Crux, a stamp taken over the change requests
-    differs from one taken before these were in the view: a judged finding about the
-    change requests or the Project, and an external run that reads `change_requests`,
-    are stale once and are judged or run again.
+  - A change request comes with its `parent` (an id), only when it has one, but not
+    with its `situation`, its issuer or its Assumptions: those are the request in the
+    words of whoever asked and the readings of those words, and what is to be relied
+    on of them is in the Contracts. It has no `crux` either: the questions that stop a
+    request are the Cruxes raised in it, and they are the `cruxes` section. A Harness
+    writer given the view learns which part a put is for and which request a question
+    stops.
+  - A Crux in `cruxes` comes with its `id`, `raised_in` (the id of the change request
+    it stops), the `findings` it was raised from, its `kind`, `question` and
+    `importance`, its `options` (each with its `id`, `choice`, `wording`, `expects` and
+    `consequence`), the option `recommended` (by `option` id, with `reason` and
+    `confidence`), `supersedes`, its `state` (`open` or `answered`) and, once
+    decided, its `answer`: the `id` of the decision, the `decision` (`chosen` with the
+    option id and the reason, `worded`, `unspecified` or `withdrawn`), its `basis`,
+    `by` and `at`. The words of a Crux (an option's wording and consequence, the
+    reason of the recommendation, a decision in other words) are given as whoever
+    raised or decided it wrote them, so they say no more of the requirements than that
+    person put there.
+  - `cruxes` is a section an external check may read (see "External checks"). The
+    stamp of a change request covers the Cruxes raised in it, and the stamp over the
+    Project covers all the Cruxes. What was saved before the view was version 4 goes
+    stale once and is judged or run again: an external result, since the model it
+    was sent carries the version, and a judged finding about a change request that
+    has a parent or a Crux, or about the Project of a store that has one. A stamp
+    over a model with neither is what it was.
 
 A put or a retire does not need an open change request, but it belongs to none: it
 shows in the targets of no change request (only a `change_set` `for` the request
@@ -279,7 +319,8 @@ kinds, and a use case belongs to one of them for good:
 
 - An **edit** changes what the model says: a put or a retire, a Context added or
   its `uses` set, the Policy, the record of a change request (`cr_open`,
-  `cr_decide`, `cr_assume`, `cr_reopen`), `items_rekey`. The checks of the `edit`
+  `cr_crux_raise`, `cr_crux_decide`, `cr_assume`, `cr_reopen`), `items_rekey`. The
+  checks of the `edit`
   moment run on the model before it and after it, and the answer has `findings`:
   those the edit introduced. A mandatory check, or an external check that is a gate,
   refuses it only for those.
@@ -313,18 +354,18 @@ read and write them, so a schema and the reading cannot differ:
 ```text
 chidev schema          # lists the schemas, with the title and the id of each
 chidev schema ops      # one line of exec: an operation. title "chidev-exec 1", $id urn:chidev:schema:ops:1
-chidev schema view     # the `view` of the operation `view`. title "chidev-view 3", $id urn:chidev:schema:view:3
+chidev schema view     # the `view` of the operation `view`. title "chidev-view 4", $id urn:chidev:schema:view:4
 chidev schema external-call   # what an external check is sent (see "External checks"). title "chidev-external-call 2"
 chidev schema external-reply  # what an external check answers. title "chidev-external-reply 2"
 ```
 
 - **A schema is a necessary condition, not a sufficient one.** It says what a line
   must look like to be read. A rule that sets fields against each other is not in it:
-  exactly one of `source` and `source_file`, exactly one of `choice`, `wording` and
-  `unspecified`, a subject, an item or a clause. An operation that breaks one is
+  exactly one of `source` and `source_file`, exactly one of `option`, `wording`,
+  `unspecified` and `withdrawn`, a subject, an item or a clause. An operation that breaks one is
   read, and refused when it runs, by a rule with a name (see "Diagnostics").
 - The schema of the results of the other operations is not printed.
-- The version of the view (`chidev-view 3`, `version` in the view, `VIEW_VERSION` in
+- The version of the view (`chidev-view 4`, `version` in the view, `VIEW_VERSION` in
   Rust) has its own promise: a field added does not change it, and only a change of
   meaning or shape (a field removed or renamed) does. A reader ignores a field it does
   not know and refuses a version it does not know.
@@ -467,8 +508,8 @@ is `protocol` 2: it has the `moment` the program is asked at (`edit`, `pin`,
 a program is told when it is asked. A response with no findings is
 `{"protocol":2,"findings":[]}`; a response of `protocol` 1 is accepted as well (its
 form did not change), and any other version is a failed run. Diagnostics
-go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`, and/or
-`change_requests`; unrequested sections are omitted, and a word that is not one, or
+go to stderr. `reads` selects `contracts`, `interfaces`, `harnesses`,
+`change_requests` and/or `cruxes`; unrequested sections are omitted, and a word that is not one, or
 no word at all, is refused when `chidev.toml` is loaded. Context metadata is always
 sent. The model sent is the `view` of the operation of that name, for every Context
 and the sections read.
@@ -951,8 +992,9 @@ and not the implementation. Therefore:
 A change request says what is asked, why (`situation`, in the words of whoever
 raised it, and the `issuer`: both are kept and `status` shows them), which
 targets it asks to have revised or retired (`targets`) and which to keep as they
-are (`keep`). It may carry a `crux`, a choice a decision maker has to make, and the
-`assumptions` made while raising it (see below). A request is **closed by a
+are (`keep`). It may carry the `assumptions` made while raising it, and it is stopped
+by the Cruxes raised in it, choices a decision maker has to make (see "Crux, Policy
+and Assumption"); it holds none itself. A request is **closed by a
 decision a person or a role takes and records** (`cr_resolve`), never by what
 the definitions did: the targets are the content of the request, not a condition
 of closing it. The targets are the assets, as a tree, and each has a revision:
@@ -972,7 +1014,7 @@ A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
 `{"clause":{"context":..,"contract":..,"label":..}}` and
 `{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
 the request opens, and a target is in one list, once. `cr_open` refuses a field it
-does not know (`change` and `remove` of earlier versions among them).
+does not know (`change` and `remove` of earlier versions, and `crux`, among them).
 
 - `targets`: what the request asks to have revised or retired. A request that
   adds something names what holds it, as adding is a move of the container: a
@@ -985,11 +1027,13 @@ does not know (`change` and `remove` of earlier versions among them).
   parts are.
 - `keep`: the targets that must stay as they are; the revision recorded at
   `cr_open` is compared, whoever moved the target.
-- Each option of the Crux takes the same `targets` / `keep` lists (and
-  `wording`, the exact new text of the definitions, and `consequence`, free text
-  saying what else choosing it affects). `cr_decide` records the
-  revision each of them has at that moment. Deciding with the decision maker's
-  own wording, or leaving it unspecified, names nothing more.
+- Each option of a Crux raised in the request takes the same `targets` / `keep` lists
+  (and `wording`, the exact new text of the definitions, and `consequence`, free text
+  saying what else choosing it affects). When a Crux is decided, the lists of the
+  option chosen become the request's decided expectations, each with the revision it
+  has at that moment (see "Crux, Policy and Assumption"). Deciding with the decision
+  maker's own wording, leaving it unspecified, or withdrawing the question names
+  nothing more.
 - Neither list gates the closing of the request. `status` shows, for each of its
   `targets`, **what the work did to it**, read from the footprints of the
   request's change sets and of its parts (see "Attribution and frame"): `revised`,
@@ -1023,8 +1067,9 @@ exist. The `reason` and `by` (`{"person":..}` or `{"role":..}`) are required.
 Only explicit states refuse it, in this order:
 
 1. the request is resolved already;
-2. it is `done` and its Crux has no answer (any other resolution may leave the
-   question open);
+2. a Crux raised in it has no decision, whatever the resolution (`done`, `wont_do`,
+   `invalid`, a duplicate or a superseded one: `cr.crux-unanswered`). The Cruxes
+   raised in a request are decided or withdrawn before it ends;
 3. a `duplicate` or a `superseded` points at itself or at a request that does not
    exist;
 4. a request whose `parent` it is is not resolved (whatever way it would end).
@@ -1043,7 +1088,7 @@ The checks then say where the record and the work disagree (below).
 The resolution it had stays: a request keeps a **history**, a log of
 `resolved` and `reopened` steps (each with the reason, who and when) that is only
 appended to, and `status` shows it as `history` beside the current `resolution`.
-A reopened request takes work (`change_set` `for` it), decisions and assumptions
+A reopened request takes work (`change_set` `for` it), Cruxes and assumptions
 again, and can be resolved anew. Reopening does not touch its parts or its
 parent: a parent resolved while this request was closed stays resolved.
 
@@ -1052,11 +1097,7 @@ parent: a parent resolved while this request was closed stays resolved.
 ```json
 {"op":"cr_open","title":"Refuse big discounts","intent":"change_behavior",
  "situation":"discounts above 50% should never be given","issuer":"sales",
- "targets":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}],
- "crux":{"kind":"ambiguity","importance":"normal",
-  "recommended":{"choice":"reuse InvalidDiscount","reason":"no new type","confidence":85},
-  "options":[{"choice":"reuse InvalidDiscount"},
-             {"choice":"new error","targets":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}]}]}}
+ "targets":[{"clause":{"context":"pricing","contract":"discount","label":"C1"}}]}
 ```
 
 ```json
@@ -1077,16 +1118,18 @@ removing a feature):
 `cr_open` answers with what it recorded, so a wrong reference is seen at once:
 `{"kind":"keep","target":{"clause":{"context":"pricing","contract":"discount","label":"C1"}},"recorded":1}`
 (`kind` is `target` or `keep`). `status` shows each request with its `situation`,
-`issuer`, `state`, `answer`, `resolution` and `history`, its `targets` with what
-the work did to each, its `keep` with whether each moved, its `work` and its
-`out_of_frame`. It lists a request whose Crux has no decision under `awaiting`
-(title, kind, options with what each names and its `consequence`, the recommendation with its
+`issuer`, `state`, `resolution` and `history`, the ids of the Cruxes raised in it
+(`cruxes`), its `targets` with what the work did to each, its `keep` with whether
+each moved, its `work` and its `out_of_frame`. It lists every Crux under `cruxes` (the
+record `view` gives, with the request it was raised in by its title as `raised_in`),
+each Crux that has no decision under `awaiting` (its id, `raised_in`, the question,
+kind, options with what each names and its `consequence`, the recommendation with its
 confidence, and the importance), and the unresolved requests one of whose `keep`
 moved under `keep_moved`. The checks:
 
 | check | level | says |
 |---|---|---|
-| `cr.awaiting-decision` | note | the Crux of an unresolved request has no decision |
+| `cr.awaiting-decision` | warning | a Crux has no decision, whether or not the request it was raised in is resolved |
 | `cr.keep-moved` | warning | an unresolved request keeps a target and it moved |
 | `cr.out-of-frame` | warning | the work for an unresolved request moved something it did not name |
 | `cr.resolved-without-work` | warning | resolved as `done`, yet no change set `for` it or its parts moved anything |
@@ -1098,7 +1141,9 @@ the revisions of its targets, which a resolution no longer does; `status` shows
 the same thing (`not touched yet`) per target, without a finding on every request
 that has just been opened. A database written before targets and resolutions (or
 before the Crux, Policy and Assumptions below, or before the work of a request was
-recorded) does not load; chidev is unreleased and there is no migration.
+recorded) does not load: there is no migration for it. A store of layout 1, which
+held a Crux inside its change request, is migrated when it is opened (see "The
+store's layout").
 
 The change a request asks for is made as a `change_set` `for` it (see "Change
 sets"): a change that touches several assets and holds only as a whole (a Clause
@@ -1123,7 +1168,7 @@ the same commit). That ties the work to the request that asked for it:
   its work, and it is closed when they are resolved. A parent resolved as done
   with no work on it or on any part is `cr.resolved-without-work`.
 - The targets a request names to revise or retire (its own and those of the
-  option its Crux chose) are its **frame**; a `keep` is not part of it. Naming a
+  options chosen for the Cruxes raised in it) are its **frame**; a `keep` is not part of it. Naming a
   container frames everything in it: a Contract frames its Clauses, a Context its
   assets and what is in them, the Project everything. The work of a request is to
   stay in its frame, and **the frame is the request's own**: a parent's targets
@@ -1161,22 +1206,99 @@ record who decided what, on which basis, strictly and immutably, because it
 cannot be reproduced. It applies to every change request and finding (Contracts,
 Interfaces, Harness implementation, code), not only to the specification.
 
-- The Crux has a `kind`, its `options` (each with the expectations it asks and,
-  optionally, its `consequence`: what else choosing it affects), a
-  `recommended` choice `{choice, reason?, confidence?}` where `confidence` is a
-  percentage from 0 to 100, an `importance` (`low`, `normal` or `high`), and
-  `supersedes`, the title of a change request whose answered Crux this one
-  replaces (it has to exist and be answered when the request opens). The
+- A Crux is a record of its own, with an `id`; a change request does not hold it.
+  It is **raised in** a change request (`raised_in`), the one it stops: normally the
+  request in whose work the question came up, but any request will do. A request can
+  be stopped by several Cruxes, and a Crux stops one request. It may be raised from
+  findings (`findings`; none for a question that arises from the text of the
+  request). It has a `kind` (`ambiguity`: the text reads more than one way;
+  `conflict`: two promises cannot both hold; `model`: the words of the model are in
+  question; `disagreement`: a test and the promise it checks read differently), its
+  `question`, its `options` (each with an `id`, the expectations it asks and,
+  optionally, its `consequence`: what else choosing it affects), a recommended
+  option with a `reason` and a `confidence` that is a percentage from 0 to 100, an
+  `importance` (`low`, `normal` or `high`), and `supersedes`, the id of a Crux whose
+  decision this one replaces (it has to exist and have a decision to replace, and a
+  withdrawn one has none: `cr.supersedes-unknown`, `cr.supersedes-unanswered`). The
   recommendation and the importance are what a Policy line is written against.
-- `cr_decide` gives the answer, once:
-  `{"op":"cr_decide","title":..,"choice":..` (or `"wording"`, or `"unspecified"`)
-  `,"basis":{"policy":"P1"}` (or `{"arbitrary":"<reason>"}`)
-  `,"by":{"role":"orchestrator"}` (or `{"person":"alice"}`)`}`. A `policy` basis
-  has to name a line the Policy has now, and the revision of the Policy is
-  recorded with it. The time comes from the clock of the application, never from
-  the domain. An answer is never rewritten: deciding a Crux that has an answer is
-  refused. Changing a decision means opening a new change request whose Crux
-  `supersedes` the old one; the old answer stays as it was given.
+- `cr_crux_raise` raises a Crux in the request titled `in`, which must not be
+  resolved (`cr.already-resolved`: reopen it first):
+
+  ```json
+  {"op":"cr_crux_raise","in":"Refuse big discounts","question":"Which error is given?",
+   "kind":"ambiguity","importance":"normal",
+   "findings":[{"rule":"cite.uncited-clause","subject":{"clause":{"context":"pricing","contract":"discount","label":"C1"}}}],
+   "options":[{"choice":"reuse InvalidDiscount","recommended":{"reason":"no new type","confidence":85}},
+              {"choice":"new error","wording":"C2: a refused discount is DiscountRefused",
+               "targets":[{"clause":{"context":"pricing","contract":"discount","label":"C2"}}],
+               "keep":[{"clause":{"context":"pricing","contract":"discount","label":"C3"}}],
+               "consequence":"callers match a new error"}]}
+  ```
+
+  `question`, `kind` and `options` are required; there is at least one option and no
+  choice is given twice. At most one option has `recommended` (its `reason` and
+  `confidence` are optional). An option's `targets` and `keep` are written like the
+  request's and have to exist when the Crux is raised; one that the request asks with
+  another kind, or that is given twice, is refused (`input.invalid`). The result has
+  the id of the Crux and of each option, which a decision points at:
+  `{"op":"cr_crux_raise","crux":"<crux id>","options":[{"id":"<option id>","choice":"reuse InvalidDiscount"},..],"findings":[]}`.
+  An id in angle brackets, here and below, is the one an earlier result gave.
+- A **decision is required**, and "undefined" is a decision. `cr_crux_decide` gives it,
+  once, with exactly one of `option` (the id of one of the Crux's options, with an
+  optional `reason`), `wording` (the behaviour in the decision maker's own words, with
+  an optional `reason`), `unspecified` (the behaviour is left free; a list of what must
+  still hold, which may be empty) and `withdrawn` (`true`: the question is not needed
+  any more), with the `basis` and `by`:
+
+  ```json
+  {"op":"cr_crux_decide","crux":"<crux id>","option":"<option id>","reason":"no new type",
+   "basis":{"arbitrary":"no line of the Policy covers it"},"by":{"person":"alice"}}
+  {"op":"cr_crux_decide","crux":"<crux id>","unspecified":["a refusal is an error"],
+   "basis":{"policy":"P1"},"by":{"role":"orchestrator"}}
+  {"op":"cr_crux_decide","crux":"<crux id>","withdrawn":true,
+   "basis":{"arbitrary":"the clause it asked about is gone"},"by":{"person":"alice"}}
+  ```
+
+  The `basis` is `{"policy":"P1"}` (a line the Policy has now; the revision of the
+  Policy is recorded with it) or `{"arbitrary":"<reason>"}`. A decision to leave it
+  unspecified or to withdraw the question has no `reason` of its own: the basis has
+  it. The time comes from the clock of the application, never from the domain. An
+  answer is never rewritten: deciding a Crux that has one is refused
+  (`cr.crux-answered`), and an option the Crux does not have is not one
+  (`cr.crux-unknown-option`). Changing a decision means raising a new Crux that
+  `supersedes` the old one; the old answer stays as it was given. A Crux of kind
+  `model` is the one exception to "undefined is an answer": without the word the
+  model cannot be written, so it can be worded, chosen or withdrawn but not left
+  unspecified. A Crux that is no longer needed is withdrawn (any kind may be); a
+  withdrawal is a decision and asks nothing of any target.
+- **Who may decide** a Crux (the authority to decide, `CruxAnswerable`) is a concept
+  of the model, and it is managed outside chidev for now: chidev holds no identity of
+  its users, so it grants and checks nothing. `by` (`{"role":..}` or `{"person":..}`)
+  is recorded as declared, and nothing is compared to it. The boundary is decided in
+  [ADR 0003](docs/adr/0003-the-authority-to-decide-a-crux-is-managed-outside-chidev.md).
+- The Cruxes stop the request they are raised in: "Lifecycle and resolution" says
+  which resolutions are refused (`cr.crux-unanswered`), and a request with Cruxes is
+  `decided` once each of them has a decision (a withdrawal is one). When a Crux is
+  decided, the targets of the option chosen become the request's decided
+  expectations, in the same commit: each is recorded with the revision it has then;
+  one an earlier decision recorded with the same kind keeps its first revision, one
+  the request itself asks with the same kind is not added a second time, and one asked
+  with another kind, by the request or by an earlier decision, is refused. A Crux that
+  supersedes a decision taken in the same request takes that decision's expectations
+  back first, in the same commit, so it may ask the opposite of a target. They are
+  part of the request's frame (see "Attribution and frame"), and the work goes `for`
+  the request. A Crux of a resolved request takes only a withdrawal: any other
+  decision is refused (`cr.already-resolved`) until the request is reopened. A store
+  migrated from layout 1 can hold a Crux that was never decided in a request resolved
+  otherwise than as `done`; it is a record of what was, and `cr.awaiting-decision`
+  goes on reporting it.
+- `cr_decide` and the `crux` of `cr_open` are gone; these two operations replace
+  them. A line that has one is refused (`input.unknown-op`, `input.unknown-field`),
+  and `did_you_mean` does not name the new one. Raise the question with
+  `cr_crux_raise`, in the request it stops, where `crux` was given, and decide it
+  with `cr_crux_decide` where `cr_decide` was written. The Crux is named by its id and
+  not by the title of its request, and a decision names the option by its id
+  (`option`) and not by the text of its choice (`choice`).
 - The **Policy** is the Project's decision policy: numbered lines `P1`, `P2`, ...
   each with a text. `policy_put` replaces all of them:
   `{"op":"policy_put","lines":[{"id":"P1","text":"take the recommendation when its confidence is 80 or more"}]}`.
@@ -1193,7 +1315,7 @@ Interfaces, Harness implementation, code), not only to the specification.
   `cr_open.assumptions`, or append later with
   `{"op":"cr_assume","title":..,"statement":..,"reason":..,"evidence":[..]}`.
   Assumptions only grow, and a resolved request takes none. `status` lists them
-  with each request, beside its answer (decision, basis, who and when).
+  with each request.
 
 ## Retiring
 
@@ -1250,8 +1372,9 @@ of one, without `for`.
 
 ## Change-request addresses
 
-Each entry in `cr_open.addresses` names a rule and the subject of its finding.
-It uses the same `subject` form as `finding_report`:
+Each entry in `cr_open.addresses`, and in the `findings` of `cr_crux_raise` (the
+findings a Crux is raised from), names a rule and the subject of its finding. It
+uses the same `subject` form as `finding_report`:
 
 ```json
 [

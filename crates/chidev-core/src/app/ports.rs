@@ -13,11 +13,12 @@ use super::commit::{Gated, Trigger};
 
 use crate::domain::check::{Executor, Level, Moment};
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
-    ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
+    ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
 };
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
@@ -220,6 +221,8 @@ pub struct Changes {
     pub measurements: Vec<Measurement>,
     /// Change requests opened or changed.
     pub change_requests: Vec<ChangeRequest>,
+    /// Cruxes raised or decided.
+    pub cruxes: Vec<Crux>,
     /// Asset names given.
     pub names: Vec<AssetName>,
     /// The checks the use case ran, appended to the record of runs.
@@ -245,7 +248,12 @@ pub trait JudgedRepository {
 /// what it needs (each read on its own; no transaction is held across them), decides, and commits every change at
 /// once; the store keeps them all or none.
 pub trait Store:
-    ProjectRepository + PinRepository + ChangeRequestRepository + AssetNames + JudgedRepository
+    ProjectRepository
+    + PinRepository
+    + ChangeRequestRepository
+    + CruxRepository
+    + AssetNames
+    + JudgedRepository
 {
     /// Latest persisted execution of every external rule.
     fn external_reports(
@@ -267,7 +275,7 @@ pub trait Store:
     /// Where the store stands now; read it before the use case reads anything else.
     fn revision(&self) -> impl Future<Output = Result<StoreRevision, StoreError>> + Send;
 
-    /// The revision of the store at which the model last changed: the Project, the change requests or the names
+    /// The revision of the store at which the model last changed: the Project, the change requests, the Cruxes or the names
     /// (what an agent is shown). A commit that only records a run or a judged report leaves it, so a report made
     /// on a view read before such a commit is not taken for one made on an older model.
     fn model_revision(&self) -> impl Future<Output = Result<StoreRevision, StoreError>> + Send;

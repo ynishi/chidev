@@ -75,6 +75,19 @@ uuid_id!(
     ChangeRequestId
 );
 uuid_id!(
+    /// The identity of a Crux, a question a decision maker answers.
+    CruxId
+);
+uuid_id!(
+    /// The identity of an option of a Crux; a recommendation and a decision point at it, so they stay true when the
+    /// option is reworded.
+    CruxOptionId
+);
+uuid_id!(
+    /// The identity of an Answer, the record of one decision of a decision maker.
+    AnswerId
+);
+uuid_id!(
     /// The identity of a measurement: one run of a measure over one subject.
     MeasurementId
 );

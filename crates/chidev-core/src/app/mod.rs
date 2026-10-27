@@ -62,16 +62,18 @@ use self::ports::{AssetKind, AssetName, Clock, IdSource, Store, StoreRevision};
 pub use crate::domain::check::ParamValue;
 use crate::domain::check::{CheckView, Finding, Mention, Moment};
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, ChangeRequestError, Crux,
+    ChangeRequest, ChangeRequestDraft, ChangeRequestError,
 };
+use crate::domain::entity::crux::{Crux, CruxDraft};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
 use crate::domain::service::change_request::{
-    awaiting_decision, check_supersedes, contexts_in, decide, expectations_now, keep_moved,
-    keep_progress, out_of_frame, resolve, target_progress,
+    check_requests_and_cruxes, contexts_in, expectations_now, keep_moved, keep_progress,
+    out_of_frame, raised_in, resolve, state_of, target_progress,
 };
 use crate::domain::service::cite::stale_cites;
+use crate::domain::service::crux::{check_supersedes, decide};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::violation::Violation;
 use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
@@ -80,13 +82,13 @@ use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::confidence::Confidence;
 pub use crate::domain::vo::crux::{CruxKind, Importance};
-use crate::domain::vo::crux::{CruxOption, Decision, Reasoned, Recommended};
+use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 pub use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
-    CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
-    PinId, ProjectId,
+    AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId,
+    HarnessId, InterfaceId, ItemId, PinId, ProjectId,
 };
 pub use crate::domain::vo::intent::Intent;
 use crate::domain::vo::intent::Issuer;
@@ -429,11 +431,13 @@ fn view<'a>(
     project: &'a Project,
     pins: &'a [Pin],
     change_requests: &'a [ChangeRequest],
+    cruxes: &'a [Crux],
 ) -> CheckView<'a> {
     CheckView {
         project,
         pins,
         change_requests,
+        cruxes,
         measurements: &[],
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
@@ -570,41 +574,56 @@ pub struct OptionInput {
     pub keep: Vec<TargetInput>,
     /// What else it affects.
     pub consequence: Option<String>,
+    /// Whether the one who raises the Crux recommends this option, why, and how sure. At most one option of a Crux
+    /// is recommended.
+    pub recommended: Option<RecommendationInput>,
 }
 
-/// A choice and why (a decision).
+/// Why an option is recommended, and how sure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReasonedInput {
-    /// The choice.
-    pub choice: String,
-    /// Why.
-    pub reason: Option<String>,
-}
-
-/// The option recommended, why, and how sure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecommendedInput {
-    /// The choice.
-    pub choice: String,
+pub struct RecommendationInput {
     /// Why.
     pub reason: Option<String>,
     /// How sure, from 0 to 100.
     pub confidence: Option<u64>,
 }
 
-/// The choice of a change request a decision maker makes.
+/// A Crux as it is raised: the question a decision maker is to answer, in the change request it stops. The change
+/// request is addressed by its title; everything that is recorded is by id.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CruxInput {
+pub struct RaiseCruxInput {
+    /// The title of the change request the Crux is raised in, which it stops until it is decided.
+    pub cr: String,
     /// What kind of question it is.
     pub kind: CruxKind,
-    /// The options.
+    /// The question, in a sentence.
+    pub question: String,
+    /// The findings it is raised from; none for a question that arises from the text of the change request.
+    pub findings: Vec<FindingInput>,
+    /// The options, at least one.
     pub options: Vec<OptionInput>,
-    /// The option recommended.
-    pub recommended: Option<RecommendedInput>,
     /// How much the answer matters.
     pub importance: Option<Importance>,
-    /// The title of the change request whose answered Crux this one replaces.
+    /// The id of the Crux whose decision this one replaces.
     pub supersedes: Option<String>,
+}
+
+/// An option of a Crux as it was raised: the id its decision points at, and the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaisedOption {
+    /// Its id.
+    pub id: CruxOptionId,
+    /// The choice.
+    pub choice: String,
+}
+
+/// A Crux as it was raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Raised {
+    /// Its id.
+    pub id: CruxId,
+    /// Its options, in the order given.
+    pub options: Vec<RaisedOption>,
 }
 
 /// Where an Assumption stands, as a person writes it.
@@ -703,8 +722,6 @@ pub struct ChangeRequestInput {
     pub targets: Vec<TargetInput>,
     /// The targets it asks to keep as they are, each target once and none of them also a target.
     pub keep: Vec<TargetInput>,
-    /// The choice for a decision maker, besides the targets; none: nothing to decide.
-    pub crux: Option<CruxInput>,
     /// The interpretations settled from the repository and general knowledge while raising it.
     pub assumptions: Vec<AssumptionInput>,
     /// The findings it deals with.
@@ -731,7 +748,12 @@ pub struct FindingInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionInput {
     /// One of the options.
-    Chosen(ReasonedInput),
+    Chosen {
+        /// The id of the option, as `cr_crux_raise` gave it back.
+        option: String,
+        /// Why.
+        reason: Option<String>,
+    },
     /// The behaviour in the person's own words.
     Worded {
         /// The behaviour.
@@ -744,6 +766,8 @@ pub enum DecisionInput {
         /// What must still hold.
         keep: Vec<String>,
     },
+    /// The question is not needed any more.
+    Withdrawn,
 }
 
 /// What a decision rests on, in the result of `status`.
@@ -763,11 +787,39 @@ pub enum BasisStatus {
     },
 }
 
+/// What was decided about a Crux, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionStatus {
+    /// One of the options, by its id.
+    Chosen {
+        /// The id of the option.
+        option: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// The behaviour in the decision maker's own words.
+    Worded {
+        /// The behaviour.
+        wording: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// The behaviour left free, as long as these hold.
+    Unspecified {
+        /// What must still hold.
+        keep: Vec<String>,
+    },
+    /// The question was withdrawn.
+    Withdrawn,
+}
+
 /// The answer to a Crux, in the result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnswerStatus {
-    /// What was decided, in words.
-    pub decision: String,
+    /// Its id.
+    pub id: String,
+    /// What was decided.
+    pub decision: DecisionStatus,
     /// What it rests on.
     pub basis: BasisStatus,
     /// `role` or `person`.
@@ -878,14 +930,10 @@ pub struct ChangeRequestStatus {
     pub parent: Option<String>,
     /// Who raised it.
     pub issuer: Option<String>,
-    /// The kind of its Crux; none: it has no choice for a decision maker.
-    pub crux: Option<&'static str>,
-    /// The title of the change request whose answered Crux its Crux supersedes.
-    pub supersedes: Option<String>,
+    /// The ids of the Cruxes raised in it, in `Status::cruxes`.
+    pub cruxes: Vec<String>,
     /// `open`, `decided` or `resolved`.
     pub state: &'static str,
-    /// The answer to its Crux: the decision, what it rests on, who gave it and when.
-    pub answer: Option<AnswerStatus>,
     /// How it ended, when it is resolved.
     pub resolution: Option<ResolutionStatus>,
     /// Every resolution and reopening, in the order they happened.
@@ -930,9 +978,11 @@ pub struct AwaitingExpect {
     pub target: String,
 }
 
-/// An option of an undecided Crux.
+/// An option of a Crux, in the result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwaitingOption {
+    /// Its id, which a decision points at.
+    pub id: String,
     /// The choice.
     pub choice: String,
     /// The new wording it makes of the definitions.
@@ -943,23 +993,64 @@ pub struct AwaitingOption {
     pub consequence: Option<String>,
 }
 
-/// The recommendation of an undecided Crux.
+/// The recommendation of a Crux.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecommendedStatus {
-    /// The choice recommended.
-    pub choice: String,
+    /// The id of the option recommended.
+    pub option: String,
     /// Why.
     pub reason: Option<String>,
     /// How sure, from 0 to 100.
     pub confidence: Option<u8>,
 }
 
-/// A change request whose Crux has no decision yet: what a decision maker is asked.
+/// A finding a Crux was raised from, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CruxFindingStatus {
+    /// The rule.
+    pub rule: String,
+    /// What it is about, in words; none: the Project.
+    pub about: Option<String>,
+}
+
+/// A Crux, in the result of `status`: the same record as the `cruxes` of `view`, with the change request it was
+/// raised in by its title, as the rest of `status` names change requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CruxStatus {
+    /// Its id.
+    pub id: String,
+    /// The title of the change request it stops.
+    pub raised_in: String,
+    /// The findings it was raised from.
+    pub findings: Vec<CruxFindingStatus>,
+    /// The kind of question.
+    pub kind: &'static str,
+    /// The question.
+    pub question: String,
+    /// How much the answer matters.
+    pub importance: Option<&'static str>,
+    /// The options, in the order given.
+    pub options: Vec<AwaitingOption>,
+    /// The option recommended, with how sure.
+    pub recommended: Option<RecommendedStatus>,
+    /// The id of the Crux whose decision it replaces.
+    pub supersedes: Option<String>,
+    /// `open` or `answered`.
+    pub state: &'static str,
+    /// The answer: the decision, what it rests on, who gave it and when.
+    pub answer: Option<AnswerStatus>,
+}
+
+/// A Crux that has no decision yet: what a decision maker is asked. Its change request, resolved or not, waits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwaitingStatus {
-    /// The change request's title.
-    pub cr: String,
-    /// The kind of its Crux.
+    /// The Crux's id.
+    pub crux: String,
+    /// The title of the change request it was raised in.
+    pub raised_in: String,
+    /// The question.
+    pub question: String,
+    /// The kind of the Crux.
     pub kind: &'static str,
     /// The options.
     pub options: Vec<AwaitingOption>,
@@ -1034,7 +1125,9 @@ pub struct Status {
     pub change_requests: Vec<ChangeRequestStatus>,
     /// The change requests that keep a target as it is, and it moved.
     pub keep_moved: Vec<KeepMovedStatus>,
-    /// The change requests whose Crux has no decision yet.
+    /// Every Crux.
+    pub cruxes: Vec<CruxStatus>,
+    /// The Cruxes that have no decision yet.
     pub awaiting: Vec<AwaitingStatus>,
     /// The decision Policy of the Project.
     pub policy: PolicyStatus,
@@ -1049,12 +1142,21 @@ pub struct Status {
     pub measurements: Vec<MeasurementStanding>,
 }
 
-/// A decision, in words.
-fn decision_text(d: &Decision) -> String {
+/// A decision, for `status`.
+fn decision_status(d: &Decision) -> DecisionStatus {
     match d {
-        Decision::Chosen(c) => c.choice().to_string(),
-        Decision::Worded { wording, .. } => format!("in other words: {wording}"),
-        Decision::Unspecified { .. } => "left unspecified".to_string(),
+        Decision::Chosen { option, reason } => DecisionStatus::Chosen {
+            option: option.to_string(),
+            reason: reason.as_ref().map(|r| r.to_string()),
+        },
+        Decision::Worded { wording, reason } => DecisionStatus::Worded {
+            wording: wording.to_string(),
+            reason: reason.as_ref().map(|r| r.to_string()),
+        },
+        Decision::Unspecified { keep } => DecisionStatus::Unspecified {
+            keep: keep.iter().map(|k| k.to_string()).collect(),
+        },
+        Decision::Withdrawn => DecisionStatus::Withdrawn,
     }
 }
 
@@ -1088,11 +1190,10 @@ fn prose(text: &Option<String>) -> Result<Option<Prose>, AppError> {
         .transpose()
 }
 
-fn reasoned(r: &ReasonedInput) -> Result<Reasoned, AppError> {
-    Ok(Reasoned::new(
-        Choice::try_from(r.choice.as_str()).map_err(input)?,
-        prose(&r.reason)?,
-    ))
+/// The uuid an id is written as. What is not one names nothing, which is a mistake of the input, not a rule.
+fn uuid_of(what: &str, text: &str) -> Result<uuid::Uuid, AppError> {
+    uuid::Uuid::parse_str(text.trim())
+        .map_err(|_| AppError::Input(format!("`{text}` is not the id of {what}")))
 }
 
 /// An Assumption as the domain holds it, from what a person wrote.
@@ -1139,10 +1240,11 @@ fn assumption_status(a: &Assumption) -> AssumptionStatus {
     }
 }
 
-/// An answer, in words, for `status`.
+/// An answer to a Crux, for `status`.
 fn answer_status(a: &Answer) -> AnswerStatus {
     AnswerStatus {
-        decision: decision_text(a.decision()),
+        id: a.id().to_string(),
+        decision: decision_status(a.decision()),
         basis: match a.basis() {
             Basis::Policy {
                 line,
@@ -1514,10 +1616,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// Opens a change request: what is asked and why, whether it means to change the behaviour, the change request
-    /// it is a part of, who raises it, the definitions it is about (each citation names its Context), and the
-    /// question for a person, whose options may name the definitions they ask to change. Gives back the id and the
-    /// lines as recorded. Like the record of a change request in general, it is an edit: the checks of an edit
-    /// run, and the answer carries what it introduced.
+    /// it is a part of, who raises it, and the definitions it is about (each citation names its Context). Gives
+    /// back the id and the lines as recorded. A question for a person is not a part of it: it is raised in the
+    /// change request afterwards ([`App::raise_crux`]). Like the record of a change request in general, it is an
+    /// edit: the checks of an edit run, and the answer carries what it introduced.
     pub async fn open_change_request(
         &mut self,
         c: &ChangeRequestInput,
@@ -1525,17 +1627,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
-        let existing = self.store.change_requests().await?;
+        let (existing, _) = self.requests_and_cruxes().await?;
         if existing.iter().any(|cr| *cr.title() == title) {
             return Err(AppError::TitleTaken(title.to_string()));
         }
-        // The id is made before the Crux, so that a refusal of the Crux names the request it was opened for.
         let id = ChangeRequestId::from_uuid(self.ids.next_uuid());
-        let refused = |error: ChangeRequestError| AppError::ChangeRequestOf {
-            id,
-            title: title.to_string(),
-            error,
-        };
         let parent = match &c.parent {
             None => None,
             Some(t) => Some(
@@ -1563,67 +1659,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 wanted.push((target, kind));
             }
         }
-        let crux = match &c.crux {
-            None => None,
-            Some(q) => {
-                let mut options = Vec::with_capacity(q.options.len());
-                for o in &q.options {
-                    let mut expects = BTreeMap::new();
-                    for (kind, refs) in [
-                        (ExpectKind::Target, &o.targets),
-                        (ExpectKind::Keep, &o.keep),
-                    ] {
-                        for r in refs {
-                            let target = self.target_of(&p, r).await?;
-                            let twice = expects.insert(target, kind).is_some();
-                            let clashes = wanted.iter().any(|(t, k)| *t == target && *k != kind);
-                            if twice || clashes {
-                                return Err(AppError::Input(format!(
-                                    "{} is a target and kept, or given twice, by the change request and the option `{}`",
-                                    self.describe(&p, target).await?,
-                                    o.choice
-                                )));
-                            }
-                        }
-                    }
-                    options.push(CruxOption::new(
-                        Choice::try_from(o.choice.as_str()).map_err(input)?,
-                        prose(&o.change)?,
-                        expects,
-                        prose(&o.consequence)?,
-                    ));
-                }
-                let recommended = q
-                    .recommended
-                    .as_ref()
-                    .map(|r| {
-                        Ok::<_, AppError>(Recommended::new(
-                            Choice::try_from(r.choice.as_str()).map_err(input)?,
-                            prose(&r.reason)?,
-                            r.confidence
-                                .map(|c| Confidence::try_from(c).map_err(input))
-                                .transpose()?,
-                        ))
-                    })
-                    .transpose()?;
-                let supersedes = match &q.supersedes {
-                    None => None,
-                    Some(t) => {
-                        let replaced = existing
-                            .iter()
-                            .find(|cr| cr.title().as_str() == t.trim())
-                            .map(|cr| cr.id())
-                            .ok_or_else(|| AppError::UnknownChangeRequest(t.clone()))?;
-                        check_supersedes(replaced, &existing).map_err(refused)?;
-                        Some(replaced)
-                    }
-                };
-                Some(
-                    Crux::new(q.kind, options, recommended, q.importance, supersedes)
-                        .map_err(refused)?,
-                )
-            }
-        };
         let assumptions = c
             .assumptions
             .iter()
@@ -1647,7 +1682,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 parent,
                 issuer,
                 expects: expectations_now(&p, wanted),
-                crux,
                 assumptions,
                 addresses,
             },
@@ -1676,14 +1710,137 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// Records the answer to the Crux of the change request titled `title`: the `decision`, what it rests on
-    /// (`basis`: a line of the Project's Policy, which must exist, or an arbitrary reason), who decided it (`by`),
-    /// and when (from the clock). The answer is recorded once and never rewritten: a Crux already answered refuses
-    /// another. The Policy line is cited at the revision the Policy has now. An edit of the record (see
+    /// Raises a Crux in the change request titled `c.cr`: the question a decision maker is to answer, of a kind, with
+    /// the options (each may name the targets it asks to be revised, retired or kept once it is chosen, which are
+    /// read against what the change request asks as `cr_open` reads its targets), the findings it is raised from,
+    /// and the Crux it replaces (by id; that one must have a decision to replace). One option at most is
+    /// recommended. The change request waits for the Crux: it cannot be resolved until the Crux is decided. A
+    /// resolved change request takes none (reopen it first). Gives back the id of the Crux and of each option, which
+    /// the decision points at. An edit of the record (see [`App::open_change_request`]).
+    pub async fn raise_crux(&mut self, c: &RaiseCruxInput) -> Result<Checked<Raised>, AppError> {
+        let at = self.store.revision().await?;
+        let p = self.project().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        let cr = crs
+            .into_iter()
+            .find(|r| r.title().as_str() == c.cr.trim())
+            .ok_or_else(|| AppError::UnknownChangeRequest(c.cr.clone()))?;
+        let refused = |error: ChangeRequestError| AppError::on(&cr, error);
+        if cr.is_resolved() {
+            return Err(refused(ChangeRequestError::AlreadyResolved));
+        }
+        let question = Prose::try_from(c.question.as_str()).map_err(input)?;
+        if c.options.iter().filter(|o| o.recommended.is_some()).count() > 1 {
+            return Err(AppError::Input(
+                "at most one option is recommended".to_string(),
+            ));
+        }
+        // The Crux replaced is read first: what its decision asked of targets does not stand once this Crux is
+        // decided, so the options are read against what stands without it.
+        let supersedes = match &c.supersedes {
+            None => None,
+            Some(text) => {
+                let replaced = CruxId::from_uuid(uuid_of("a crux", text)?);
+                check_supersedes(replaced, cruxes.iter().find(|q| q.id() == replaced))
+                    .map_err(refused)?;
+                Some(replaced)
+            }
+        };
+        let leaving_out = supersedes
+            .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced))
+            .filter(|q| q.raised_in() == cr.id())
+            .and_then(Crux::answer_given)
+            .map(Answer::id);
+        let id = CruxId::from_uuid(self.ids.next_uuid());
+        let mut options = Vec::with_capacity(c.options.len());
+        let mut recommended = None;
+        for o in &c.options {
+            let mut expects = BTreeMap::new();
+            for (kind, refs) in [
+                (ExpectKind::Target, &o.targets),
+                (ExpectKind::Keep, &o.keep),
+            ] {
+                for r in refs {
+                    let target = self.target_of(&p, r).await?;
+                    let twice = expects.insert(target, kind).is_some();
+                    // What the request asks itself, and what the decisions taken in it ask and still stand.
+                    let clashes = cr
+                        .kind_asked(&target, leaving_out)
+                        .is_some_and(|asked| asked != kind);
+                    if twice || clashes {
+                        return Err(AppError::Input(format!(
+                            "{} is a target and kept, or given twice, by the change request (or a decision taken in it) and the option `{}`",
+                            self.describe(&p, target).await?,
+                            o.choice
+                        )));
+                    }
+                }
+            }
+            let option = CruxOption::new(
+                CruxOptionId::from_uuid(self.ids.next_uuid()),
+                Choice::try_from(o.choice.as_str()).map_err(input)?,
+                prose(&o.change)?,
+                expects,
+                prose(&o.consequence)?,
+            );
+            if let Some(r) = &o.recommended {
+                recommended = Some(Recommended::new(
+                    option.id(),
+                    prose(&r.reason)?,
+                    r.confidence
+                        .map(|c| Confidence::try_from(c).map_err(input))
+                        .transpose()?,
+                ));
+            }
+            options.push(option);
+        }
+        let mut findings = Vec::with_capacity(c.findings.len());
+        for f in &c.findings {
+            findings.push(self.finding_ref(&p, f).await?);
+        }
+        let crux = Crux::raise(
+            id,
+            CruxDraft {
+                raised_in: cr.id(),
+                findings,
+                kind: c.kind,
+                question,
+                options,
+                recommended,
+                importance: c.importance,
+                supersedes,
+            },
+        )
+        .map_err(refused)?;
+        let raised = Raised {
+            id,
+            options: crux
+                .options()
+                .iter()
+                .map(|o| RaisedOption {
+                    id: o.id(),
+                    choice: o.choice().to_string(),
+                })
+                .collect(),
+        };
+        let delta = ModelDelta::new().with_crux(crux);
+        let findings = self.commit_edit(EditTrigger::RaiseCrux, at, delta).await?;
+        Ok(Checked {
+            value: raised,
+            findings,
+        })
+    }
+
+    /// Records the decision of the Crux with the id `crux`: what is decided, what it rests on (`basis`: a line of
+    /// the Project's Policy, which must exist, or an arbitrary reason), who decided it (`by`), and when (from the
+    /// clock). The decision is recorded once and never rewritten: a Crux already decided refuses another. The
+    /// Policy line is cited at the revision the Policy has now. The targets the option chosen asks for are recorded
+    /// in the change request the Crux was raised in, in the same commit; if that change request is resolved, only a
+    /// withdrawal is taken (reopen it for any other decision). An edit of the record (see
     /// [`App::open_change_request`]).
-    pub async fn decide_change_request(
+    pub async fn decide_crux(
         &mut self,
-        title: &str,
+        crux: &str,
         decision: &DecisionInput,
         basis: &BasisInput,
         by: &DecisionMakerInput,
@@ -1691,7 +1848,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let now = self.clock.now();
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let mut cr = self.change_request_titled(title).await?;
+        let wanted = CruxId::from_uuid(uuid_of("a crux", crux)?);
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        let mut crux = cruxes
+            .iter()
+            .find(|q| q.id() == wanted)
+            .cloned()
+            .ok_or_else(|| AppError::Input(format!("no crux has the id `{wanted}`")))?;
+        let mut cr = crs
+            .into_iter()
+            .find(|c| c.id() == crux.raised_in())
+            .ok_or_else(|| {
+                AppError::Store(StoreError::Corrupt(format!(
+                    "the crux {wanted} was raised in a change request that does not exist"
+                )))
+            })?;
         let basis = match basis {
             BasisInput::Policy(line) => {
                 let line = PolicyLineId::try_from(line.as_str()).map_err(input)?;
@@ -1705,7 +1876,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         let by = maker_of(by)?;
         let decision = match decision {
-            DecisionInput::Chosen(r) => Decision::Chosen(reasoned(r)?),
+            DecisionInput::Chosen { option, reason } => Decision::Chosen {
+                option: CruxOptionId::from_uuid(uuid_of("an option", option)?),
+                reason: prose(reason)?,
+            },
             DecisionInput::Worded { wording, reason } => Decision::Worded {
                 wording: Prose::try_from(wording.as_str()).map_err(input)?,
                 reason: prose(reason)?,
@@ -1716,13 +1890,38 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .map(|k| Prose::try_from(k.as_str()).map_err(input))
                     .collect::<Result<_, _>>()?,
             },
+            DecisionInput::Withdrawn => Decision::Withdrawn,
         };
-        decide(&mut cr, Answer::new(decision, basis, by, now), &p)
-            .map_err(|e| AppError::on(&cr, e))?;
-        let delta = ModelDelta::new().with_change_request(cr);
-        let findings = self
-            .commit_edit(EditTrigger::DecideChangeRequest, at, delta)
-            .await?;
+        let answer = Answer::new(
+            AnswerId::from_uuid(self.ids.next_uuid()),
+            decision,
+            basis,
+            by,
+            now,
+        );
+        let before = cr.clone();
+        let replaced = crux
+            .supersedes()
+            .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced));
+        match decide(&mut crux, &mut cr, answer, &p, replaced) {
+            Ok(()) => {}
+            // A target the option asks the other of than the change request does: the refusal that raising a
+            // Crux gives for the same clash.
+            Err(ChangeRequestError::ExpectationConflict(target)) => {
+                return Err(AppError::Input(format!(
+                    "{} is a target and kept, or given twice, by the change request and the option chosen",
+                    self.describe(&p, target).await?
+                )));
+            }
+            Err(e) => return Err(AppError::on(&cr, e)),
+        }
+        // The Crux and the change request it was raised in are kept together; the change request is left alone when
+        // the decision asked nothing of it.
+        let mut delta = ModelDelta::new().with_crux(crux);
+        if cr != before {
+            delta = delta.with_change_request(cr);
+        }
+        let findings = self.commit_edit(EditTrigger::DecideCrux, at, delta).await?;
         Ok(Checked {
             value: (),
             findings,
@@ -1776,10 +1975,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// Closes the record of the change request titled `title` with a resolution: how it ended (`how`), why
     /// (`reason`), who says so (`by`), and when (from the clock). Only explicit states refuse it: the request
-    /// resolved already, its Crux not answered (to resolve it as done), a part of it not resolved, a `duplicate` or
-    /// `superseded` that points at a change request that does not exist (or at itself). The revisions of the
-    /// targets and the work recorded for the request are not consulted; the checks of the resolve moment say where
-    /// they disagree with the record.
+    /// resolved already, a Crux raised in it not decided (whatever the resolution), a part of it not resolved, a
+    /// `duplicate` or `superseded` that points at a change request that does not exist (or at itself). The
+    /// revisions of the targets and the work recorded for the request are not consulted; the checks of the resolve
+    /// moment say where they disagree with the record.
     pub async fn resolve_change_request(
         &mut self,
         title: &str,
@@ -1790,8 +1989,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let now = self.clock.now();
         let at = self.store.revision().await?;
         self.project().await?;
-        let mut cr = self.change_request_titled(title).await?;
-        let crs = self.store.change_requests().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        let mut cr = crs
+            .iter()
+            .find(|c| c.title().as_str() == title.trim())
+            .cloned()
+            .ok_or_else(|| AppError::UnknownChangeRequest(title.to_string()))?;
         let titled = |t: &String| {
             crs.iter()
                 .find(|c| c.title().as_str() == t.trim())
@@ -1811,7 +2014,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             maker_of(by)?,
             now,
         );
-        resolve(&mut cr, resolution, &crs).map_err(|e| AppError::on(&cr, e))?;
+        resolve(&mut cr, resolution, &crs, &cruxes).map_err(|e| AppError::on(&cr, e))?;
         let delta = ModelDelta::new().with_change_request(cr);
         let findings = self
             .commit_confirm(ConfirmTrigger::ResolveChangeRequest, at, delta)
@@ -1863,9 +2066,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub async fn check(&self, context: Option<&str>) -> Result<CheckResult, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let crs = self.store.change_requests().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         let wanted = context.map(|name| context_id(&p, name)).transpose()?;
-        let (found, _, _) = self.checked_on(at, &p, &crs).await?;
+        let (found, _, _) = self.checked_on(at, &p, &crs, &cruxes).await?;
         let Some(wanted) = wanted else {
             return Ok(CheckResult {
                 findings: found,
@@ -1894,16 +2097,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let crs = self.store.change_requests().await?;
-        self.checked_on(at, &p, &crs).await
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        self.checked_on(at, &p, &crs, &cruxes).await
     }
 
-    /// [`App::checked`] on the Project `p` and the change requests `crs`, which the store held at `at`.
+    /// [`App::checked`] on the Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at
+    /// `at`.
     async fn checked_on(
         &self,
         at: StoreRevision,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
     ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
         let pins = self.store.pins().await?;
         let measured = self.measured(p).await?;
@@ -1914,26 +2119,48 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 project: p,
                 pins: &pins,
                 change_requests: crs,
+                cruxes,
                 measurements: &measured.measurements,
                 measure_settings: &measured.settings,
                 sim_settings: &measured.sim_settings,
             },
         );
         let mut found = self.found(&run.findings, p, crs, &[]).await?;
-        found.extend(self.external_standing(p, crs, at).await?.0);
-        let (judged, standing) = self.judged_standing(p, crs, at).await?;
+        found.extend(self.external_standing(p, crs, cruxes, at).await?.0);
+        let (judged, standing) = self.judged_standing(p, crs, cruxes, at).await?;
         found.extend(judged);
         Ok((found, standing, measured))
     }
 
     /// The change request titled `title`.
     async fn change_request_titled(&self, title: &str) -> Result<ChangeRequest, AppError> {
-        self.store
-            .change_requests()
+        self.requests_and_cruxes()
             .await?
+            .0
             .into_iter()
             .find(|c| c.title().as_str() == title.trim())
             .ok_or_else(|| AppError::UnknownChangeRequest(title.to_string()))
+    }
+
+    /// Every change request and every Crux, read together and checked against each other
+    /// ([`check_requests_and_cruxes`]): a pair that does not fit is a store that cannot be read (`Corrupt`), as a
+    /// record the domain refuses is. The one way a use case reads them.
+    ///
+    /// The two are read one after the other, not in one transaction, so a commit of another process in between can
+    /// leave a pair that does not fit though each is sound (a change request opened and a Crux raised in it, read as
+    /// the Crux alone). That is a conflict, as a change during any use case's reads is, and not a corrupt store: the
+    /// revision of the store says which.
+    async fn requests_and_cruxes(&self) -> Result<(Vec<ChangeRequest>, Vec<Crux>), AppError> {
+        let at = self.store.revision().await?;
+        let crs = self.store.change_requests().await?;
+        let cruxes = self.store.cruxes().await?;
+        if let Err(e) = check_requests_and_cruxes(&crs, &cruxes) {
+            if self.store.revision().await? != at {
+                return Err(AppError::Store(StoreError::Conflict));
+            }
+            return Err(AppError::Store(StoreError::Corrupt(e.to_string())));
+        }
+        Ok((crs, cruxes))
     }
 
     /// Where the Project stands.
@@ -1993,7 +2220,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 now: s.now.number(),
             });
         }
-        let crs = self.store.change_requests().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         let (findings, judged, measured) = self.checked().await?;
         let measurements = self.measurement_standings(&p, &measured).await?;
         let title_of = |id: ChangeRequestId| {
@@ -2037,10 +2264,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 intent: c.intent().word(),
                 parent: c.parent().map(title_of),
                 issuer: c.issuer().map(|i| i.to_string()),
-                crux: c.crux().map(|q| q.kind().word()),
-                supersedes: c.crux().and_then(Crux::supersedes).map(title_of),
-                state: c.state().word(),
-                answer: c.crux().and_then(Crux::answer).map(answer_status),
+                cruxes: raised_in(c, &cruxes).map(|q| q.id().to_string()).collect(),
+                state: state_of(c, &cruxes).word(),
                 resolution: c.resolution().map(|r| resolution_status(r, &title_of)),
                 history: c
                     .history()
@@ -2074,39 +2299,25 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 moved: self.describe_all(&p, &k.moved).await?,
             });
         }
-        let mut awaiting = Vec::new();
-        for c in awaiting_decision(crs.iter()) {
-            let Some(q) = c.crux() else {
-                continue;
-            };
-            let mut options = Vec::with_capacity(q.options().len());
-            for o in q.options() {
-                let mut expects = Vec::with_capacity(o.expects().len());
-                for (target, kind) in o.expects() {
-                    expects.push(AwaitingExpect {
-                        kind: kind.word(),
-                        target: self.describe(&p, *target).await?,
-                    });
-                }
-                options.push(AwaitingOption {
-                    choice: o.choice().to_string(),
-                    wording: o.change().map(|w| w.to_string()),
-                    expects,
-                    consequence: o.consequence().map(|w| w.to_string()),
-                });
-            }
-            awaiting.push(AwaitingStatus {
-                cr: c.title().to_string(),
-                kind: q.kind().word(),
-                options,
-                recommended: q.recommended().map(|r| RecommendedStatus {
-                    choice: r.choice().to_string(),
-                    reason: r.reason().map(|w| w.to_string()),
-                    confidence: r.confidence().map(Confidence::percent),
-                }),
-                importance: q.importance().map(Importance::word),
-            });
+        let mut told = Vec::with_capacity(cruxes.len());
+        for q in &cruxes {
+            told.push(self.crux_status(&p, &crs, &title_of, q).await?);
         }
+        // `told` is in the order of `cruxes`, one for each.
+        let awaiting = cruxes
+            .iter()
+            .zip(&told)
+            .filter(|(q, _)| q.is_open())
+            .map(|(_, t)| AwaitingStatus {
+                crux: t.id.clone(),
+                raised_in: t.raised_in.clone(),
+                question: t.question.clone(),
+                kind: t.kind,
+                options: t.options.clone(),
+                recommended: t.recommended.clone(),
+                importance: t.importance,
+            })
+            .collect();
         let policy = PolicyStatus {
             revision: p.policy().revision().number(),
             lines: p
@@ -2125,12 +2336,67 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             stale_cites: stale,
             change_requests: records,
             keep_moved: moved,
+            cruxes: told,
             awaiting,
             policy,
             findings,
             judged,
-            external: self.external_standing(&p, &crs, at).await?.1,
+            external: self.external_standing(&p, &crs, &cruxes, at).await?.1,
             measurements,
+        })
+    }
+
+    /// A Crux for `status`: the change request it stops by its title, the targets of its options in words.
+    async fn crux_status(
+        &self,
+        p: &Project,
+        crs: &[ChangeRequest],
+        title_of: &impl Fn(ChangeRequestId) -> String,
+        q: &Crux,
+    ) -> Result<CruxStatus, AppError> {
+        let mut options = Vec::with_capacity(q.options().len());
+        for o in q.options() {
+            let mut expects = Vec::with_capacity(o.expects().len());
+            for (target, kind) in o.expects() {
+                expects.push(AwaitingExpect {
+                    kind: kind.word(),
+                    target: self.describe(p, *target).await?,
+                });
+            }
+            options.push(AwaitingOption {
+                id: o.id().to_string(),
+                choice: o.choice().to_string(),
+                wording: o.change().map(|w| w.to_string()),
+                expects,
+                consequence: o.consequence().map(|w| w.to_string()),
+            });
+        }
+        let mut findings = Vec::with_capacity(q.findings().len());
+        for f in q.findings() {
+            findings.push(CruxFindingStatus {
+                rule: f.rule().to_string(),
+                about: match f.subject() {
+                    None => None,
+                    Some(s) => Some(self.describe_subject(p, crs, s, &[]).await?),
+                },
+            });
+        }
+        Ok(CruxStatus {
+            id: q.id().to_string(),
+            raised_in: title_of(q.raised_in()),
+            findings,
+            kind: q.kind().word(),
+            question: q.question().to_string(),
+            importance: q.importance().map(Importance::word),
+            options,
+            recommended: q.recommended().map(|r| RecommendedStatus {
+                option: r.option().to_string(),
+                reason: r.reason().map(|w| w.to_string()),
+                confidence: r.confidence().map(Confidence::percent),
+            }),
+            supersedes: q.supersedes().map(|s| s.to_string()),
+            state: q.state().word(),
+            answer: q.answer_given().map(answer_status),
         })
     }
 

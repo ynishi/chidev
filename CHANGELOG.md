@@ -10,6 +10,55 @@ and this project adheres to
 
 ### Changed
 
+- Breaking: the Crux is a record of its own, with an id, not a part of a change
+  request. It is raised in a change request (`raised_in`), optionally from
+  findings; its options and its answer have ids, and a recommendation and a
+  decision point at an option by its id, not by the text of its choice. A
+  decision is required, and a decision can be a choice, a wording, "unspecified"
+  or, new, a withdrawal; a Crux of kind `model` cannot be left unspecified. The
+  authority to decide is managed outside chidev (see
+  `docs/adr/0003-the-authority-to-decide-a-crux-is-managed-outside-chidev.md`):
+  `by` is kept as declared and checked against nothing. A change request is
+  stopped by the Cruxes raised in it, and the targets of the option chosen
+  become its decided expectations when the Crux is decided (an expectation the
+  request already asks with the same kind is not added twice, and one asked with
+  another kind is refused). Each decision keeps its own entries, with its own
+  revision, and a Crux that supersedes a decision taken in the same request takes
+  that decision's expectations back first. The README's "Crux, Policy and
+  Assumption" has the operations.
+- Breaking: `cr_resolve` refuses every resolution (`done`, `wont_do`, `invalid`,
+  a duplicate, a superseded one) while a Crux raised in the request has no
+  decision, `cr.crux-unanswered`; before, only `done` was refused. A Crux cannot
+  be raised in a resolved request, and a Crux of a resolved request takes only a
+  withdrawal.
+- Breaking: `cr.awaiting-decision` is a warning, not a note, and says a Crux has
+  no decision whether or not the request it was raised in is resolved.
+- Breaking: `view` is `chidev-view 4` (`chidev schema view`). A change request
+  has no `crux` in it, and the Cruxes are the new section `cruxes`. What was
+  saved before is stale once: an external result (the model it was sent carries
+  the version), and a judged finding about a change request that has a parent or
+  a Crux, or about the Project of a store that has either. The stamp of a change
+  request covers the Cruxes raised in it, and the stamp over the Project covers
+  the Cruxes.
+- Breaking: the store's layout is 2 (`PRAGMA user_version`). A file of layout 1,
+  which held the Crux inside its change request, is migrated once when it is
+  opened, in one transaction: each Crux becomes a record of its own (its question
+  is the request's title, its options are numbered in order, a recommendation and
+  a decision that named an option by its text name its id, a `supersedes` names
+  the Crux of that request) and the change request documents lose their Crux.
+  The store's revision and the model's do not move. What cannot be moved (a text
+  that is none of the options, a `supersedes` that names a request with no Crux)
+  stops the opening with what did not match and leaves the file as it was. An
+  older chidev refuses a file of layout 2, so copy the store before upgrading.
+  See "The store's layout" in the README.
+- In Rust (`chidev-core`, a public API change): `Crux` is the aggregate
+  `domain::entity::crux::Crux`, with `CruxId`, `CruxOptionId` and `AnswerId`, and
+  `CruxRepository`, which `Store` requires; `Changes` has `cruxes`.
+  `ChangeRequest` has no `crux`, and `Decision` has `Withdrawn`.
+  `App::decide_change_request` is `App::raise_crux` and `App::decide_crux`, and
+  `EditTrigger` has `RaiseCrux` and `DecideCrux` (`DecideChangeRequest` stays
+  so that a row written before can be read). `ModelSection` has `Cruxes`,
+  `CheckView` has `cruxes`, and `ModelView::build` takes the Cruxes.
 - `lines` of an Item, a Case or an Assumption's evidence given in another form
   than two line numbers (a list of another length, one number) is refused with
   words that say their form (`[first, last]`, `[n, n]` for one line), not
@@ -19,8 +68,8 @@ and this project adheres to
   the Harness writer sends back (a question of step 2, answered as work `for`
   the part that holds it, a resolved part reopened first, while its parent is
   open); that the Harness writer reads from `view` the part each put is `for`
-  and the part that holds a Crux; that a comment gaining or losing lines moves
-  the Items after it;
+  and the Cruxes (`cruxes`) that stop a part; that a comment gaining or losing
+  lines moves the Items after it;
   that `mutation.unmeasured` is a note that no run was made; and that a
   Context is based on its Contracts in the change set that puts its first
   Contract. The example's Crux is now how large a count grows; a line that is
@@ -34,18 +83,21 @@ and this project adheres to
   run them (step 5): the program tests the working tree, so the code is pinned
   with `code_file`, and its `reads` name at least one section.
 
-- The guide (`docs/guide/PROCEDURE.md`) decides six points a first version left
-  to judgement: a question is an Assumption when the requirements' text, the
+- The guide (`docs/guide/PROCEDURE.md`) decides points a first version left to
+  judgement: a question is an Assumption when the requirements' text, the
   repository or general knowledge settles it to one reading, and a Crux
-  otherwise; a Crux part is opened when the question comes up, even in the
-  middle of the design, and names the Context that holds the work its answer
-  asks for; an acceptance example is a Clause that names its files, checked by
-  a Case that reads them, so the tests before `pin` check it; an Interface has
-  one Item per declaration a caller uses (`main` for a program); a part that
-  does not depend on an open Crux may be resolved once its Clauses, Interfaces
-  and Cases are checked not to take the answer for granted; and whoever writes
-  the Harness is given only what the record holds (`view` of the Contracts,
-  Interfaces, Harnesses and change requests), the designer in a fresh session.
+  otherwise; a Crux is raised with `cr_crux_raise` when the question comes up,
+  even in the middle of the design, in the request it came up in, which waits
+  for the decision (it is not resolved until its Cruxes are decided, however it
+  would end) while the chosen option's targets become its expectations and the
+  work goes `for` it; the decision maker is a role that applies the Policy, an
+  answering agent or a person, and its authority is managed outside chidev;
+  an acceptance example is a Clause that names its files, checked by a Case that
+  reads them, so the tests before `pin` check it; an Interface has one Item per
+  declaration a caller uses (`main` for a program); and whoever writes the
+  Harness is given only what the record holds (`view` of the Contracts,
+  Interfaces, Harnesses, change requests and Cruxes), the designer in a fresh
+  session.
 
 - The guide (`docs/guide/PROCEDURE.md`) answers what two first versions run
   through it had to guess:
@@ -57,8 +109,8 @@ and this project adheres to
     keep the answer wait; code written meanwhile is not the answer;
   - an option names in `targets` the assets that exist and that choosing it
     would change, and says in `consequence` what else it affects;
-  - a Crux part names what holds what its answer adds, the Contract once it is
-    there;
+  - the request a Crux is raised in names what holds what its answer adds, the
+    Contract once it is there;
   - a Context's Contracts, Interfaces and Harness are kept in one part unless
     there is a reason to split them, and each put of a Harness is applied for
     the part whose change it carries;
@@ -115,9 +167,10 @@ and this project adheres to
   kinds, and is kept only after the checks its kind asks for (an edit, a
   confirmation, a question, or a record that runs none); see
   `docs/adr/0002-every-use-case-that-changes-state-is-a-trigger-and-one-door-keeps.md`.
-  Eight operations were kept with no check and are now edits: `context_add`,
-  `context_uses`, `base_on_contract`, `items_rekey`, `cr_open`, `cr_decide`,
-  `cr_assume` and `cr_reopen`. Their results have `findings`, those the edit
+  Operations that were kept with no check are now edits: `context_add`,
+  `context_uses`, `base_on_contract`, `items_rekey`, `cr_open`, `cr_assume` and
+  `cr_reopen`, and so are `cr_crux_raise` and `cr_crux_decide`, which replace
+  `cr_decide`. Their results have `findings`, those the edit
   introduced; a mandatory check refuses them for those, and an external check
   registered as a gate at `edit` is asked about them and can refuse them.
   `items_rekey` now says the citations it made stale (`cite.stale`). `init`,
@@ -141,10 +194,23 @@ and this project adheres to
   digest counts it by) and `Descriptor.hooks` is `Descriptor.moments`.
   `Invocation.hook` is `Invocation.moment`, and `Invocation` has a `trigger`.
   `App::add_context`, `set_uses`, `base_on_contract`, `items_rekey`,
-  `open_change_request`, `decide_change_request`, `assume` and
+  `open_change_request`, `raise_crux`, `decide_crux`, `assume` and
   `reopen_change_request` return their value in `Checked`, with the findings.
   `Store::commit` takes a `Gated` (made only in `app::commit`) and not `Changes`.
   `ExternalCall.hook` is `ExternalCall.moment`, and `ExternalCall.protocol` is 2.
+
+### Removed
+
+- The operation `cr_decide` and the field `crux` of `cr_open`. A line that has
+  one is refused (`input.unknown-op`, `input.unknown-field`), and `did_you_mean`
+  does not name the new one. In place of the `crux` of `cr_open`, raise the
+  question with `cr_crux_raise` in the request it stops (`in` is its title;
+  `question` is new, the `kind`, `importance`, `options` and `supersedes` stay,
+  `recommended` is a mark on an option, and `supersedes` is a Crux's id, not a
+  request's title). In place of `cr_decide`, decide with `cr_crux_decide`: the
+  Crux is named by its id (`crux`, not `title`), and an option by its id
+  (`option`, not the text `choice`); `wording`, `unspecified`, `basis` and `by`
+  are as they were.
 
 ### Added
 
@@ -155,13 +221,22 @@ and this project adheres to
   The README says what the shape cannot: a finding's `rule` is the one asked
   for, its `message` is not blank, its `subject` is in the model sent; and
   that an empty `reads` is refused.
-- A change request in `view` has its `parent` and its `crux` (kind, importance,
-  options, recommendation, what it supersedes and, once decided, the decision),
-  each left out when it has none, so a request with neither is written as
-  before; its `situation`, issuer and Assumptions are not in it. Once any
-  request has a parent or a Crux, saved judged findings about the change
-  requests or the Project, and external runs that read `change_requests`, are
-  stale once. The view stays `chidev-view 3`.
+- A change request in `view` has its `parent` (an id), left out when it has
+  none; its `situation`, issuer and Assumptions are not in it. The Cruxes are
+  the section `cruxes`, which `view` and the `reads` of an external check name:
+  each with its id, the request it stops (`raised_in`), its findings, kind,
+  question, importance, options (each with an id), recommendation, what it
+  supersedes, its state and, once decided, the answer (an id, the decision, the
+  basis, `by` and `at`).
+- `cr_crux_raise` raises a Crux in a change request, from findings or from the
+  text of the request, and answers with the ids of the Crux and of its options;
+  `cr_crux_decide` decides it, once, with an option (by id), a wording,
+  "unspecified" or a withdrawal (`withdrawn`), the basis and who decided. The
+  decision `Withdrawn` ends a question that is not needed any more. The rule
+  `cr.crux-unknown-option` refuses a decision that names an option the Crux does
+  not have, which `explain` describes; it was refused before with no rule
+  (`domain.unmapped`). A Crux that is withdrawn cannot be superseded
+  (`cr.supersedes-unanswered`).
 - A second `base_on_contract` for a Context already based on its Contracts is
   refused by a rule of its own, `context.already-based`, which `explain`
   describes; it was refused before with no rule (`domain.unmapped`).

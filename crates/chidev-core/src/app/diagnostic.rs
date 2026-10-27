@@ -18,6 +18,7 @@ use super::ports::{AssetName, IdSource, Store};
 use super::{App, AppError, Found, TargetInput, no_provider};
 use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::rule::{
     self, APP_UNMAPPED, CR_TITLE_TAKEN, INPUT_INVALID, INPUT_ITEMS_REQUIRED, INPUT_MISSING_FIELD,
@@ -26,6 +27,7 @@ use crate::domain::rule::{
     INPUT_WRONG_TYPE, ITEMS_FAILED, ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED,
     PROJECT_EXISTS, PROJECT_NONE, Rule, RuleKind,
 };
+use crate::domain::service::crux::check_supersedes;
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::ChangeRequestId;
@@ -960,8 +962,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// The titles of the change requests.
     async fn change_request_titles(&self) -> Vec<String> {
-        match self.store.change_requests().await {
-            Ok(crs) => crs.iter().map(|c| c.title().to_string()).collect(),
+        match self.requests_and_cruxes().await {
+            Ok((crs, _)) => crs.iter().map(|c| c.title().to_string()).collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -981,9 +983,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 None => self.describe_in(p, t, pending).await,
             },
             Party::ChangeRequest(id) => Ok(self
-                .store
-                .change_requests()
+                .requests_and_cruxes()
                 .await?
+                .0
                 .iter()
                 .find(|c| c.id() == id)
                 .map_or_else(|| id.to_string(), |c| c.title().to_string())),
@@ -999,7 +1001,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// ones already known; the rest are looked up), its values, and the operations its remedies come to.
     async fn diagnostic_of(&self, v: &Violation, mut names: Names) -> Diagnostic {
         let project = self.project().await.ok();
+        // The one read of the change requests (and of the Cruxes, which the suggestions name) that does not go
+        // through `requests_and_cruxes`: it only looks up the words for what the refusal is about, and a store that
+        // cannot be read is reported by the path that made the refusal (which got there first), so here the words are
+        // left out and the diagnostic goes on.
         let crs = self.store.change_requests().await.unwrap_or_default();
+        let cruxes = self.store.cruxes().await.unwrap_or_default();
         if let Some(p) = &project {
             for party in v.parties() {
                 if names.get(&party).is_none()
@@ -1053,8 +1060,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         if let Some(p) = &project {
             for (remedy, how) in v.remedies() {
-                d.suggestions
-                    .extend(self.suggestions_of(p, &crs, &names, v, remedy, *how).await);
+                d.suggestions.extend(
+                    self.suggestions_of(p, (&crs, &cruxes), &names, v, remedy, *how)
+                        .await,
+                );
             }
         }
         d
@@ -1064,7 +1073,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     async fn suggestions_of(
         &self,
         p: &Project,
-        crs: &[ChangeRequest],
+        (crs, cruxes): (&[ChangeRequest], &[Crux]),
         names: &Names,
         v: &Violation,
         remedy: &Remedy,
@@ -1097,9 +1106,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     )
                 })
                 .collect(),
-            Remedy::AnswerCrux { change_request } => vec![suggest(
-                json!({"op": "cr_decide", "title": title(change_request),
-                    "choice": "<one of its options>", "basis": {"arbitrary": "<why>"}, "by": by}),
+            // The Crux the violation is about, and no other: the change request may have several.
+            Remedy::AnswerCrux { crux, .. } => vec![suggest(
+                json!({"op": "cr_crux_decide", "crux": crux.to_string(),
+                    "option": "<one of its option ids>",
+                    "basis": {"arbitrary": "<why>"}, "by": by}),
                 how,
             )],
             Remedy::ReopenChangeRequest { change_request } => vec![suggest(
@@ -1107,12 +1118,27 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     "reason": "<why the work goes on>", "by": by}),
                 how,
             )],
-            Remedy::SupersedeCrux { change_request } => vec![suggest(
-                json!({"op": "cr_open", "title": "<title>", "intent": "change_behavior",
-                    "crux": {"kind": "ambiguity", "options": [{"choice": "<the new choice>"}],
-                        "supersedes": title(change_request)}}),
-                how,
-            )],
+            Remedy::SupersedeCrux {
+                change_request,
+                crux,
+            } => {
+                // The Crux the violation is about, and no other. A decision that cannot be replaced (a withdrawal)
+                // gets none: the new Crux would be refused.
+                if cruxes
+                    .iter()
+                    .find(|q| q.id() == *crux)
+                    .is_some_and(|q| check_supersedes(q.id(), Some(q)).is_err())
+                {
+                    return Vec::new();
+                }
+                vec![suggest(
+                    json!({"op": "cr_crux_raise", "in": title(change_request),
+                        "question": "<the question>", "kind": "ambiguity",
+                        "options": [{"choice": "<the new choice>"}],
+                        "supersedes": crux.to_string()}),
+                    how,
+                )]
+            }
             Remedy::PutPolicyLine { line } => {
                 let mut lines: Vec<Json> = p
                     .policy()
@@ -1336,7 +1362,7 @@ mod tests {
     fn serde_messages_become_input_rules_with_the_names_that_would_be_right() {
         let op = json!({"op": "cr_opn", "title": "x"});
         let d = Diagnostic::of_unreadable(
-            "unknown variant `cr_opn`, expected one of `init`, `cr_open`, `cr_decide` at line 1 column 15",
+            "unknown variant `cr_opn`, expected one of `init`, `cr_open`, `cr_crux_decide` at line 1 column 15",
             Some(&op),
         );
         assert_eq!(d.code, "input.unknown-op");

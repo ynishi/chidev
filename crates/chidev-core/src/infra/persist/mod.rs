@@ -1,37 +1,57 @@
 //! How the aggregates are written to the store and read back: one JSON document each, in a versioned schema
-//! ([`v1`]). A document that is newer than this code, or that the domain's rules refuse, is `Corrupt`, never
-//! quietly repaired.
+//! ([`v1`], and [`crux`] for the Crux). A document that is newer than this code, or that the domain's rules refuse,
+//! is `Corrupt`, never quietly repaired.
+//!
+//! The schemas are numbered per kind of document: the Project and the Pin are at 2, the change request at 3 and the
+//! Crux at 1. A change request document of schema 1 or 2 held its Crux; it is read only by the migration of the store
+//! to layout 2 ([`layout2`]), which writes it again as schema 3, and never by [`decode_change_request`].
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
 
+pub(crate) mod crux;
+pub(crate) mod layout2;
 pub(crate) mod measure;
 pub(crate) mod v1;
 
-use self::v1::{ChangeRequestDoc, PinDoc, ProjectDoc, SCHEMA};
+use self::crux::CruxDoc;
+use self::v1::{CR_SCHEMA, ChangeRequestDoc, PinDoc, ProjectDoc, SCHEMA};
 
-/// The schema number a document is written with.
+/// The schema number a Project or Pin document is written with.
 pub(crate) const CURRENT: u32 = SCHEMA;
+
+/// The schema number a change request document is written with.
+pub(crate) const CURRENT_CHANGE_REQUEST: u32 = CR_SCHEMA;
+
+/// The schema number a Crux document is written with.
+pub(crate) const CURRENT_CRUX: u32 = crux::SCHEMA;
 
 fn encode<D: Serialize>(doc: &D) -> Result<String, StoreError> {
     serde_json::to_string(doc)
         .map_err(|e| StoreError::Failed(format!("cannot write a document: {e}")))
 }
 
-/// Reads a document of `stored` schema (the column beside it); the document's own `schema` must agree.
-fn decode<D, T>(stored: u32, text: &str, own: impl Fn(&D) -> u32) -> Result<T, StoreError>
+/// Reads a document of `stored` schema (the column beside it), of a kind whose newest schema is `current`; the
+/// document's own `schema` must agree.
+fn decode<D, T>(
+    stored: u32,
+    current: u32,
+    text: &str,
+    own: impl Fn(&D) -> u32,
+) -> Result<T, StoreError>
 where
     D: DeserializeOwned,
     T: TryFrom<D, Error = String>,
 {
-    if stored > CURRENT {
+    if stored > current {
         return Err(StoreError::Corrupt(format!(
-            "schema {stored} is newer than this version reads ({CURRENT})"
+            "schema {stored} is newer than this version reads ({current})"
         )));
     }
     let doc: D = serde_json::from_str(text).map_err(|e| StoreError::Corrupt(e.to_string()))?;
@@ -49,7 +69,7 @@ pub(crate) fn encode_project(p: &Project) -> Result<String, StoreError> {
 }
 
 pub(crate) fn decode_project(stored: u32, text: &str) -> Result<Project, StoreError> {
-    decode::<ProjectDoc, Project>(stored, text, |d| d.schema)
+    decode::<ProjectDoc, Project>(stored, CURRENT, text, |d| d.schema)
 }
 
 pub(crate) fn encode_pin(p: &Pin) -> Result<String, StoreError> {
@@ -57,7 +77,7 @@ pub(crate) fn encode_pin(p: &Pin) -> Result<String, StoreError> {
 }
 
 pub(crate) fn decode_pin(stored: u32, text: &str) -> Result<Pin, StoreError> {
-    decode::<PinDoc, Pin>(stored, text, |d| d.schema)
+    decode::<PinDoc, Pin>(stored, CURRENT, text, |d| d.schema)
 }
 
 pub(crate) fn encode_change_request(c: &ChangeRequest) -> Result<String, StoreError> {
@@ -65,22 +85,37 @@ pub(crate) fn encode_change_request(c: &ChangeRequest) -> Result<String, StoreEr
 }
 
 pub(crate) fn decode_change_request(stored: u32, text: &str) -> Result<ChangeRequest, StoreError> {
-    decode::<ChangeRequestDoc, ChangeRequest>(stored, text, |d| d.schema)
+    if stored < CURRENT_CHANGE_REQUEST {
+        return Err(StoreError::Corrupt(format!(
+            "a change request of schema {stored} is read by the migration of the store to layout 2, not as it is"
+        )));
+    }
+    decode::<ChangeRequestDoc, ChangeRequest>(stored, CURRENT_CHANGE_REQUEST, text, |d| d.schema)
+}
+
+pub(crate) fn encode_crux(c: &Crux) -> Result<String, StoreError> {
+    encode(&CruxDoc::from(c))
+}
+
+pub(crate) fn decode_crux(stored: u32, text: &str) -> Result<Crux, StoreError> {
+    decode::<CruxDoc, Crux>(stored, CURRENT_CRUX, text, |d| d.schema)
 }
 
 #[cfg(test)]
 pub(crate) mod fixture {
-    //! One Project, Pin and change requests that use every part of the stored format.
+    //! One Project, Pin, change requests and Cruxes that use every part of the stored format.
 
     use std::collections::BTreeMap;
 
     use uuid::Uuid;
 
-    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
+    use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft};
     use crate::domain::entity::context::Context;
+    use crate::domain::entity::crux::{Crux, CruxDraft};
     use crate::domain::entity::pin::Pin;
     use crate::domain::entity::project::Project;
-    use crate::domain::service::change_request::{decide, expectations_now};
+    use crate::domain::service::change_request::expectations_now;
+    use crate::domain::service::crux::decide;
     use crate::domain::service::pin::record;
     use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
     use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
@@ -88,14 +123,12 @@ pub(crate) mod fixture {
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::confidence::Confidence;
-    use crate::domain::vo::crux::{
-        CruxKind, CruxOption, Decision, Importance, Reasoned, Recommended,
-    };
+    use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Recommended};
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
     use crate::domain::vo::id::{
-        CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
-        PinId, ProjectId,
+        AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId,
+        HarnessId, InterfaceId, ItemId, PinId, ProjectId,
     };
     use crate::domain::vo::intent::{Intent, Issuer};
     use crate::domain::vo::item_key::ItemKey;
@@ -217,12 +250,19 @@ pub(crate) mod fixture {
         Prose::try_from(t).unwrap()
     }
 
-    fn reasoned(c: &str) -> Reasoned {
-        Reasoned::new(Choice::try_from(c).unwrap(), Some(prose("because")))
+    /// The id of the option `k` of the Crux numbered `n`.
+    pub(crate) fn option_id(n: u128, k: u128) -> CruxOptionId {
+        CruxOptionId::from_uuid(id(n * 100 + k))
     }
 
-    fn answer(decision: Decision, basis: Basis, by: DecisionMaker, at: u64) -> Answer {
-        Answer::new(decision, basis, by, Timestamp::from_millis(at))
+    fn answer(n: u128, decision: Decision, basis: Basis, by: DecisionMaker, at: u64) -> Answer {
+        Answer::new(
+            AnswerId::from_uuid(id(8000 + n)),
+            decision,
+            basis,
+            by,
+            Timestamp::from_millis(at),
+        )
     }
 
     fn assumption() -> Assumption {
@@ -245,9 +285,21 @@ pub(crate) mod fixture {
         )
     }
 
-    /// A change request without a Crux that names a target or a keep of every kind, resolved, reopened and resolved
-    /// again, and one with a Crux, a parent, an Assumption and a decision on a Policy line that names a target.
+    /// A change request that names a target or a keep of every kind, resolved, reopened and resolved again, and one
+    /// with a parent, an Assumption, and the expectations of a decision on a Policy line that names a target. The
+    /// Cruxes are [`cruxes`].
     pub(crate) fn change_requests(p: &Project) -> Vec<ChangeRequest> {
+        records(p).0
+    }
+
+    /// The Cruxes of [`change_requests`]: one raised in `pop of empty` with two options, a recommendation and an
+    /// importance, decided on a Policy line; and one raised in `rename push` that is open, from findings. The
+    /// Cruxes of [`other_decisions`] come after them.
+    pub(crate) fn cruxes(p: &Project) -> Vec<Crux> {
+        records(p).1
+    }
+
+    fn records(p: &Project) -> (Vec<ChangeRequest>, Vec<Crux>) {
         let targets = [
             Target::Item(ItemId::from_uuid(id(31))),
             Target::Clause(ClauseId::from_uuid(id(21))),
@@ -286,7 +338,6 @@ pub(crate) mod fixture {
                 parent: None,
                 issuer: None,
                 expects: expectations_now(p, of_every_kind),
-                crux: None,
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
@@ -317,34 +368,6 @@ pub(crate) mod fixture {
                 Timestamp::from_millis(1_700_000_000_003),
             ))
             .unwrap();
-        let crux = Crux::new(
-            CruxKind::Ambiguity,
-            vec![
-                CruxOption::new(
-                    Choice::try_from("fail").unwrap(),
-                    Some(prose("C2 says fail")),
-                    BTreeMap::new(),
-                    Some(prose("callers check")),
-                ),
-                CruxOption::new(
-                    Choice::try_from("zero").unwrap(),
-                    None,
-                    BTreeMap::from([
-                        (targets[1], ExpectKind::Target),
-                        (Target::Item(ItemId::from_uuid(id(32))), ExpectKind::Target),
-                    ]),
-                    None,
-                ),
-            ],
-            Some(Recommended::new(
-                Choice::try_from("zero").unwrap(),
-                Some(prose("callers already handle zero")),
-                Some(Confidence::try_from(85).unwrap()),
-            )),
-            Some(Importance::High),
-            None,
-        )
-        .unwrap();
         let mut second = ChangeRequest::open(
             ChangeRequestId::from_uuid(id(61)),
             ChangeRequestDraft {
@@ -354,7 +377,6 @@ pub(crate) mod fixture {
                 parent: Some(ChangeRequestId::from_uuid(id(60))),
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
                 expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Target))),
-                crux: Some(crux),
                 assumptions: vec![assumption()],
                 addresses: vec![
                     FindingRef::new(
@@ -365,29 +387,171 @@ pub(crate) mod fixture {
                 ],
             },
         );
+        let mut asked = crux(
+            62,
+            second.id(),
+            CruxKind::Ambiguity,
+            "what does pop of an empty stack do?",
+            vec![
+                (
+                    "fail",
+                    Some("C2 says fail"),
+                    BTreeMap::new(),
+                    Some("callers check"),
+                ),
+                (
+                    "zero",
+                    None,
+                    BTreeMap::from([
+                        (targets[1], ExpectKind::Target),
+                        (Target::Item(ItemId::from_uuid(id(32))), ExpectKind::Target),
+                    ]),
+                    None,
+                ),
+            ],
+        );
+        asked = with_recommendation(asked, 1);
         let basis = p
             .policy()
             .basis_on(PolicyLineId::try_from("P1").unwrap())
             .unwrap();
-        let by = DecisionMaker::role("orchestrator").unwrap();
         decide(
+            &mut asked,
             &mut second,
             answer(
-                Decision::Chosen(reasoned("zero")),
+                62,
+                Decision::Chosen {
+                    option: option_id(62, 1),
+                    reason: Some(prose("because")),
+                },
                 basis,
-                by,
+                DecisionMaker::role("orchestrator").unwrap(),
                 1_700_000_000_123,
             ),
             p,
+            None,
         )
         .unwrap();
-        vec![first, second]
+        // An open question raised from findings, in a request that was resolved without it: a record of what was.
+        let mut open = Crux::raise(
+            CruxId::from_uuid(id(63)),
+            CruxDraft {
+                raised_in: first.id(),
+                findings: vec![
+                    FindingRef::new(
+                        RuleId::from_static("cite.uncited-clause"),
+                        Some(Subject::Clause(ClauseId::from_uuid(id(21)))),
+                    ),
+                    FindingRef::new(RuleId::from_static("context.no-harness"), None),
+                ],
+                kind: CruxKind::Model,
+                question: prose("is a stack a list?"),
+                options: vec![
+                    CruxOption::new(
+                        option_id(63, 0),
+                        Choice::try_from("yes").unwrap(),
+                        None,
+                        BTreeMap::new(),
+                        None,
+                    ),
+                    CruxOption::new(
+                        option_id(63, 1),
+                        Choice::try_from("no").unwrap(),
+                        Some(prose("a Stack is not a List")),
+                        BTreeMap::new(),
+                        None,
+                    ),
+                ],
+                recommended: None,
+                importance: None,
+                supersedes: None,
+            },
+        )
+        .unwrap();
+        open = with_importance(open, Importance::Low);
+        (vec![first, second], vec![asked, open])
     }
 
-    /// The other kinds of decision, on an arbitrary basis by a person, each superseding the Crux of the change
-    /// request `pop of empty` (the second of `change_requests`).
-    pub(crate) fn other_decisions(p: &Project) -> Vec<ChangeRequest> {
-        let open = |n: u128, title: &str, kind: CruxKind| {
+    /// An open Crux numbered `n` raised in `raised_in`, with the options `(choice, change, expects, consequence)`;
+    /// the option `k` has the id `option_id(n, k)`.
+    #[allow(clippy::type_complexity)]
+    fn crux(
+        n: u128,
+        raised_in: ChangeRequestId,
+        kind: CruxKind,
+        question: &str,
+        options: Vec<(
+            &str,
+            Option<&str>,
+            BTreeMap<Target, ExpectKind>,
+            Option<&str>,
+        )>,
+    ) -> Crux {
+        Crux::raise(
+            CruxId::from_uuid(id(n)),
+            CruxDraft {
+                raised_in,
+                findings: Vec::new(),
+                kind,
+                question: prose(question),
+                options: options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, (choice, change, expects, consequence))| {
+                        CruxOption::new(
+                            option_id(n, k as u128),
+                            Choice::try_from(choice).unwrap(),
+                            change.map(prose),
+                            expects,
+                            consequence.map(prose),
+                        )
+                    })
+                    .collect(),
+                recommended: None,
+                importance: Some(Importance::High),
+                supersedes: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// `crux` again, raised with the option `k` recommended, with a reason and 85 sure.
+    fn with_recommendation(crux: Crux, k: u128) -> Crux {
+        let n = crux.id().as_uuid().as_u128();
+        redraw(&crux, |d| {
+            d.recommended = Some(Recommended::new(
+                option_id(n, k),
+                Some(prose("callers already handle zero")),
+                Some(Confidence::try_from(85).unwrap()),
+            ));
+        })
+    }
+
+    fn with_importance(crux: Crux, importance: Importance) -> Crux {
+        redraw(&crux, |d| d.importance = Some(importance))
+    }
+
+    /// `crux` raised again with `change` made to what it was raised with.
+    fn redraw(crux: &Crux, change: impl FnOnce(&mut CruxDraft)) -> Crux {
+        let mut draft = CruxDraft {
+            raised_in: crux.raised_in(),
+            findings: crux.findings().to_vec(),
+            kind: crux.kind(),
+            question: crux.question().clone(),
+            options: crux.options().to_vec(),
+            recommended: crux.recommended().cloned(),
+            importance: crux.importance(),
+            supersedes: crux.supersedes(),
+        };
+        change(&mut draft);
+        Crux::raise(crux.id(), draft).unwrap()
+    }
+
+    /// The other kinds of decision, on an arbitrary basis by a person, each in a request of its own and each on a
+    /// Crux that supersedes the Crux of the change request `pop of empty` (the second of `change_requests`): the
+    /// requests, and then the Cruxes.
+    pub(crate) fn other_decisions(p: &Project) -> (Vec<ChangeRequest>, Vec<Crux>) {
+        let open = |n: u128, title: &str| {
             ChangeRequest::open(
                 ChangeRequestId::from_uuid(id(n)),
                 ChangeRequestDraft {
@@ -400,60 +564,75 @@ pub(crate) mod fixture {
                         p,
                         [(Target::Item(ItemId::from_uuid(id(31))), ExpectKind::Target)],
                     ),
-                    crux: Some(
-                        Crux::new(
-                            kind,
-                            vec![CruxOption::new(
-                                Choice::try_from("a").unwrap(),
-                                None,
-                                BTreeMap::new(),
-                                None,
-                            )],
-                            None,
-                            Some(Importance::Low),
-                            Some(ChangeRequestId::from_uuid(id(61))),
-                        )
-                        .unwrap(),
-                    ),
                     assumptions: Vec::new(),
                     addresses: Vec::new(),
                 },
             )
         };
+        let superseding = |n: u128, raised_in: &ChangeRequest, kind: CruxKind| {
+            let q = crux(
+                n,
+                raised_in.id(),
+                kind,
+                "which one?",
+                vec![("a", None, BTreeMap::new(), None)],
+            );
+            redraw(&q, |d| {
+                d.importance = Some(Importance::Low);
+                d.supersedes = Some(CruxId::from_uuid(id(62)));
+            })
+        };
         let arbitrary = |reason: &str| Basis::Arbitrary {
             reason: prose(reason),
         };
         let alice = || DecisionMaker::person("alice").unwrap();
-        let mut worded = open(70, "worded", CruxKind::Conflict);
-        decide(
-            &mut worded,
-            answer(
+        let mut crs = Vec::new();
+        let mut cruxes = Vec::new();
+        for (n, title, kind, decision, basis, at) in [
+            (
+                70,
+                "worded",
+                CruxKind::Conflict,
                 Decision::Worded {
                     wording: prose("in my words"),
                     reason: None,
                 },
                 arbitrary("the product leans this way"),
-                alice(),
                 1_700_000_000_456,
             ),
-            p,
-        )
-        .unwrap();
-        let mut free = open(71, "free", CruxKind::Disagreement);
-        decide(
-            &mut free,
-            answer(
+            (
+                71,
+                "free",
+                CruxKind::Disagreement,
                 Decision::Unspecified {
                     keep: vec![prose("it terminates")],
                 },
                 arbitrary("either is fine here"),
-                alice(),
                 1_700_000_000_789,
             ),
-            p,
-        )
-        .unwrap();
-        vec![worded, free]
+            (
+                72,
+                "withdrawn",
+                CruxKind::Model,
+                Decision::Withdrawn,
+                arbitrary("the word is settled elsewhere"),
+                1_700_000_000_999,
+            ),
+        ] {
+            let mut cr = open(n, title);
+            let mut q = superseding(n, &cr, kind);
+            decide(
+                &mut q,
+                &mut cr,
+                answer(n, decision, basis, alice(), at),
+                p,
+                None,
+            )
+            .unwrap();
+            crs.push(cr);
+            cruxes.push(q);
+        }
+        (crs, cruxes)
     }
 }
 
@@ -575,11 +754,24 @@ mod tests {
     }
 
     #[test]
-    fn change_requests_come_back_as_they_were_written() {
+    fn change_requests_and_cruxes_come_back_as_they_were_written() {
         let p = project();
-        for cr in change_requests(&p).into_iter().chain(other_decisions(&p)) {
+        let (others, other_cruxes) = other_decisions(&p);
+        for cr in change_requests(&p).into_iter().chain(others) {
             let text = encode_change_request(&cr).unwrap();
-            assert_eq!(decode_change_request(CURRENT, &text).unwrap(), cr);
+            assert_eq!(
+                decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap(),
+                cr
+            );
+        }
+        let all = cruxes(&p);
+        // Open and answered; chosen, worded, unspecified and withdrawn.
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].state().word(), "answered");
+        assert_eq!(all[1].state().word(), "open");
+        for q in all.into_iter().chain(other_cruxes) {
+            let text = encode_crux(&q).unwrap();
+            assert_eq!(decode_crux(CURRENT_CRUX, &text).unwrap(), q);
         }
     }
 
@@ -592,9 +784,7 @@ mod tests {
         let p = project();
         let mut cr = change_requests(&p)
             .into_iter()
-            .find(|c| {
-                c.state() != crate::domain::entity::change_request::ChangeRequestState::Resolved
-            })
+            .find(|c| !c.is_resolved())
             .unwrap();
         let context = Target::Context(ContextId::from_uuid(id(1)));
         let contract = Target::Contract(ContractId::from_uuid(id(2)));
@@ -608,24 +798,25 @@ mod tests {
         .unwrap();
         cr.record_work(Footprint::new(9, Vec::new())).unwrap();
         let text = encode_change_request(&cr).unwrap();
-        let read = decode_change_request(CURRENT, &text).unwrap();
+        let read = decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap();
         assert_eq!(read.work(), cr.work());
         assert_eq!(read, cr);
         // a document without it is of before it existed and does not load
         let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         doc.as_object_mut().unwrap().remove("work");
-        assert!(decode_change_request(CURRENT, &doc.to_string()).is_err());
+        assert!(decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).is_err());
     }
 
     #[test]
-    fn an_answer_comes_back_with_its_basis_its_maker_and_its_time() {
+    fn an_answer_comes_back_with_its_id_its_basis_its_maker_and_its_time() {
         use crate::domain::vo::answer::Basis;
         use crate::domain::vo::crux::Importance;
         let p = project();
-        let second = &change_requests(&p)[1];
-        let text = encode_change_request(second).unwrap();
-        let read = decode_change_request(CURRENT, &text).unwrap();
-        let answer = read.crux().and_then(|q| q.answer()).unwrap();
+        let q = &cruxes(&p)[0];
+        let text = encode_crux(q).unwrap();
+        let read = decode_crux(CURRENT_CRUX, &text).unwrap();
+        let answer = read.answer_given().unwrap();
+        assert_eq!(answer.id().as_uuid(), id(8062));
         assert!(matches!(
             answer.basis(),
             Basis::Policy { line, policy_revision }
@@ -633,20 +824,38 @@ mod tests {
         ));
         assert_eq!(answer.by().to_string(), "role orchestrator");
         assert_eq!(answer.at().millis(), 1_700_000_000_123);
-        assert_eq!(read.assumptions().len(), 1);
-        assert_eq!(read.assumptions()[0].evidence().len(), 3);
-        let q = read.crux().unwrap();
         assert_eq!(
-            q.recommended()
+            read.recommended()
                 .and_then(|r| r.confidence())
                 .map(|c| c.percent()),
             Some(85)
         );
-        assert_eq!(q.importance(), Some(Importance::High));
-        let superseding = &other_decisions(&p)[0];
-        let text = encode_change_request(superseding).unwrap();
-        let read = decode_change_request(CURRENT, &text).unwrap();
-        assert_eq!(read.crux().and_then(|q| q.supersedes()), Some(second.id()));
+        assert_eq!(read.importance(), Some(Importance::High));
+        assert_eq!(read.options().len(), 2);
+        assert_eq!(read.options()[1].id(), option_id(62, 1));
+        assert_eq!(
+            read.recommended().map(|r| r.option()),
+            Some(option_id(62, 1))
+        );
+        // What the decision asked is in the change request, with the revisions of the targets then.
+        let second = &change_requests(&p)[1];
+        assert_eq!(second.decided_expects().len(), 1);
+        let (others, other_cruxes) = other_decisions(&p);
+        assert!(others.iter().all(|c| c.decided_expects().is_empty()));
+        for superseding in &other_cruxes {
+            let text = encode_crux(superseding).unwrap();
+            let read = decode_crux(CURRENT_CRUX, &text).unwrap();
+            assert_eq!(read.supersedes(), Some(q.id()));
+        }
+        // The open Crux keeps the findings it was raised from.
+        let open = &cruxes(&p)[1];
+        let read = decode_crux(CURRENT_CRUX, &encode_crux(open).unwrap()).unwrap();
+        assert_eq!(read.findings().len(), 2);
+        assert!(read.is_open());
+        assert_eq!(read.raised_in(), change_requests(&p)[0].id());
+        // The assumptions are the change request's.
+        assert_eq!(second.assumptions().len(), 1);
+        assert_eq!(second.assumptions()[0].evidence().len(), 3);
     }
 
     #[test]
@@ -664,12 +873,12 @@ mod tests {
     #[test]
     fn a_document_of_an_older_layout_is_refused_and_says_what_is_wrong() {
         let p = project();
-        // Without the Assumptions, or the Policy, a document does not load: there is no migration.
+        // Without the Assumptions, or the Policy, a document does not load: there is no migration of those.
         let mut doc: serde_json::Value =
             serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
         doc.as_object_mut().unwrap().remove("assumptions");
         assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
             Err(StoreError::Corrupt(why)) if why.contains("assumptions")
         ));
         let mut doc: serde_json::Value =
@@ -679,19 +888,19 @@ mod tests {
             decode_project(CURRENT, &doc.to_string()),
             Err(StoreError::Corrupt(why)) if why.contains("policy")
         ));
-        // A Crux that still has a `default`, and a request that still has a `decision`, are refused by name.
+        // A change request that still holds a Crux, and one that still has a `decision`, are refused by name.
         let mut doc: serde_json::Value =
             serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
-        doc["crux"]["default"] = serde_json::json!(null);
+        doc["crux"] = serde_json::json!(null);
         assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
-            Err(StoreError::Corrupt(why)) if why.contains("default")
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("crux")
         ));
         let mut doc: serde_json::Value =
             serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
         doc["decision"] = serde_json::json!(null);
         assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
             Err(StoreError::Corrupt(why)) if why.contains("decision")
         ));
         // A request without `addresses` does not load either.
@@ -699,43 +908,79 @@ mod tests {
             serde_json::from_str(&encode_change_request(&change_requests(&p)[0]).unwrap()).unwrap();
         doc.as_object_mut().unwrap().remove("addresses");
         assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
             Err(StoreError::Corrupt(why)) if why.contains("addresses")
+        ));
+        // A Crux that still names its options by text, or lacks its question, does not load.
+        let crux = encode_crux(&cruxes(&p)[0]).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&crux).unwrap();
+        doc.as_object_mut().unwrap().remove("question");
+        assert!(matches!(
+            decode_crux(CURRENT_CRUX, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("question")
+        ));
+        let mut doc: serde_json::Value = serde_json::from_str(&crux).unwrap();
+        doc["recommended"] =
+            serde_json::json!({ "choice": "zero", "reason": null, "confidence": null });
+        assert!(matches!(
+            decode_crux(CURRENT_CRUX, &doc.to_string()),
+            Err(StoreError::Corrupt(why)) if why.contains("choice")
         ));
     }
 
     #[test]
     fn an_invariant_the_domain_holds_is_checked_on_restore() {
         let p = project();
-        let second = encode_change_request(&change_requests(&p)[1]).unwrap();
+        let asked = encode_crux(&cruxes(&p)[0]).unwrap();
         let corrupt = |edit: &dyn Fn(&mut serde_json::Value)| {
-            let mut doc: serde_json::Value = serde_json::from_str(&second).unwrap();
+            let mut doc: serde_json::Value = serde_json::from_str(&asked).unwrap();
             edit(&mut doc);
-            decode_change_request(CURRENT, &doc.to_string())
+            decode_crux(CURRENT_CRUX, &doc.to_string())
         };
-        // A confidence above 100, a blank maker, an answer to a choice that is not an option, a bad line id.
+        let stray = serde_json::json!(id(9999).to_string());
+        // A confidence above 100, a blank maker, an answer to an option the Crux does not have, a bad line id, a
+        // recommendation of an option it does not have, no options at all.
         assert!(matches!(
-            corrupt(&|d| d["crux"]["recommended"]["confidence"] = serde_json::json!(101)),
+            corrupt(&|d| d["recommended"]["confidence"] = serde_json::json!(101)),
             Err(StoreError::Corrupt(_))
         ));
         assert!(matches!(
-            corrupt(&|d| d["crux"]["answer"]["by"] = serde_json::json!({ "role": " " })),
+            corrupt(&|d| d["state"]["answered"]["by"] = serde_json::json!({ "role": " " })),
             Err(StoreError::Corrupt(_))
         ));
         assert!(matches!(
-            corrupt(&|d| d["crux"]["answer"]["decision"] =
-                serde_json::json!({ "chosen": { "choice": "nope", "reason": null } })),
+            corrupt(&|d| d["state"]["answered"]["decision"] =
+                serde_json::json!({ "chosen": { "option": stray, "reason": null } })),
             Err(StoreError::Corrupt(_))
         ));
         assert!(matches!(
-            corrupt(&|d| d["crux"]["answer"]["basis"] =
+            corrupt(&|d| d["state"]["answered"]["basis"] =
                 serde_json::json!({ "policy": { "line": "P0", "policy_revision": 3 } })),
             Err(StoreError::Corrupt(_))
         ));
-        // Evidence that leaves the repository.
         assert!(matches!(
-            corrupt(&|d| d["assumptions"][0]["evidence"][0]["repo"]["path"] =
-                serde_json::json!("../secret")),
+            corrupt(&|d| d["recommended"]["option"] = stray.clone()),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            corrupt(&|d| d["options"] = serde_json::json!([])),
+            Err(StoreError::Corrupt(_))
+        ));
+        // A model question that was left unspecified.
+        assert!(matches!(
+            corrupt(&|d| {
+                d["kind"] = serde_json::json!("model");
+                d["state"]["answered"]["decision"] =
+                    serde_json::json!({ "unspecified": { "keep": [] } });
+            }),
+            Err(StoreError::Corrupt(_))
+        ));
+        // Evidence that leaves the repository.
+        let second = encode_change_request(&change_requests(&p)[1]).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&second).unwrap();
+        doc["assumptions"][0]["evidence"][0]["repo"]["path"] = serde_json::json!("../secret");
+        assert!(matches!(
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
             Err(StoreError::Corrupt(_))
         ));
         // A Policy line changed after the Policy's own revision.
@@ -752,13 +997,14 @@ mod tests {
     fn a_change_request_that_asks_for_more_keeps_what_it_asked_and_an_old_document_is_refused() {
         let p = project();
         let second = &change_requests(&p)[1];
-        assert_eq!(second.decided_expects().len(), 2);
+        // `zero` asks for C1 (the request asks it already, as it does: not recorded again) and for the Item `pop`.
+        assert_eq!(second.decided_expects().len(), 1);
         // A document of the layout before expectations names no `decided_expects`: it does not load, and says why.
         for old in ["decided_expects", "expects"] {
             let mut doc: serde_json::Value =
                 serde_json::from_str(&encode_change_request(second).unwrap()).unwrap();
             doc.as_object_mut().unwrap().remove(old);
-            let refused = decode_change_request(CURRENT, &doc.to_string());
+            let refused = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string());
             assert!(
                 matches!(&refused, Err(StoreError::Corrupt(why)) if why.contains(old)),
                 "{old}: {refused:?}"
@@ -772,7 +1018,10 @@ mod tests {
         let first = &change_requests(&p)[0];
         assert_eq!(first.expects().len(), 8);
         let text = encode_change_request(first).unwrap();
-        assert_eq!(&decode_change_request(CURRENT, &text).unwrap(), first);
+        assert_eq!(
+            &decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap(),
+            first
+        );
     }
 
     #[test]
@@ -786,7 +1035,7 @@ mod tests {
         assert!(steps[0]["resolved"]["kind"] == "done");
         assert!(steps[1].get("reopened").is_some());
         assert!(steps[2]["resolved"]["kind"]["superseded"]["by"].is_string());
-        let read = decode_change_request(CURRENT, &doc.to_string()).unwrap();
+        let read = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
         assert_eq!(read.history(), first.history());
         assert_eq!(
             read.resolution().map(|r| r.reason().as_str()),
@@ -798,7 +1047,7 @@ mod tests {
         old["resolved"] = serde_json::json!(true);
         for why in ["history", "resolved"] {
             assert!(matches!(
-                decode_change_request(CURRENT, &old.to_string()),
+                decode_change_request(CURRENT_CHANGE_REQUEST, &old.to_string()),
                 Err(StoreError::Corrupt(m)) if m.contains(why)
             ));
         }
@@ -806,23 +1055,9 @@ mod tests {
         let mut swapped = doc.clone();
         swapped["history"].as_array_mut().unwrap().swap(0, 1);
         assert!(matches!(
-            decode_change_request(CURRENT, &swapped.to_string()),
+            decode_change_request(CURRENT_CHANGE_REQUEST, &swapped.to_string()),
             Err(StoreError::Corrupt(_))
         ));
-        // A resolution as done of a request whose Crux has no answer is refused.
-        let mut unanswered: serde_json::Value =
-            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
-        unanswered["crux"]["answer"] = serde_json::Value::Null;
-        unanswered["decided_expects"] = serde_json::json!([]);
-        unanswered["history"] = serde_json::json!([{ "resolved": {
-            "kind": "done", "reason": "r", "by": { "person": "alice" }, "at": 1 } }]);
-        assert!(matches!(
-            decode_change_request(CURRENT, &unanswered.to_string()),
-            Err(StoreError::Corrupt(_))
-        ));
-        // Not done, the question may stay open.
-        unanswered["history"][0]["resolved"]["kind"] = serde_json::json!("wont_do");
-        assert!(decode_change_request(CURRENT, &unanswered.to_string()).is_ok());
     }
 
     #[test]
@@ -833,22 +1068,49 @@ mod tests {
         let again = doc["expects"][0].clone();
         doc["expects"].as_array_mut().unwrap().push(again);
         assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
+            decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()),
             Err(StoreError::Corrupt(why)) if why.contains("twice")
         ));
     }
 
     #[test]
     fn a_decided_expectation_the_decision_does_not_ask_is_corrupt() {
+        use crate::domain::service::change_request::check_requests_and_cruxes;
         let p = project();
+        let (crs, mut all) = (change_requests(&p), cruxes(&p));
+        assert_eq!(check_requests_and_cruxes(&crs, &all), Ok(()));
+        // The decision now chooses the option that asks nothing: what is recorded for it is unasked.
         let mut doc: serde_json::Value =
-            serde_json::from_str(&encode_change_request(&change_requests(&p)[1]).unwrap()).unwrap();
-        doc["crux"]["answer"]["decision"] =
-            serde_json::json!({ "chosen": { "choice": "fail", "reason": null } });
-        assert!(matches!(
-            decode_change_request(CURRENT, &doc.to_string()),
-            Err(StoreError::Corrupt(_))
-        ));
+            serde_json::from_str(&encode_crux(&all[0]).unwrap()).unwrap();
+        doc["state"]["answered"]["decision"] = serde_json::json!({ "chosen": { "option": option_id(62, 0).to_string(), "reason": null } });
+        all[0] = decode_crux(CURRENT_CRUX, &doc.to_string()).unwrap();
+        assert!(check_requests_and_cruxes(&crs, &all).is_err());
+    }
+
+    #[test]
+    fn a_request_resolved_as_done_with_a_crux_open_is_refused_when_they_are_read_together() {
+        use crate::domain::service::change_request::check_requests_and_cruxes;
+        let p = project();
+        let crs = change_requests(&p);
+        let mut all = cruxes(&p);
+        // The open Crux is raised in a request that was resolved as superseded: a record of what was.
+        assert_eq!(check_requests_and_cruxes(&crs, &all), Ok(()));
+        // Raised in the one decided, it is the same; but a request resolved as done is not.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&crs[0]).unwrap()).unwrap();
+        doc["history"] = serde_json::json!([{ "resolved": {
+            "kind": "done", "reason": "r", "by": { "person": "alice" }, "at": 1 } }]);
+        let done = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
+        assert!(check_requests_and_cruxes(&[done, crs[1].clone()], &all).is_err());
+        // A Crux raised in a request there is not.
+        all[1] = decode_crux(
+            CURRENT_CRUX,
+            &encode_crux(&all[1])
+                .unwrap()
+                .replace(&id(60).to_string(), &id(9998).to_string()),
+        )
+        .unwrap();
+        assert!(check_requests_and_cruxes(&crs, &all).is_err());
     }
 
     #[test]
@@ -964,7 +1226,8 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_and_a_change_request_of_schema_1_are_read_as_they_are() {
+    fn a_pin_of_schema_1_is_read_as_it_is_and_a_change_request_of_schema_1_or_2_is_for_the_migration()
+     {
         let p = project();
         let pin = pin(&p);
         let text = encode_pin(&pin)
@@ -972,10 +1235,15 @@ mod tests {
             .replace("\"schema\":2", "\"schema\":1");
         assert_eq!(decode_pin(1, &text).unwrap(), pin);
         for cr in change_requests(&p) {
-            let text = encode_change_request(&cr)
-                .unwrap()
-                .replace("\"schema\":2", "\"schema\":1");
-            assert_eq!(decode_change_request(1, &text).unwrap(), cr);
+            let text = encode_change_request(&cr).unwrap();
+            assert!(text.contains("\"schema\":3"), "{text}");
+            for old in [1, 2] {
+                let text = text.replace("\"schema\":3", &format!("\"schema\":{old}"));
+                assert!(matches!(
+                    decode_change_request(old, &text),
+                    Err(StoreError::Corrupt(why)) if why.contains("migration")
+                ));
+            }
         }
     }
 

@@ -1,11 +1,13 @@
 //! The answer to a Crux: what was decided, on what basis, by whom, and when. It is an external input that cannot be
-//! reproduced, so it is recorded whole and never rewritten.
+//! reproduced, so it is recorded whole and never rewritten, and it has an id of its own so that a later record can
+//! point at the decision.
 
 use std::fmt;
 
 use thiserror::Error;
 
 use super::crux::Decision;
+use super::id::AnswerId;
 use super::policy::PolicyLineId;
 use super::prose::Prose;
 use super::revision::Revision;
@@ -68,6 +70,10 @@ impl fmt::Display for MakerName {
 
 /// Who decided: a role that holds the authority to decide that change request or finding (an orchestrator, a lead
 /// of a harness), or a person. The domain checks nothing about the name; it is the record of who answered.
+///
+/// The authority to decide (`CruxAnswerable`) is a concept of the model's words, and it is managed outside chidev:
+/// chidev holds no identity of its users, so it neither grants nor checks it. What it keeps is this claim of who
+/// decided.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DecisionMaker {
     /// A role with the authority to decide.
@@ -109,10 +115,11 @@ impl fmt::Display for DecisionMaker {
     }
 }
 
-/// The answer to a Crux: the decision, the basis it rests on, who decided it, and when. An answer is immutable;
-/// a different decision is a new Crux that supersedes the one answered.
+/// The answer to a Crux: its id, the decision, the basis it rests on, who decided it, and when. An answer is
+/// immutable; a different decision is a new Crux that supersedes the one answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
+    id: AnswerId,
     decision: Decision,
     basis: Basis,
     by: DecisionMaker,
@@ -121,13 +128,25 @@ pub struct Answer {
 
 impl Answer {
     /// An answer.
-    pub fn new(decision: Decision, basis: Basis, by: DecisionMaker, at: Timestamp) -> Answer {
+    pub fn new(
+        id: AnswerId,
+        decision: Decision,
+        basis: Basis,
+        by: DecisionMaker,
+        at: Timestamp,
+    ) -> Answer {
         Answer {
+            id,
             decision,
             basis,
             by,
             at,
         }
+    }
+
+    /// Its id.
+    pub fn id(&self) -> AnswerId {
+        self.id
     }
 
     /// What was decided.

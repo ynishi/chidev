@@ -22,8 +22,8 @@ use chidev_core::app::ports::{
 };
 use chidev_core::app::{
     App, AppError, AssumptionInput, BasisInput, CaseInput, ChangeRequestInput, ClauseInput,
-    ClauseRef, CruxInput, CruxKind, DecisionInput, DecisionMakerInput, Intent, ItemInput, ItemRef,
-    OptionInput, ReasonedInput, Registry, ReportInput, ReportedFinding, ResolutionInput,
+    ClauseRef, CruxKind, DecisionInput, DecisionMakerInput, Intent, ItemInput, ItemRef,
+    OptionInput, RaiseCruxInput, Raised, Registry, ReportInput, ReportedFinding, ResolutionInput,
     SubjectInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
@@ -31,14 +31,16 @@ use chidev_core::domain::check::{
     Check, CheckView, Descriptor, Executor, Finding, Level, Moment, Params,
 };
 use chidev_core::domain::entity::change_request::ChangeRequest;
+use chidev_core::domain::entity::crux::Crux;
 use chidev_core::domain::entity::measurement::Measurement;
 use chidev_core::domain::entity::pin::Pin;
 use chidev_core::domain::entity::project::Project;
 use chidev_core::domain::repository::{
-    ChangeRequestRepository, PinRepository, ProjectRepository, StoreError,
+    ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
 };
+use chidev_core::domain::service::change_request::raised_in;
 use chidev_core::domain::vo::finding::{RuleId, Subject};
-use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId, PinId};
+use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::resolution::Transition;
@@ -109,10 +111,10 @@ macro_rules! change_request_check {
             }
 
             fn run(&self, view: &CheckView<'_>, _: &Params) -> Vec<Finding> {
-                let applies: fn(&ChangeRequest) -> bool = $applies;
+                let applies: fn(&ChangeRequest, &[Crux]) -> bool = $applies;
                 view.change_requests
                     .iter()
-                    .filter(|cr| applies(cr))
+                    .filter(|cr| applies(cr, view.cruxes))
                     .map(|cr| {
                         Finding::new(
                             &$descriptor,
@@ -126,19 +128,19 @@ macro_rules! change_request_check {
     };
 }
 
-fn exists(_: &ChangeRequest) -> bool {
+fn exists(_: &ChangeRequest, _: &[Crux]) -> bool {
     true
 }
 
-fn is_decided(cr: &ChangeRequest) -> bool {
-    cr.crux().is_some_and(|q| q.answer().is_some())
+fn is_decided(cr: &ChangeRequest, cruxes: &[Crux]) -> bool {
+    raised_in(cr, cruxes).any(|q| !q.is_open())
 }
 
-fn is_assumed(cr: &ChangeRequest) -> bool {
+fn is_assumed(cr: &ChangeRequest, _: &[Crux]) -> bool {
     !cr.assumptions().is_empty()
 }
 
-fn was_reopened(cr: &ChangeRequest) -> bool {
+fn was_reopened(cr: &ChangeRequest, _: &[Crux]) -> bool {
     cr.history()
         .iter()
         .any(|t| matches!(t, Transition::Reopened(_)))
@@ -219,37 +221,37 @@ fn request(title: &str) -> ChangeRequestInput {
         issuer: None,
         targets: vec![],
         keep: vec![],
-        crux: Some(CruxInput {
-            kind: CruxKind::Ambiguity,
-            options: vec![OptionInput {
-                choice: "keep".into(),
-                change: None,
-                targets: vec![],
-                keep: vec![],
-                consequence: None,
-            }],
-            recommended: None,
-            importance: None,
-            supersedes: None,
-        }),
         assumptions: vec![],
         addresses: vec![],
     }
 }
 
-/// A request with nothing to decide: it can be resolved as it is.
-fn plain(title: &str) -> ChangeRequestInput {
-    ChangeRequestInput {
-        crux: None,
-        ..request(title)
+/// A question for the change request titled `cr`, with the one option `keep`.
+fn question(cr: &str) -> RaiseCruxInput {
+    RaiseCruxInput {
+        cr: cr.into(),
+        kind: CruxKind::Ambiguity,
+        question: "Is it kept?".into(),
+        findings: vec![],
+        options: vec![OptionInput {
+            choice: "keep".into(),
+            change: None,
+            targets: vec![],
+            keep: vec![],
+            consequence: None,
+            recommended: None,
+        }],
+        importance: None,
+        supersedes: None,
     }
 }
 
-fn chose() -> DecisionInput {
-    DecisionInput::Chosen(ReasonedInput {
-        choice: "keep".into(),
+/// The decision of the one option of a Crux just raised.
+fn chose(raised: &Raised) -> DecisionInput {
+    DecisionInput::Chosen {
+        option: raised.options[0].id.to_string(),
         reason: None,
-    })
+    }
 }
 
 fn arbitrary() -> BasisInput {
@@ -333,8 +335,16 @@ async fn the_edits_of_a_change_request_run_the_checks_of_an_edit_and_report_only
     let again = app.assume("a", &assumption()).await.unwrap();
     assert!(again.findings.is_empty(), "{:?}", again.findings);
 
+    // A question raised in the request is an edit of its record, and nothing of what it checks is introduced yet.
+    let raised = app.raise_crux(&question("a")).await.unwrap();
+    assert!(raised.findings.is_empty(), "{:?}", raised.findings);
     let decided = app
-        .decide_change_request("a", &chose(), &arbitrary(), &alice())
+        .decide_crux(
+            &raised.value.id.to_string(),
+            &chose(&raised.value),
+            &arbitrary(),
+            &alice(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -390,7 +400,8 @@ async fn a_mandatory_check_refuses_each_edit_of_a_change_request_that_introduces
     // the rest need a request, made while nothing is mandatory
     let mut open = app_with("cr-refuse-rest", registry(&[])).await;
     open.open_change_request(&request("a")).await.unwrap();
-    open.open_change_request(&plain("b")).await.unwrap();
+    let raised = open.raise_crux(&question("a")).await.unwrap().value;
+    open.open_change_request(&request("b")).await.unwrap();
     open.resolve_change_request("b", &ResolutionInput::Done, "settled", &alice())
         .await
         .unwrap();
@@ -398,7 +409,12 @@ async fn a_mandatory_check_refuses_each_edit_of_a_change_request_that_introduces
     let mut app = under(open, registry(&[&NoDecided]), 100);
     let revision = app.store().revision().await.unwrap();
     let result = app
-        .decide_change_request("a", &chose(), &arbitrary(), &alice())
+        .decide_crux(
+            &raised.id.to_string(),
+            &chose(&raised),
+            &arbitrary(),
+            &alice(),
+        )
         .await;
     refused(&app, "test.no-cr-decided", result, revision).await;
 
@@ -412,8 +428,11 @@ async fn a_mandatory_check_refuses_each_edit_of_a_change_request_that_introduces
         .await;
     refused(&app, "test.no-cr-reopened", result, revision).await;
     // none of the four changed the requests
+    let cruxes = app.store().cruxes().await.unwrap();
     for cr in app.store().change_requests().await.unwrap() {
-        assert!(!is_decided(&cr) && !is_assumed(&cr) && !was_reopened(&cr));
+        assert!(
+            !is_decided(&cr, &cruxes) && !is_assumed(&cr, &cruxes) && !was_reopened(&cr, &cruxes)
+        );
     }
 }
 
@@ -612,11 +631,19 @@ async fn what_the_store_holds_after_an_edit_or_a_confirmation_is_the_state_that_
         app.store().pin_code(pinned.value).await.unwrap().as_deref(),
         Some("fn push() {}")
     );
-    // and one that closes a change request
-    app.decide_change_request("a", &chose(), &arbitrary(), &alice())
-        .await
-        .unwrap();
+    // the question of a change request, and its decision, which is kept with the change request it was raised in
+    let raised = app.raise_crux(&question("a")).await.unwrap().value;
     assert_eq!(held(app.store()).await, checked());
+    app.decide_crux(
+        &raised.id.to_string(),
+        &chose(&raised),
+        &arbitrary(),
+        &alice(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(held(app.store()).await, checked());
+    // and one that closes a change request
     app.resolve_change_request("a", &ResolutionInput::Done, "settled", &alice())
         .await
         .unwrap();
@@ -740,9 +767,33 @@ async fn the_checks_a_use_case_ran_are_recorded_under_its_trigger() {
         Moment::Edit,
         Trigger::Edit(EditTrigger::OpenChangeRequest),
     );
-    app.decide_change_request("a", &chose(), &arbitrary(), &alice())
-        .await
-        .unwrap();
+    app.raise_crux(&question("a")).await.unwrap();
+    let runs = new_runs(&app, &mut seen).await;
+    only(&runs, Moment::Edit, Trigger::Edit(EditTrigger::RaiseCrux));
+    let raised = app.raise_crux(&question("a")).await.unwrap().value;
+    new_runs(&app, &mut seen).await;
+    // The first question is withdrawn, the second chosen: a decision is an edit under a trigger of its own.
+    let open = app.store().cruxes().await.unwrap();
+    assert_eq!(open.len(), 2);
+    let first = open.iter().find(|q| q.id() != raised.id).unwrap();
+    app.decide_crux(
+        &first.id().to_string(),
+        &DecisionInput::Withdrawn,
+        &arbitrary(),
+        &alice(),
+    )
+    .await
+    .unwrap();
+    let runs = new_runs(&app, &mut seen).await;
+    only(&runs, Moment::Edit, Trigger::Edit(EditTrigger::DecideCrux));
+    app.decide_crux(
+        &raised.id.to_string(),
+        &chose(&raised),
+        &arbitrary(),
+        &alice(),
+    )
+    .await
+    .unwrap();
     app.resolve_change_request("a", &ResolutionInput::Done, "settled", &alice())
         .await
         .unwrap();
@@ -842,6 +893,20 @@ impl ChangeRequestRepository for Flaky {
 
     async fn change_requests(&self) -> Result<Vec<ChangeRequest>, StoreError> {
         self.inner.change_requests().await
+    }
+}
+
+impl CruxRepository for Flaky {
+    async fn crux(&self, id: CruxId) -> Result<Option<Crux>, StoreError> {
+        self.inner.crux(id).await
+    }
+
+    async fn cruxes(&self) -> Result<Vec<Crux>, StoreError> {
+        self.inner.cruxes().await
+    }
+
+    async fn cruxes_raised_in(&self, raised_in: ChangeRequestId) -> Result<Vec<Crux>, StoreError> {
+        self.inner.cruxes_raised_in(raised_in).await
     }
 }
 

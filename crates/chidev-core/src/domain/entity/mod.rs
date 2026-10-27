@@ -4,6 +4,7 @@
 pub mod change_request;
 pub mod context;
 pub mod contract;
+pub mod crux;
 pub mod harness;
 pub mod interface;
 pub mod measurement;
