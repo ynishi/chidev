@@ -427,15 +427,15 @@ pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -
         .filter(|c| judged_open(c, resolving) && !c.work().is_empty())
         .filter_map(|cr| {
             let frame = frame(cr);
-            let inside = |m: &Move| {
-                frame
-                    .iter()
-                    .any(|container| m.is_inside(*container) || m.cites_inside(*container))
-            };
             // Each change set on its own: a container is covered by what moved inside it in the same set.
             let mut moved = BTreeSet::new();
             let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
+                let inside = |m: &Move| {
+                    frame.iter().any(|container| {
+                        m.is_inside(*container) || footprint.cites_inside(m.target(), *container)
+                    })
+                };
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
                     covered.insert(m.target());
@@ -464,13 +464,13 @@ mod tests {
     use crate::domain::entity::context::Context;
     use crate::domain::entity::crux::CruxDraft;
     use crate::domain::service::crux::decide;
-    use crate::domain::service::footprint::moves_between;
+    use crate::domain::service::footprint::footprint_between;
     use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::crux::{CruxKind, CruxOption, Decision};
-    use crate::domain::vo::footprint::Footprint;
+    use crate::domain::vo::footprint::{Citations, Footprint};
     use crate::domain::vo::id::{
         AnswerId, CaseId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId, HarnessId,
         InterfaceId, ItemId, ProjectId, test_uuid,
@@ -500,8 +500,7 @@ mod tests {
     fn work(p: &mut Project, c: &mut ChangeRequest, at: u64, change: impl FnOnce(&mut Project)) {
         let before = p.clone();
         change(p);
-        c.record_work(Footprint::new(at, moves_between(&before, p)))
-            .unwrap();
+        c.record_work(footprint_between(at, &before, p)).unwrap();
     }
 
     fn clause() -> Target {
@@ -1757,13 +1756,15 @@ mod tests {
         assert_eq!(out_of_frame(std::slice::from_ref(&old))[0].moved, [case()]);
         // the same move with what the Case cited is inside
         let mut new = open(&p, 2, Intent::ChangeBehavior, &frame);
-        new.record_work(Footprint::new(
-            2,
-            vec![Move::new(case(), within).with_cites(
-                vec![clause()],
-                vec![Target::Project, Target::Context(core()), contract()],
-            )],
-        ))
+        new.record_work(
+            Footprint::new(2, vec![Move::new(case(), within)]).with_citations(BTreeMap::from([(
+                CaseId::from_uuid(test_uuid(40)),
+                Citations::new(
+                    vec![clause()],
+                    vec![Target::Project, Target::Context(core()), contract()],
+                ),
+            )])),
+        )
         .unwrap();
         assert!(out_of_frame(std::slice::from_ref(&new)).is_empty());
     }

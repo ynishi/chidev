@@ -21,12 +21,11 @@ use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
-use crate::domain::service::footprint::moves_between;
+use crate::domain::service::footprint::footprint_between;
 use crate::domain::violation::Violation;
 use crate::domain::vo::case::CaseName;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-use crate::domain::vo::footprint::Footprint;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
@@ -376,8 +375,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             return Err(self.set_error(&p, &plan, e).await?);
         }
         if let Some(cr) = &mut applied_for {
-            let moves = moves_between(&p_before, &after);
-            cr.record_work(Footprint::new(at.0 + 1, moves))?;
+            cr.record_work(footprint_between(at.0 + 1, &p_before, &after))?;
         }
         let mut retired = Vec::new();
         for r in after.retired().iter().skip(p.retired().len()) {

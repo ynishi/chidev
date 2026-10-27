@@ -809,7 +809,9 @@ mod tests {
 
     #[test]
     fn a_moved_case_comes_back_with_what_it_cited_and_a_footprint_without_it_cites_nothing() {
-        use crate::domain::vo::footprint::{Footprint, Move};
+        use std::collections::BTreeMap;
+
+        use crate::domain::vo::footprint::{Citations, Footprint, Move};
         use crate::domain::vo::id::{CaseId, ClauseId, ContextId, ContractId, ItemId};
         use crate::domain::vo::target::Target;
 
@@ -822,38 +824,47 @@ mod tests {
         let contract = Target::Contract(ContractId::from_uuid(id(2)));
         let clause = Target::Clause(ClauseId::from_uuid(id(3)));
         let item = Target::Item(ItemId::from_uuid(id(4)));
-        let case = Target::Case(CaseId::from_uuid(id(5)));
+        let case_id = CaseId::from_uuid(id(5));
+        let case = Target::Case(case_id);
         let within = vec![Target::Project, context];
-        cr.record_work(Footprint::new(
-            7,
-            vec![
-                Move::new(contract, within.clone()),
-                Move::new(case, within.clone())
-                    .with_cites(vec![clause, item], vec![Target::Project, context, contract]),
-            ],
-        ))
+        cr.record_work(
+            Footprint::new(
+                7,
+                vec![
+                    Move::new(contract, within.clone()),
+                    Move::new(case, within.clone()),
+                ],
+            )
+            .with_citations(BTreeMap::from([(
+                case_id,
+                Citations::new(vec![clause, item], vec![Target::Project, context, contract]),
+            )])),
+        )
         .unwrap();
         let text = encode_change_request(&cr).unwrap();
         let read = decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap();
         assert_eq!(read.work(), cr.work());
-        let moves = read.work()[0].moves();
-        assert_eq!(moves[1].cites(), [clause, item]);
-        assert!(moves[0].cites().is_empty());
-        // a footprint stored before citations were recorded has none of the keys, and is read as citing nothing
+        let footprint = &read.work()[0];
+        assert_eq!(footprint.citations()[&case_id].cites(), [clause, item]);
+        assert!(footprint.cites_inside(case, contract));
+        assert!(!footprint.cites_inside(contract, contract));
+        // a footprint stored before citations were recorded has no such key, and is read as citing nothing
         let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         for footprint in doc["work"].as_array_mut().unwrap() {
-            for m in footprint["moves"].as_array_mut().unwrap() {
-                let m = m.as_object_mut().unwrap();
-                m.remove("cites");
-                m.remove("cites_within");
-            }
+            assert!(
+                footprint
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("citations")
+                    .is_some()
+            );
         }
         let old = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
-        let moves = old.work()[0].moves();
-        assert_eq!(moves[1].target(), case);
-        assert!(moves[1].cites().is_empty() && moves[1].cites_within().is_empty());
-        assert!(!moves[1].cites_inside(clause));
-        assert!(moves[1].is_inside(context));
+        let footprint = &old.work()[0];
+        assert_eq!(footprint.moves()[1].target(), case);
+        assert!(footprint.citations().is_empty());
+        assert!(!footprint.cites_inside(case, clause));
+        assert!(footprint.moves()[1].is_inside(context));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::entity::project::Project;
-use crate::domain::vo::footprint::Move;
+use crate::domain::vo::footprint::{Citations, Footprint, Move};
+use crate::domain::vo::id::CaseId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
 
@@ -49,61 +50,65 @@ fn tree(project: &Project) -> Tree {
 type Tree = BTreeMap<Target, (Revision, Vec<Target>)>;
 
 /// What each Case of `project` cites: the Items and Clauses.
-fn citations(project: &Project) -> BTreeMap<Target, Vec<Target>> {
+fn citations(project: &Project) -> BTreeMap<CaseId, Vec<Target>> {
     project
         .contexts()
         .flat_map(|c| c.harnesses())
         .flat_map(|h| h.cases())
-        .map(|case| (Target::Case(case.id()), case.cites().targets().collect()))
+        .map(|case| (case.id(), case.cites().targets().collect()))
         .collect()
 }
 
-/// The targets that moved from `before` to `after`: the ones made, the ones whose revision went up, and the ones
-/// that are gone, each with the containers it was in (as `after` has it, or as `before` had it for one that is
-/// gone), in the order of the targets. A container whose revision moved because something in it was added or
-/// removed is a move of its own.
+/// The footprint, at `store_revision`, of the change set that took the Project from `before` to `after`: the
+/// targets that moved, the ones made, the ones whose revision went up, and the ones that are gone, each with the
+/// containers it was in (as `after` has it, or as `before` had it for one that is gone), in the order of the
+/// targets. A container whose revision moved because something in it was added or removed is a move of its own.
 ///
 /// A Case that moved also carries what it cites: in `after` for one that was made, in `before` for one that is
 /// gone, and in both together for one that was changed, so that a change set that retires a Clause and moves the
 /// Cases off it still counts them as citing it.
-pub fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
+pub fn footprint_between(store_revision: u64, before: &Project, after: &Project) -> Footprint {
     let (was, now) = (tree(before), tree(after));
     let (was_cites, now_cites) = (citations(before), citations(after));
-    // What the Case `m` moved cites on each side given, with the containers of each as that side has them.
-    let with_cites = |m: Move, sides: &[(&Tree, &BTreeMap<Target, Vec<Target>>)]| {
-        let mut cited = BTreeSet::new();
+    let mut moves = Vec::new();
+    let mut cited = BTreeMap::new();
+    // The Case `target`, if it is one, moved: what it cites on each side given, with the containers of each as that
+    // side has them.
+    let mut note = |target: Target, sides: &[(&Tree, &BTreeMap<CaseId, Vec<Target>>)]| {
+        let Target::Case(case) = target else { return };
+        let mut cites = BTreeSet::new();
         let mut within = BTreeSet::new();
-        for (tree, cites) in sides {
-            for t in cites.get(&m.target()).into_iter().flatten() {
-                cited.insert(*t);
+        for (tree, by_case) in sides {
+            for t in by_case.get(&case).into_iter().flatten() {
+                cites.insert(*t);
                 if let Some((_, w)) = tree.get(t) {
                     within.extend(w.iter().copied());
                 }
             }
         }
-        m.with_cites(cited.into_iter().collect(), within.into_iter().collect())
+        cited.insert(
+            case,
+            Citations::new(cites.into_iter().collect(), within.into_iter().collect()),
+        );
     };
-    let mut moves = Vec::new();
     for (target, (revision, within)) in &now {
         if was.get(target).map(|(r, _)| r) != Some(revision) {
-            let sides: &[_] = if was.contains_key(target) {
-                &[(&was, &was_cites), (&now, &now_cites)]
+            moves.push(Move::new(*target, within.clone()));
+            if was.contains_key(target) {
+                note(*target, &[(&was, &was_cites), (&now, &now_cites)]);
             } else {
-                &[(&now, &now_cites)]
-            };
-            moves.push(with_cites(Move::new(*target, within.clone()), sides));
+                note(*target, &[(&now, &now_cites)]);
+            }
         }
     }
     for (target, (_, within)) in &was {
         if !now.contains_key(target) {
-            moves.push(with_cites(
-                Move::new(*target, within.clone()),
-                &[(&was, &was_cites)],
-            ));
+            moves.push(Move::new(*target, within.clone()));
+            note(*target, &[(&was, &was_cites)]);
         }
     }
     moves.sort_by_key(Move::target);
-    moves
+    Footprint::new(store_revision, moves).with_citations(cited)
 }
 
 #[cfg(test)]
@@ -170,6 +175,11 @@ mod tests {
         .unwrap();
         put(&mut p, &[(30, "C1", "one"), (31, "C2", "two")]);
         p
+    }
+
+    /// What moved from `before` to `after`.
+    fn moves_between(before: &Project, after: &Project) -> Vec<Move> {
+        footprint_between(2, before, after).moves().to_vec()
     }
 
     #[test]
@@ -274,10 +284,6 @@ mod tests {
         p
     }
 
-    fn move_of(moves: &[Move], target: Target) -> &Move {
-        moves.iter().find(|m| m.target() == target).unwrap()
-    }
-
     #[test]
     fn a_moved_case_carries_what_it_cited_before_and_after_the_change_set_and_nothing_else_does() {
         let mut before = with_an_interface();
@@ -285,35 +291,37 @@ mod tests {
         let mut after = before.clone();
         // 40 now cites C2 (it cited C1), 41 is gone, 42 is new and cites C1
         put_cases(&mut after, "fn t() { 1 }", &[(40, &[31]), (42, &[30])]);
-        let moves = moves_between(&before, &after);
+        let footprint = footprint_between(2, &before, &after);
         let (item, c1, c2) = (
             Target::Item(item_id()),
             Target::Clause(clause_id(30)),
             Target::Clause(clause_id(31)),
         );
         let (core, contract) = (Target::Context(core()), Target::Contract(contract_id()));
-        let case = |n: u128| Target::Case(CaseId::from_uuid(test_uuid(n)));
+        let case_id = |n: u128| CaseId::from_uuid(test_uuid(n));
+        let cited = |n: u128| &footprint.citations()[&case_id(n)];
         // changed: before and after together
-        let changed = move_of(&moves, case(40));
+        let changed = cited(40);
         assert_eq!(changed.cites(), [c1, c2, item]);
-        assert!(changed.cites_inside(contract) && changed.cites_inside(core));
-        assert!(changed.cites_inside(Target::Interface(InterfaceId::from_uuid(test_uuid(100)))));
+        assert!(changed.is_inside(contract) && changed.is_inside(core));
+        assert!(changed.is_inside(Target::Interface(InterfaceId::from_uuid(test_uuid(100)))));
+        assert!(footprint.cites_inside(Target::Case(case_id(40)), contract));
         // retired: before
-        let gone = move_of(&moves, case(41));
+        let gone = cited(41);
         assert_eq!(gone.cites(), [c2, item]);
-        assert!(!gone.cites_inside(c1));
+        assert!(!gone.is_inside(c1));
         // added: after
-        let made = move_of(&moves, case(42));
+        let made = cited(42);
         assert_eq!(made.cites(), [c1, item]);
-        assert!(!made.cites_inside(c2));
-        // a Harness, a Contract, a Clause: no citations
-        for other in [Target::Harness(harness_id()), contract] {
-            assert!(
-                moves
-                    .iter()
-                    .filter(|m| m.target() == other)
-                    .all(|m| m.cites().is_empty() && m.cites_within().is_empty())
-            );
+        assert!(!made.is_inside(c2));
+        // the Cases that moved are the ones that have citations: not a Harness, a Contract or a Clause, which
+        // cite nothing, nor a Case that did not move
+        assert_eq!(
+            footprint.citations().keys().copied().collect::<Vec<_>>(),
+            [case_id(40), case_id(41), case_id(42)]
+        );
+        for other in [Target::Harness(harness_id()), contract, c1] {
+            assert!(!footprint.cites_inside(other, contract));
         }
     }
 
