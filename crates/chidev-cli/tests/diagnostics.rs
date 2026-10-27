@@ -19,12 +19,17 @@ fn fresh_dir(name: &str) -> PathBuf {
 
 /// Runs `ops` through `chidev exec` in a project of its own; the result of each, in order.
 fn run(name: &str, ops: &[Value]) -> Vec<Value> {
-    let dir = fresh_dir(name);
+    exec_in(&fresh_dir(name), ops)
+}
+
+/// Runs `ops` through `chidev exec` in the project `dir` as it is, so that a run can go on from the results of an
+/// earlier one (the ids it was given).
+fn exec_in(dir: &Path, ops: &[Value]) -> Vec<Value> {
     let file = dir.join("ops.jsonl");
     let text: String = ops.iter().map(|op| format!("{op}\n")).collect();
     std::fs::write(&file, text).expect("a file");
     let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
-        .current_dir(&dir)
+        .current_dir(dir)
         .arg("exec")
         .arg(&file)
         .arg("--store")
@@ -57,15 +62,22 @@ fn setup() -> Vec<Value> {
 
 /// The setup, then `more`; the results of `more`.
 fn after_setup(name: &str, more: &[Value]) -> Vec<Value> {
+    let (_, results) = after_setup_in(name, more);
+    results
+}
+
+/// [`after_setup`], and the directory of the project, to go on in.
+fn after_setup_in(name: &str, more: &[Value]) -> (PathBuf, Vec<Value>) {
+    let dir = fresh_dir(name);
     let mut ops = setup();
     let skip = ops.len();
     ops.extend(more.iter().cloned());
-    let results = run(name, &ops);
+    let results = exec_in(&dir, &ops);
     assert!(
         results[..skip].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
-    results[skip..].to_vec()
+    (dir, results[skip..].to_vec())
 }
 
 fn cr_open(title: &str, parent: Option<&str>) -> Value {
@@ -143,31 +155,127 @@ fn a_parent_with_open_parts_names_the_parts_and_the_operation_that_resolves_each
 
 #[test]
 fn done_with_an_unanswered_crux_suggests_deciding_it() {
-    let r = after_setup(
+    let (dir, r) = after_setup_in(
         "diag-crux-unanswered",
         &[
-            json!({"op":"cr_open","title":"Choose rounding","intent":"change_behavior",
-                "crux":{"kind":"ambiguity","options":[{"choice":"up"},{"choice":"even"}]}}),
+            cr_open("Choose rounding", None),
+            json!({"op":"cr_crux_raise","in":"Choose rounding","question":"How is a half rounded?",
+                "kind":"ambiguity","options":[{"choice":"up"},{"choice":"even"}]}),
             json!({"op":"cr_resolve","title":"Choose rounding","resolution":"done","reason":"r","by":by_alice()}),
-            json!({"op":"cr_decide","title":"Choose rounding","choice":"up","basis":{"arbitrary":"x"},"by":by_alice()}),
-            json!({"op":"cr_decide","title":"Choose rounding","choice":"even","basis":{"arbitrary":"y"},"by":by_alice()}),
         ],
     );
-    let d = one(&r[1]);
+    assert_eq!(r[1]["ok"], true, "{r:#?}");
+    let crux = r[1]["crux"].as_str().expect("the id of the Crux");
+    let up = r[1]["options"][0]["id"].as_str().expect("an option id");
+    let even = r[1]["options"][1]["id"].as_str().expect("an option id");
+    assert_eq!(r[1]["options"][0]["choice"], "up");
+    let d = one(&r[2]);
     assert_eq!(d["code"], "cr.crux-unanswered");
     assert_eq!(d["subjects"][0]["name"], "Choose rounding");
-    assert_eq!(d["suggestions"][0]["op"]["op"], "cr_decide");
-    assert_eq!(d["suggestions"][0]["op"]["title"], "Choose rounding");
+    assert_eq!(d["suggestions"][0]["op"]["op"], "cr_crux_decide");
+    assert_eq!(d["suggestions"][0]["op"]["crux"], crux);
     assert_eq!(d["suggestions"][0]["applicability"], "placeholder");
-    // once answered, a second answer is refused, and a new change request that supersedes it is suggested
-    assert_eq!(r[2]["ok"], true, "{r:#?}");
-    let again = one(&r[3]);
-    assert_eq!(again["code"], "cr.crux-answered");
-    assert_eq!(again["suggestions"][0]["op"]["op"], "cr_open");
-    assert_eq!(
-        again["suggestions"][0]["op"]["crux"]["supersedes"],
-        "Choose rounding"
+    // once answered, a second answer is refused, and a new Crux that supersedes it is suggested
+    let more = exec_in(
+        &dir,
+        &[
+            json!({"op":"cr_crux_decide","crux":crux,"option":up,"basis":{"arbitrary":"x"},"by":by_alice()}),
+            json!({"op":"cr_crux_decide","crux":crux,"option":even,"basis":{"arbitrary":"y"},"by":by_alice()}),
+        ],
     );
+    assert_eq!(more[0]["ok"], true, "{more:#?}");
+    let again = one(&more[1]);
+    assert_eq!(again["code"], "cr.crux-answered");
+    assert_eq!(again["suggestions"][0]["op"]["op"], "cr_crux_raise");
+    assert_eq!(again["suggestions"][0]["op"]["in"], "Choose rounding");
+    assert_eq!(again["suggestions"][0]["op"]["supersedes"], crux);
+}
+
+#[test]
+fn a_crux_is_refused_in_a_resolved_change_request_against_its_targets_and_without_exactly_one_decision()
+ {
+    let raise = |cr: &str| {
+        json!({"op":"cr_crux_raise","in":cr,"question":"How is a half rounded?","kind":"ambiguity",
+            "options":[{"choice":"up","recommended":{"confidence":70}},{"choice":"even"}]})
+    };
+    let (dir, r) = after_setup_in(
+        "diag-crux-raise",
+        &[
+            json!({"op":"cr_open","title":"Closed","intent":"change_behavior"}),
+            json!({"op":"cr_resolve","title":"Closed","resolution":"wont_do","reason":"r","by":by_alice()}),
+            raise("Closed"),
+            json!({"op":"cr_open","title":"Keeps C1","intent":"keep_behavior",
+                "keep":[{"clause":{"contract":"rounding","label":"C1","context":"core"}}]}),
+            json!({"op":"cr_crux_raise","in":"Keeps C1","question":"q","kind":"ambiguity",
+                "options":[{"choice":"reword","targets":[{"clause":{"contract":"rounding","label":"C1","context":"core"}}]}]}),
+            json!({"op":"cr_crux_raise","in":"Keeps C1","question":"q","kind":"ambiguity",
+                "options":[{"choice":"a","recommended":{}},{"choice":"b","recommended":{}}]}),
+            raise("Keeps C1"),
+        ],
+    );
+    // a resolved change request takes none, and the way out is to reopen it
+    assert_eq!(one(&r[2])["code"], "cr.already-resolved");
+    assert_eq!(one(&r[2])["suggestions"][0]["op"]["op"], "cr_reopen");
+    // an option cannot ask the other of a target than the change request does
+    let clash = one(&r[4]);
+    assert_eq!(clash["code"], "input.invalid");
+    assert!(
+        clash["message"]
+            .as_str()
+            .unwrap()
+            .contains("target and kept")
+    );
+    // at most one option is recommended
+    let two = one(&r[5]);
+    assert_eq!(two["code"], "input.invalid");
+    assert!(two["message"].as_str().unwrap().contains("at most one"));
+    assert_eq!(r[6]["ok"], true, "{r:#?}");
+    let crux = r[6]["crux"].as_str().expect("the id of the Crux");
+    let up = r[6]["options"][0]["id"].as_str().expect("an option id");
+
+    let decide = |fields: Value| {
+        let mut op = json!({"op":"cr_crux_decide","crux":crux,
+            "basis":{"arbitrary":"x"},"by":by_alice()});
+        for (key, value) in fields.as_object().unwrap() {
+            op[key] = value.clone();
+        }
+        op
+    };
+    let more = exec_in(
+        &dir,
+        &[
+            decide(json!({})),
+            decide(json!({"option":up,"wording":"w"})),
+            decide(json!({"unspecified":[],"withdrawn":true})),
+            decide(json!({"withdrawn":false})),
+            decide(json!({"withdrawn":true,"reason":"why"})),
+            decide(json!({"option":"b4d5f6a7-0000-7000-8000-000000000000"})),
+            decide(json!({"option":"up"})),
+            json!({"op":"cr_crux_decide","crux":"b4d5f6a7-0000-7000-8000-000000000000","option":up,
+                "basis":{"arbitrary":"x"},"by":by_alice()}),
+            decide(json!({"option":up})),
+        ],
+    );
+    for (n, result) in more.iter().enumerate().take(5) {
+        let d = one(result);
+        assert_eq!(d["code"], "input.invalid", "{n}: {d:#?}");
+    }
+    assert!(
+        one(&more[0])["message"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one")
+    );
+    assert_eq!(one(&more[5])["code"], "cr.crux-unknown-option");
+    assert_eq!(one(&more[6])["code"], "input.invalid");
+    assert_eq!(one(&more[7])["code"], "input.invalid");
+    assert!(
+        one(&more[7])["message"]
+            .as_str()
+            .unwrap()
+            .contains("no crux")
+    );
+    assert_eq!(more[8]["ok"], true, "{more:#?}");
 }
 
 #[test]
@@ -273,7 +381,10 @@ fn an_input_that_cannot_be_read_is_a_rule_of_its_own_with_the_names_that_would_b
                 "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"ap","key":"price"}]}]}),
             json!({"op":"harness_put","context":"core","name":"h","source":"x\n",
                 "cases":[{"name":"c","lines":[1,1],"items":[{"interface":"api","key":"pric"}]}]}),
+            json!({"op":"cr_crux_raise","in":"Nobody","question":"q","kind":"ambiguity","options":[{"choice":"a"}]}),
             json!({"op":"cr_decide","title":"Nobody","choice":"a","basis":{"arbitrary":"x"},"by":by_alice()}),
+            json!({"op":"cr_open","title":"T2","intent":"change_behavior",
+                "crux":{"kind":"ambiguity","options":[{"choice":"a"}]}}),
         ],
     );
     let op = one(&r[0]);
@@ -314,7 +425,16 @@ fn an_input_that_cannot_be_read_is_a_rule_of_its_own_with_the_names_that_would_b
 
     let title = one(&r[7]);
     assert_eq!(title["values"]["kind"], "change request");
-    assert_eq!(title["field"], "title");
+    assert_eq!(title["field"], "in");
+
+    // the operation that decided the Crux of a change request by its title, and the field that held a Crux in
+    // `cr_open`, are gone
+    let old_op = one(&r[8]);
+    assert_eq!(old_op["code"], "input.unknown-op");
+    assert_eq!(old_op["field"], "op");
+    let old_field = one(&r[9]);
+    assert_eq!(old_field["code"], "input.unknown-field");
+    assert_eq!(old_field["field"], "crux");
 }
 
 #[test]

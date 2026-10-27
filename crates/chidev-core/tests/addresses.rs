@@ -10,10 +10,9 @@ use chidev_core::app::ports::external::{
 };
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, BasisInput, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput,
-    CruxKind, DecisionInput, DecisionMakerInput, FindingInput, Intent, ItemInput, ItemRef,
-    OptionInput, ReasonedInput, Registry, ReportInput, ReportedFinding, ResolutionInput,
-    SubjectInput,
+    App, AppError, BasisInput, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxKind,
+    DecisionInput, DecisionMakerInput, FindingInput, Intent, ItemInput, ItemRef, OptionInput,
+    RaiseCruxInput, Registry, ReportInput, ReportedFinding, ResolutionInput, SubjectInput,
 };
 use chidev_core::domain::check::external::ExternalRule;
 use chidev_core::domain::check::{FindingState, Moment};
@@ -53,7 +52,6 @@ fn request(title: &str, addresses: Vec<FindingInput>) -> ChangeRequestInput {
         issuer: None,
         targets: vec![],
         keep: vec![],
-        crux: None,
         assumptions: vec![],
         addresses,
     }
@@ -399,33 +397,40 @@ async fn a_case_name_that_does_not_identify_one_case_is_refused_atomically() {
 async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
     let (mut app, _) = fixture(judged_registry()).await;
     report_every_subject(&mut app).await;
-    let mut review = request(
+    let review = request(
         "human review",
         vec![FindingInput {
             rule: "judged.context".into(),
             subject: Some(SubjectInput::Context("core".into())),
         }],
     );
-    review.crux = Some(CruxInput {
-        kind: CruxKind::Ambiguity,
-        options: vec![OptionInput {
-            choice: "keep".into(),
-            change: None,
-            targets: vec![],
-            keep: vec![],
-            consequence: None,
-        }],
-        recommended: None,
-        importance: None,
-        supersedes: None,
-    });
     app.open_change_request(&review).await.unwrap();
-    app.decide_change_request(
-        "human review",
-        &DecisionInput::Chosen(ReasonedInput {
-            choice: "keep".into(),
+    let raised = app
+        .raise_crux(&RaiseCruxInput {
+            cr: "human review".into(),
+            kind: CruxKind::Ambiguity,
+            question: "Is it kept?".into(),
+            findings: vec![],
+            options: vec![OptionInput {
+                choice: "keep".into(),
+                change: None,
+                targets: vec![],
+                keep: vec![],
+                consequence: None,
+                recommended: None,
+            }],
+            importance: None,
+            supersedes: None,
+        })
+        .await
+        .unwrap()
+        .value;
+    app.decide_crux(
+        &raised.id.to_string(),
+        &DecisionInput::Chosen {
+            option: raised.options[0].id.to_string(),
             reason: None,
-        }),
+        },
         &BasisInput::Arbitrary("nothing derives it".into()),
         &DecisionMakerInput::Person("alice".into()),
     )

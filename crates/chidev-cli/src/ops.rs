@@ -7,14 +7,15 @@ use std::path::{Component, Path};
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, AssumptionInput, BasisInput, BasisStatus, CaseInput, ChangeRequestInput,
-    ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxInput, CruxKind,
-    DecisionInput, DecisionMakerInput, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput,
-    Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef,
-    ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
-    PolicyLineInput, PutDone, PutInput, ReasonedInput, RecommendedInput, RenameInput, ReportInput,
-    ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
-    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
+    App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, CaseInput,
+    ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef, ContractPut, CruxKind,
+    CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput,
+    EvidenceStatus, FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut,
+    ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue,
+    PinState, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput,
+    RecommendedStatus, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
+    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding, RuleToJudge,
+    SubjectInput, TargetInput, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -126,21 +127,20 @@ enum Op {
     /// Replaces the decision Policy (the numbered lines `P1`, `P2`, ... that settle a choice without asking a
     /// decision maker) with `lines`, whole.
     PolicyPut { lines: Vec<PolicyLineDto> },
-    /// Decides the Crux of a change request, once: exactly one of `choice`, `wording` and `unspecified`, the `basis`
-    /// it rests on (a Policy line or an arbitrary reason), and who decides (`by`).
-    CrDecide {
-        title: String,
-        #[serde(default)]
-        choice: Option<String>,
-        #[serde(default)]
-        wording: Option<String>,
-        #[serde(default)]
-        unspecified: Option<Vec<String>>,
-        #[serde(default)]
-        reason: Option<String>,
-        basis: BasisDto,
-        by: MakerDto,
-    },
+    /// Raises a Crux in the change request titled `in`: a question only a decision maker can answer (`question`, of
+    /// a `kind`), the `options` (each may name the `targets` it asks to be revised or retired, and the `keep` it asks
+    /// to stay as they are, once it is chosen; at most one is `recommended`), the `findings` it is raised from
+    /// (written like the `addresses` of `cr_open`), how much it matters (`importance`), and the Crux it replaces
+    /// (`supersedes`, an id; that one must have a decision to replace). The change request cannot be resolved until
+    /// the Crux is decided. A resolved change request takes none. The result has the id of the Crux and of each
+    /// option, which `cr_crux_decide` points at.
+    CrCruxRaise(Box<RaiseDto>),
+    /// Decides a Crux, once: the `crux` (an id), exactly one of `option` (an option id of the Crux; with an optional
+    /// `reason`), `wording` (the behaviour in the decision maker's words; with an optional `reason`), `unspecified`
+    /// (what must still hold, for a behaviour left free) and `withdrawn: true` (the question is not needed any more),
+    /// the `basis` it rests on (a Policy line or an arbitrary reason), and who decides (`by`, a claim that nothing
+    /// checks). The targets the option chosen asks for are recorded in the change request the Crux was raised in.
+    CrCruxDecide(Box<DecideDto>),
     /// Appends an Assumption to a change request that is not resolved.
     CrAssume {
         title: String,
@@ -152,8 +152,8 @@ enum Op {
     /// Closes the record of a change request with a resolution: `resolution` is `"done"`, `"wont_do"`,
     /// `"invalid"`, `{"duplicate":"<title>"}` or `{"superseded":"<title>"}` (the title of a change request that
     /// exists), with the `reason` and who resolves it (`by`). Refused only by explicit states: resolved already,
-    /// the Crux unanswered (for `"done"`), a part not resolved, a reference that does not exist. The targets and
-    /// the work are not consulted; checks report where they disagree.
+    /// a Crux raised in it not decided (whatever the resolution), a part not resolved, a reference that does not
+    /// exist. The targets and the work are not consulted; checks report where they disagree.
     CrResolve {
         title: String,
         resolution: ResolutionDto,
@@ -218,9 +218,9 @@ enum Op {
     FindingReport(Box<ReportDto>),
     /// Reads the part of the model that is asked for: the `sections` named (at least one; nothing is read by
     /// default), of the Contexts named in `contexts` (every Context when it is left out; none when it is `[]`). The
-    /// Contexts always come with their `id`, `name`, `basis` and `uses`; the change requests belong to the Project,
-    /// so they come when `change_requests` is a section, whatever `contexts` says. The result is the `view`, and the
-    /// `store_revision` it was read at.
+    /// Contexts always come with their `id`, `name`, `basis` and `uses`; the change requests and the Cruxes belong
+    /// to the Project, so they come when `change_requests` and `cruxes` are sections, whatever `contexts` says. The
+    /// result is the `view`, and the `store_revision` it was read at.
     View(ViewDto),
 }
 
@@ -854,9 +854,6 @@ struct OpenDto {
     /// The targets it asks to stay as they are.
     #[serde(default)]
     keep: Vec<RefDto>,
-    /// The choice for a decision maker, besides the targets; none: nothing to decide.
-    #[serde(default)]
-    crux: Option<CruxDto>,
     /// The interpretations settled from the repository and general knowledge while raising it.
     #[serde(default)]
     assumptions: Vec<AssumptionDto>,
@@ -1197,6 +1194,22 @@ struct CrOpenOut<'a> {
     findings: Vec<FindingOut<'a>>,
 }
 
+/// The result of `cr_crux_raise`: the id of the Crux, and of each option with its choice.
+#[derive(Debug, Serialize)]
+struct CruxRaisedOut<'a> {
+    op: &'static str,
+    crux: String,
+    options: Vec<RaisedOptionOut<'a>>,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// An option of a Crux just raised.
+#[derive(Debug, Serialize)]
+struct RaisedOptionOut<'a> {
+    id: String,
+    choice: &'a str,
+}
+
 /// A Pin in the result of `status`.
 #[derive(Debug, Serialize)]
 struct PinOut<'a> {
@@ -1230,11 +1243,45 @@ struct MakerOut<'a> {
     name: &'a str,
 }
 
+/// What was decided about a Crux, in the result of `status`: the words `view` uses.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DecisionOut<'a> {
+    Chosen {
+        option: &'a str,
+        reason: Option<&'a str>,
+    },
+    Worded {
+        wording: &'a str,
+        reason: Option<&'a str>,
+    },
+    Unspecified(&'a [String]),
+    Withdrawn,
+}
+
+impl<'a> From<&'a DecisionStatus> for DecisionOut<'a> {
+    fn from(d: &'a DecisionStatus) -> DecisionOut<'a> {
+        match d {
+            DecisionStatus::Chosen { option, reason } => DecisionOut::Chosen {
+                option,
+                reason: reason.as_deref(),
+            },
+            DecisionStatus::Worded { wording, reason } => DecisionOut::Worded {
+                wording,
+                reason: reason.as_deref(),
+            },
+            DecisionStatus::Unspecified { keep } => DecisionOut::Unspecified(keep),
+            DecisionStatus::Withdrawn => DecisionOut::Withdrawn,
+        }
+    }
+}
+
 /// The answer to a Crux, in the result of `status`: the decision, what it rests on, who gave it, and when
 /// (milliseconds since the epoch).
 #[derive(Debug, Serialize)]
 struct AnswerOut<'a> {
-    decision: &'a str,
+    id: &'a str,
+    decision: DecisionOut<'a>,
     basis: BasisOut<'a>,
     by: MakerOut<'a>,
     at: u64,
@@ -1352,10 +1399,9 @@ struct CrOut<'a> {
     intent: &'static str,
     parent: Option<&'a str>,
     issuer: Option<&'a str>,
-    crux: Option<&'static str>,
-    supersedes: Option<&'a str>,
+    /// The ids of the Cruxes raised in it, in `cruxes`.
+    cruxes: &'a [String],
     state: &'static str,
-    answer: Option<AnswerOut<'a>>,
     resolution: Option<ResolutionOut<'a>>,
     history: Vec<HistoryOut<'a>>,
     assumptions: Vec<AssumptionOut<'a>>,
@@ -1386,27 +1432,125 @@ struct AwaitingExpectOut<'a> {
     target: &'a str,
 }
 
-/// An option of an undecided Crux.
+/// An option of a Crux, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct AwaitingOptionOut<'a> {
+    id: &'a str,
     choice: &'a str,
     wording: Option<&'a str>,
     expects: Vec<AwaitingExpectOut<'a>>,
     consequence: Option<&'a str>,
 }
 
-/// The recommendation of an undecided Crux, with how sure (0 to 100).
+impl<'a> From<&'a AwaitingOption> for AwaitingOptionOut<'a> {
+    fn from(o: &'a AwaitingOption) -> AwaitingOptionOut<'a> {
+        AwaitingOptionOut {
+            id: &o.id,
+            choice: &o.choice,
+            wording: o.wording.as_deref(),
+            expects: o
+                .expects
+                .iter()
+                .map(|e| AwaitingExpectOut {
+                    kind: e.kind,
+                    target: &e.target,
+                })
+                .collect(),
+            consequence: o.consequence.as_deref(),
+        }
+    }
+}
+
+/// The recommendation of a Crux: the id of the option, why, and how sure (0 to 100).
 #[derive(Debug, Serialize)]
 struct RecommendedOut<'a> {
-    choice: &'a str,
+    option: &'a str,
     reason: Option<&'a str>,
     confidence: Option<u8>,
 }
 
-/// A change request whose Crux has no decision yet, in the result of `status`.
+impl<'a> From<&'a RecommendedStatus> for RecommendedOut<'a> {
+    fn from(r: &'a RecommendedStatus) -> RecommendedOut<'a> {
+        RecommendedOut {
+            option: &r.option,
+            reason: r.reason.as_deref(),
+            confidence: r.confidence,
+        }
+    }
+}
+
+/// A finding a Crux was raised from, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct CruxFindingOut<'a> {
+    rule: &'a str,
+    about: Option<&'a str>,
+}
+
+/// A Crux in the result of `status`: the record `view` shows, with the change request it stops by its title.
+#[derive(Debug, Serialize)]
+struct CruxOut<'a> {
+    id: &'a str,
+    raised_in: &'a str,
+    findings: Vec<CruxFindingOut<'a>>,
+    kind: &'static str,
+    question: &'a str,
+    importance: Option<&'static str>,
+    options: Vec<AwaitingOptionOut<'a>>,
+    recommended: Option<RecommendedOut<'a>>,
+    supersedes: Option<&'a str>,
+    state: &'static str,
+    answer: Option<AnswerOut<'a>>,
+}
+
+impl<'a> From<&'a CruxStatus> for CruxOut<'a> {
+    fn from(q: &'a CruxStatus) -> CruxOut<'a> {
+        CruxOut {
+            id: &q.id,
+            raised_in: &q.raised_in,
+            findings: q
+                .findings
+                .iter()
+                .map(|f| CruxFindingOut {
+                    rule: &f.rule,
+                    about: f.about.as_deref(),
+                })
+                .collect(),
+            kind: q.kind,
+            question: &q.question,
+            importance: q.importance,
+            options: q.options.iter().map(AwaitingOptionOut::from).collect(),
+            recommended: q.recommended.as_ref().map(RecommendedOut::from),
+            supersedes: q.supersedes.as_deref(),
+            state: q.state,
+            answer: q.answer.as_ref().map(|a| AnswerOut {
+                id: &a.id,
+                decision: DecisionOut::from(&a.decision),
+                basis: match &a.basis {
+                    BasisStatus::Policy {
+                        line,
+                        policy_revision,
+                    } => BasisOut::Policy {
+                        line,
+                        policy_revision: *policy_revision,
+                    },
+                    BasisStatus::Arbitrary { reason } => BasisOut::Arbitrary { reason },
+                },
+                by: MakerOut {
+                    kind: a.by_kind,
+                    name: &a.by,
+                },
+                at: a.at,
+            }),
+        }
+    }
+}
+
+/// A Crux that has no decision yet, in the result of `status`: what a decision maker is asked.
 #[derive(Debug, Serialize)]
 struct AwaitingOut<'a> {
-    cr: &'a str,
+    crux: &'a str,
+    raised_in: &'a str,
+    question: &'a str,
     kind: &'static str,
     options: Vec<AwaitingOptionOut<'a>>,
     recommended: Option<RecommendedOut<'a>>,
@@ -1549,6 +1693,7 @@ struct StatusOut<'a> {
     stale_cites: Vec<StaleCiteOut<'a>>,
     change_requests: Vec<CrOut<'a>>,
     keep_moved: Vec<KeepMovedOut<'a>>,
+    cruxes: Vec<CruxOut<'a>>,
     awaiting: Vec<AwaitingOut<'a>>,
     policy: PolicyOut<'a>,
     findings: Vec<FindingOut<'a>>,
@@ -1722,36 +1867,136 @@ impl From<IntentDto> for Intent {
     }
 }
 
-/// The choice for a decision maker. There is no `default`: work that depends on the answer waits for it.
+/// The fields of `cr_crux_raise`, boxed: they are far larger than most operations'. There is no `default` for the
+/// decision maker: what depends on the answer waits for it.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct CruxDto {
+struct RaiseDto {
+    /// The title of the change request the Crux is raised in, which it stops.
+    #[serde(rename = "in")]
+    cr: String,
+    /// The question, in a sentence.
+    question: String,
     kind: KindDto,
+    /// The findings it is raised from, written like the `addresses` of `cr_open`.
+    #[serde(default)]
+    findings: Vec<AddressDto>,
     options: Vec<OptionDto>,
     #[serde(default)]
-    recommended: Option<RecommendedDto>,
-    #[serde(default)]
     importance: Option<ImportanceDto>,
-    /// The title of the change request whose answered Crux this one replaces.
+    /// The id of the Crux whose decision this one replaces.
     #[serde(default)]
     supersedes: Option<String>,
 }
 
-/// The option recommended, why, and how sure (0 to 100).
+impl TryFrom<RaiseDto> for RaiseCruxInput {
+    type Error = AppError;
+
+    fn try_from(d: RaiseDto) -> Result<RaiseCruxInput, AppError> {
+        Ok(RaiseCruxInput {
+            cr: d.cr,
+            kind: d.kind.into(),
+            question: d.question,
+            findings: d.findings.into_iter().map(FindingInput::from).collect(),
+            options: d
+                .options
+                .into_iter()
+                .map(|o| {
+                    Ok(OptionInput {
+                        choice: o.choice,
+                        change: o.wording,
+                        targets: targets_of(o.targets)?,
+                        keep: targets_of(o.keep)?,
+                        consequence: o.consequence,
+                        recommended: o.recommended.map(RecommendationInput::from),
+                    })
+                })
+                .collect::<Result<_, AppError>>()?,
+            importance: d.importance.map(Importance::from),
+            supersedes: d.supersedes,
+        })
+    }
+}
+
+/// The fields of `cr_crux_decide`: the Crux, exactly one decision, what it rests on and who decides.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct RecommendedDto {
-    choice: String,
+struct DecideDto {
+    /// The id of the Crux.
+    crux: String,
+    /// The id of the option chosen.
+    #[serde(default)]
+    option: Option<String>,
+    /// The behaviour in the decision maker's own words.
+    #[serde(default)]
+    wording: Option<String>,
+    /// What must still hold, for a behaviour left free.
+    #[serde(default)]
+    unspecified: Option<Vec<String>>,
+    /// `true`: the question is not needed any more.
+    #[serde(default)]
+    withdrawn: Option<bool>,
+    /// Why the option or the wording was decided; a decision to leave it unspecified or to withdraw the question
+    /// has its reason in the `basis`.
+    #[serde(default)]
+    reason: Option<String>,
+    basis: BasisDto,
+    by: MakerDto,
+}
+
+impl DecideDto {
+    /// The decision, parsed once from the fields it is written in: exactly one of them is given.
+    fn decision(&self) -> Result<DecisionInput, AppError> {
+        let given = usize::from(self.option.is_some())
+            + usize::from(self.wording.is_some())
+            + usize::from(self.unspecified.is_some())
+            + usize::from(self.withdrawn.is_some());
+        if given != 1 {
+            return Err(AppError::Input(
+                "give exactly one of `option`, `wording`, `unspecified` and `withdrawn`"
+                    .to_string(),
+            ));
+        }
+        if let Some(option) = &self.option {
+            return Ok(DecisionInput::Chosen {
+                option: option.clone(),
+                reason: self.reason.clone(),
+            });
+        }
+        if let Some(wording) = &self.wording {
+            return Ok(DecisionInput::Worded {
+                wording: wording.clone(),
+                reason: self.reason.clone(),
+            });
+        }
+        if self.reason.is_some() {
+            return Err(AppError::Input(
+                "`reason` goes with `option` or `wording`; a decision to leave it unspecified or to withdraw the question gives its reason in the `basis`".to_string(),
+            ));
+        }
+        match (&self.unspecified, self.withdrawn) {
+            (Some(keep), _) => Ok(DecisionInput::Unspecified { keep: keep.clone() }),
+            (None, Some(true)) => Ok(DecisionInput::Withdrawn),
+            (None, _) => Err(AppError::Input(
+                "`withdrawn` is `true`, or left out".to_string(),
+            )),
+        }
+    }
+}
+
+/// Why an option is recommended, and how sure (0 to 100).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RecommendationDto {
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
     confidence: Option<u64>,
 }
 
-impl From<RecommendedDto> for RecommendedInput {
-    fn from(r: RecommendedDto) -> RecommendedInput {
-        RecommendedInput {
-            choice: r.choice,
+impl From<RecommendationDto> for RecommendationInput {
+    fn from(r: RecommendationDto) -> RecommendationInput {
+        RecommendationInput {
             reason: r.reason,
             confidence: r.confidence,
         }
@@ -1811,6 +2056,9 @@ struct OptionDto {
     keep: Vec<RefDto>,
     #[serde(default)]
     consequence: Option<String>,
+    /// Present: the Crux recommends this option (at most one option does), and why, and how sure (0 to 100).
+    #[serde(default)]
+    recommended: Option<RecommendationDto>,
 }
 
 /// A reference to a target of any kind. The Project is `{"project": true}`.
@@ -2351,33 +2599,9 @@ where
                 issuer,
                 targets,
                 keep,
-                crux,
                 assumptions,
                 addresses,
             } = *open;
-            let crux = crux
-                .map(|q| {
-                    Ok::<_, AppError>(CruxInput {
-                        kind: q.kind.into(),
-                        options: q
-                            .options
-                            .into_iter()
-                            .map(|o| {
-                                Ok(OptionInput {
-                                    choice: o.choice,
-                                    change: o.wording,
-                                    targets: targets_of(o.targets)?,
-                                    keep: targets_of(o.keep)?,
-                                    consequence: o.consequence,
-                                })
-                            })
-                            .collect::<Result<_, AppError>>()?,
-                        recommended: q.recommended.map(RecommendedInput::from),
-                        importance: q.importance.map(Importance::from),
-                        supersedes: q.supersedes,
-                    })
-                })
-                .transpose()?;
             let input = ChangeRequestInput {
                 title,
                 situation,
@@ -2386,7 +2610,6 @@ where
                 issuer,
                 targets: targets_of(targets)?,
                 keep: targets_of(keep)?,
-                crux,
                 assumptions: assumptions.into_iter().map(AssumptionInput::from).collect(),
                 addresses: addresses.into_iter().map(FindingInput::from).collect(),
             };
@@ -2435,32 +2658,33 @@ where
                 findings: findings_out(&done.findings),
             })?
         }
-        Op::CrDecide {
-            title,
-            choice,
-            wording,
-            unspecified,
-            reason,
-            basis,
-            by,
-        } => {
-            let decision = match (choice, wording, unspecified) {
-                (Some(choice), None, None) => {
-                    DecisionInput::Chosen(ReasonedInput { choice, reason })
-                }
-                (None, Some(wording), None) => DecisionInput::Worded { wording, reason },
-                (None, None, Some(keep)) => DecisionInput::Unspecified { keep },
-                _ => {
-                    return Err(AppError::Input(
-                        "give exactly one of `choice`, `wording` and `unspecified`".to_string(),
-                    ));
-                }
-            };
+        Op::CrCruxRaise(raise) => {
+            let input = RaiseCruxInput::try_from(*raise)?;
+            let done = app.raise_crux(&input).await?;
+            let Raised { id, options } = &done.value;
+            to_value(&CruxRaisedOut {
+                op: "cr_crux_raise",
+                crux: id.to_string(),
+                options: options
+                    .iter()
+                    .map(|o| RaisedOptionOut {
+                        id: o.id.to_string(),
+                        choice: &o.choice,
+                    })
+                    .collect(),
+                findings: findings_out(&done.findings),
+            })?
+        }
+        Op::CrCruxDecide(decide) => {
+            let decision = decide.decision()?;
+            let DecideDto {
+                crux, basis, by, ..
+            } = *decide;
             let done = app
-                .decide_change_request(&title, &decision, &basis.into(), &by.into())
+                .decide_crux(&crux, &decision, &basis.into(), &by.into())
                 .await?;
             to_value(&DoneOut {
-                op: "cr_decide",
+                op: "cr_crux_decide",
                 findings: findings_out(&done.findings),
             })?
         }
@@ -2526,8 +2750,7 @@ where
                         intent: c.intent,
                         parent: c.parent.as_deref(),
                         issuer: c.issuer.as_deref(),
-                        crux: c.crux,
-                        supersedes: c.supersedes.as_deref(),
+                        cruxes: &c.cruxes,
                         state: c.state,
                         resolution: c.resolution.as_ref().map(ResolutionOut::from),
                         history: c.history.iter().map(HistoryOut::from).collect(),
@@ -2547,24 +2770,6 @@ where
                                 moved: k.moved,
                             })
                             .collect(),
-                        answer: c.answer.as_ref().map(|a| AnswerOut {
-                            decision: &a.decision,
-                            basis: match &a.basis {
-                                BasisStatus::Policy {
-                                    line,
-                                    policy_revision,
-                                } => BasisOut::Policy {
-                                    line,
-                                    policy_revision: *policy_revision,
-                                },
-                                BasisStatus::Arbitrary { reason } => BasisOut::Arbitrary { reason },
-                            },
-                            by: MakerOut {
-                                kind: a.by_kind,
-                                name: &a.by,
-                            },
-                            at: a.at,
-                        }),
                         assumptions: c
                             .assumptions
                             .iter()
@@ -2605,34 +2810,17 @@ where
                         moved: &k.moved,
                     })
                     .collect(),
+                cruxes: s.cruxes.iter().map(CruxOut::from).collect(),
                 awaiting: s
                     .awaiting
                     .iter()
                     .map(|a| AwaitingOut {
-                        cr: &a.cr,
+                        crux: &a.crux,
+                        raised_in: &a.raised_in,
+                        question: &a.question,
                         kind: a.kind,
-                        options: a
-                            .options
-                            .iter()
-                            .map(|o| AwaitingOptionOut {
-                                choice: &o.choice,
-                                wording: o.wording.as_deref(),
-                                expects: o
-                                    .expects
-                                    .iter()
-                                    .map(|e| AwaitingExpectOut {
-                                        kind: e.kind,
-                                        target: &e.target,
-                                    })
-                                    .collect(),
-                                consequence: o.consequence.as_deref(),
-                            })
-                            .collect(),
-                        recommended: a.recommended.as_ref().map(|r| RecommendedOut {
-                            choice: &r.choice,
-                            reason: r.reason.as_deref(),
-                            confidence: r.confidence,
-                        }),
+                        options: a.options.iter().map(AwaitingOptionOut::from).collect(),
+                        recommended: a.recommended.as_ref().map(RecommendedOut::from),
                         importance: a.importance,
                     })
                     .collect(),

@@ -38,14 +38,69 @@ fn exec(dir: &Path, file: &Path, store: &Path) -> (Vec<Value>, Option<i32>) {
     (lines, out.status.code())
 }
 
+/// The operations of `ops` (each a line of JSON), each run through a `chidev exec` of its own on `store`, so that
+/// one can use an id an earlier one gave back: `@N.crux` is the id of the Crux that the operation on line N raised,
+/// and `@N.option(choice)` the id of its option with that choice. The results are numbered as if the operations were
+/// one file, and the code is 1 when any of them was refused, else 0.
+fn exec_each(dir: &Path, store: &Path, ops: &[String]) -> (Vec<Value>, Option<i32>) {
+    let mut results: Vec<Value> = Vec::with_capacity(ops.len());
+    for (k, op) in ops.iter().enumerate() {
+        let file = dir.join("each.jsonl");
+        std::fs::write(&file, format!("{}\n", with_ids(op.trim_end(), &results))).expect("a file");
+        let (mut one, _) = exec(dir, &file, store);
+        let mut result = one.remove(0);
+        result["line"] = (k + 1).into();
+        results.push(result);
+    }
+    let code = i32::from(results.iter().any(|r| r["ok"] == false));
+    (results, Some(code))
+}
+
+/// `op` with the ids of earlier results written in (see [`exec_each`]).
+fn with_ids(op: &str, results: &[Value]) -> String {
+    let mut out = String::new();
+    let mut rest = op;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let digits = tail
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        let n: usize = tail[..digits].parse().expect("a line number after `@`");
+        let result = &results[n - 1];
+        let tail = &tail[digits..];
+        if let Some(t) = tail.strip_prefix(".crux") {
+            out.push_str(result["crux"].as_str().expect("the id of a Crux"));
+            rest = t;
+        } else if let Some(t) = tail.strip_prefix(".option(") {
+            let end = t.find(')').expect("a closing parenthesis");
+            let id = result["options"]
+                .as_array()
+                .expect("the options of a Crux")
+                .iter()
+                .find(|o| o["choice"] == t[..end])
+                .and_then(|o| o["id"].as_str())
+                .unwrap_or_else(|| panic!("no option `{}` in {result}", &t[..end]));
+            out.push_str(id);
+            rest = &t[end + 1..];
+        } else {
+            panic!("`@{n}` is followed by `.crux` or `.option(choice)`");
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The flow, run on a store of its own.
 fn run() -> (Vec<Value>, Option<i32>) {
     let dir = fresh_dir("flow");
-    exec(
-        &dir,
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flow.jsonl")),
-        &dir.join("chidev.db"),
-    )
+    let ops: Vec<String> =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flow.jsonl"))
+            .expect("the flow")
+            .lines()
+            .map(str::to_string)
+            .collect();
+    exec_each(&dir, &dir.join("chidev.db"), &ops)
 }
 
 /// The result of the operation on line `n` of the flow.
@@ -80,9 +135,9 @@ fn states(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     let (results, code) = run();
-    assert_eq!(results.len(), 29);
+    assert_eq!(results.len(), 30);
     assert!(
-        results[..28].iter().all(|r| r["ok"] == true),
+        results[..29].iter().all(|r| r["ok"] == true),
         "{results:#?}"
     );
 
@@ -94,26 +149,48 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     );
 
     // the request is open; its part decided, with the clause still to be written
-    let decided = at(&results, 16);
+    let raised = at(&results, 15);
+    let crux = raised["crux"].as_str().expect("the id of the Crux");
+    let half_to_even = raised["options"][1]["id"].as_str().expect("an option id");
+    let decided = at(&results, 17);
     let crs = &decided["change_requests"];
     assert_eq!(crs[0]["title"], "Fair totals");
     assert_eq!(crs[0]["state"], "open");
-    assert_eq!(crs[0]["crux"], Value::Null);
+    assert_eq!(crs[0]["cruxes"], serde_json::json!([]));
     assert_eq!(crs[1]["parent"], "Fair totals");
     assert_eq!(crs[1]["issuer"], "designer");
-    assert_eq!(crs[1]["crux"], "ambiguity");
+    assert_eq!(crs[1]["cruxes"], serde_json::json!([crux]));
     assert_eq!(crs[1]["state"], "decided");
-    assert_eq!(crs[1]["answer"]["decision"], "half to even");
+    // the Crux is a record of its own, with the change request it stops, its options and its answer
+    let cruxes = decided["cruxes"].as_array().expect("cruxes");
+    assert_eq!(cruxes.len(), 1);
+    let asked = &cruxes[0];
+    assert_eq!(asked["id"], crux);
+    assert_eq!(asked["raised_in"], "How is a half cent rounded?");
+    assert_eq!(asked["kind"], "ambiguity");
+    assert_eq!(asked["state"], "answered");
+    assert_eq!(asked["recommended"]["option"], half_to_even);
+    assert_eq!(asked["recommended"]["confidence"], 70);
+    assert_eq!(asked["options"][1]["id"], half_to_even);
+    assert_eq!(asked["options"][1]["choice"], "half to even");
     assert_eq!(
-        crs[1]["answer"]["basis"],
+        asked["answer"]["decision"],
+        serde_json::json!({ "chosen": {
+            "option": half_to_even,
+            "reason": "fair to the customer over many totals"
+        } })
+    );
+    assert!(asked["answer"]["id"].is_string());
+    assert_eq!(
+        asked["answer"]["basis"],
         serde_json::json!({ "arbitrary": { "reason": "the shop accepts the cost of fairness" } })
     );
     assert_eq!(
-        crs[1]["answer"]["by"],
+        asked["answer"]["by"],
         serde_json::json!({ "kind": "person", "name": "alice" })
     );
-    assert!(crs[1]["answer"]["at"].as_u64().expect("a time") > 0);
-    assert_eq!(crs[0]["answer"], Value::Null);
+    assert!(asked["answer"]["at"].as_u64().expect("a time") > 0);
+    assert_eq!(decided["awaiting"], serde_json::json!([]));
     // the situation and the issuer given to cr_open are kept and shown
     assert_eq!(crs[0]["issuer"], "customer support");
     assert_eq!(
@@ -131,9 +208,9 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
         serde_json::json!([{ "target": "rounding C1", "progress": "not touched yet" }])
     );
 
-    // the clause changed (line 17), so both change requests resolve (lines 20, 21); then the interface changes
+    // the clause changed (line 18), so both change requests resolve (lines 21, 22); then the interface changes
     // too: the pins and the citations are behind, and the change requests stay resolved
-    let changed = at(&results, 23);
+    let changed = at(&results, 24);
     assert_eq!(changed["change_requests"][0]["state"], "resolved");
     assert_eq!(changed["change_requests"][1]["state"], "resolved");
     assert_eq!(
@@ -159,13 +236,13 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(changed["stale_cites"].as_array().expect("cites").len(), 3);
     assert!(changed.get("unapplied").is_none());
     // the interface was revised, not replaced; its item kept its id across the change of its declaration (the same key),
-    // or line 22 would have been refused for orphaning the cases that cite it
-    assert_eq!(at(&results, 22)["revision"], 2);
-    assert_eq!(at(&results, 22)["id"], at(&results, 6)["id"]);
+    // or line 23 would have been refused for orphaning the cases that cite it
+    assert_eq!(at(&results, 23)["revision"], 2);
+    assert_eq!(at(&results, 23)["id"], at(&results, 6)["id"]);
 
-    // the new Clause C2 is cited by no Case once the contract is put (line 17), and the put does not say so (an
-    // edit does not finish the model); the check (line 18) does: an open warning, with the name of the clause. The
-    // change request opened for it (line 19) makes it addressed from then on, and it stays so while that request
+    // the new Clause C2 is cited by no Case once the contract is put (line 18), and the put does not say so (an
+    // edit does not finish the model); the check (line 19) does: an open warning, with the name of the clause. The
+    // change request opened for it (line 20) makes it addressed from then on, and it stays so while that request
     // is unresolved
     let uncited = |r: &Value| -> Option<Value> {
         r["findings"]
@@ -175,17 +252,17 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
             .find(|f| f["rule"] == "cite.uncited-clause" && f["about"] == "rounding C2")
             .cloned()
     };
-    assert!(uncited(at(&results, 17)).is_none());
-    let found = uncited(at(&results, 18)).expect("C2 is uncited");
+    assert!(uncited(at(&results, 18)).is_none());
+    let found = uncited(at(&results, 19)).expect("C2 is uncited");
     assert_eq!(found["level"], "warning");
     assert_eq!(found["state"], "open");
     assert_eq!(
-        uncited(at(&results, 23)).expect("still uncited")["state"],
+        uncited(at(&results, 24)).expect("still uncited")["state"],
         "addressed"
     );
-    // the harness put (line 24) cites it: the status after the pins (line 28) does not find it (a put never says
+    // the harness put (line 25) cites it: the status after the pins (line 29) does not find it (a put never says
     // it, so the put itself proves nothing here)
-    assert!(uncited(at(&results, 28)).is_none());
+    assert!(uncited(at(&results, 29)).is_none());
     // a pin made against what has moved is reported by the put that moved it, while the status says so for as
     // long as it lasts, and not once it is pinned again
     let pin_stale = |r: &Value| {
@@ -196,12 +273,12 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
             .filter(|f| f["rule"] == "pin.stale")
             .count()
     };
-    assert_eq!(pin_stale(at(&results, 22)), 2);
     assert_eq!(pin_stale(at(&results, 23)), 2);
-    assert_eq!(pin_stale(at(&results, 28)), 0);
+    assert_eq!(pin_stale(at(&results, 24)), 2);
+    assert_eq!(pin_stale(at(&results, 29)), 0);
 
     // the harnesses brought up to date and the code pinned again: everything is fresh
-    let again = at(&results, 28);
+    let again = at(&results, 29);
     assert_eq!(
         pin_states(again),
         states(&[("price", "fresh"), ("print", "fresh")])
@@ -209,7 +286,7 @@ fn the_flow_runs_from_contract_to_pin_through_a_change_and_back() {
     assert_eq!(again["stale_cites"], serde_json::json!([]));
 
     // dropping the item the harnesses cite is refused, and the run reports the failure
-    let refused = at(&results, 29);
+    let refused = at(&results, 30);
     assert_eq!(refused["ok"], false);
     assert!(message(refused).contains("cannot reach"), "{refused:#?}");
     assert_eq!(diag(refused)["code"], "project.cite-unreachable");
@@ -249,74 +326,78 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "any discount is accepted",
             "a refused discount is an InvalidDiscount",
         ),
-        // 4: the settled change (C1, a line) and the question about a detail (which error; C2 for a new one)
+        // 4: the settled change (C1, a line)
         concat!(
             "{\"op\":\"cr_open\",\"title\":\"Refuse big discounts\",\"intent\":\"change_behavior\",",
-            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}],",
-            "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
-            "{\"choice\":\"reuse InvalidDiscount\"},",
-            "{\"choice\":\"new error\",\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
-            "],\"recommended\":{\"choice\":\"reuse InvalidDiscount\",\"reason\":\"no new type\",\"confidence\":60},",
-            "\"importance\":\"normal\"}}\n"
+            "\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C1\"}}]}"
         )
         .to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        "{\"op\":\"check\"}\n".to_string(),
+        // 5: and the question about a detail (which error; C2 for a new one), raised in it
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Refuse big discounts\",\"choice\":\"reuse InvalidDiscount\",",
-            "\"basis\":{\"arbitrary\":\"one error type is enough\"},\"by\":{\"person\":\"alice\"}}\n"
+            "{\"op\":\"cr_crux_raise\",\"in\":\"Refuse big discounts\",\"question\":\"Which error is raised?\",",
+            "\"kind\":\"ambiguity\",\"options\":[",
+            "{\"choice\":\"reuse InvalidDiscount\",\"recommended\":{\"reason\":\"no new type\",\"confidence\":60}},",
+            "{\"choice\":\"new error\",\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
+            "],\"importance\":\"normal\"}"
         )
         .to_string(),
-        // 8: decided, yet C1 never changed: resolving looks at no revision, so it resolves, and the check says
+        "{\"op\":\"status\"}".to_string(),
+        "{\"op\":\"check\"}".to_string(),
+        concat!(
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@5.crux\",\"option\":\"@5.option(reuse InvalidDiscount)\",",
+            "\"basis\":{\"arbitrary\":\"one error type is enough\"},\"by\":{\"person\":\"alice\"}}"
+        )
+        .to_string(),
+        // 9: decided, yet C1 never changed: resolving looks at no revision, so it resolves, and the check says
         // that nothing was applied for it
-        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"nothing to change after all\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 10: a resolved request takes no more work
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"nothing to change after all\",\"by\":{\"person\":\"alice\"}}".to_string(),
+        "{\"op\":\"status\"}".to_string(),
+        // 11: a resolved request takes no more work
         discount_set(
             "Refuse big discounts",
             "a discount above 50% is refused",
             "a refused discount is an InvalidDiscount",
         ),
-        // 11: opened again, it takes the work, and is resolved anew
-        "{\"op\":\"cr_reopen\",\"title\":\"Refuse big discounts\",\"reason\":\"the clause did need to change\",\"by\":{\"person\":\"bob\"}}\n".to_string(),
+        // 12: opened again, it takes the work, and is resolved anew
+        "{\"op\":\"cr_reopen\",\"title\":\"Refuse big discounts\",\"reason\":\"the clause did need to change\",\"by\":{\"person\":\"bob\"}}".to_string(),
         discount_set(
             "Refuse big discounts",
             "a discount above 50% is refused",
             "a refused discount is an InvalidDiscount",
         ),
-        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"C1 was changed\",\"by\":{\"person\":\"bob\"}}\n".to_string(),
-        // 14: a question whose second option names C2 as a target
+        "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"C1 was changed\",\"by\":{\"person\":\"bob\"}}".to_string(),
+        // 15: a request, and a question whose second option names C2 as a target
+        "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\"}".to_string(),
         concat!(
-            "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
-            "\"crux\":{\"kind\":\"ambiguity\",\"options\":[",
+            "{\"op\":\"cr_crux_raise\",\"in\":\"Name the error\",\"question\":\"Is the error new?\",",
+            "\"kind\":\"ambiguity\",\"options\":[",
             "{\"choice\":\"reuse InvalidDiscount\"},",
             "{\"choice\":\"new error\",\"targets\":[{\"clause\":{\"context\":\"pricing\",\"contract\":\"discount\",\"label\":\"C2\"}}]}",
-            "]}}\n"
+            "]}"
         )
         .to_string(),
-        // 15: done needs the question answered
-        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
+        // 17: done needs the question answered
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"r\",\"by\":{\"person\":\"alice\"}}".to_string(),
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"new error\",",
-            "\"basis\":{\"arbitrary\":\"callers tell the errors apart\"},\"by\":{\"person\":\"alice\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@16.crux\",\"option\":\"@16.option(new error)\",",
+            "\"basis\":{\"arbitrary\":\"callers tell the errors apart\"},\"by\":{\"person\":\"alice\"}}"
         )
         .to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 18: C2 was never touched; resolved as done all the same, and the checks say so
-        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"callers are fine\",\"by\":{\"person\":\"alice\"}}\n".to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 20: an unknown field of cr_open is refused, the old lists included
-        "{\"op\":\"cr_open\",\"title\":\"Old words\",\"intent\":\"change_behavior\",\"change\":[{\"project\":true}]}\n".to_string(),
-    ]
-    .concat();
-    let (results, code, err) = exec_in(&dir, &ops);
-    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+        "{\"op\":\"status\"}".to_string(),
+        // 20: C2 was never touched; resolved as done all the same, and the checks say so
+        "{\"op\":\"cr_resolve\",\"title\":\"Name the error\",\"resolution\":\"done\",\"reason\":\"callers are fine\",\"by\":{\"person\":\"alice\"}}".to_string(),
+        "{\"op\":\"status\"}".to_string(),
+        // 22: an unknown field of cr_open is refused, the old lists included
+        "{\"op\":\"cr_open\",\"title\":\"Old words\",\"intent\":\"change_behavior\",\"change\":[{\"project\":true}]}".to_string(),
+    ];
+    let (results, code) = exec_each(&dir, &dir.join("chidev.db"), &ops);
+    assert_eq!(code, Some(1), "{results:#?}");
     let failed: Vec<u64> = results
         .iter()
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [10, 15, 20], "{results:#?}");
+    assert_eq!(failed, [11, 17, 22], "{results:#?}");
 
     // cr_open echoes what it recorded, by name
     let opened = at(&results, 4);
@@ -329,22 +410,41 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         }])
     );
 
-    // the undecided question is visible: in status, and in check as a note; the line is behind as well
-    let waiting = at(&results, 5);
+    // the question raised in it gives back its id and the id of each option
+    let raised = at(&results, 5);
+    let crux = raised["crux"].as_str().expect("the id of the Crux");
+    let reuse = raised["options"][0]["id"].as_str().expect("an option id");
+    let new_error = raised["options"][1]["id"].as_str().expect("an option id");
+    assert_eq!(raised["options"][0]["choice"], "reuse InvalidDiscount");
+    assert_eq!(raised["options"][1]["choice"], "new error");
+
+    // the undecided question is visible: in status, and in check as a warning; the line is behind as well
+    let waiting = at(&results, 6);
     assert_eq!(
         waiting["awaiting"],
         serde_json::json!([{
-            "cr": "Refuse big discounts",
+            "crux": crux,
+            "raised_in": "Refuse big discounts",
+            "question": "Which error is raised?",
             "kind": "ambiguity",
             "options": [
-                { "choice": "reuse InvalidDiscount", "wording": null, "expects": [], "consequence": null },
-                { "choice": "new error", "wording": null,
+                { "id": reuse, "choice": "reuse InvalidDiscount", "wording": null, "expects": [],
+                  "consequence": null },
+                { "id": new_error, "choice": "new error", "wording": null,
                   "expects": [{ "kind": "target", "target": "discount C2" }], "consequence": null }
             ],
-            "recommended": { "choice": "reuse InvalidDiscount", "reason": "no new type", "confidence": 60 },
+            "recommended": { "option": reuse, "reason": "no new type", "confidence": 60 },
             "importance": "normal"
         }])
     );
+    // the request holds the id of its Crux, and the Crux is in the list of them
+    assert_eq!(
+        waiting["change_requests"][0]["cruxes"],
+        serde_json::json!([crux])
+    );
+    assert_eq!(waiting["cruxes"][0]["id"], crux);
+    assert_eq!(waiting["cruxes"][0]["state"], "open");
+    assert_eq!(waiting["cruxes"][0]["answer"], Value::Null);
     assert_eq!(
         waiting["policy"],
         serde_json::json!({ "revision": 1, "lines": [] })
@@ -362,16 +462,17 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             .find(|f| f["rule"] == rule)
             .cloned()
     };
-    let note = finding(at(&results, 6), "cr.awaiting-decision").expect("awaiting is found");
-    assert_eq!(note["level"], "note");
+    let note = finding(at(&results, 7), "cr.awaiting-decision").expect("awaiting is found");
+    assert_eq!(note["level"], "warning");
     // nothing judges the revisions any more: no check says the targets have not followed
-    assert!(finding(at(&results, 6), "cr.unapplied").is_none());
+    assert!(finding(at(&results, 7), "cr.unapplied").is_none());
 
     // decided, and C1 never changed: it resolves all the same, and the check says nothing was applied for it
     assert_eq!(at(&results, 8)["ok"], true, "{results:#?}");
-    let unworked = finding(at(&results, 8), "cr.resolved-without-work").expect("found");
+    assert_eq!(at(&results, 9)["ok"], true, "{results:#?}");
+    let unworked = finding(at(&results, 9), "cr.resolved-without-work").expect("found");
     assert_eq!(unworked["level"], "warning");
-    let decided = at(&results, 9);
+    let decided = at(&results, 10);
     assert_eq!(decided["awaiting"], serde_json::json!([]));
     let refuse = &decided["change_requests"][0];
     assert_eq!(refuse["resolution"]["resolution"], "done");
@@ -388,32 +489,32 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
         serde_json::json!([{ "target": "discount C1", "progress": "not touched yet" }])
     );
     // a resolved request takes no more work
-    let closed = message(at(&results, 10));
+    let closed = message(at(&results, 11));
     assert!(closed.contains("resolved"), "{closed}");
-    assert_eq!(diag(at(&results, 10))["code"], "cr.already-resolved");
+    assert_eq!(diag(at(&results, 11))["code"], "cr.already-resolved");
 
     // reopened it takes the work, and is resolved anew: no finding this time, and the history keeps all three steps
-    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 12)["ok"], true, "{results:#?}");
     assert_eq!(at(&results, 13)["ok"], true, "{results:#?}");
-    assert!(finding(at(&results, 13), "cr.resolved-without-work").is_none());
-    assert!(finding(at(&results, 13), "cr.targets-untouched").is_none());
+    assert_eq!(at(&results, 14)["ok"], true, "{results:#?}");
+    assert!(finding(at(&results, 14), "cr.resolved-without-work").is_none());
+    assert!(finding(at(&results, 14), "cr.targets-untouched").is_none());
 
     // the second question: done needs the answer; after the choice of the second option C2 is a target
-    assert_eq!(at(&results, 15)["ok"], false);
-    assert_eq!(diag(at(&results, 15))["code"], "cr.crux-unanswered");
-    assert!(message(at(&results, 15)).contains("not answered"));
-    assert_eq!(at(&results, 16)["ok"], true, "{results:#?}");
-    let chosen = &at(&results, 17)["change_requests"][1];
+    assert_eq!(at(&results, 17)["ok"], false);
+    assert_eq!(diag(at(&results, 17))["code"], "cr.crux-unanswered");
+    assert!(message(at(&results, 17)).contains("no decision"));
+    assert_eq!(at(&results, 18)["ok"], true, "{results:#?}");
+    let chosen = &at(&results, 19)["change_requests"][1];
     assert_eq!(chosen["state"], "decided");
     assert_eq!(
         chosen["targets"],
         serde_json::json!([{ "target": "discount C2", "progress": "not touched yet" }])
     );
     // resolved as done with C2 untouched and no work at all: a finding for the missing work
-    assert_eq!(at(&results, 18)["ok"], true, "{results:#?}");
-    assert!(finding(at(&results, 18), "cr.resolved-without-work").is_some());
-    let last = at(&results, 19);
+    assert_eq!(at(&results, 20)["ok"], true, "{results:#?}");
+    assert!(finding(at(&results, 20), "cr.resolved-without-work").is_some());
+    let last = at(&results, 21);
     assert_eq!(last["awaiting"], serde_json::json!([]));
     assert_eq!(last["change_requests"][0]["state"], "resolved");
     assert_eq!(last["change_requests"][1]["state"], "resolved");
@@ -445,9 +546,9 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert!(last.get("unapplied").is_none());
 
     // a field cr_open does not know is refused, whatever it was once called
-    let old = message(at(&results, 20));
+    let old = message(at(&results, 22));
     assert!(old.contains("change"), "{old}");
-    assert_eq!(diag(at(&results, 20))["code"], "input.unknown-field");
+    assert_eq!(diag(at(&results, 22))["code"], "input.unknown-field");
 }
 
 /// The e2e case "remove release": a parent without targets, a child with targets, one change set `for` the
@@ -721,124 +822,172 @@ fn policy_put(lines: &[(&str, &str)]) -> String {
 #[test]
 fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersedes_it() {
     let dir = fresh_dir("decisions");
-    let crux = |kind: &str, recommended: &str, importance: &str, supersedes: &str| {
+    // a question raised in the change request titled `cr`, with the options `half up` and `half to even`
+    let raise = |cr: &str, tail: &str| {
         format!(
-            "\"crux\":{{\"kind\":\"{kind}\",\"options\":[{{\"choice\":\"half up\"}},{{\"choice\":\"half to even\"}}]{recommended}{importance}{supersedes}}}"
+            "{{\"op\":\"cr_crux_raise\",\"in\":\"{cr}\",\"question\":\"How is a half rounded?\",\"options\":[{{\"choice\":\"half up\"}},{{\"choice\":\"half to even\"{}}}],{tail}}}",
+            if tail.contains("conflict") {
+                ""
+            } else {
+                ",\"recommended\":{\"reason\":\"no bias\",\"confidence\":85}"
+            }
         )
     };
+    let open = |title: &str, intent: &str| {
+        format!("{{\"op\":\"cr_open\",\"title\":\"{title}\",\"intent\":\"{intent}\"}}")
+    };
     let ops = [
-        "{\"op\":\"init\"}\n".to_string(),
-        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        "{\"op\":\"init\"}".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}".to_string(),
         discount_put("a half rounds up", "a refused discount is an InvalidDiscount"),
         // 4: the decision Policy
         policy_put(&[
             ("P1", "take the recommendation when its confidence is 80 or more"),
             ("P2", "when the importance is low and the options cost the same, either is fine"),
         ]),
-        // 5: a Crux whose recommendation is 85 sure
-        format!(
-            "{{\"op\":\"cr_open\",\"title\":\"Round half to even?\",\"intent\":\"change_behavior\",{}}}\n",
-            crux(
-                "ambiguity",
-                ",\"recommended\":{\"choice\":\"half to even\",\"reason\":\"no bias\",\"confidence\":85}",
-                ",\"importance\":\"low\"",
-                ""
-            )
+        // 5, 6: a Crux whose recommendation is 85 sure
+        open("Round half to even?", "change_behavior"),
+        raise(
+            "Round half to even?",
+            "\"kind\":\"ambiguity\",\"importance\":\"low\"",
         ),
-        // 6: a Crux nothing derives
-        format!(
-            "{{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",{}}}\n",
-            crux("conflict", "", ",\"importance\":\"high\"", "")
-        ),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 8: the orchestrator applies P1
+        // 7, 8: a Crux nothing derives
+        open("Name the error", "change_behavior"),
+        raise("Name the error", "\"kind\":\"conflict\",\"importance\":\"high\""),
+        "{\"op\":\"status\"}".to_string(),
+        // 10: the orchestrator applies P1
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Round half to even?\",\"choice\":\"half to even\",",
-            "\"basis\":{\"policy\":\"P1\"},\"by\":{\"role\":\"orchestrator\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@6.crux\",\"option\":\"@6.option(half to even)\",",
+            "\"basis\":{\"policy\":\"P1\"},\"by\":{\"role\":\"orchestrator\"}}"
         )
         .to_string(),
-        // 9: a person decides what no line derives
+        // 11: a person decides what no line derives
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Name the error\",\"choice\":\"half up\",\"reason\":\"keep what callers know\",",
-            "\"basis\":{\"arbitrary\":\"the requester wants the old behaviour kept\"},\"by\":{\"person\":\"alice\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@8.crux\",\"option\":\"@8.option(half up)\",",
+            "\"reason\":\"keep what callers know\",",
+            "\"basis\":{\"arbitrary\":\"the requester wants the old behaviour kept\"},\"by\":{\"person\":\"alice\"}}"
         )
         .to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 11: an answer is never rewritten
+        "{\"op\":\"status\"}".to_string(),
+        // 13: an answer is never rewritten
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Round half to even?\",\"choice\":\"half up\",",
-            "\"basis\":{\"arbitrary\":\"changed my mind\"},\"by\":{\"person\":\"alice\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@6.crux\",\"option\":\"@6.option(half up)\",",
+            "\"basis\":{\"arbitrary\":\"changed my mind\"},\"by\":{\"person\":\"alice\"}}"
         )
         .to_string(),
-        // 12: a third change request replaces the first decision
-        format!(
-            "{{\"op\":\"cr_open\",\"title\":\"Round half up after all\",\"intent\":\"change_behavior\",{}}}\n",
-            crux("ambiguity", "", "", ",\"supersedes\":\"Round half to even?\"")
+        // 14, 15: another question replaces the first decision
+        open("Round half up after all", "change_behavior"),
+        raise(
+            "Round half up after all",
+            "\"kind\":\"ambiguity\",\"supersedes\":\"@6.crux\"",
         ),
-        "{\"op\":\"cr_open\",\"title\":\"Plain\",\"intent\":\"keep_behavior\"}\n".to_string(),
-        // 14: there is nothing to replace in a change request without an answered Crux
-        format!(
-            "{{\"op\":\"cr_open\",\"title\":\"Bad supersede\",\"intent\":\"change_behavior\",{}}}\n",
-            crux("ambiguity", "", "", ",\"supersedes\":\"Plain\"")
+        // 16, 17: a question that nobody has decided
+        open("Plain", "keep_behavior"),
+        raise("Plain", "\"kind\":\"ambiguity\""),
+        // 18, 19: there is nothing to replace in a Crux that has no decision
+        open("Bad supersede", "change_behavior"),
+        raise(
+            "Bad supersede",
+            "\"kind\":\"ambiguity\",\"supersedes\":\"@17.crux\"",
         ),
-        // 15: an Assumption appended to an open change request
+        // 20: an Assumption appended to an open change request
         concat!(
             "{\"op\":\"cr_assume\",\"title\":\"Plain\",\"statement\":\"a half cent is a tie\",",
             "\"reason\":\"the rounding code treats it so\",\"evidence\":[",
             "{\"repo\":{\"path\":\"src/round.rs\",\"lines\":[10,14]}},",
-            "{\"knowledge\":{\"reference\":\"IEEE 754 roundTiesToEven\"}}]}\n"
+            "{\"knowledge\":{\"reference\":\"IEEE 754 roundTiesToEven\"}}]}"
         )
         .to_string(),
-        // 16: evidence that leaves the repository
+        // 21: evidence that leaves the repository
         concat!(
             "{\"op\":\"cr_assume\",\"title\":\"Plain\",\"statement\":\"x\",\"reason\":\"y\",",
-            "\"evidence\":[{\"repo\":{\"path\":\"../secret\"}}]}\n"
+            "\"evidence\":[{\"repo\":{\"path\":\"../secret\"}}]}"
         )
         .to_string(),
-        // 17: a Policy line the policy does not have
+        // 22: a Policy line the policy does not have
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Round half up after all\",\"choice\":\"half up\",",
-            "\"basis\":{\"policy\":\"P9\"},\"by\":{\"role\":\"harness-lead\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@15.crux\",\"option\":\"@15.option(half up)\",",
+            "\"basis\":{\"policy\":\"P9\"},\"by\":{\"role\":\"harness-lead\"}}"
         )
         .to_string(),
-        // 18: the harness lead applies P2
+        // 23: the harness lead applies P2
         concat!(
-            "{\"op\":\"cr_decide\",\"title\":\"Round half up after all\",\"choice\":\"half up\",",
-            "\"basis\":{\"policy\":\"P2\"},\"by\":{\"role\":\"harness-lead\"}}\n"
+            "{\"op\":\"cr_crux_decide\",\"crux\":\"@15.crux\",\"option\":\"@15.option(half up)\",",
+            "\"basis\":{\"policy\":\"P2\"},\"by\":{\"role\":\"harness-lead\"}}"
         )
         .to_string(),
-        "{\"op\":\"status\"}\n".to_string(),
-        // 20: the policy is replaced: P1 is reworded and P2 is gone
+        "{\"op\":\"status\"}".to_string(),
+        // 25: the policy is replaced: P1 is reworded and P2 is gone
         policy_put(&[("P1", "take the recommendation when its confidence is 90 or more")]),
-        "{\"op\":\"status\"}\n".to_string(),
-    ]
-    .concat();
-    let (results, code, err) = exec_in(&dir, &ops);
-    assert_eq!(code, Some(1), "{err}\n{results:#?}");
+        "{\"op\":\"status\"}".to_string(),
+    ];
+    let (results, code) = exec_each(&dir, &dir.join("chidev.db"), &ops);
+    assert_eq!(code, Some(1), "{results:#?}");
     let failed: Vec<u64> = results
         .iter()
         .filter(|r| r["ok"] == false)
         .map(|r| r["line"].as_u64().expect("line"))
         .collect();
-    assert_eq!(failed, [11, 14, 16, 17], "{results:#?}");
+    assert_eq!(failed, [13, 19, 21, 22], "{results:#?}");
 
     // the policy: revision 2 after the first put (1 is the empty one)
     assert_eq!(at(&results, 4)["revision"], 2);
 
+    // the ids a raise gave back, and the Crux of a status by its id
+    let id_of = |line: u64| {
+        at(&results, line)["crux"]
+            .as_str()
+            .expect("an id")
+            .to_string()
+    };
+    let option_of = |line: u64, choice: &str| -> String {
+        at(&results, line)["options"]
+            .as_array()
+            .expect("options")
+            .iter()
+            .find(|o| o["choice"] == choice)
+            .and_then(|o| o["id"].as_str())
+            .expect("an option")
+            .to_string()
+    };
+    let crux_in = |status: &Value, id: &str| -> Value {
+        status["cruxes"]
+            .as_array()
+            .expect("cruxes")
+            .iter()
+            .find(|q| q["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no crux {id}"))
+    };
+
     // both Cruxes are awaited, with what a decision maker needs to choose
-    let waiting = at(&results, 7);
+    let waiting = at(&results, 9);
     let awaiting = waiting["awaiting"].as_array().expect("awaiting");
     assert_eq!(awaiting.len(), 2);
-    assert_eq!(awaiting[0]["cr"], "Round half to even?");
-    assert_eq!(awaiting[0]["kind"], "ambiguity");
-    assert_eq!(awaiting[0]["importance"], "low");
+    let find = |id: &str| -> &Value {
+        awaiting
+            .iter()
+            .find(|a| a["crux"] == id)
+            .unwrap_or_else(|| panic!("{id} is not awaited"))
+    };
+    let derived = find(&id_of(6));
+    assert_eq!(derived["raised_in"], "Round half to even?");
+    assert_eq!(derived["question"], "How is a half rounded?");
+    assert_eq!(derived["kind"], "ambiguity");
+    assert_eq!(derived["importance"], "low");
     assert_eq!(
-        awaiting[0]["recommended"],
-        serde_json::json!({ "choice": "half to even", "reason": "no bias", "confidence": 85 })
+        derived["recommended"],
+        serde_json::json!({
+            "option": option_of(6, "half to even"),
+            "reason": "no bias",
+            "confidence": 85
+        })
     );
-    assert_eq!(awaiting[0]["options"].as_array().expect("options").len(), 2);
-    assert_eq!(awaiting[1]["recommended"], Value::Null);
-    assert_eq!(awaiting[1]["importance"], "high");
+    assert_eq!(derived["options"].as_array().expect("options").len(), 2);
+    let free = find(&id_of(8));
+    assert_eq!(free["recommended"], Value::Null);
+    assert_eq!(free["importance"], "high");
+    assert_eq!(free["kind"], "conflict");
     assert_eq!(
         waiting["policy"]["lines"][0],
         serde_json::json!({
@@ -849,10 +998,14 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
     assert_eq!(waiting["policy"]["revision"], 2);
 
     // status shows both answers: who decided, on what basis, and when
-    let decided = at(&results, 10);
+    let decided = at(&results, 12);
     assert_eq!(decided["awaiting"], serde_json::json!([]));
-    let first = &decided["change_requests"][0]["answer"];
-    assert_eq!(first["decision"], "half to even");
+    let first = crux_in(decided, &id_of(6))["answer"].clone();
+    assert_eq!(
+        first["decision"],
+        serde_json::json!({ "chosen": { "option": option_of(6, "half to even"), "reason": null } })
+    );
+    assert!(first["id"].is_string());
     assert_eq!(
         first["basis"],
         serde_json::json!({ "policy": { "line": "P1", "policy_revision": 2 } })
@@ -862,8 +1015,14 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
         serde_json::json!({ "kind": "role", "name": "orchestrator" })
     );
     assert!(first["at"].as_u64().expect("a time") > 0);
-    let second = &decided["change_requests"][1]["answer"];
-    assert_eq!(second["decision"], "half up");
+    let second = crux_in(decided, &id_of(8))["answer"].clone();
+    assert_eq!(
+        second["decision"],
+        serde_json::json!({ "chosen": {
+            "option": option_of(8, "half up"),
+            "reason": "keep what callers know"
+        } })
+    );
     assert_eq!(
         second["basis"],
         serde_json::json!({ "arbitrary": { "reason": "the requester wants the old behaviour kept" } })
@@ -874,27 +1033,52 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
     );
 
     // the answer stands
-    assert!(error_at(&results, 11).contains("answered already"));
+    assert!(error_at(&results, 13).contains("answered already"));
+    assert_eq!(diag(at(&results, 13))["code"], "cr.crux-answered");
     // nothing to replace, a Policy line that is not there, evidence outside the repository
-    assert!(error_at(&results, 14).contains("no answered crux"));
-    assert!(error_at(&results, 16).contains(".."));
-    assert!(error_at(&results, 17).contains("`P9`"));
-    assert_eq!(diag(at(&results, 17))["code"], "cr.policy-line-unknown");
+    assert!(error_at(&results, 19).contains("no decision to replace"));
+    assert_eq!(diag(at(&results, 19))["code"], "cr.supersedes-unanswered");
+    assert!(error_at(&results, 21).contains(".."));
+    assert!(error_at(&results, 22).contains("`P9`"));
+    assert_eq!(diag(at(&results, 22))["code"], "cr.policy-line-unknown");
 
-    // the third change request supersedes the first; the Assumption is on its change request
-    let later = at(&results, 19);
-    let crs = &later["change_requests"];
-    assert_eq!(crs[2]["title"], "Round half up after all");
-    assert_eq!(crs[2]["supersedes"], "Round half to even?");
-    assert_eq!(crs[2]["state"], "decided");
+    // the third question supersedes the first decision, by its id; the Assumption is on its change request
+    let later = at(&results, 24);
+    let replacing = crux_in(later, &id_of(15));
+    assert_eq!(replacing["supersedes"], id_of(6));
+    assert_eq!(replacing["raised_in"], "Round half up after all");
+    assert_eq!(replacing["state"], "answered");
     assert_eq!(
-        crs[2]["answer"]["by"],
+        replacing["answer"]["by"],
         serde_json::json!({ "kind": "role", "name": "harness-lead" })
     );
-    assert_eq!(crs[0]["answer"]["decision"], "half to even");
-    assert_eq!(crs[3]["title"], "Plain");
+    let request = |title: &str| -> Value {
+        later["change_requests"]
+            .as_array()
+            .expect("change requests")
+            .iter()
+            .find(|c| c["title"] == title)
+            .cloned()
+            .unwrap_or_else(|| panic!("no change request {title}"))
+    };
+    assert_eq!(request("Round half up after all")["state"], "decided");
     assert_eq!(
-        crs[3]["assumptions"],
+        request("Round half up after all")["cruxes"],
+        serde_json::json!([id_of(15)])
+    );
+    // the question nobody decided keeps its request open and is still awaited
+    assert_eq!(request("Plain")["state"], "open");
+    assert_eq!(
+        later["awaiting"]
+            .as_array()
+            .expect("awaiting")
+            .iter()
+            .map(|a| a["crux"].clone())
+            .collect::<Vec<_>>(),
+        [serde_json::json!(id_of(17))]
+    );
+    assert_eq!(
+        request("Plain")["assumptions"],
         serde_json::json!([{
             "statement": "a half cent is a tie",
             "reason": "the rounding code treats it so",
@@ -906,7 +1090,7 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
     );
 
     // the policy changed: both decisions that rested on it are noted, and neither was rewritten
-    let replaced = at(&results, 20);
+    let replaced = at(&results, 25);
     assert_eq!(replaced["revision"], 3);
     let gone: Vec<&Value> = replaced["findings"]
         .as_array()
@@ -916,8 +1100,8 @@ fn a_crux_is_decided_once_on_a_basis_by_a_decision_maker_and_a_new_crux_supersed
         .collect();
     assert_eq!(gone.len(), 2, "{replaced:#?}");
     assert!(gone.iter().all(|f| f["level"] == "note"));
-    let after = at(&results, 21);
-    assert_eq!(after["change_requests"][0]["answer"], *first);
+    let after = at(&results, 26);
+    assert_eq!(crux_in(after, &id_of(6))["answer"], first);
     assert_eq!(after["policy"]["lines"].as_array().expect("lines").len(), 1);
 }
 
@@ -1525,7 +1709,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     assert_eq!(rule["when"], serde_json::json!(["should"]));
     assert_eq!(rule["moments"], serde_json::json!(["edit", "check"]));
     let model = &rules["model"];
-    assert_eq!(model["version"], 3);
+    assert_eq!(model["version"], 4);
     assert_eq!(model["store_revision"], 3);
     let contract = &model["contexts"][0]["contracts"][0];
     assert_eq!(contract["name"], "rounding");
@@ -2683,14 +2867,16 @@ fn the_operations_that_were_kept_without_a_check_answer_with_findings() {
         "{\"op\":\"context_uses\",\"context\":\"core\",\"uses\":[\"base\"]}",
         "{\"op\":\"contract_put\",\"context\":\"core\",\"name\":\"stack\",\"title\":\"Stack\",\"clauses\":[{\"label\":\"C1\",\"text\":\"push then pop\"}]}",
         "{\"op\":\"base_on_contract\",\"context\":\"core\"}",
-        "{\"op\":\"cr_open\",\"title\":\"q\",\"intent\":\"keep_behavior\",\"crux\":{\"kind\":\"ambiguity\",\"options\":[{\"choice\":\"keep\"}]}}",
+        "{\"op\":\"cr_open\",\"title\":\"q\",\"intent\":\"keep_behavior\"}",
+        "{\"op\":\"cr_crux_raise\",\"in\":\"q\",\"question\":\"Is it kept?\",\"kind\":\"ambiguity\",\"options\":[{\"choice\":\"keep\"}]}",
         "{\"op\":\"cr_assume\",\"title\":\"q\",\"statement\":\"a stack is a stack\",\"reason\":\"it is how it is used\"}",
-        "{\"op\":\"cr_decide\",\"title\":\"q\",\"choice\":\"keep\",\"basis\":{\"arbitrary\":\"nothing derives it\"},\"by\":{\"person\":\"alice\"}}",
+        "{\"op\":\"cr_crux_decide\",\"crux\":\"@8.crux\",\"option\":\"@8.option(keep)\",\"basis\":{\"arbitrary\":\"nothing derives it\"},\"by\":{\"person\":\"alice\"}}",
         "{\"op\":\"cr_resolve\",\"title\":\"q\",\"resolution\":\"done\",\"reason\":\"settled\",\"by\":{\"person\":\"alice\"}}",
         "{\"op\":\"cr_reopen\",\"title\":\"q\",\"reason\":\"it came back\",\"by\":{\"person\":\"alice\"}}",
-    ];
-    let (results, code, err) = exec_in(&dir, &(ops.join("\n") + "\n"));
-    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    ]
+    .map(str::to_string);
+    let (results, code) = exec_each(&dir, &dir.join("chidev.db"), &ops);
+    assert_eq!(code, Some(0), "{results:#?}");
     for (n, op) in ops.iter().enumerate().skip(1) {
         let result = &results[n];
         assert_eq!(result["ok"], true, "{op}: {result:#?}");

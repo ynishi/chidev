@@ -274,6 +274,7 @@ mod tests {
                 project: p,
                 pins,
                 change_requests: &[],
+                cruxes: &[],
                 measurements,
                 measure_settings: settings,
                 sim_settings: &BTreeMap::new(),

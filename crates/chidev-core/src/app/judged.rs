@@ -17,6 +17,7 @@ use super::ports::{
 use super::{App, AppError, SubjectInput, input};
 use crate::domain::check::{Executor, Finding, JudgedRule, Level, Moment};
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, SubjectKind};
@@ -161,9 +162,9 @@ where
             .transpose()?;
         let named = wanted.as_ref().map(|id| self.judged_rule(id)).transpose()?;
         let p = self.project().await?;
-        let crs = self.store.change_requests().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         let reports = self.store.judged_reports().await?;
-        let model = self.model_view(&p, &crs, at).await?;
+        let model = self.model_view(&p, &crs, &cruxes, at).await?;
         let mut rules = Vec::new();
         for r in self.registry.judged() {
             if named.is_some_and(|n| n.id() != r.id())
@@ -243,8 +244,8 @@ where
         }
         let read_at = StoreRevision(report.read_at);
         let p = self.project().await?;
-        let crs = self.store.change_requests().await?;
-        let view = self.model_view(&p, &crs, at).await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
+        let view = self.model_view(&p, &crs, &cruxes, at).await?;
         let mut kept: Vec<JudgedFinding> = Vec::with_capacity(report.findings.len());
         for f in &report.findings {
             let subject = match &f.subject {
@@ -359,13 +360,14 @@ where
         &self,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
         at: StoreRevision,
     ) -> Result<(Vec<Found>, Vec<RuleStanding>), AppError> {
         if self.registry.judged().is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
         let reports = self.store.judged_reports().await?;
-        let view = self.model_view(p, crs, at).await?;
+        let view = self.model_view(p, crs, cruxes, at).await?;
         let mut findings = Vec::new();
         let mut meta = Vec::new();
         let mut standing = Vec::new();
@@ -431,9 +433,10 @@ where
         &self,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
         at: StoreRevision,
     ) -> Result<ModelView, AppError> {
         let names = self.names_in_model(p.contexts(), &[]).await?;
-        Ok(ModelView::build(at.0, p, crs, &names))
+        Ok(ModelView::build(at.0, p, crs, cruxes, &names))
     }
 }

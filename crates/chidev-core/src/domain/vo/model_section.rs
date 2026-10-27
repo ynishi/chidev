@@ -1,4 +1,5 @@
-//! A part of the model that a reader can be shown without the rest: the assets of one kind, or the change requests.
+//! A part of the model that a reader can be shown without the rest: the assets of one kind, the change requests, or
+//! the Cruxes.
 
 /// The sections, written once: each variant with its doc and its word. The enum, [`ModelSection::ALL`] and
 /// [`ModelSection::word`] are all made from this one list, so a section cannot be in one and missing from another.
@@ -36,6 +37,9 @@ sections! {
     Harnesses => "harnesses",
     /// The change requests, which belong to the Project and not to a Context.
     ChangeRequests => "change_requests",
+    /// The Cruxes, which belong to the Project and not to a Context: the questions that stop change requests, with
+    /// their options and the decisions taken.
+    Cruxes => "cruxes",
 }
 
 impl ModelSection {
@@ -57,7 +61,13 @@ mod tests {
         let words: Vec<_> = ModelSection::ALL.iter().map(|s| s.word()).collect();
         assert_eq!(
             words,
-            ["contracts", "interfaces", "harnesses", "change_requests"]
+            [
+                "contracts",
+                "interfaces",
+                "harnesses",
+                "change_requests",
+                "cruxes"
+            ]
         );
         assert_eq!(ModelSection::from_word("contract"), None);
     }

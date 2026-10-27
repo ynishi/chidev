@@ -25,11 +25,12 @@ use super::ports::{
 use super::{App, AppError, Found, view};
 use crate::domain::check::{Change, CheckView, Finding, Moment, introduced};
 use crate::domain::entity::change_request::ChangeRequest;
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
-use crate::domain::vo::id::{ChangeRequestId, ContextId, InterfaceId};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId};
 
 /// Declares one of the four kinds of trigger: the enum, the word of each variant, and the list of all of them, from
 /// one list of variants, so that a variant cannot be left out of the list or have no word.
@@ -93,8 +94,16 @@ triggers! {
         /// [`App::open_change_request`](super::App::open_change_request). The record of a change request is edited
         /// like the model is: it is judged by the checks of an edit, and an external gate sees it.
         OpenChangeRequest = "open_change_request",
-        /// [`App::decide_change_request`](super::App::decide_change_request).
+        /// The decision of a Crux, as an earlier version recorded it, when the Crux was a part of a change request
+        /// and the use case was `decide_change_request`. No use case runs under it any more
+        /// ([`EditTrigger::DecideCrux`] took its place), but the word is in the database beside the checks of those
+        /// runs, and a word once written is never changed: it is read back as it was.
         DecideChangeRequest = "decide_change_request",
+        /// [`App::raise_crux`](super::App::raise_crux): a Crux is raised in a change request.
+        RaiseCrux = "raise_crux",
+        /// [`App::decide_crux`](super::App::decide_crux): a Crux is decided, and the change request it was raised in
+        /// takes what the option chosen asks.
+        DecideCrux = "decide_crux",
         /// [`App::assume`](super::App::assume).
         Assume = "assume",
         /// [`App::reopen_change_request`](super::App::reopen_change_request).
@@ -297,11 +306,11 @@ struct NameKey {
     name: String,
 }
 
-/// The part of the model a use case changes: the Project (whole), and the Pins, change requests and asset names it
-/// makes or replaces.
+/// The part of the model a use case changes: the Project (whole), and the Pins, change requests, Cruxes and asset
+/// names it makes or replaces.
 ///
 /// **What replaces what is decided here, once.** Each map is keyed by what the store keys its table by (the
-/// Interface of a Pin, the id of a change request, the Context, kind and name of an asset's name), and the key is
+/// Interface of a Pin, the id of a change request or of a Crux, the Context, kind and name of an asset's name), and the key is
 /// taken from the value when it is put in, so a caller cannot give a value under another's key.
 /// [`ModelDelta::apply`] replaces, in the model that was read, the element of the same key; the store writes each
 /// element under that key, and keeps whatever else it has. So the state that is checked (`apply`) and the state
@@ -311,6 +320,7 @@ pub(super) struct ModelDelta {
     project: Option<Project>,
     pins: BTreeMap<InterfaceId, (Pin, PinCode)>,
     change_requests: BTreeMap<ChangeRequestId, ChangeRequest>,
+    cruxes: BTreeMap<CruxId, Crux>,
     names: BTreeMap<NameKey, AssetName>,
 }
 
@@ -340,6 +350,12 @@ impl ModelDelta {
     /// A change request opened or changed. It replaces the change request of its id.
     pub(super) fn with_change_request(mut self, cr: ChangeRequest) -> ModelDelta {
         self.change_requests.insert(cr.id(), cr);
+        self
+    }
+
+    /// A Crux raised or decided. It replaces the Crux of its id.
+    pub(super) fn with_crux(mut self, crux: Crux) -> ModelDelta {
+        self.cruxes.insert(crux.id(), crux);
         self
     }
 
@@ -380,6 +396,8 @@ impl ModelDelta {
         after
             .change_requests
             .extend(self.change_requests.values().cloned());
+        after.cruxes.retain(|q| !self.cruxes.contains_key(&q.id()));
+        after.cruxes.extend(self.cruxes.values().cloned());
         after
     }
 
@@ -391,6 +409,7 @@ impl ModelDelta {
             pins,
             pin_codes,
             change_requests: self.change_requests.into_values().collect(),
+            cruxes: self.cruxes.into_values().collect(),
             names: self.names.into_values().collect(),
             invocations,
             external,
@@ -405,11 +424,17 @@ struct ModelState {
     project: Project,
     pins: Vec<Pin>,
     change_requests: Vec<ChangeRequest>,
+    cruxes: Vec<Crux>,
 }
 
 impl ModelState {
     fn view(&self) -> CheckView<'_> {
-        view(&self.project, &self.pins, &self.change_requests)
+        view(
+            &self.project,
+            &self.pins,
+            &self.change_requests,
+            &self.cruxes,
+        )
     }
 }
 
@@ -534,7 +559,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             sim_settings: &measured.sim_settings,
             ..state.view()
         };
-        let (p, crs) = (&state.project, &state.change_requests);
+        let (p, crs, cruxes) = (&state.project, &state.change_requests, &state.cruxes);
         let mut run = self.registry.run(Moment::Check, at, &view);
         let external = self.run_external(Moment::Check, at, &view, &[]).await?;
         let mut findings = self.found(&run.findings, p, crs, &[]).await?;
@@ -542,7 +567,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             self.external_findings(&external, p, crs, &[], false)
                 .await?,
         );
-        findings.extend(self.judged_standing(p, crs, at).await?.0);
+        findings.extend(self.judged_standing(p, crs, cruxes, at).await?.0);
         run.invocations
             .extend(self.external_invocations(&external, Moment::Check, at));
         let changes = Changes {
@@ -595,10 +620,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// is a conflict here, before any check judges the mix or an external program is run on it, as the commit would
     /// be one later.
     async fn read_state(&self, at: StoreRevision) -> Result<ModelState, AppError> {
+        let project = self.project().await?;
+        let pins = self.store.pins().await?;
+        let (change_requests, cruxes) = self.requests_and_cruxes().await?;
         let state = ModelState {
-            project: self.project().await?,
-            pins: self.store.pins().await?,
-            change_requests: self.store.change_requests().await?,
+            project,
+            pins,
+            change_requests,
+            cruxes,
         };
         if self.store.revision().await? != at {
             return Err(AppError::Store(StoreError::Conflict));
@@ -722,6 +751,27 @@ mod tests {
         assert_eq!(Trigger::from_word("put"), None);
     }
 
+    /// A word written by an earlier version stays readable, though no use case runs under it now; the use cases of the
+    /// Crux have words of their own.
+    #[test]
+    fn the_word_of_the_decision_of_a_change_request_is_still_read_and_the_cruxes_have_their_own() {
+        assert_eq!(
+            Trigger::from_word("decide_change_request"),
+            Some(Trigger::Edit(EditTrigger::DecideChangeRequest))
+        );
+        assert_eq!(
+            Trigger::from_word("raise_crux"),
+            Some(Trigger::Edit(EditTrigger::RaiseCrux))
+        );
+        assert_eq!(
+            Trigger::from_word("decide_crux"),
+            Some(Trigger::Edit(EditTrigger::DecideCrux))
+        );
+        for t in [EditTrigger::RaiseCrux, EditTrigger::DecideCrux] {
+            assert_eq!(Trigger::Edit(t).moment(), Some(Moment::Edit));
+        }
+    }
+
     /// The list is the kinds' own lists, so a trigger declared in a kind is in it.
     #[test]
     fn the_list_of_triggers_is_the_lists_of_the_kinds() {
@@ -792,6 +842,7 @@ mod tests {
             project: project.clone(),
             pins: vec![pin(10, 100), pin(11, 101)],
             change_requests: Vec::new(),
+            cruxes: Vec::new(),
         };
         let delta = ModelDelta::new().with_pin(pin(10, 200), "new code".to_string());
         let after = delta.apply(&read);

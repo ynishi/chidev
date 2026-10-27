@@ -17,7 +17,7 @@ use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RenameInput,
     RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired,
 };
-use crate::domain::entity::change_request::{ChangeRequestError, ChangeRequestState};
+use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
@@ -253,7 +253,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let mut applied_for = match &set.change_request {
             Some(title) => {
                 let cr = self.change_request_titled(title).await?;
-                if cr.state() == ChangeRequestState::Resolved {
+                if cr.is_resolved() {
                     return Err(AppError::on(&cr, ChangeRequestError::AlreadyResolved));
                 }
                 Some(cr)

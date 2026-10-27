@@ -782,8 +782,8 @@ mod checks {
 
     use chidev_core::app::ports::{Invocation, Outcome};
     use chidev_core::app::{
-        App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, CruxInput, CruxKind,
-        FindingInput, Intent, OptionInput, Registry, SubjectInput, TargetInput,
+        App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, CruxKind, FindingInput, Intent,
+        OptionInput, RaiseCruxInput, Registry, SubjectInput, TargetInput,
     };
     use chidev_core::domain::check::{
         Check, CheckView, Descriptor, Executor, Finding, FindingState, Level, Moment, Params,
@@ -991,8 +991,7 @@ mod checks {
         let open = |title: &str,
                     intent: Intent,
                     targets: Vec<TargetInput>,
-                    keep: Vec<TargetInput>,
-                    crux: Option<CruxInput>| ChangeRequestInput {
+                    keep: Vec<TargetInput>| ChangeRequestInput {
             title: title.to_string(),
             situation: None,
             intent,
@@ -1000,7 +999,6 @@ mod checks {
             issuer: None,
             targets,
             keep,
-            crux,
             assumptions: Vec::new(),
             addresses: Vec::new(),
         };
@@ -1010,6 +1008,7 @@ mod checks {
             targets,
             keep: Vec::new(),
             consequence: None,
+            recommended: None,
         };
         // One that revises a Clause of core (and says it keeps the behaviour), one that keeps a Clause of billing
         // (and names no target to change), one whose question only has an option that names a Clause of core, and
@@ -1020,41 +1019,37 @@ mod checks {
                 Intent::KeepBehavior,
                 vec![clause("core", "stack")],
                 Vec::new(),
-                None,
             ),
             open(
                 "Keeps billing",
                 Intent::ChangeBehavior,
                 Vec::new(),
                 vec![clause("billing", "bill")],
-                None,
             ),
-            open(
-                "Undecided",
-                Intent::ChangeBehavior,
-                Vec::new(),
-                Vec::new(),
-                Some(CruxInput {
-                    kind: CruxKind::Ambiguity,
-                    options: vec![
-                        option("reword", vec![clause("core", "stack")]),
-                        option("leave", Vec::new()),
-                    ],
-                    recommended: None,
-                    importance: None,
-                    supersedes: None,
-                }),
-            ),
+            open("Undecided", Intent::ChangeBehavior, Vec::new(), Vec::new()),
             open(
                 "Names nothing",
                 Intent::ChangeBehavior,
                 Vec::new(),
                 Vec::new(),
-                None,
             ),
         ] {
             app.open_change_request(&c).await.unwrap();
         }
+        app.raise_crux(&RaiseCruxInput {
+            cr: "Undecided".to_string(),
+            kind: CruxKind::Ambiguity,
+            question: "Reword it or leave it?".to_string(),
+            findings: Vec::new(),
+            options: vec![
+                option("reword", vec![clause("core", "stack")]),
+                option("leave", Vec::new()),
+            ],
+            importance: None,
+            supersedes: None,
+        })
+        .await
+        .unwrap();
         let all = app.check(None).await.unwrap();
         assert_eq!(all.outside, 0);
         let abouts = |found: &[chidev_core::app::Found], rule: &str| -> Vec<String> {
@@ -1124,7 +1119,6 @@ mod checks {
             issuer: None,
             targets: Vec::new(),
             keep: Vec::new(),
-            crux: None,
             assumptions: Vec::new(),
             addresses: vec![FindingInput {
                 rule: "cite.uncited-clause".to_string(),
@@ -1402,7 +1396,7 @@ mod judged {
         assert_eq!(view.store_revision.0, now(&app).await);
         assert_eq!(view.model.store_revision(), view.store_revision.0);
         let json = serde_json::to_value(&view.model).unwrap();
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["version"], 4);
         let clauses = &json["contexts"][0]["contracts"][0]["clauses"];
         assert_eq!(json["contexts"][0]["contracts"][0]["name"], "stack");
         assert_eq!(clauses[0]["label"], "C1");
@@ -1751,7 +1745,6 @@ mod judged {
             issuer: None,
             targets: Vec::new(),
             keep: Vec::new(),
-            crux: None,
             assumptions: Vec::new(),
             addresses: vec![FindingInput {
                 rule: "judged.vague".to_string(),
@@ -1838,7 +1831,6 @@ mod diagnostics {
             issuer: None,
             targets: Vec::new(),
             keep: Vec::new(),
-            crux: None,
             assumptions: Vec::new(),
             addresses: Vec::new(),
         }

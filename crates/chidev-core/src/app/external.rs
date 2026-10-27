@@ -15,7 +15,7 @@ use crate::domain::check::external::ExternalRule;
 use crate::domain::check::{
     CheckView, DIGEST_MOMENTS_KEY, Executor, Finding, Level, Moment, ParamValue,
 };
-use crate::domain::entity::{change_request::ChangeRequest, project::Project};
+use crate::domain::entity::{change_request::ChangeRequest, crux::Crux, project::Project};
 use crate::domain::vo::{
     digest::Digest,
     finding::{RuleId, Subject, SubjectKind},
@@ -97,6 +97,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         rule: &ExternalRule,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
         pending: &[AssetName],
     ) -> Result<ExternalModelView, AppError> {
         let names = self.names_in_model(p.contexts(), pending).await?;
@@ -105,7 +106,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             sections: rule.reads().iter().copied().collect(),
         };
         Ok(ExternalModelView::new(
-            ModelView::build(0, p, crs, &names).select(&selection),
+            ModelView::build(0, p, crs, cruxes, &names).select(&selection),
         ))
     }
 
@@ -155,7 +156,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 continue;
             }
             let model = self
-                .external_model(rule, view.project, view.change_requests, pending)
+                .external_model(
+                    rule,
+                    view.project,
+                    view.change_requests,
+                    view.cruxes,
+                    pending,
+                )
                 .await?;
             let params = policy
                 .params
@@ -281,7 +288,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 (rule, &r.failure, saved.iter().find(|s| s.rule == r.rule))
                 && base.failure.is_none()
                 && self
-                    .describes(base, rule, before.project, before.change_requests)
+                    .describes(
+                        base,
+                        rule,
+                        before.project,
+                        before.change_requests,
+                        before.cruxes,
+                    )
                     .await?
             {
                 // The protocol gives a finding no typed grounds, so its message is the only mark of the fact that
@@ -301,17 +314,19 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(judged)
     }
 
-    /// Whether the saved `report` of `rule` describes the model `p` with the change requests `crs`: the same input
-    /// and the same configuration of the rule as it is registered now.
+    /// Whether the saved `report` of `rule` describes the model `p` with the change requests `crs` and the Cruxes
+    /// `cruxes`: the same input and the same configuration of the rule as it is registered now.
     async fn describes(
         &self,
         report: &ExternalReport,
         rule: &ExternalRule,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
     ) -> Result<bool, AppError> {
         Ok(report.config_stamp == self.external_config_stamp(rule)?
-            && report.input_stamp == fingerprint(&self.external_model(rule, p, crs, &[]).await?)?)
+            && report.input_stamp
+                == fingerprint(&self.external_model(rule, p, crs, cruxes, &[]).await?)?)
     }
 
     pub(super) fn external_invocations(
@@ -409,6 +424,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self,
         p: &Project,
         crs: &[ChangeRequest],
+        cruxes: &[Crux],
         _at: StoreRevision,
     ) -> Result<(Vec<Found>, Vec<ExternalStanding>), AppError> {
         let reports = self.store.external_reports().await?;
@@ -421,7 +437,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             let report = reports.iter().find(|r| r.rule == id.as_str());
             let state = if let Some(r) = report {
-                let current = self.describes(r, rule, p, crs).await?;
+                let current = self.describes(r, rule, p, crs, cruxes).await?;
                 found.extend(
                     self.external_findings(std::slice::from_ref(r), p, crs, &[], !current)
                         .await?,

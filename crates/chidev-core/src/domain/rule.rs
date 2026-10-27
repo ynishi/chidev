@@ -75,19 +75,21 @@ pub const UNMAPPED: RuleId = RuleId::from_static("domain.unmapped");
 pub const APP_UNMAPPED: RuleId = RuleId::from_static("app.unmapped");
 /// A change request is resolved and the operation needs it open.
 pub const CR_ALREADY_RESOLVED: RuleId = RuleId::from_static("cr.already-resolved");
-/// A change request is to be resolved as done while its crux is not answered.
+/// A change request is to be resolved while a crux raised in it has no decision.
 pub const CR_CRUX_UNANSWERED: RuleId = RuleId::from_static("cr.crux-unanswered");
 /// A change request is to be resolved while parts of it are open.
 pub const CR_PARENT_OPEN: RuleId = RuleId::from_static("cr.parent-open");
 /// A crux is answered once.
 pub const CR_CRUX_ANSWERED: RuleId = RuleId::from_static("cr.crux-answered");
+/// A decision names an option the crux does not have.
+pub const CR_CRUX_UNKNOWN_OPTION: RuleId = RuleId::from_static("cr.crux-unknown-option");
 /// A duplicate or superseded resolution points at a change request that does not exist.
 pub const CR_REFERENCE_UNKNOWN: RuleId = RuleId::from_static("cr.reference-unknown");
 /// A resolution points at the change request it resolves.
 pub const CR_REFERENCE_ITSELF: RuleId = RuleId::from_static("cr.reference-itself");
-/// A crux is to supersede the crux of a change request that does not exist.
+/// A crux is to supersede a crux that does not exist.
 pub const CR_SUPERSEDES_UNKNOWN: RuleId = RuleId::from_static("cr.supersedes-unknown");
-/// A crux is to supersede a crux that is not answered.
+/// A crux is to supersede a crux that has no decision to replace.
 pub const CR_SUPERSEDES_UNANSWERED: RuleId = RuleId::from_static("cr.supersedes-unanswered");
 /// A decision rests on a policy line that does not exist.
 pub const CR_POLICY_LINE_UNKNOWN: RuleId = RuleId::from_static("cr.policy-line-unknown");
@@ -178,18 +180,18 @@ static RULES: &[Rule] = &[
     Rule {
         id: CR_ALREADY_RESOLVED,
         kind: RuleKind::Invariant,
-        summary: "A resolved change request takes no more decisions, assumptions, work or resolutions.",
-        help: "The change request was resolved, and its record is closed. If the work goes on, reopen it with `cr_reopen` (a reason, and who reopens it); the resolution it had stays in its history. If the question is a new one, open a new change request.",
+        summary: "A resolved change request takes no more crux, decisions (but a withdrawal), assumptions, work or resolutions.",
+        help: "The change request was resolved, and its record is closed. If the work goes on, reopen it with `cr_reopen` (a reason, and who reopens it); the resolution it had stays in its history. If the question is a new one, open a new change request. A crux raised in a resolved change request that was never decided can still be withdrawn with `cr_crux_decide` (`withdrawn`).",
         message: "the change request {s0} is resolved already",
         values: &[],
-        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"up","basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"},{"choice":"to even"}]}"#,
     },
     Rule {
         id: CR_CRUX_UNANSWERED,
         kind: RuleKind::Invariant,
-        summary: "A change request cannot be resolved as done while its crux has no answer.",
-        help: "The crux is a choice only a decision maker can make; work that depends on it waits. Answer it with `cr_decide` (a choice, the basis it rests on, and who decides), then resolve. If the question no longer matters, resolve the change request as `wont_do` or `invalid` instead.",
-        message: "the change request {s0} cannot be resolved as done: its crux is not answered",
+        summary: "A change request cannot be resolved, whatever the resolution, while a crux raised in it has no decision.",
+        help: "A crux is a question only a decision maker can answer, and it stops the change request it was raised in. Decide it with `cr_crux_decide` (an option, the basis it rests on, and who decides), then resolve. A decision to leave it unspecified, or to withdraw the question because it is not needed any more, is a decision too.",
+        message: "the change request {s0} cannot be resolved: a crux raised in it has no decision",
         values: &[],
         example: r#"{"op":"cr_resolve","title":"Round halves up","resolution":"done","reason":"shipped","by":{"person":"alice"}}"#,
     },
@@ -205,11 +207,20 @@ static RULES: &[Rule] = &[
     Rule {
         id: CR_CRUX_ANSWERED,
         kind: RuleKind::Invariant,
-        summary: "The crux of a change request is answered once and never rewritten.",
-        help: "An answer is an input from outside that cannot be reproduced, so it is kept as it was given. A different decision is a new change request whose crux supersedes this one (`supersedes` in its crux).",
-        message: "the crux of the change request {s0} is answered already",
+        summary: "A crux is answered once and never rewritten.",
+        help: "An answer is an input from outside that cannot be reproduced, so it is kept as it was given. A different decision is a new crux that supersedes this one (`cr_crux_raise` with `supersedes` the id of this crux).",
+        message: "the crux raised in the change request {s0} is answered already",
         values: &[],
-        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"down","basis":{"arbitrary":"changed my mind"},"by":{"person":"alice"}}"#,
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","basis":{"arbitrary":"changed my mind"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_UNKNOWN_OPTION,
+        kind: RuleKind::Invariant,
+        summary: "A decision names an option the crux has.",
+        help: "A decision points at an option of the crux by its id, not by its text. Name an option the crux has: `cr_crux_raise` gave the id of each, and `view` (the section `cruxes`) and `status` list them.",
+        message: "the option named for the crux raised in {s0} is not one of its options",
+        values: &[],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-0000000000ff","basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
     },
     Rule {
         id: CR_REFERENCE_UNKNOWN,
@@ -232,20 +243,20 @@ static RULES: &[Rule] = &[
     Rule {
         id: CR_SUPERSEDES_UNKNOWN,
         kind: RuleKind::Invariant,
-        summary: "A crux supersedes the crux of a change request that exists.",
-        help: "Name the change request whose answered crux the new one replaces, by its title.",
-        message: "the change request that the crux of {s0} supersedes does not exist",
+        summary: "A crux supersedes a crux that exists.",
+        help: "Name the crux whose decision the new one replaces, by its id (`view` and `status` list the cruxes).",
+        message: "the crux that the crux raised in {s0} supersedes does not exist",
         values: &[],
-        example: r#"{"op":"cr_open","title":"Redecide","intent":"change_behavior","crux":{"kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"No such title"}}"#,
+        example: r#"{"op":"cr_crux_raise","in":"Redecide","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"018f6b1e-0000-7000-8000-0000000000ee"}"#,
     },
     Rule {
         id: CR_SUPERSEDES_UNANSWERED,
         kind: RuleKind::Invariant,
-        summary: "A crux supersedes a crux that is answered; there is nothing to replace otherwise.",
-        help: "Answer the crux of the change request it supersedes first (`cr_decide`), or leave `supersedes` out and decide that crux itself.",
-        message: "the change request {s1} that the crux of {s0} supersedes has no answered crux",
+        summary: "A crux supersedes a crux that has a decision to replace; a withdrawn crux has none.",
+        help: "A decision is replaced by a new crux that points at it. A crux that is still open has no decision yet: decide it instead. A crux that was withdrawn decided nothing, so there is nothing in it to replace: raise a new question without `supersedes`.",
+        message: "the crux that the crux raised in {s0} supersedes has no decision to replace",
         values: &[],
-        example: r#"{"op":"cr_open","title":"Redecide","intent":"change_behavior","crux":{"kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"Unanswered"}}"#,
+        example: r#"{"op":"cr_crux_raise","in":"Redecide","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"018f6b1e-0000-7000-8000-000000000001"}"#,
     },
     Rule {
         id: CR_POLICY_LINE_UNKNOWN,
@@ -254,7 +265,7 @@ static RULES: &[Rule] = &[
         help: "Put the line in the policy first (`policy_put` replaces the lines whole), or decide with an arbitrary reason instead of a policy line.",
         message: "the decision of {s0} rests on the policy line {s1}, which the policy does not have",
         values: &[],
-        example: r#"{"op":"cr_decide","title":"Round halves up","choice":"up","basis":{"policy":"P9"},"by":{"person":"alice"}}"#,
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","basis":{"policy":"P9"},"by":{"person":"alice"}}"#,
     },
     Rule {
         id: CR_TITLE_TAKEN,
@@ -533,7 +544,7 @@ static RULES: &[Rule] = &[
         help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does.",
         message: "no {kind} is named `{name}`",
         values: &["kind", "name"],
-        example: r#"{"op":"cr_decide","title":"No such title","choice":"up","basis":{"arbitrary":"x"},"by":{"person":"alice"}}"#,
+        example: r#"{"op":"cr_crux_raise","in":"No such title","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"}]}"#,
     },
     Rule {
         id: INPUT_INVALID,

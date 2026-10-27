@@ -13,12 +13,12 @@ use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_ALREADY_BASED, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET,
-    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_PARENT_OPEN,
-    CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED,
-    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
-    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
-    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
-    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
+    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
+    CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN,
+    CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM,
+    INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE,
+    PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT,
+    SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
     SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
@@ -53,17 +53,10 @@ impl ChangeRequestError {
             ChangeRequestError::SupersedesUnknown(_) => Violation::of(CR_SUPERSEDES_UNKNOWN)
                 .on(here)
                 .with_remedy(Remedy::OpenChangeRequest, Applicability::Review),
-            ChangeRequestError::SupersedesUnanswered(other) => {
-                Violation::of(CR_SUPERSEDES_UNANSWERED)
-                    .on(here)
-                    .about(Party::ChangeRequest(*other))
-                    .with_remedy(
-                        Remedy::AnswerCrux {
-                            change_request: *other,
-                        },
-                        Applicability::Placeholder,
-                    )
+            ChangeRequestError::SupersedesUnanswered(_) => {
+                Violation::of(CR_SUPERSEDES_UNANSWERED).on(here)
             }
+            ChangeRequestError::NotAnOption(_) => Violation::of(CR_CRUX_UNKNOWN_OPTION).on(here),
             ChangeRequestError::UnknownPolicyLine(line) => Violation::of(CR_POLICY_LINE_UNKNOWN)
                 .on(here)
                 .about(Party::PolicyLine(*line))
@@ -91,13 +84,13 @@ impl ChangeRequestError {
             }
             ChangeRequestError::NoOption
             | ChangeRequestError::DuplicateOption(_)
-            | ChangeRequestError::NotAnOption(_)
             | ChangeRequestError::UnspecifiedNotAllowed(_)
-            | ChangeRequestError::NoCrux
             | ChangeRequestError::PolicyRevisionMismatch { .. }
             | ChangeRequestError::NotResolved
             | ChangeRequestError::HistoryOutOfOrder
-            | ChangeRequestError::UnaskedExpectation(_) => Violation::unmapped(self).on(here),
+            | ChangeRequestError::UnaskedExpectation(_)
+            | ChangeRequestError::ExpectationConflict(_)
+            | ChangeRequestError::RaisedInUnknown(_) => Violation::unmapped(self).on(here),
         }
     }
 }
@@ -400,7 +393,9 @@ mod tests {
     use crate::domain::rule::{UNMAPPED, rule};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::ClauseLabel;
-    use crate::domain::vo::id::{ClauseId, ContextId, InterfaceId, ItemId, test_uuid};
+    use crate::domain::vo::id::{
+        ClauseId, ContextId, CruxId, CruxOptionId, InterfaceId, ItemId, test_uuid,
+    };
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::name::ContextName;
     use crate::domain::vo::policy::PolicyLineId;
@@ -415,6 +410,9 @@ mod tests {
     fn choice() -> Choice {
         Choice::try_from("up").unwrap()
     }
+    fn crux(n: u128) -> CruxId {
+        CruxId::from_uuid(test_uuid(n))
+    }
 
     /// The name of a variant; exhaustive, so a new variant is not forgotten here.
     fn cr_name(e: &ChangeRequestError) -> &'static str {
@@ -423,7 +421,6 @@ mod tests {
             ChangeRequestError::DuplicateOption(_) => "DuplicateOption",
             ChangeRequestError::NotAnOption(_) => "NotAnOption",
             ChangeRequestError::UnspecifiedNotAllowed(_) => "UnspecifiedNotAllowed",
-            ChangeRequestError::NoCrux => "NoCrux",
             ChangeRequestError::AlreadyResolved => "AlreadyResolved",
             ChangeRequestError::Undecided => "Undecided",
             ChangeRequestError::AlreadyAnswered => "AlreadyAnswered",
@@ -437,6 +434,8 @@ mod tests {
             ChangeRequestError::HistoryOutOfOrder => "HistoryOutOfOrder",
             ChangeRequestError::ChildrenNotResolved { .. } => "ChildrenNotResolved",
             ChangeRequestError::UnaskedExpectation(_) => "UnaskedExpectation",
+            ChangeRequestError::ExpectationConflict(_) => "ExpectationConflict",
+            ChangeRequestError::RaisedInUnknown(_) => "RaisedInUnknown",
         }
     }
 
@@ -444,14 +443,13 @@ mod tests {
         vec![
             ChangeRequestError::NoOption,
             ChangeRequestError::DuplicateOption(choice()),
-            ChangeRequestError::NotAnOption(choice()),
+            ChangeRequestError::NotAnOption(CruxOptionId::from_uuid(test_uuid(8))),
             ChangeRequestError::UnspecifiedNotAllowed("model"),
-            ChangeRequestError::NoCrux,
             ChangeRequestError::AlreadyResolved,
             ChangeRequestError::Undecided,
             ChangeRequestError::AlreadyAnswered,
-            ChangeRequestError::SupersedesUnknown(cr(2)),
-            ChangeRequestError::SupersedesUnanswered(cr(2)),
+            ChangeRequestError::SupersedesUnknown(crux(2)),
+            ChangeRequestError::SupersedesUnanswered(crux(2)),
             ChangeRequestError::UnknownPolicyLine(line("P1")),
             ChangeRequestError::PolicyRevisionMismatch {
                 recorded: Revision::first(),
@@ -465,6 +463,8 @@ mod tests {
                 children: vec![cr(2), cr(3)],
             },
             ChangeRequestError::UnaskedExpectation(Target::Project),
+            ChangeRequestError::ExpectationConflict(Target::Project),
+            ChangeRequestError::RaisedInUnknown(cr(2)),
         ]
     }
 
@@ -578,12 +578,12 @@ mod tests {
     /// leaves this list, and a new variant that is not mapped has to be added to it.
     const STILL_UNMAPPED: &[&str] = &[
         "ChangeRequestError::DuplicateOption",
+        "ChangeRequestError::ExpectationConflict",
         "ChangeRequestError::HistoryOutOfOrder",
-        "ChangeRequestError::NoCrux",
         "ChangeRequestError::NoOption",
-        "ChangeRequestError::NotAnOption",
         "ChangeRequestError::NotResolved",
         "ChangeRequestError::PolicyRevisionMismatch",
+        "ChangeRequestError::RaisedInUnknown",
         "ChangeRequestError::UnaskedExpectation",
         "ChangeRequestError::UnspecifiedNotAllowed",
         "ContextError::NoContract",
@@ -758,7 +758,7 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 18 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
+        assert_eq!(gives().len(), 19 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
         assert_eq!(STILL_UNMAPPED.len(), 26);
     }
 
@@ -781,11 +781,11 @@ mod tests {
 
     #[test]
     fn an_unmapped_violation_carries_the_debug_text_and_is_tracked_by_the_bug_rule() {
-        let v = ChangeRequestError::NoCrux.violation(cr(1));
+        let v = ChangeRequestError::NoOption.violation(cr(1));
         assert_eq!(*v.rule(), UNMAPPED);
         assert_eq!(
             v.values().get("error"),
-            Some(&Value::Text("NoCrux".to_string()))
+            Some(&Value::Text("NoOption".to_string()))
         );
         assert_eq!(v.subjects(), &[Party::ChangeRequest(cr(1))]);
     }
@@ -850,15 +850,22 @@ mod tests {
             "cr.reference-unknown"
         );
         assert_eq!(
-            ChangeRequestError::SupersedesUnknown(cr(9))
+            ChangeRequestError::SupersedesUnknown(crux(9))
                 .violation(cr(1))
                 .rule()
                 .as_str(),
             "cr.supersedes-unknown"
         );
-        let unanswered = ChangeRequestError::SupersedesUnanswered(cr(9)).violation(cr(1));
+        let unanswered = ChangeRequestError::SupersedesUnanswered(crux(9)).violation(cr(1));
         assert_eq!(unanswered.rule().as_str(), "cr.supersedes-unanswered");
-        assert_eq!(unanswered.subjects().len(), 2);
+        assert_eq!(unanswered.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert_eq!(
+            ChangeRequestError::NotAnOption(CruxOptionId::from_uuid(test_uuid(8)))
+                .violation(cr(1))
+                .rule()
+                .as_str(),
+            "cr.crux-unknown-option"
+        );
         let line_gone = ChangeRequestError::UnknownPolicyLine(line("P7")).violation(cr(1));
         assert_eq!(line_gone.rule().as_str(), "cr.policy-line-unknown");
         assert_eq!(line_gone.subjects()[1], Party::PolicyLine(line("P7")));

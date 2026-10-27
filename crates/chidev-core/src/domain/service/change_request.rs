@@ -1,9 +1,11 @@
-//! Deciding and resolving a change request against the other change requests, and reading what its work did.
+//! Resolving a change request against the other change requests and the Cruxes raised in it, and reading what its
+//! work did.
 //!
-//! A change request ends by an explicit resolution. Only explicit states refuse one: a Crux not answered (to
-//! resolve as done), a part not resolved, a resolution pointing at a request that is not there, the request
-//! resolved already. The revisions of the Project and the work recorded are never consulted by a resolution; they
-//! are read afterwards, for `status` and the checks, which say where the record and the work disagree.
+//! A change request ends by an explicit resolution. Only explicit states refuse one: a Crux raised in it that has no
+//! decision (whatever the resolution), a part not resolved, a resolution pointing at a request that is not there,
+//! the request resolved already. The revisions of the Project and the work recorded are never consulted by a
+//! resolution; they are read afterwards, for `status` and the checks, which say where the record and the work
+//! disagree.
 //!
 //! The work of a request is its footprints and those of the requests that are a part of it, directly or not
 //! (`moved_under`). The targets a request names to revise or retire are its frame: naming a container frames
@@ -11,12 +13,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use thiserror::Error;
+
 use super::cite::revision_of;
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestError, ChangeRequestState, Crux,
+    ChangeRequest, ChangeRequestError, ChangeRequestState,
 };
+use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::answer::{Answer, Basis};
 use crate::domain::vo::footprint::Move;
 use crate::domain::vo::id::{ChangeRequestId, ContextId};
 use crate::domain::vo::resolution::Resolution;
@@ -48,55 +52,93 @@ pub fn expectations_now(
         .collect()
 }
 
-/// Gives the Crux of `cr` its answer, once, with each target the option chosen names at the revision it has in
-/// `project` now. An answer on the basis of a Policy line must cite a line the Policy of `project` has, at the
-/// revision it has now (the line applied is the line as it reads at the decision). A Crux that is answered already
-/// takes no other answer.
-pub fn decide(
-    cr: &mut ChangeRequest,
-    answer: Answer,
-    project: &Project,
-) -> Result<(), ChangeRequestError> {
-    if let Basis::Policy {
-        line,
-        policy_revision,
-    } = answer.basis()
-    {
-        let policy = project.policy();
-        if policy.line(*line).is_none() {
-            return Err(ChangeRequestError::UnknownPolicyLine(*line));
-        }
-        if *policy_revision != policy.revision() {
-            return Err(ChangeRequestError::PolicyRevisionMismatch {
-                recorded: *policy_revision,
-                now: policy.revision(),
+/// The Cruxes in `cruxes` that were raised in `cr`.
+pub fn raised_in<'a>(
+    cr: &'a ChangeRequest,
+    cruxes: &'a [Crux],
+) -> impl Iterator<Item = &'a Crux> + 'a {
+    cruxes.iter().filter(move |q| q.raised_in() == cr.id())
+}
+
+/// Where `cr` stands, given the Cruxes in `cruxes` (those raised in other change requests are not read): resolved
+/// when it is; decided when it has at least one Crux and every one has a decision (a withdrawal is one); open
+/// otherwise.
+pub fn state_of(cr: &ChangeRequest, cruxes: &[Crux]) -> ChangeRequestState {
+    if cr.is_resolved() {
+        return ChangeRequestState::Resolved;
+    }
+    let mut own = raised_in(cr, cruxes).peekable();
+    if own.peek().is_some() && own.all(|q| !q.is_open()) {
+        ChangeRequestState::Decided
+    } else {
+        ChangeRequestState::Open
+    }
+}
+
+/// Every expectation `cr` could come to hold: its own, and those of every option of every Crux raised in it,
+/// whichever is chosen. The options' are the kind alone: they are given a revision when one is chosen.
+pub fn possible_kinds<'a>(
+    cr: &'a ChangeRequest,
+    cruxes: &'a [Crux],
+) -> impl Iterator<Item = (Target, ExpectKind)> + 'a {
+    cr.expects().iter().map(|(t, e)| (*t, e.kind)).chain(
+        raised_in(cr, cruxes)
+            .flat_map(|q| q.options())
+            .flat_map(|o| o.expects().iter().map(|(t, k)| (*t, *k))),
+    )
+}
+
+/// Why the change requests and the Cruxes read from a store do not fit together: the change request the problem
+/// is about, and what is wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("the change request {cr}: {error}")]
+pub struct RecordsInconsistent {
+    /// The change request. For a Crux raised in one that does not exist, that one's id.
+    pub cr: ChangeRequestId,
+    /// What is wrong.
+    pub error: ChangeRequestError,
+}
+
+/// Checks the rules that hold between the change requests `crs` and the Cruxes `cruxes` read from a store, which no
+/// single record can check:
+///
+/// - A Crux was raised in a change request there is.
+/// - A change request that is resolved as done has no open Crux. One resolved otherwise may have: it is a record of
+///   what was, and `cr.awaiting-decision` goes on reporting the question.
+/// - Every expectation recorded for a decision is one a decision of a Crux raised in the change request asks.
+///
+/// It is the last word on a pair read together; the first refusal is returned.
+pub fn check_requests_and_cruxes(
+    crs: &[ChangeRequest],
+    cruxes: &[Crux],
+) -> Result<(), RecordsInconsistent> {
+    for q in cruxes {
+        if !crs.iter().any(|c| c.id() == q.raised_in()) {
+            return Err(RecordsInconsistent {
+                cr: q.raised_in(),
+                error: ChangeRequestError::RaisedInUnknown(q.raised_in()),
             });
         }
     }
-    let targets = cr
-        .crux()
-        .into_iter()
-        .flat_map(|q| q.options())
-        .flat_map(|o| o.expects().keys().copied());
-    let now = revisions_now(project, targets);
-    cr.decide(answer, &now)
-}
-
-/// Whether a Crux may supersede the answered Crux of the change request `replaced`: `all` must have it, and its
-/// Crux must be answered. What was decided is not rewritten; a different decision is a new Crux that points at the
-/// one it replaces.
-pub fn check_supersedes(
-    replaced: ChangeRequestId,
-    all: &[ChangeRequest],
-) -> Result<(), ChangeRequestError> {
-    let cr = all
-        .iter()
-        .find(|c| c.id() == replaced)
-        .ok_or(ChangeRequestError::SupersedesUnknown(replaced))?;
-    match cr.crux().and_then(Crux::answer) {
-        Some(_) => Ok(()),
-        None => Err(ChangeRequestError::SupersedesUnanswered(replaced)),
+    for cr in crs {
+        let broken = |error| RecordsInconsistent { cr: cr.id(), error };
+        let done = cr.resolution().is_some_and(|r| r.kind().is_done());
+        if done && raised_in(cr, cruxes).any(Crux::is_open) {
+            return Err(broken(ChangeRequestError::Undecided));
+        }
+        let asked: Vec<(Target, ExpectKind)> = raised_in(cr, cruxes)
+            .flat_map(|q| q.decided_expects())
+            .collect();
+        if let Some(t) = cr
+            .decided_expects()
+            .iter()
+            .find(|(t, e)| !asked.contains(&(**t, e.kind)))
+            .map(|(t, _)| *t)
+        {
+            return Err(broken(ChangeRequestError::UnaskedExpectation(t)));
+        }
     }
+    Ok(())
 }
 
 /// `cr` and every change request in `all` that is a part of it, directly or not. `cr` is the one given (the copy in
@@ -134,25 +176,26 @@ pub fn has_work(cr: &ChangeRequest, all: &[ChangeRequest]) -> bool {
 /// The change requests, in `crs`, that are a part of `parent` (their parent is it) and are not resolved.
 pub fn open_parts(parent: ChangeRequestId, crs: &[ChangeRequest]) -> Vec<ChangeRequestId> {
     crs.iter()
-        .filter(|c| c.parent() == Some(parent) && c.state() != ChangeRequestState::Resolved)
+        .filter(|c| c.parent() == Some(parent) && !c.is_resolved())
         .map(|c| c.id())
         .collect()
 }
 
 /// Closes the record of `cr` with `resolution`. The explicit states that refuse it, in this order: `cr` resolved
-/// already; the Crux not answered, when it is resolved as done; a resolution that points at `cr` itself or at a
-/// change request `all` does not have; a change request in `all` that is a part of `cr` and not resolved. Nothing
-/// else is read: not the revisions of the targets, not the work. A change request is a record of its own, so `all`
-/// is every change request there is (`cr` itself may be among them).
+/// already; a Crux of `cruxes` raised in `cr` with no decision, whatever the resolution; a resolution that points at
+/// `cr` itself or at a change request `all` does not have; a change request in `all` that is a part of `cr` and not
+/// resolved. Nothing else is read: not the revisions of the targets, not the work. A change request is a record of
+/// its own, so `all` is every change request there is (`cr` itself may be among them), and `cruxes` is every Crux.
 pub fn resolve(
     cr: &mut ChangeRequest,
     resolution: Resolution,
     all: &[ChangeRequest],
+    cruxes: &[Crux],
 ) -> Result<(), ChangeRequestError> {
     if cr.is_resolved() {
         return Err(ChangeRequestError::AlreadyResolved);
     }
-    if resolution.kind().is_done() && cr.awaits_decision() {
+    if raised_in(cr, cruxes).any(Crux::is_open) {
         return Err(ChangeRequestError::Undecided);
     }
     if let Some(reference) = resolution.kind().reference() {
@@ -302,7 +345,7 @@ pub struct KeepMoved {
 /// change request's business.
 pub fn keep_moved(crs: &[ChangeRequest], project: &Project) -> Vec<KeepMoved> {
     crs.iter()
-        .filter(|c| c.state() != ChangeRequestState::Resolved)
+        .filter(|c| !c.is_resolved())
         .filter_map(|cr| {
             let moved: Vec<Target> = keep_progress(cr, project)
                 .into_iter()
@@ -352,7 +395,7 @@ pub struct OutOfFrame {
 /// is judged for the part, not again for its parent. A request with no frame has all its work outside.
 pub fn out_of_frame(crs: &[ChangeRequest]) -> Vec<OutOfFrame> {
     crs.iter()
-        .filter(|c| c.state() != ChangeRequestState::Resolved && !c.work().is_empty())
+        .filter(|c| !c.is_resolved() && !c.work().is_empty())
         .filter_map(|cr| {
             let frame = frame(cr);
             let inside = |m: &Move| frame.iter().any(|container| m.is_inside(*container));
@@ -379,36 +422,30 @@ pub fn out_of_frame(crs: &[ChangeRequest]) -> Vec<OutOfFrame> {
         .collect()
 }
 
-/// Every unresolved change request in `crs` whose Crux is not decided yet: a person is awaited.
-pub fn awaiting_decision<'a>(
-    crs: impl IntoIterator<Item = &'a ChangeRequest>,
-) -> Vec<&'a ChangeRequest> {
-    crs.into_iter().filter(|c| c.awaits_decision()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::domain::entity::change_request::{ChangeRequestDraft, Crux};
+    use crate::domain::entity::change_request::ChangeRequestDraft;
     use crate::domain::entity::context::Context;
+    use crate::domain::entity::crux::CruxDraft;
+    use crate::domain::service::crux::decide;
     use crate::domain::service::footprint::moves_between;
-    use crate::domain::vo::answer::DecisionMaker;
+    use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-    use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned, Recommended};
+    use crate::domain::vo::crux::{CruxKind, CruxOption, Decision};
     use crate::domain::vo::footprint::Footprint;
     use crate::domain::vo::id::{
-        CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
-        test_uuid,
+        AnswerId, CaseId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId, HarnessId,
+        InterfaceId, ItemId, ProjectId, test_uuid,
     };
     use crate::domain::vo::intent::Intent;
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
-    use crate::domain::vo::policy::PolicyLineId;
     use crate::domain::vo::prose::Prose;
     use crate::domain::vo::resolution::{Reopening, ResolutionKind, Transition};
     use crate::domain::vo::source::Source;
@@ -551,10 +588,6 @@ mod tests {
         p
     }
 
-    fn choice(s: &str) -> Choice {
-        Choice::try_from(s).unwrap()
-    }
-
     fn draft(p: &Project, intent: Intent, wanted: &[(Target, ExpectKind)]) -> ChangeRequestDraft {
         ChangeRequestDraft {
             title: Title::try_from("How is a half rounded?").unwrap(),
@@ -563,7 +596,6 @@ mod tests {
             parent: None,
             issuer: None,
             expects: expectations_now(p, wanted.iter().copied()),
-            crux: None,
             assumptions: Vec::new(),
             addresses: Vec::new(),
         }
@@ -581,54 +613,91 @@ mod tests {
         )
     }
 
-    fn cr(p: &Project, crux: Option<Crux>) -> ChangeRequest {
-        let mut d = draft(p, Intent::ChangeBehavior, &[(clause(), ExpectKind::Target)]);
-        d.crux = crux;
-        ChangeRequest::open(ChangeRequestId::from_uuid(test_uuid(1)), d)
+    /// A settled change (C1, its own target).
+    fn cr(p: &Project) -> ChangeRequest {
+        ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(1)),
+            draft(p, Intent::ChangeBehavior, &[(clause(), ExpectKind::Target)]),
+        )
     }
 
-    /// A settled change (C1, its own target) and a question about a detail (which error type; C2 for a new one).
-    fn person(p: &Project) -> ChangeRequest {
-        let crux = Crux::new(
+    fn option_id(n: u128) -> CruxOptionId {
+        CruxOptionId::from_uuid(test_uuid(1000 + n))
+    }
+
+    /// A Crux numbered `n` raised in `c`, with the options `options` (the choice, and what it expects of targets);
+    /// the option `k` (from 0) has the id `option_id(k)`.
+    fn crux_with(
+        c: &ChangeRequest,
+        n: u128,
+        kind: CruxKind,
+        options: Vec<(&str, BTreeMap<Target, ExpectKind>)>,
+    ) -> Crux {
+        Crux::raise(
+            CruxId::from_uuid(test_uuid(n)),
+            CruxDraft {
+                raised_in: c.id(),
+                findings: Vec::new(),
+                kind,
+                question: Prose::try_from("which one?").unwrap(),
+                options: options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, (choice, expects))| {
+                        CruxOption::new(
+                            option_id(k as u128),
+                            choice_of(choice),
+                            None,
+                            expects,
+                            None,
+                        )
+                    })
+                    .collect(),
+                recommended: None,
+                importance: None,
+                supersedes: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn choice_of(s: &str) -> Choice {
+        Choice::try_from(s).unwrap()
+    }
+
+    /// The question about a detail (which error type; C2 for a new one): `up` (0) asks nothing, `to even` (1)
+    /// asks for C2.
+    fn asking(c: &ChangeRequest, n: u128) -> Crux {
+        crux_with(
+            c,
+            n,
             CruxKind::Ambiguity,
             vec![
-                CruxOption::new(choice("up"), None, BTreeMap::new(), None),
-                CruxOption::new(
-                    choice("to even"),
-                    Some(Prose::try_from("C2 names a new error").unwrap()),
-                    BTreeMap::from([(detail(), ExpectKind::Target)]),
-                    None,
-                ),
+                ("up", BTreeMap::new()),
+                ("to even", BTreeMap::from([(detail(), ExpectKind::Target)])),
             ],
-            Some(Recommended::new(choice("up"), None, None)),
-            None,
-            None,
         )
-        .unwrap();
-        cr(p, Some(crux))
     }
 
-    /// An answer on an arbitrary basis, by a person.
-    fn chosen(c: &str) -> Answer {
-        answer_on(
-            c,
+    /// An answer on an arbitrary basis, by a person, choosing the option `k`.
+    fn chosen(k: u128) -> Answer {
+        Answer::new(
+            AnswerId::from_uuid(test_uuid(900)),
+            Decision::Chosen {
+                option: option_id(k),
+                reason: None,
+            },
             Basis::Arbitrary {
                 reason: Prose::try_from("nothing derives it").unwrap(),
             },
-        )
-    }
-
-    fn answer_on(c: &str, basis: Basis) -> Answer {
-        Answer::new(
-            Decision::Chosen(Reasoned::new(choice(c), None)),
-            basis,
             DecisionMaker::person("alice").unwrap(),
             Timestamp::from_millis(5),
         )
     }
 
-    fn line_id(text: &str) -> PolicyLineId {
-        PolicyLineId::try_from(text).unwrap()
+    /// `crux` decided for `c`: the option `k` chosen.
+    fn decided(c: &mut ChangeRequest, crux: &mut Crux, k: u128, p: &Project) {
+        decide(crux, c, chosen(k), p).unwrap();
     }
 
     fn resolution(kind: ResolutionKind) -> Resolution {
@@ -644,129 +713,191 @@ mod tests {
         resolution(ResolutionKind::Done)
     }
 
-    /// Resolves `c` as done against the change requests `all`.
+    /// Resolves `c` as done against the change requests `all`, with no Crux.
     fn finish(c: &mut ChangeRequest, all: &[ChangeRequest]) -> Result<(), ChangeRequestError> {
-        resolve(c, done(), all)
+        resolve(c, done(), all, &[])
     }
 
     // The Crux.
 
     #[test]
-    fn a_decision_on_a_policy_basis_must_cite_a_line_the_policy_has() {
-        let mut p = project();
-        let mut c = person(&p);
-        let on = |line: &str, revision| {
-            answer_on(
-                "up",
-                Basis::Policy {
-                    line: line_id(line),
-                    policy_revision: revision,
-                },
-            )
-        };
-        // The policy has no lines yet.
-        assert_eq!(
-            decide(&mut c, on("P1", p.policy().revision()), &p),
-            Err(ChangeRequestError::UnknownPolicyLine(line_id("P1")))
-        );
-        assert!(c.awaits_decision());
-        p.put_policy(vec![(
-            line_id("P1"),
-            Prose::try_from("take the recommendation from 80").unwrap(),
-        )])
-        .unwrap();
-        // A line it does not have, and a revision it is not at, are refused.
-        assert_eq!(
-            decide(&mut c, on("P2", p.policy().revision()), &p),
-            Err(ChangeRequestError::UnknownPolicyLine(line_id("P2")))
-        );
-        assert_eq!(
-            decide(&mut c, on("P1", Revision::first()), &p),
-            Err(ChangeRequestError::PolicyRevisionMismatch {
-                recorded: Revision::first(),
-                now: p.policy().revision()
-            })
-        );
-        assert!(c.awaits_decision());
-        // The line it has, at the revision it has: taken, and the revision is recorded.
-        let basis = p.policy().basis_on(line_id("P1")).unwrap();
-        decide(&mut c, answer_on("up", basis.clone()), &p).unwrap();
-        assert_eq!(
-            c.crux().and_then(Crux::answer).map(Answer::basis),
-            Some(&basis)
-        );
-    }
-
-    #[test]
-    fn a_second_decision_is_refused_and_what_the_first_named_still_stands() {
+    fn a_request_is_decided_when_it_has_cruxes_and_every_one_has_a_decision() {
         let p = project();
-        let mut c = person(&p);
-        decide(&mut c, chosen("to even"), &p).unwrap();
-        assert_eq!(
-            decide(&mut c, chosen("up"), &p),
-            Err(ChangeRequestError::AlreadyAnswered)
-        );
-        assert_eq!(
-            target_progress(&c, &p, &[c.clone()])
-                .iter()
-                .map(|t| t.target)
-                .collect::<Vec<_>>(),
-            [clause(), detail()]
-        );
-    }
-
-    #[test]
-    fn a_crux_may_supersede_only_an_answered_crux_of_a_change_request_that_exists() {
-        let p = project();
-        let mut answered = person(&p);
-        let unanswered = ChangeRequest::open(
+        let mut c = cr(&p);
+        let mut other = ChangeRequest::open(
             ChangeRequestId::from_uuid(test_uuid(2)),
             draft(&p, Intent::ChangeBehavior, &[]),
         );
-        let asking = ChangeRequest::open(
-            ChangeRequestId::from_uuid(test_uuid(3)),
-            ChangeRequestDraft {
-                crux: person(&p).crux().cloned(),
-                ..draft(&p, Intent::ChangeBehavior, &[])
-            },
-        );
-        let all = [answered.clone(), unanswered.clone(), asking.clone()];
-        // It does not exist.
-        let ghost = ChangeRequestId::from_uuid(test_uuid(99));
+        // No Crux: open. A Crux raised in another request does not count.
+        assert_eq!(state_of(&c, &[]), ChangeRequestState::Open);
+        let mut first = asking(&c, 500);
+        let mut second = asking(&c, 501);
+        let mut elsewhere = asking(&other, 502);
         assert_eq!(
-            check_supersedes(ghost, &all),
-            Err(ChangeRequestError::SupersedesUnknown(ghost))
+            state_of(&c, &[first.clone(), elsewhere.clone()]),
+            ChangeRequestState::Open
         );
-        // It has no Crux, or its Crux is not answered.
-        assert_eq!(
-            check_supersedes(unanswered.id(), &all),
-            Err(ChangeRequestError::SupersedesUnanswered(unanswered.id()))
-        );
-        assert_eq!(
-            check_supersedes(asking.id(), &all),
-            Err(ChangeRequestError::SupersedesUnanswered(asking.id()))
-        );
-        // It is answered.
-        decide(&mut answered, chosen("up"), &p).unwrap();
-        let all = [answered.clone(), unanswered, asking];
-        assert_eq!(check_supersedes(answered.id(), &all), Ok(()));
+        decide(&mut elsewhere, &mut other, chosen(0), &p).unwrap();
+        // One of two decided: open still.
+        decided(&mut c, &mut first, 0, &p);
+        let all = [first.clone(), second.clone(), elsewhere.clone()];
+        assert_eq!(state_of(&c, &all), ChangeRequestState::Open);
+        assert_eq!(state_of(&other, &all), ChangeRequestState::Decided);
+        // Every one decided, a withdrawal counted: decided.
+        decide(
+            &mut second,
+            &mut c,
+            Answer::new(
+                AnswerId::from_uuid(test_uuid(901)),
+                Decision::Withdrawn,
+                Basis::Arbitrary {
+                    reason: Prose::try_from("not needed").unwrap(),
+                },
+                DecisionMaker::person("alice").unwrap(),
+                Timestamp::from_millis(6),
+            ),
+            &p,
+        )
+        .unwrap();
+        let all = [first, second, elsewhere];
+        assert_eq!(state_of(&c, &all), ChangeRequestState::Decided);
+        finish_with(&mut c, &[], &all).unwrap();
+        assert_eq!(state_of(&c, &all), ChangeRequestState::Resolved);
+    }
+
+    /// Resolves `c` as done against the change requests `all` and the Cruxes `cruxes`.
+    fn finish_with(
+        c: &mut ChangeRequest,
+        all: &[ChangeRequest],
+        cruxes: &[Crux],
+    ) -> Result<(), ChangeRequestError> {
+        resolve(c, done(), all, cruxes)
     }
 
     #[test]
-    fn an_undecided_crux_is_awaited_and_refuses_done_alone() {
+    fn a_request_with_a_crux_open_resolves_in_no_way_until_it_is_decided() {
         let p = project();
-        let mut c = person(&p);
-        assert_eq!(awaiting_decision([&c]), [&c]);
-        assert_eq!(finish(&mut c, &[]), Err(ChangeRequestError::Undecided));
-        assert_eq!(c.state(), ChangeRequestState::Open);
-        // Not done: the question may stay open.
+        let mut c = cr(&p);
+        let mut q = asking(&c, 500);
+        for kind in [
+            ResolutionKind::Done,
+            ResolutionKind::WontDo,
+            ResolutionKind::Invalid,
+        ] {
+            assert_eq!(
+                resolve(&mut c, resolution(kind), &[], std::slice::from_ref(&q)),
+                Err(ChangeRequestError::Undecided)
+            );
+        }
+        assert!(!c.is_resolved());
+        // A request for which the Crux is raised in another is not held by it.
+        let mut other = ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(2)),
+            draft(&p, Intent::ChangeBehavior, &[]),
+        );
+        resolve(&mut other, done(), &[], std::slice::from_ref(&q)).unwrap();
+        decided(&mut c, &mut q, 0, &p);
+        finish_with(&mut c, &[], std::slice::from_ref(&q)).unwrap();
+        assert!(c.is_resolved());
+    }
+
+    #[test]
+    fn a_request_names_what_every_option_of_its_cruxes_could_ask() {
+        let p = project();
+        let c = cr(&p);
+        let q = asking(&c, 500);
+        let mut kinds: Vec<_> = possible_kinds(&c, std::slice::from_ref(&q)).collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [
+                (clause(), ExpectKind::Target),
+                (detail(), ExpectKind::Target)
+            ]
+        );
+        // Without the Crux, only its own.
+        assert_eq!(possible_kinds(&c, &[]).count(), 1);
+    }
+
+    #[test]
+    fn requests_and_cruxes_that_do_not_fit_together_are_refused() {
+        let p = project();
+        let mut c = cr(&p);
+        let mut q = asking(&c, 500);
+        assert_eq!(
+            check_requests_and_cruxes(&[c.clone()], &[q.clone()]),
+            Ok(())
+        );
+        // A Crux raised in a request there is not.
+        let ghost = ChangeRequestId::from_uuid(test_uuid(77));
+        let lost = ChangeRequest::open(ghost, draft(&p, Intent::ChangeBehavior, &[]));
+        let stray = asking(&lost, 501);
+        assert_eq!(
+            check_requests_and_cruxes(&[c.clone()], &[stray]),
+            Err(RecordsInconsistent {
+                cr: ghost,
+                error: ChangeRequestError::RaisedInUnknown(ghost)
+            })
+        );
+        // Resolved as done with a Crux open: refused. Resolved otherwise: a record of what was.
         let mut dropped = c.clone();
-        resolve(&mut dropped, resolution(ResolutionKind::WontDo), &[]).unwrap();
-        assert!(awaiting_decision([&dropped]).is_empty());
-        decide(&mut c, chosen("up"), &p).unwrap();
-        assert!(awaiting_decision([&c]).is_empty());
-        finish(&mut c, &[]).unwrap();
-        assert_eq!(c.state(), ChangeRequestState::Resolved);
+        dropped.resolve(resolution(ResolutionKind::WontDo)).unwrap();
+        assert_eq!(check_requests_and_cruxes(&[dropped], &[q.clone()]), Ok(()));
+        let mut closed = c.clone();
+        closed.resolve(done()).unwrap();
+        assert_eq!(
+            check_requests_and_cruxes(&[closed.clone()], &[q.clone()]),
+            Err(RecordsInconsistent {
+                cr: c.id(),
+                error: ChangeRequestError::Undecided
+            })
+        );
+        // Once decided, it is not.
+        decided(&mut c, &mut q, 1, &p);
+        assert_eq!(
+            check_requests_and_cruxes(&[c.clone()], &[q.clone()]),
+            Ok(())
+        );
+        // A request reopened after it was done, with a question raised since, is held by that question only.
+        let mut reopened = closed;
+        reopened
+            .reopen(Reopening::new(
+                Prose::try_from("a new question").unwrap(),
+                DecisionMaker::person("bob").unwrap(),
+                Timestamp::from_millis(8),
+            ))
+            .unwrap();
+        let fresh = asking(&reopened, 502);
+        assert_eq!(check_requests_and_cruxes(&[reopened], &[fresh]), Ok(()));
+        // An expectation recorded for a decision that no decision asks.
+        let recorded = ChangeRequest::restore(
+            c.id(),
+            draft(
+                &p,
+                Intent::ChangeBehavior,
+                &[(clause(), ExpectKind::Target)],
+            ),
+            BTreeMap::from([(
+                detail(),
+                Expectation {
+                    kind: ExpectKind::Keep,
+                    recorded: Revision::first(),
+                },
+            )]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        // `to even` asks C2 to be revised, not kept.
+        assert_eq!(
+            check_requests_and_cruxes(&[recorded], &[q.clone()]),
+            Err(RecordsInconsistent {
+                cr: c.id(),
+                error: ChangeRequestError::UnaskedExpectation(detail())
+            })
+        );
+        // The kind that was asked is what the decision recorded.
+        assert_eq!(c.decided_expects()[&detail()].kind, ExpectKind::Target);
     }
 
     // Resolving looks at explicit states only.
@@ -774,7 +905,7 @@ mod tests {
     #[test]
     fn a_request_whose_targets_were_never_touched_resolves_as_done() {
         let p = project();
-        let mut c = cr(&p, None);
+        let mut c = cr(&p);
         assert_eq!(
             target_progress(&c, &p, &[]),
             [TargetProgress {
@@ -784,7 +915,7 @@ mod tests {
         );
         // The revision of the target is not consulted, and neither is the work.
         finish(&mut c, &[]).unwrap();
-        assert_eq!(c.state(), ChangeRequestState::Resolved);
+        assert!(c.is_resolved());
         assert!(!has_work(&c, &[]));
         assert_eq!(resolved_without_work(&[c.clone()]), [c.id()]);
     }
@@ -800,7 +931,7 @@ mod tests {
         );
         put_contract(&mut p, "a half rounds to even");
         finish(&mut mine, &[]).unwrap();
-        assert_eq!(mine.state(), ChangeRequestState::Resolved);
+        assert!(mine.is_resolved());
     }
 
     #[test]
@@ -819,19 +950,19 @@ mod tests {
             ResolutionKind::Invalid,
         ] {
             assert_eq!(
-                resolve(&mut parent, resolution(kind), &all),
+                resolve(&mut parent, resolution(kind), &all, &[]),
                 Err(ChangeRequestError::ChildrenNotResolved {
                     children: vec![part.id()]
                 })
             );
         }
-        assert_eq!(parent.state(), ChangeRequestState::Open);
+        assert!(!parent.is_resolved());
         // A part ends any way it likes, and then its parent may close.
-        resolve(&mut part, resolution(ResolutionKind::WontDo), &all).unwrap();
+        resolve(&mut part, resolution(ResolutionKind::WontDo), &all, &[]).unwrap();
         let all = [parent.clone(), part];
         assert!(open_parts(parent.id(), &all).is_empty());
         finish(&mut parent, &all).unwrap();
-        assert_eq!(parent.state(), ChangeRequestState::Resolved);
+        assert!(parent.is_resolved());
     }
 
     #[test]
@@ -878,21 +1009,21 @@ mod tests {
         for kind in kinds(ghost) {
             let mut c = all[0].clone();
             assert_eq!(
-                resolve(&mut c, resolution(kind), &all),
+                resolve(&mut c, resolution(kind), &all, &[]),
                 Err(ChangeRequestError::ReferenceUnknown(ghost))
             );
-            assert_eq!(c.state(), ChangeRequestState::Open);
+            assert!(!c.is_resolved());
         }
         for kind in kinds(all[0].id()) {
             let mut c = all[0].clone();
             assert_eq!(
-                resolve(&mut c, resolution(kind), &all),
+                resolve(&mut c, resolution(kind), &all, &[]),
                 Err(ChangeRequestError::ReferencesItself)
             );
         }
         for kind in kinds(other.id()) {
             let mut c = all[0].clone();
-            resolve(&mut c, resolution(kind), &all).unwrap();
+            resolve(&mut c, resolution(kind), &all, &[]).unwrap();
             assert_eq!(c.resolution().map(|r| r.kind()), Some(kind));
         }
     }
@@ -900,7 +1031,7 @@ mod tests {
     #[test]
     fn a_resolved_request_is_resolved_once_until_it_is_reopened() {
         let p = project();
-        let mut c = cr(&p, None);
+        let mut c = cr(&p);
         finish(&mut c, &[]).unwrap();
         assert_eq!(
             finish(&mut c, &[]),
@@ -914,8 +1045,8 @@ mod tests {
             )
         };
         c.reopen(reopening()).unwrap();
-        assert_eq!(c.state(), ChangeRequestState::Open);
-        resolve(&mut c, resolution(ResolutionKind::WontDo), &[]).unwrap();
+        assert!(!c.is_resolved());
+        resolve(&mut c, resolution(ResolutionKind::WontDo), &[], &[]).unwrap();
         assert_eq!(c.history().len(), 3);
         assert!(matches!(&c.history()[0], Transition::Resolved(r) if r.kind().is_done()));
         assert!(matches!(&c.history()[1], Transition::Reopened(_)));
@@ -1111,7 +1242,7 @@ mod tests {
             Intent::ChangeBehavior,
             &[(item(), ExpectKind::Target)],
         );
-        resolve(&mut dropped, resolution(ResolutionKind::WontDo), &[]).unwrap();
+        resolve(&mut dropped, resolution(ResolutionKind::WontDo), &[], &[]).unwrap();
         assert!(targets_untouched(&[dropped.clone()], &p).is_empty());
         assert!(resolved_without_work(&[dropped]).is_empty());
     }
@@ -1119,7 +1250,7 @@ mod tests {
     #[test]
     fn a_change_set_that_moved_nothing_is_no_work() {
         let p = project();
-        let mut c = cr(&p, None);
+        let mut c = cr(&p);
         c.record_work(Footprint::new(2, Vec::new())).unwrap();
         assert!(!has_work(&c, &[]));
         finish(&mut c, &[]).unwrap();
@@ -1129,9 +1260,10 @@ mod tests {
     #[test]
     fn what_the_chosen_option_names_is_a_target_too() {
         let p = project();
-        let mut c = person(&p);
+        let mut c = cr(&p);
+        let mut q = asking(&c, 500);
         assert_eq!(target_progress(&c, &p, &[]).len(), 1);
-        decide(&mut c, chosen("to even"), &p).unwrap();
+        decided(&mut c, &mut q, 1, &p);
         assert_eq!(
             target_progress(&c, &p, &[])
                 .iter()
@@ -1162,26 +1294,19 @@ mod tests {
         let bare = open(&p, 2, Intent::ChangeBehavior, &[]);
         assert!(contexts_in(&bare, &p).is_empty());
         // An option names billing, but nothing is chosen: until it is, it is not settled what the request is about.
-        let crux = Crux::new(
+        let mut asked = cr(&p);
+        let mut crux = crux_with(
+            &asked,
+            500,
             CruxKind::Conflict,
-            vec![CruxOption::new(
-                choice("move it"),
-                None,
+            vec![(
+                "move it",
                 BTreeMap::from([(billing_context, ExpectKind::Target)]),
-                None,
             )],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let mut asking = cr(&p, Some(crux));
-        assert_eq!(contexts_in(&asking, &p), BTreeSet::from([core()]));
-        decide(&mut asking, chosen("move it"), &p).unwrap();
-        assert_eq!(
-            contexts_in(&asking, &p),
-            BTreeSet::from([core(), billing()])
         );
+        assert_eq!(contexts_in(&asked, &p), BTreeSet::from([core()]));
+        decided(&mut asked, &mut crux, 0, &p);
+        assert_eq!(contexts_in(&asked, &p), BTreeSet::from([core(), billing()]));
         // The Project is no Context's.
         let project_wide = open(
             &p,
@@ -1263,29 +1388,17 @@ mod tests {
     #[test]
     fn an_option_that_keeps_a_target_is_a_keep_once_chosen() {
         let p = project();
-        let crux = Crux::new(
+        let mut c = cr(&p);
+        let mut crux = crux_with(
+            &c,
+            500,
             CruxKind::Conflict,
             vec![
-                CruxOption::new(
-                    choice("drop C2"),
-                    None,
-                    BTreeMap::from([(detail(), ExpectKind::Target)]),
-                    None,
-                ),
-                CruxOption::new(
-                    choice("keep both"),
-                    None,
-                    BTreeMap::from([(detail(), ExpectKind::Keep)]),
-                    None,
-                ),
+                ("drop C2", BTreeMap::from([(detail(), ExpectKind::Target)])),
+                ("keep both", BTreeMap::from([(detail(), ExpectKind::Keep)])),
             ],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let mut c = cr(&p, Some(crux));
-        decide(&mut c, chosen("keep both"), &p).unwrap();
+        );
+        decided(&mut c, &mut crux, 1, &p);
         assert_eq!(c.decided_expects()[&detail()].kind, ExpectKind::Keep);
         assert_eq!(keep_progress(&c, &p).len(), 1);
         assert_eq!(frame(&c), BTreeSet::from([clause()]));

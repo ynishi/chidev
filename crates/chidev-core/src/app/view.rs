@@ -48,12 +48,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .as_deref()
             .map(|names| context_ids(&p, names))
             .transpose()?;
-        let crs = self.store.change_requests().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         // the names are those of the assets of the Contexts read, and only an asset section shows them
         let names = if input
             .sections
             .iter()
-            .any(|s| *s != ModelSection::ChangeRequests)
+            .any(|s| !matches!(s, ModelSection::ChangeRequests | ModelSection::Cruxes))
         {
             let read = |c: &&Context| contexts.as_ref().is_none_or(|ids| ids.contains(&c.id()));
             self.names_in_model(p.contexts().filter(read), &[]).await?
@@ -66,7 +66,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         Ok(ViewRead {
             store_revision: at,
-            view: ModelView::build(at.0, &p, &crs, &names).select(&selection),
+            view: ModelView::build(at.0, &p, &crs, &cruxes, &names).select(&selection),
         })
     }
 

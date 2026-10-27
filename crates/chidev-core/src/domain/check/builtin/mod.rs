@@ -85,6 +85,7 @@ mod fixture {
     use crate::domain::check::{Check, CheckView, Finding};
     use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft};
     use crate::domain::entity::context::Context;
+    use crate::domain::entity::crux::{Crux, CruxDraft};
     use crate::domain::entity::pin::Pin;
     use crate::domain::entity::project::Project;
     use crate::domain::service::change_request::expectations_now;
@@ -93,8 +94,8 @@ mod fixture {
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::{
-        CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
-        PinId, ProjectId, test_uuid,
+        CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId, HarnessId,
+        InterfaceId, ItemId, PinId, ProjectId, test_uuid,
     };
     use crate::domain::vo::intent::Intent;
     use crate::domain::vo::item_key::ItemKey;
@@ -208,7 +209,7 @@ mod fixture {
         .unwrap()
     }
 
-    /// A change request without a Crux, expecting `wanted` of targets at their revisions now.
+    /// A change request, expecting `wanted` of targets at their revisions now.
     pub(super) fn cr(
         p: &Project,
         n: u128,
@@ -225,11 +226,81 @@ mod fixture {
                 parent: parent.map(|k| ChangeRequestId::from_uuid(test_uuid(k))),
                 issuer: None,
                 expects: expectations_now(p, wanted.iter().copied()),
-                crux: None,
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
         )
+    }
+
+    /// An open Crux numbered `n`, raised in the change request numbered `raised_in`, with one option for each of
+    /// `options` (the choice, and the targets that option expects). The option `k` (from 0) has the id
+    /// `option_id(n, k)`.
+    pub(super) fn crux(
+        n: u128,
+        raised_in: u128,
+        kind: crate::domain::vo::crux::CruxKind,
+        options: &[(&str, &[(Target, ExpectKind)])],
+    ) -> Crux {
+        use crate::domain::vo::choice::Choice;
+        use crate::domain::vo::crux::CruxOption;
+        use crate::domain::vo::prose::Prose;
+        Crux::raise(
+            CruxId::from_uuid(test_uuid(n)),
+            CruxDraft {
+                raised_in: ChangeRequestId::from_uuid(test_uuid(raised_in)),
+                findings: Vec::new(),
+                kind,
+                question: Prose::try_from("which one?").unwrap(),
+                options: options
+                    .iter()
+                    .enumerate()
+                    .map(|(k, (choice, expects))| {
+                        CruxOption::new(
+                            option_id(n, k),
+                            Choice::try_from(*choice).unwrap(),
+                            None,
+                            expects.iter().copied().collect(),
+                            None,
+                        )
+                    })
+                    .collect(),
+                recommended: None,
+                importance: None,
+                supersedes: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// The id of the option `k` of the Crux `n` made by [`crux`].
+    pub(super) fn option_id(n: u128, k: usize) -> CruxOptionId {
+        CruxOptionId::from_uuid(test_uuid(100_000 + n * 100 + k as u128))
+    }
+
+    /// `crux` answered with its option `k`, on `basis`.
+    pub(super) fn answered(
+        mut crux: Crux,
+        k: usize,
+        basis: crate::domain::vo::answer::Basis,
+    ) -> Crux {
+        use crate::domain::vo::answer::{Answer, DecisionMaker};
+        use crate::domain::vo::crux::Decision;
+        use crate::domain::vo::id::AnswerId;
+        use crate::domain::vo::timestamp::Timestamp;
+        let n = crux.id().as_uuid().as_u128();
+        let option = crux.options()[k].id();
+        crux.answer(Answer::new(
+            AnswerId::from_uuid(test_uuid(900_000 + n)),
+            Decision::Chosen {
+                option,
+                reason: None,
+            },
+            basis,
+            DecisionMaker::role("orchestrator").unwrap(),
+            Timestamp::from_millis(1),
+        ))
+        .unwrap();
+        crux
     }
 
     /// What `check` finds in `p` with these Pins and change requests.
@@ -239,11 +310,23 @@ mod fixture {
         pins: &[Pin],
         crs: &[ChangeRequest],
     ) -> Vec<Finding> {
+        run_with_cruxes(check, p, pins, crs, &[])
+    }
+
+    /// What `check` finds in `p` with these Pins, change requests and Cruxes.
+    pub(super) fn run_with_cruxes(
+        check: &dyn Check,
+        p: &Project,
+        pins: &[Pin],
+        crs: &[ChangeRequest],
+        cruxes: &[Crux],
+    ) -> Vec<Finding> {
         check.run(
             &CheckView {
                 project: p,
                 pins,
                 change_requests: crs,
+                cruxes,
                 measurements: &[],
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
@@ -308,7 +391,6 @@ mod tests {
                 "pin.unpinned"
                     | "context.no-interface"
                     | "context.no-harness"
-                    | "cr.awaiting-decision"
                     | "cr.intent-mismatch"
                     | "cr.targets-untouched"
                     | "crux.policy-line-gone"
@@ -440,6 +522,7 @@ mod tests {
                 Timestamp::from_millis(3),
             ),
             all,
+            &[],
         )
         .unwrap();
     }
@@ -546,75 +629,58 @@ mod tests {
     }
 
     #[test]
-    fn a_change_request_whose_question_is_not_decided_is_found_until_it_is_decided() {
-        use std::collections::BTreeMap;
-
-        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
-        use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
-        use crate::domain::vo::choice::Choice;
-        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
-        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+    fn a_crux_not_decided_is_found_until_it_is_decided_even_in_a_request_that_is_resolved() {
+        use crate::domain::vo::answer::Basis;
+        use crate::domain::vo::crux::CruxKind;
         use crate::domain::vo::prose::Prose;
-        use crate::domain::vo::timestamp::Timestamp;
-        use crate::domain::vo::title::Title;
-        let option =
-            |c: &str| CruxOption::new(Choice::try_from(c).unwrap(), None, BTreeMap::new(), None);
-        let crux = Crux::new(
-            CruxKind::Conflict,
-            vec![option("a"), option("b")],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
         let p = project();
         let plain = cr(&p, 1, Intent::ChangeBehavior, None, &[]);
-        let mut asking = ChangeRequest::open(
-            ChangeRequestId::from_uuid(test_uuid(2)),
-            ChangeRequestDraft {
-                title: Title::try_from("asks").unwrap(),
-                situation: None,
-                intent: Intent::ChangeBehavior,
-                parent: None,
-                issuer: None,
-                expects: BTreeMap::new(),
-                crux: Some(crux),
-                assumptions: Vec::new(),
-                addresses: Vec::new(),
-            },
+        let asking = cr(&p, 2, Intent::ChangeBehavior, None, &[]);
+        let mut gone = cr(&p, 3, Intent::ChangeBehavior, None, &[]);
+        resolve_as(&mut gone, ResolutionKind::WontDo, &[]);
+        let two = |n, raised_in| crux(n, raised_in, CruxKind::Conflict, &[("a", &[]), ("b", &[])]);
+        let crs = [plain, asking.clone(), gone.clone()];
+        let cruxes = [two(10, 2), two(11, 3), two(12, 2)];
+        let found = run_with_cruxes(&AwaitingDecision, &p, &[], &crs, &cruxes);
+        // One finding for each request, however many of its Cruxes are open, and one for the resolved request.
+        assert_eq!(
+            subjects(&found),
+            [
+                Some(Subject::ChangeRequest(asking.id())),
+                Some(Subject::ChangeRequest(gone.id()))
+            ]
         );
-        let found = run(&AwaitingDecision, &p, &[], &[plain.clone(), asking.clone()]);
+        assert_eq!(found[0].level(), crate::domain::check::Level::Warning);
+        assert!(found[0].message().contains(&cruxes[0].id().to_string()));
+        assert!(found[0].message().contains(&cruxes[2].id().to_string()));
+        // Decided, a Crux is not found; a Crux of the same request still open is.
+        let basis = || Basis::Arbitrary {
+            reason: Prose::try_from("nothing derives it").unwrap(),
+        };
+        let cruxes = [
+            answered(two(10, 2), 0, basis()),
+            answered(two(11, 3), 1, basis()),
+            two(12, 2),
+        ];
+        let found = run_with_cruxes(&AwaitingDecision, &p, &[], &crs, &cruxes);
         assert_eq!(
             subjects(&found),
             [Some(Subject::ChangeRequest(asking.id()))]
         );
-        assert_eq!(found[0].level(), crate::domain::check::Level::Note);
-        let choice = Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None));
-        let answer = Answer::new(
-            choice,
-            Basis::Arbitrary {
-                reason: Prose::try_from("nothing derives it").unwrap(),
-            },
-            DecisionMaker::person("alice").unwrap(),
-            Timestamp::from_millis(1),
-        );
-        asking.decide(answer, &BTreeMap::new()).unwrap();
-        assert!(run(&AwaitingDecision, &p, &[], &[plain, asking]).is_empty());
+        let cruxes = [
+            answered(two(10, 2), 0, basis()),
+            answered(two(11, 3), 1, basis()),
+            answered(two(12, 2), 0, basis()),
+        ];
+        assert!(run_with_cruxes(&AwaitingDecision, &p, &[], &crs, &cruxes).is_empty());
     }
 
     #[test]
     fn a_decision_on_a_policy_line_that_is_gone_or_reworded_is_noted() {
-        use std::collections::BTreeMap;
-
-        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
-        use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
-        use crate::domain::vo::choice::Choice;
-        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
-        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+        use crate::domain::vo::answer::Basis;
+        use crate::domain::vo::crux::CruxKind;
         use crate::domain::vo::policy::PolicyLineId;
         use crate::domain::vo::prose::Prose;
-        use crate::domain::vo::timestamp::Timestamp;
-        use crate::domain::vo::title::Title;
         let line = |n: &str, t: &str| {
             (
                 PolicyLineId::try_from(n).unwrap(),
@@ -627,63 +693,38 @@ mod tests {
             line("P2", "low: either"),
         ])
         .unwrap();
-        let answered = |n: u128, title: &str, on: Basis| {
-            let crux = Crux::new(
-                CruxKind::Ambiguity,
-                vec![CruxOption::new(
-                    Choice::try_from("a").unwrap(),
-                    None,
-                    BTreeMap::new(),
-                    None,
-                )],
-                None,
-                None,
-                None,
+        let on_p1 = cr(&p, 1, Intent::ChangeBehavior, None, &[]);
+        let on_p2 = cr(&p, 2, Intent::ChangeBehavior, None, &[]);
+        let arbitrary = cr(&p, 3, Intent::ChangeBehavior, None, &[]);
+        let decided = |n: u128, raised_in: u128, basis: Basis| {
+            answered(
+                crux(n, raised_in, CruxKind::Ambiguity, &[("a", &[])]),
+                0,
+                basis,
             )
-            .unwrap();
-            let mut c = ChangeRequest::open(
-                ChangeRequestId::from_uuid(test_uuid(n)),
-                ChangeRequestDraft {
-                    title: Title::try_from(title).unwrap(),
-                    situation: None,
-                    intent: Intent::ChangeBehavior,
-                    parent: None,
-                    issuer: None,
-                    expects: BTreeMap::new(),
-                    crux: Some(crux),
-                    assumptions: Vec::new(),
-                    addresses: Vec::new(),
-                },
-            );
-            let answer = Answer::new(
-                Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None)),
-                on,
-                DecisionMaker::role("orchestrator").unwrap(),
-                Timestamp::from_millis(1),
-            );
-            c.decide(answer, &BTreeMap::new()).unwrap();
-            c
         };
         let on = |n: &str| {
             p.policy()
                 .basis_on(PolicyLineId::try_from(n).unwrap())
                 .unwrap()
         };
-        let on_p1 = answered(1, "on p1", on("P1"));
-        let on_p2 = answered(2, "on p2", on("P2"));
-        let arbitrary = answered(
-            3,
-            "arbitrary",
-            Basis::Arbitrary {
-                reason: Prose::try_from("the product leans this way").unwrap(),
-            },
-        );
         let crs = [on_p1.clone(), on_p2.clone(), arbitrary];
+        let cruxes = [
+            decided(10, 1, on("P1")),
+            decided(11, 2, on("P2")),
+            decided(
+                12,
+                3,
+                Basis::Arbitrary {
+                    reason: Prose::try_from("the product leans this way").unwrap(),
+                },
+            ),
+        ];
         // Nothing moved.
-        assert!(run(&PolicyLineGone, &p, &[], &crs).is_empty());
+        assert!(run_with_cruxes(&PolicyLineGone, &p, &[], &crs, &cruxes).is_empty());
         // P1 is reworded, P2 is dropped: both are found, the arbitrary one never is.
         p.put_policy(vec![line("P1", "take it from 90")]).unwrap();
-        let found = run(&PolicyLineGone, &p, &[], &crs);
+        let found = run_with_cruxes(&PolicyLineGone, &p, &[], &crs, &cruxes);
         assert_eq!(
             subjects(&found),
             [
@@ -699,20 +740,22 @@ mod tests {
             line("P2", "low: either"),
         ])
         .unwrap();
-        let kept = [answered(
-            1,
-            "on p1",
-            q.policy()
-                .basis_on(PolicyLineId::try_from("P1").unwrap())
-                .unwrap(),
-        )];
+        let basis = q
+            .policy()
+            .basis_on(PolicyLineId::try_from("P1").unwrap())
+            .unwrap();
+        let kept_crs = [on_p1];
+        let kept = [decided(10, 1, basis)];
         q.put_policy(vec![line("P1", "take it from 80"), line("P3", "new")])
             .unwrap();
-        assert!(run(&PolicyLineGone, &q, &[], &kept).is_empty());
+        assert!(run_with_cruxes(&PolicyLineGone, &q, &[], &kept_crs, &kept).is_empty());
         // Written again after it was dropped, it is a new text.
         q.put_policy(vec![line("P3", "new")]).unwrap();
         q.put_policy(vec![line("P1", "take it from 80")]).unwrap();
-        assert_eq!(run(&PolicyLineGone, &q, &[], &kept).len(), 1);
+        assert_eq!(
+            run_with_cruxes(&PolicyLineGone, &q, &[], &kept_crs, &kept).len(),
+            1
+        );
     }
 
     #[test]
@@ -775,13 +818,7 @@ mod tests {
 
     #[test]
     fn intent_and_targets_that_disagree_are_noted() {
-        use std::collections::BTreeMap;
-
-        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
-        use crate::domain::vo::choice::Choice;
-        use crate::domain::vo::crux::{CruxKind, CruxOption};
-        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
-        use crate::domain::vo::title::Title;
+        use crate::domain::vo::crux::CruxKind;
         let p = project();
         let clause_change = [(Target::Clause(clause(30)), ExpectKind::Target)];
         let keeps_but_changes_a_clause = cr(&p, 1, Intent::KeepBehavior, None, &clause_change);
@@ -807,33 +844,13 @@ mod tests {
             &[(Target::Clause(clause(30)), ExpectKind::Keep)],
         );
         let changes_a_clause = cr(&p, 5, Intent::ChangeBehavior, None, &clause_change);
-        // Nothing is named in itself, but an option names a target.
-        let crux = Crux::new(
+        // Nothing is named in itself, but an option of a Crux raised in it names a target.
+        let option_removes = cr(&p, 6, Intent::ChangeBehavior, None, &[]);
+        let asks = crux(
+            60,
+            6,
             CruxKind::Conflict,
-            vec![CruxOption::new(
-                Choice::try_from("drop").unwrap(),
-                None,
-                BTreeMap::from([(Target::Clause(clause(31)), ExpectKind::Target)]),
-                None,
-            )],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let option_removes = ChangeRequest::open(
-            ChangeRequestId::from_uuid(test_uuid(6)),
-            ChangeRequestDraft {
-                title: Title::try_from("asks").unwrap(),
-                situation: None,
-                intent: Intent::ChangeBehavior,
-                parent: None,
-                issuer: None,
-                expects: BTreeMap::new(),
-                crux: Some(crux),
-                assumptions: Vec::new(),
-                addresses: Vec::new(),
-            },
+            &[("drop", &[(Target::Clause(clause(31)), ExpectKind::Target)])],
         );
         let mut resolved = cr(&p, 7, Intent::KeepBehavior, None, &clause_change);
         resolve_as(&mut resolved, ResolutionKind::Done, &[]);
@@ -846,7 +863,7 @@ mod tests {
             option_removes,
             resolved,
         ];
-        let found = run(&IntentMismatch, &p, &[], &crs);
+        let found = run_with_cruxes(&IntentMismatch, &p, &[], &crs, std::slice::from_ref(&asks));
         assert_eq!(
             subjects(&found),
             [
@@ -856,6 +873,9 @@ mod tests {
             ]
         );
         assert_eq!(found[0].level(), crate::domain::check::Level::Note);
+        // Without the Crux, the request that only the option names a target for names none.
+        let alone = run(&IntentMismatch, &p, &[], &crs);
+        assert_eq!(alone.len(), 4);
     }
 
     use crate::domain::check::{Ground, LineState, introduced};
@@ -962,57 +982,24 @@ mod tests {
         );
     }
 
-    /// A change request whose question is answered on the Policy line `line` as the Policy of `p` has it.
-    fn decided_on(p: &Project, line: &str) -> crate::domain::entity::change_request::ChangeRequest {
-        use std::collections::BTreeMap;
-
-        use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestDraft, Crux};
-        use crate::domain::vo::answer::{Answer, DecisionMaker};
-        use crate::domain::vo::choice::Choice;
-        use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Reasoned};
-        use crate::domain::vo::id::{ChangeRequestId, test_uuid};
+    /// A change request, and a Crux raised in it answered on the Policy line `line` as the Policy of `p` has it.
+    fn decided_on(
+        p: &Project,
+        line: &str,
+    ) -> (
+        crate::domain::entity::change_request::ChangeRequest,
+        crate::domain::entity::crux::Crux,
+    ) {
+        use crate::domain::vo::crux::CruxKind;
         use crate::domain::vo::policy::PolicyLineId;
-        use crate::domain::vo::timestamp::Timestamp;
-        use crate::domain::vo::title::Title;
-        let crux = Crux::new(
-            CruxKind::Ambiguity,
-            vec![CruxOption::new(
-                Choice::try_from("a").unwrap(),
-                None,
-                BTreeMap::new(),
-                None,
-            )],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let mut c = ChangeRequest::open(
-            ChangeRequestId::from_uuid(test_uuid(1)),
-            ChangeRequestDraft {
-                title: Title::try_from("on a line").unwrap(),
-                situation: None,
-                intent: Intent::ChangeBehavior,
-                parent: None,
-                issuer: None,
-                expects: BTreeMap::new(),
-                crux: Some(crux),
-                assumptions: Vec::new(),
-                addresses: Vec::new(),
-            },
-        );
         let basis = p
             .policy()
             .basis_on(PolicyLineId::try_from(line).unwrap())
             .unwrap();
-        let answer = Answer::new(
-            Decision::Chosen(Reasoned::new(Choice::try_from("a").unwrap(), None)),
-            basis,
-            DecisionMaker::role("orchestrator").unwrap(),
-            Timestamp::from_millis(1),
-        );
-        c.decide(answer, &BTreeMap::new()).unwrap();
-        c
+        (
+            cr(p, 1, Intent::ChangeBehavior, None, &[]),
+            answered(crux(10, 1, CruxKind::Ambiguity, &[("a", &[])]), 0, basis),
+        )
     }
 
     #[test]
@@ -1032,9 +1019,10 @@ mod tests {
             line("P2", "low: either"),
         ])
         .unwrap();
-        let crs = [decided_on(&p, "P1")];
+        let (request, decided) = decided_on(&p, "P1");
+        let (crs, cruxes) = ([request], [decided]);
         // Nothing found while the line is as it was; the line reworded is found.
-        assert!(run(&PolicyLineGone, &p, &[], &crs).is_empty());
+        assert!(run_with_cruxes(&PolicyLineGone, &p, &[], &crs, &cruxes).is_empty());
         let mut reworded = p.clone();
         reworded
             .put_policy(vec![
@@ -1042,7 +1030,7 @@ mod tests {
                 line("P2", "low: either"),
             ])
             .unwrap();
-        let was = run(&PolicyLineGone, &reworded, &[], &crs);
+        let was = run_with_cruxes(&PolicyLineGone, &reworded, &[], &crs, &cruxes);
         assert_eq!(was.len(), 1);
         assert!(matches!(
             was[0].grounds(),
@@ -1052,13 +1040,20 @@ mod tests {
             }]
         ));
         assert_eq!(
-            introduced(&[], &run(&PolicyLineGone, &reworded, &[], &crs)).len(),
+            introduced(
+                &[],
+                &run_with_cruxes(&PolicyLineGone, &reworded, &[], &crs, &cruxes)
+            )
+            .len(),
             1
         );
         // The line is dropped from the reworded text: it is gone now, which the finding did not say.
         let mut gone = reworded.clone();
         gone.put_policy(vec![line("P2", "low: either")]).unwrap();
-        let found = introduced(&was, &run(&PolicyLineGone, &gone, &[], &crs));
+        let found = introduced(
+            &was,
+            &run_with_cruxes(&PolicyLineGone, &gone, &[], &crs, &cruxes),
+        );
         assert_eq!(found.len(), 1);
         assert!(matches!(
             found[0].grounds(),
@@ -1075,7 +1070,16 @@ mod tests {
                 line("P2", "low: the other"),
             ])
             .unwrap();
-        assert_eq!(run(&PolicyLineGone, &other, &[], &crs).len(), 1);
-        assert!(introduced(&was, &run(&PolicyLineGone, &other, &[], &crs)).is_empty());
+        assert_eq!(
+            run_with_cruxes(&PolicyLineGone, &other, &[], &crs, &cruxes).len(),
+            1
+        );
+        assert!(
+            introduced(
+                &was,
+                &run_with_cruxes(&PolicyLineGone, &other, &[], &crs, &cruxes)
+            )
+            .is_empty()
+        );
     }
 }

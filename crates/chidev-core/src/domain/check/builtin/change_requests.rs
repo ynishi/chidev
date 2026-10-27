@@ -8,13 +8,14 @@ use crate::domain::check::level::{Level, Moment};
 use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
-use crate::domain::entity::change_request::ChangeRequestState;
 use crate::domain::service::change_request::{
-    awaiting_decision, keep_moved, out_of_frame, resolved_without_work, targets_untouched,
+    keep_moved, out_of_frame, possible_kinds, resolved_without_work, targets_untouched,
 };
 use crate::domain::service::cite::revision_of;
+use crate::domain::service::crux::awaiting_decision;
 use crate::domain::vo::answer::Basis;
 use crate::domain::vo::finding::{RuleId, Subject};
+use crate::domain::vo::id::ChangeRequestId;
 use crate::domain::vo::intent::Intent;
 use crate::domain::vo::target::{ExpectKind, Target};
 
@@ -101,22 +102,26 @@ impl Check for TargetsUntouched {
     }
 }
 
-/// A change request whose question has no decision yet.
+/// A Crux no decision maker has answered.
 #[derive(Debug, Clone, Copy)]
 pub struct AwaitingDecision;
 
 static AWAITING_DECISION: Descriptor = Descriptor {
     id: RuleId::from_static("cr.awaiting-decision"),
     summary: Cow::Borrowed(
-        "an unresolved change request whose crux no decision maker has answered",
+        "a crux no decision maker has answered, whether or not its change request is resolved",
     ),
     help: Cow::Borrowed(
-        "The change request has a choice that neither the repository nor the decision Policy settles, and waits \
-           for a decision maker. What depends on the answer waits; the option chosen may expect more of other \
-           targets. Apply the Policy if a line covers it, or ask a person, then decide it (`cr_decide`).",
+        "A crux is a question that neither the repository nor the decision Policy settles, and it waits for a \
+           decision maker. The change request it was raised in cannot be resolved until it is decided, and what \
+           depends on the answer waits; the option chosen may expect more of other targets. A decision is \
+           required: apply the Policy if a line covers it, or ask a person, then decide it (`cr_crux_decide`); to leave \
+           it unspecified, or to say the question is not needed any more, is a decision too. A change request \
+           resolved before the decision (as `wont_do`, say) is a record of what was, and the question is reported \
+           all the same.",
     ),
     moments: Cow::Borrowed(&[Moment::Resolve, Moment::Check]),
-    default_level: Level::Note,
+    default_level: Level::Warning,
     mandatory: false,
     params: std::borrow::Cow::Borrowed(&[]),
     executor: Executor::Builtin,
@@ -127,15 +132,28 @@ impl Check for AwaitingDecision {
         &AWAITING_DECISION
     }
 
+    /// One finding for each change request that has a Crux open, about that change request: a finding is the same
+    /// rule about the same thing, so the Cruxes of one request are told in its message, by their ids.
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
-        awaiting_decision(view.change_requests.iter())
+        let mut by_request: Vec<(ChangeRequestId, Vec<String>)> = Vec::new();
+        for q in awaiting_decision(view.cruxes) {
+            let said = format!(
+                "a {} question ({}) is not decided yet",
+                q.kind().word(),
+                q.id()
+            );
+            match by_request.iter_mut().find(|(cr, _)| *cr == q.raised_in()) {
+                Some((_, all)) => all.push(said),
+                None => by_request.push((q.raised_in(), vec![said])),
+            }
+        }
+        by_request
             .into_iter()
-            .map(|c| {
-                let kind = c.crux().map_or("question", |q| q.kind().word());
+            .map(|(cr, said)| {
                 Finding::new(
                     &AWAITING_DECISION,
-                    Some(Subject::ChangeRequest(c.id())),
-                    format!("a {kind} question is not decided yet"),
+                    Some(Subject::ChangeRequest(cr)),
+                    said.join("; "),
                 )
             })
             .collect()
@@ -169,43 +187,59 @@ impl Check for PolicyLineGone {
         &POLICY_LINE_GONE
     }
 
+    /// One finding for each change request that has a decision on a Policy line which is gone or reworded, with the
+    /// grounds of every such decision.
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let policy = view.project.policy();
-        view.change_requests
-            .iter()
-            .filter_map(|c| {
-                let answer = c.crux().and_then(|q| q.answer())?;
-                let Basis::Policy {
-                    line,
-                    policy_revision,
-                } = answer.basis()
-                else {
-                    return None;
-                };
-                // The ground is the line's own `changed_at`, not the revision of the whole Policy: rewording
-                // another line moves that and has nothing to do with this decision.
-                let (message, state) = match policy.line(*line) {
-                    None => (
-                        format!("the policy line {line} it was decided on is gone"),
-                        LineState::Gone,
+        let mut by_request: Vec<(ChangeRequestId, Vec<String>, Vec<Ground>)> = Vec::new();
+        for q in view.cruxes {
+            let Some(answer) = q.answer_given() else {
+                continue;
+            };
+            let Basis::Policy {
+                line,
+                policy_revision,
+            } = answer.basis()
+            else {
+                continue;
+            };
+            // The ground is the line's own `changed_at`, not the revision of the whole Policy: rewording
+            // another line moves that and has nothing to do with this decision.
+            let (message, state) = match policy.line(*line) {
+                None => (
+                    format!("the policy line {line} it was decided on is gone"),
+                    LineState::Gone,
+                ),
+                Some(l) if l.changed_at() > *policy_revision => (
+                    format!(
+                        "the policy line {line} was reworded after it was applied (policy {policy_revision}, now {})",
+                        policy.revision()
                     ),
-                    Some(l) if l.changed_at() > *policy_revision => (
-                        format!(
-                            "the policy line {line} was reworded after it was applied (policy {policy_revision}, now {})",
-                            policy.revision()
-                        ),
-                        LineState::Reworded(l.changed_at()),
-                    ),
-                    Some(_) => return None,
-                };
-                Some(
-                    Finding::new(
-                        &POLICY_LINE_GONE,
-                        Some(Subject::ChangeRequest(c.id())),
-                        message,
-                    )
-                    .grounded(vec![Ground::PolicyLine { line: *line, state }]),
+                    LineState::Reworded(l.changed_at()),
+                ),
+                Some(_) => continue,
+            };
+            let ground = Ground::PolicyLine { line: *line, state };
+            match by_request
+                .iter_mut()
+                .find(|(cr, _, _)| *cr == q.raised_in())
+            {
+                Some((_, messages, grounds)) => {
+                    messages.push(message);
+                    grounds.push(ground);
+                }
+                None => by_request.push((q.raised_in(), vec![message], vec![ground])),
+            }
+        }
+        by_request
+            .into_iter()
+            .map(|(cr, messages, grounds)| {
+                Finding::new(
+                    &POLICY_LINE_GONE,
+                    Some(Subject::ChangeRequest(cr)),
+                    messages.join("; "),
                 )
+                .grounded(grounds)
             })
             .collect()
     }
@@ -343,7 +377,7 @@ impl Check for IntentMismatch {
         // A resolved one is a record.
         view.change_requests
             .iter()
-            .filter(|c| c.state() != ChangeRequestState::Resolved)
+            .filter(|c| !c.is_resolved())
             .filter_map(|c| {
                 let names = |kind: ExpectKind| kind == ExpectKind::Target;
                 // A parent only aggregates: it need not name a target.
@@ -353,13 +387,13 @@ impl Check for IntentMismatch {
                     .any(|p| p.parent() == Some(c.id()));
                 let message = match c.intent() {
                     Intent::KeepBehavior
-                        if c.possible_kinds()
+                        if possible_kinds(c, view.cruxes)
                             .any(|(t, k)| matches!(t, Target::Clause(_)) && names(k)) =>
                     {
                         "it keeps the behaviour, yet names a clause to revise or retire"
                     }
                     Intent::ChangeBehavior
-                        if !is_parent && !c.possible_kinds().any(|(_, k)| names(k)) =>
+                        if !is_parent && !possible_kinds(c, view.cruxes).any(|(_, k)| names(k)) =>
                     {
                         "it changes the behaviour, yet names no target"
                     }
