@@ -22,7 +22,7 @@ use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::service::change_request::state_of;
-use crate::domain::vo::answer::Basis;
+use crate::domain::vo::answer::{Basis, Beyond};
 use crate::domain::vo::crux::{CruxKind, Decision, Importance};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, Subject, SubjectKind};
@@ -200,10 +200,24 @@ pub struct CruxView {
 pub struct AnswerView {
     id: String,
     decision: DecisionView,
+    /// Where what the decision added outside its change request went; left out when the answer says nothing of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beyond: Option<BeyondView>,
     basis: BasisView,
     by: MakerView,
     /// When, in milliseconds since the epoch.
     at: u64,
+}
+
+/// Where what a decision added outside its change request went: `{"requests": [<change request ids>]}`, the change
+/// requests opened for it, or `{"declined": <why>}`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BeyondView {
+    /// The change requests opened for it, by id, as `change_requests` lists them.
+    Requests(Vec<String>),
+    /// It is not done, and why.
+    Declined(String),
 }
 
 /// What was decided about a Crux: `{"chosen": {"option": <option id>, "reason": …}}`, `{"worded": {"wording": …,
@@ -462,6 +476,12 @@ fn crux_view(x: &Crux) -> CruxView {
                 }
                 Decision::Withdrawn => DecisionView::Withdrawn,
             },
+            beyond: a.beyond().map(|b| match b {
+                Beyond::TakenBy(requests) => {
+                    BeyondView::Requests(requests.iter().map(ToString::to_string).collect())
+                }
+                Beyond::Declined { reason } => BeyondView::Declined(reason.as_str().to_string()),
+            }),
             basis: match a.basis() {
                 Basis::Policy {
                     line,

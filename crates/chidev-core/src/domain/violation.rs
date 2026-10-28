@@ -108,12 +108,22 @@ pub enum Remedy {
         /// The change request.
         change_request: ChangeRequestId,
     },
-    /// Raise a new crux that supersedes this one.
+    /// Raise a new crux that supersedes the decision that stands for this one.
     SupersedeCrux {
-        /// The change request the crux was raised in; the new crux is raised in it too.
+        /// The change request the refused operation was on. The domain cannot know which crux stands for the
+        /// question, so this is not where the new crux is raised: the application raises it in the change request
+        /// the crux that stands was raised in, which it may reopen first.
         change_request: ChangeRequestId,
         /// The crux whose decision is to be replaced.
         crux: CruxId,
+    },
+    /// Open a change request for the targets the answer adds outside its change request, and decide the crux again
+    /// naming it, or decide it declining them.
+    TakeOutside {
+        /// The crux being decided.
+        crux: CruxId,
+        /// The targets outside the change request, in order.
+        targets: Vec<Target>,
     },
     /// Put this line in the decision Policy.
     PutPolicyLine {
@@ -256,6 +266,10 @@ impl Violation {
                 | Remedy::ReopenChangeRequest { change_request }
                 | Remedy::SupersedeCrux { change_request, .. } => {
                     out.push(Party::ChangeRequest(*change_request));
+                }
+                Remedy::TakeOutside { crux, targets } => {
+                    out.push(Party::Crux(*crux));
+                    out.extend(targets.iter().map(|t| Party::Target(*t)));
                 }
                 Remedy::PutPolicyLine { line } => out.push(Party::PolicyLine(*line)),
                 Remedy::RetireReferrersFirst { referrers } => {

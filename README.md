@@ -340,7 +340,10 @@ belong):
     `consequence`), the option `recommended` (by `option` id, with `reason` and
     `confidence`), `supersedes`, its `state` (`open` or `answered`) and, once
     decided, its `answer`: the `id` of the decision, the `decision` (`chosen` with the
-    option id and the reason, `worded`, `unspecified` or `withdrawn`), its `basis`,
+    option id and the reason, `worded`, `unspecified` or `withdrawn`), its `beyond`
+    when it has one (`{"requests":[<change request ids>]}` or `{"declined":<reason>}`:
+    where what the decision added outside its request went; an answer that says
+    nothing has none), its `basis`,
     `by` and `at`. The words of a Crux (an option's wording and consequence, the
     reason of the recommendation, a decision in other words) are given as whoever
     raised or decided it wrote them, so they say no more of the requirements than that
@@ -1102,11 +1105,13 @@ does not know (`change` and `remove` of earlier versions, and `crux`, among them
   Item, not the whole Interface, when only its signature must stay).
 - Each option of a Crux raised in the request takes the same `targets` / `keep` lists
   (and `wording`, the exact new text of the definitions, and `consequence`, free text
-  saying what else choosing it affects). When a Crux is decided, the lists of the
-  option chosen become the request's decided expectations, each with the revision it
-  has at that moment (see "Crux, Policy and Assumption"). Deciding with the decision
-  maker's own wording, leaving it unspecified, or withdrawing the question names
-  nothing more.
+  saying what else choosing it affects). An option may name targets outside the
+  request. When a Crux is decided, the lists of the option chosen become the
+  request's decided expectations, each with the revision it has at that moment, except
+  the `targets` outside the request's frame: they are not added to it, and the
+  decision says where they go (see "Crux, Policy and Assumption"). Deciding with the
+  decision maker's own wording, leaving it unspecified, or withdrawing the question
+  names nothing more.
 - Neither list gates the closing of the request. `status` shows, for each of its
   `targets`, **what the work did to it**, read from the footprints of the
   request's change sets and of its parts (see "Attribution and frame"): `revised`,
@@ -1245,8 +1250,9 @@ no work and records no footprint:
 - A parent only aggregates. It need not name any target: the work of its parts is
   its work, and it is closed when they are resolved. A parent resolved as done
   with no work on it or on any part is `cr.resolved-without-work`.
-- The targets a request names to revise or retire (its own and those of the
-  options chosen for the Cruxes raised in it) are its **frame**; a `keep` is not part of it. Naming a
+- The targets a request names to revise or retire are its **frame**, as it was
+  opened; deciding a Crux never widens it (the options' `targets` outside it are not
+  added: see "Crux, Policy and Assumption"). A `keep` is not part of it. Naming a
   container frames everything in it: a Contract frames its Clauses, a Context its
   assets and what is in them, the Project everything. The work of a request is to
   stay in its frame, and **the frame is the request's own**: a parent's targets
@@ -1323,9 +1329,18 @@ Interfaces, Harness implementation, code), not only to the specification.
   optionally, its `consequence`: what else choosing it affects), a recommended
   option with a `reason` and a `confidence` that is a percentage from 0 to 100, an
   `importance` (`low`, `normal` or `high`), and `supersedes`, the id of a Crux whose
-  decision this one replaces (it has to exist and have a decision to replace, and a
-  withdrawn one has none: `cr.supersedes-unknown`, `cr.supersedes-unanswered`). The
-  recommendation and the importance are what a Policy line is written against.
+  decision this one replaces. That Crux has to exist, and a `supersedes` that parses
+  but that no Crux has the id of is a name that does not exist (`input.unknown-name`,
+  `values.kind` `crux`, `field` `supersedes`, the closest ids in `did_you_mean`; no
+  suggestion: a Crux id is not made by naming it). It has to have a decision to
+  replace (a withdrawn one has none: `cr.supersedes-unanswered`), and **one Crux
+  replaces a decision**: a decision that another Crux replaces already is refused
+  (`cr.supersedes-superseded`, `values.by` the Crux that replaces it), and its
+  suggestion is to supersede the decision that stands, the end of the chain (to decide
+  it, when that Crux has no decision yet; with a `cr_reopen` first when its request is
+  resolved). A Crux that was withdrawn replaced nothing, so the decision it pointed at
+  may be superseded anew. The recommendation and the importance are what a Policy line
+  is written against.
 - `cr_crux_raise` raises a Crux in the request titled `in`, which must not be
   resolved (`cr.already-resolved`: reopen it first):
 
@@ -1383,6 +1398,36 @@ Interfaces, Harness implementation, code), not only to the specification.
   unspecified (`cr.crux-unspecified-not-allowed`, `values.crux` and `values.kind`).
   A Crux that is no longer needed is withdrawn (any kind may be); a
   withdrawal is a decision and asks nothing of any target.
+- **A decision does not widen its request.** An option may name `targets` outside the
+  request (outside its frame: see "Attribution and frame"). When it is chosen they are
+  not added to the request, whose frame stays what it was opened with; the decision
+  says where they go, in `beyond`, one of two forms:
+
+  ```json
+  {"op":"cr_crux_decide","crux":"<crux id>","option":"<option id>",
+   "beyond":{"requests":["Tax work"]},"basis":{"arbitrary":"billing is its own change"},"by":{"person":"alice"}}
+  {"op":"cr_crux_decide","crux":"<crux id>","option":"<option id>",
+   "beyond":{"declined":"billing waits for the next release"},"basis":{"arbitrary":"..."},"by":{"person":"alice"}}
+  ```
+
+  `requests` are the titles of the change requests opened for them (a title that no
+  request has is `input.unknown-name`, `values.kind` `change request`): at least one,
+  none twice, none the request the Crux was raised in (`cr.crux-beyond-itself`), none
+  resolved (`cr.already-resolved`, with the request named as the first subject:
+  reopen it), and between them they frame every target outside
+  (`cr.crux-beyond-unframed`, `values.target`). They are read whenever `requests` is
+  given, even when the option names nothing outside. `declined` is the reason they are
+  not done. Without `beyond`, an option with a `targets` entry outside the request is
+  refused (`cr.crux-answer-outside`, `values.option` and `values.targets`), and its
+  suggestions are the `cr_open` that names them and the decision once with
+  `beyond.requests` and once with `beyond.declined`. A `keep` is never outside: it
+  protects, it does not widen. A withdrawal asks and adds nothing, so it takes no
+  `beyond` (`cr.crux-beyond-withdrawn`). `beyond` is a part of the answer, written
+  with it and never rewritten; `status` shows it next to the decision as
+  `{"requests":["<title>"]}` or `{"declined":"<reason>"}`, and `view` the same with
+  the ids of the requests (an answer that says nothing has none). Correcting what a
+  request is about is closing it as superseded and opening the corrected one, not a
+  decision.
 - **Who may decide** a Crux (the authority to decide, `CruxAnswerable`) is a concept
   of the model, and it is managed outside chidev for now: chidev holds no identity of
   its users, so it grants and checks nothing. `by` (`{"role":..}` or `{"person":..}`)
@@ -1391,18 +1436,19 @@ Interfaces, Harness implementation, code), not only to the specification.
 - The Cruxes stop the request they are raised in: "Lifecycle and resolution" says
   which resolutions are refused (`cr.crux-unanswered`), and a request with Cruxes is
   `decided` once each of them has a decision (a withdrawal is one). When a Crux is
-  decided, the targets of the option chosen become the request's decided
-  expectations, in the same commit: each is recorded with the revision it has then;
+  decided, the targets of the option chosen that are inside the request's frame
+  become its decided expectations, in the same commit (the ones outside are the
+  decision's `beyond`, above): each is recorded with the revision it has then;
   one an earlier decision recorded with the same kind keeps its first revision, one
   the request itself asks with the same kind is not added a second time, and one asked
   with another kind, by the request or by an earlier decision, is refused
   (`cr.crux-expect-conflict`, the rule an option is read by when the Crux is raised).
   A Crux that
   supersedes a decision taken in the same request takes that decision's expectations
-  back first, in the same commit, so it may ask the opposite of a target. They are
-  part of the request's frame (see "Attribution and frame"), and the work goes `for`
-  the request. A Crux of a resolved request takes only a withdrawal: any other
-  decision is refused (`cr.already-resolved`) until the request is reopened. A store
+  back first, in the same commit, so it may ask the opposite of a target; the frame
+  is read after that take-back. The work goes `for` the request. A Crux of a resolved
+  request takes only a withdrawal: any other decision is refused
+  (`cr.already-resolved`) until the request is reopened. A store
   migrated from layout 1 can hold a Crux that was never decided in a request resolved
   otherwise than as `done`; it is a record of what was, and `cr.awaiting-decision`
   goes on reporting it.
@@ -1554,7 +1600,11 @@ as a sentence to be parsed:
 - A line that cannot be read as an operation is a diagnostic as well, under an
   `input.*` rule: `input.unknown-op`, `input.unknown-field`, `input.missing-field`,
   `input.wrong-type`, `input.unknown-name`, `input.invalid`, and for `view`
-  `input.view-sections-empty`. An `interface_put` that
+  `input.view-sections-empty`. A name that does not exist is `input.unknown-name`
+  (`values.kind` and `values.name`, the closest names in `did_you_mean`, a suggestion
+  where the name can be made by naming it): a title, a label, a `crux` of
+  `cr_crux_decide` and a `supersedes` of `cr_crux_raise` (`values.kind` `crux`, `field`
+  `supersedes`, no suggestion), a title in `beyond.requests`. An `interface_put` that
   leaves `items` out has its own: `input.items-required`, `items.no-provider`,
   `items.protocol`, `items.failed`, and for `renames` `input.rename-unknown`,
   `input.rename-conflict`, `input.replaces-kept`, `input.renames-with-items`. A

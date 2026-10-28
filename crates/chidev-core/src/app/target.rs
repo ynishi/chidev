@@ -1,6 +1,8 @@
 //! What a change request points at, in the names a person writes: the input that names a target of any kind, its
 //! resolution to the id the domain works with, and the way back to names for what a use case reports.
 
+use serde::Serialize;
+
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, AssetName, IdSource, Store};
 use super::{App, AppError, ClauseRef, ItemRef, context_id};
@@ -52,6 +54,102 @@ pub enum TargetInput {
         /// The Case's name.
         name: String,
     },
+}
+
+/// A target by name, in the one form a reference to it is written in on the wire: `{"project": true}`,
+/// `{"context": "core"}`, `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on. What a use case
+/// reports and what a suggestion proposes are written with it, so that they read back as the references an operation
+/// takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetRef {
+    /// The Project, as `{"project": true}`.
+    Project(bool),
+    /// A Context, by name.
+    Context(String),
+    /// A Contract of a Context.
+    Contract {
+        /// The Context.
+        context: String,
+        /// The Contract.
+        contract: String,
+    },
+    /// An Interface of a Context.
+    Interface {
+        /// The Context.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
+    /// A Harness of a Context.
+    Harness {
+        /// The Context.
+        context: String,
+        /// The Harness.
+        harness: String,
+    },
+    /// An Item, by the Interface's name and the key.
+    Item {
+        /// The Context; none within a Harness.
+        context: Option<String>,
+        /// The Interface.
+        interface: String,
+        /// The key of the Item.
+        key: String,
+    },
+    /// A Clause, by the Contract's name and the label.
+    Clause {
+        /// The Context; none within a Harness.
+        context: Option<String>,
+        /// The Contract.
+        contract: String,
+        /// The label of the Clause.
+        label: String,
+    },
+    /// A Case of a Harness.
+    Case {
+        /// The Context.
+        context: String,
+        /// The Harness.
+        harness: String,
+        /// The Case's name.
+        name: String,
+    },
+}
+
+impl From<TargetInput> for TargetRef {
+    fn from(t: TargetInput) -> TargetRef {
+        match t {
+            TargetInput::Project => TargetRef::Project(true),
+            TargetInput::Context(name) => TargetRef::Context(name),
+            TargetInput::Contract { context, contract } => {
+                TargetRef::Contract { context, contract }
+            }
+            TargetInput::Interface { context, interface } => {
+                TargetRef::Interface { context, interface }
+            }
+            TargetInput::Harness { context, harness } => TargetRef::Harness { context, harness },
+            TargetInput::Item(r) => TargetRef::Item {
+                context: r.context,
+                interface: r.interface,
+                key: r.key,
+            },
+            TargetInput::Clause(r) => TargetRef::Clause {
+                context: r.context,
+                contract: r.contract,
+                label: r.label,
+            },
+            TargetInput::Case {
+                context,
+                harness,
+                name,
+            } => TargetRef::Case {
+                context,
+                harness,
+                name,
+            },
+        }
+    }
 }
 
 /// A target (or keep) a change request recorded when it was opened, in the names a person wrote it with.

@@ -91,6 +91,8 @@ pub const CR_REFERENCE_ITSELF: RuleId = RuleId::from_static("cr.reference-itself
 pub const CR_SUPERSEDES_UNKNOWN: RuleId = RuleId::from_static("cr.supersedes-unknown");
 /// A crux is to supersede a crux that has no decision to replace.
 pub const CR_SUPERSEDES_UNANSWERED: RuleId = RuleId::from_static("cr.supersedes-unanswered");
+/// A crux is to supersede a decision that another crux replaces already.
+pub const CR_SUPERSEDES_SUPERSEDED: RuleId = RuleId::from_static("cr.supersedes-superseded");
 /// A decision rests on a policy line that does not exist.
 pub const CR_POLICY_LINE_UNKNOWN: RuleId = RuleId::from_static("cr.policy-line-unknown");
 /// A change request is titled as another is.
@@ -108,6 +110,14 @@ pub const CR_CRUX_EXPECT_CONFLICT: RuleId = RuleId::from_static("cr.crux-expect-
 /// A crux of the kind `model` is left unspecified.
 pub const CR_CRUX_UNSPECIFIED_NOT_ALLOWED: RuleId =
     RuleId::from_static("cr.crux-unspecified-not-allowed");
+/// The option chosen names targets outside the change request, and the answer says nothing of where they go.
+pub const CR_CRUX_ANSWER_OUTSIDE: RuleId = RuleId::from_static("cr.crux-answer-outside");
+/// A target outside the change request is in the frame of none of the change requests the answer names.
+pub const CR_CRUX_BEYOND_UNFRAMED: RuleId = RuleId::from_static("cr.crux-beyond-unframed");
+/// The answer names the change request it was given in for what lies outside it.
+pub const CR_CRUX_BEYOND_ITSELF: RuleId = RuleId::from_static("cr.crux-beyond-itself");
+/// A withdrawal says where what lies outside goes.
+pub const CR_CRUX_BEYOND_WITHDRAWN: RuleId = RuleId::from_static("cr.crux-beyond-withdrawn");
 /// A Case cites an Item or a Clause it cannot reach.
 pub const PROJECT_CITE_UNREACHABLE: RuleId = RuleId::from_static("project.cite-unreachable");
 /// A sim Harness builds an Interface it cannot reach.
@@ -194,7 +204,7 @@ static RULES: &[Rule] = &[
         id: CR_ALREADY_RESOLVED,
         kind: RuleKind::Invariant,
         summary: "A resolved change request takes no more crux, decisions (but a withdrawal), assumptions, work or resolutions.",
-        help: "The change request was resolved, and its record is closed. If the work goes on, reopen it with `cr_reopen` (a reason, and who reopens it); the resolution it had stays in its history. If the question is a new one, open a new change request. A crux raised in a resolved change request that was never decided can still be withdrawn with `cr_crux_decide` (`withdrawn`).",
+        help: "The change request was resolved, and its record is closed. If the work goes on, reopen it with `cr_reopen` (a reason, and who reopens it); the resolution it had stays in its history. If the question is a new one, open a new change request. A crux raised in a resolved change request that was never decided can still be withdrawn with `cr_crux_decide` (`withdrawn`). When the decision of a crux names a resolved change request in `beyond`, that one is the first subject and the change request the crux was raised in the second: it takes no more work, so reopen it or name another.",
         message: "the change request {s0} is resolved already",
         values: &[],
         example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"},{"choice":"to even"}]}"#,
@@ -221,7 +231,7 @@ static RULES: &[Rule] = &[
         id: CR_CRUX_ANSWERED,
         kind: RuleKind::Invariant,
         summary: "A crux is answered once and never rewritten.",
-        help: "An answer is an input from outside that cannot be reproduced, so it is kept as it was given. A different decision is a new crux that supersedes this one (`cr_crux_raise` with `supersedes` the id of this crux).",
+        help: "An answer is an input from outside that cannot be reproduced, so it is kept as it was given. A different decision is a new crux that supersedes the decision that stands for the question: this crux, or the crux that replaced it if another has (`cr_crux_raise` with `supersedes` the id of that crux). The suggestion names the one that stands.",
         message: "the crux raised in the change request {s0} is answered already",
         values: &[],
         example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","basis":{"arbitrary":"changed my mind"},"by":{"person":"alice"}}"#,
@@ -269,6 +279,15 @@ static RULES: &[Rule] = &[
         help: "A decision is replaced by a new crux that points at it. A crux that is still open has no decision yet: decide it instead. A crux that was withdrawn decided nothing, so there is nothing in it to replace: raise a new question without `supersedes`.",
         message: "the crux that the crux raised in {s0} supersedes has no decision to replace",
         values: &[],
+        example: r#"{"op":"cr_crux_raise","in":"Redecide","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"018f6b1e-0000-7000-8000-000000000001"}"#,
+    },
+    Rule {
+        id: CR_SUPERSEDES_SUPERSEDED,
+        kind: RuleKind::Invariant,
+        summary: "A decision is replaced by one crux; a crux supersedes a decision no other crux replaces.",
+        help: "One decision stands for a question, so two cruxes do not replace the same one. `values.by` is the crux that replaces it already. To change the decision again, supersede the one that stands: the last crux of the chain (`view` and `status` list the cruxes with the `supersedes` of each). If it has no decision yet, decide it instead. A crux that was withdrawn replaced nothing, so the decision it pointed at may be superseded anew.",
+        message: "the decision that the crux raised in {s0} supersedes is replaced by the crux {by} already",
+        values: &["by"],
         example: r#"{"op":"cr_crux_raise","in":"Redecide","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"a"}],"supersedes":"018f6b1e-0000-7000-8000-000000000001"}"#,
     },
     Rule {
@@ -342,6 +361,42 @@ static RULES: &[Rule] = &[
         message: "the crux {crux}, raised in {s0}, is a {kind} question and cannot be left unspecified",
         values: &["crux", "kind"],
         example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","unspecified":[],"basis":{"arbitrary":"left free"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_ANSWER_OUTSIDE,
+        kind: RuleKind::Invariant,
+        summary: "An answer says where what its option adds outside the change request goes.",
+        help: "A change request is about the targets it was opened with (its frame), and a decision never widens it: the targets the option chosen names to be revised or retired that are outside the frame are not added to the request. The answer says where they go, in `beyond`: `{\"requests\":[<titles>]}`, the change requests opened for them (each is open and frames the targets outside), or `{\"declined\":\"<why>\"}` if they are not done. `values.option` is the choice of the option and `values.targets` the targets outside. Open the change request for them with `cr_open`, then decide again.",
+        message: "the option {option}, chosen for a crux raised in {s0}, names targets outside the change request, and the answer does not say where they go: {targets}",
+        values: &["option", "targets"],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_BEYOND_UNFRAMED,
+        kind: RuleKind::Invariant,
+        summary: "A change request an answer names for what lies outside frames it.",
+        help: "`values.target` is a target the option chosen names that is outside the change request, and no change request in `beyond.requests` frames it (names it, or a container of it, as a target to revise or retire). Open a change request that names it with `cr_open` and name that one, or add it to `beyond.requests`; or decline it with `beyond.declined`.",
+        message: "{target}, named by the option chosen for a crux raised in {s0}, is outside it and in the frame of none of the change requests the answer names",
+        values: &["target"],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","beyond":{"requests":["Another request"]},"basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_BEYOND_ITSELF,
+        kind: RuleKind::Invariant,
+        summary: "An answer sends what lies outside its change request to another change request.",
+        help: "What lies outside a change request cannot be taken by the same one: its frame is what it was opened with. Open another change request for it with `cr_open` and name that one in `beyond.requests`, or decline it with `beyond.declined`.",
+        message: "the answer to a crux raised in {s0} names {s0} for what lies outside it",
+        values: &[],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","option":"018f6b1e-0000-7000-8000-000000000002","beyond":{"requests":["Round halves up"]},"basis":{"arbitrary":"settled"},"by":{"person":"alice"}}"#,
+    },
+    Rule {
+        id: CR_CRUX_BEYOND_WITHDRAWN,
+        kind: RuleKind::Invariant,
+        summary: "A withdrawal says nothing of what lies outside the change request.",
+        help: "A withdrawal ends the question and asks nothing of any target, so there is nothing outside to place. Leave `beyond` out.",
+        message: "the withdrawal of a crux raised in {s0} cannot say where anything outside goes",
+        values: &[],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","withdrawn":true,"beyond":{"declined":"nothing was asked"},"basis":{"arbitrary":"not needed"},"by":{"person":"alice"}}"#,
     },
     Rule {
         id: PROJECT_CITE_UNREACHABLE,

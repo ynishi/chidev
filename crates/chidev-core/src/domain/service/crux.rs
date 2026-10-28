@@ -1,21 +1,24 @@
 //! Deciding a Crux against the change request it stops and the Project, and reading what a Crux replaces.
 //!
 //! A Crux is answered once. The answer is a decision of a decision maker, and the option it chooses may ask more of
-//! targets, which the change request the Crux was raised in records. That change request is another aggregate, so
-//! the decision is made here, over both.
+//! targets, which the change request the Crux was raised in records when they are inside its frame. That change
+//! request is another aggregate, so the decision is made here, over both.
 
-use super::change_request::revisions_now;
+use std::collections::BTreeSet;
+
+use super::change_request::{outside_frame, revisions_now};
 use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestError};
 use crate::domain::entity::crux::{Crux, CruxDraft};
 use crate::domain::entity::project::Project;
-use crate::domain::vo::answer::{Answer, Basis};
+use crate::domain::vo::answer::{Answer, Basis, Beyond};
 use crate::domain::vo::crux::Decision;
-use crate::domain::vo::id::{AnswerId, CruxId};
+use crate::domain::vo::id::{AnswerId, ChangeRequestId, CruxId};
+use crate::domain::vo::target::{ExpectKind, Target};
 
 /// Gives `crux` its answer, once, and records in `cr` what the option chosen asks of targets, each at the revision it
 /// has in `project` now, with the answer that asked for it. `cr` is the change request `crux` was raised in.
 /// `replaced` is the Crux `crux` supersedes, as the caller found it (none when `crux` supersedes none, or the Crux it
-/// names is not there).
+/// names is not there). `others` are the change requests there are, for the ones the `beyond` of the answer names.
 ///
 /// A decision that replaces another takes back what the one replaced asked: when `replaced` was raised in `cr` too,
 /// the expectations recorded from its answer are removed from `cr` before those of this decision are recorded, so
@@ -23,6 +26,13 @@ use crate::domain::vo::id::{AnswerId, CruxId};
 /// ends the question, it does not give another decision), so it takes nothing back. A Crux replaced that was raised in
 /// another change request leaves that change request's expectations as they are: they are its history, and what this
 /// decision asks is recorded in `cr`, the change request this Crux was raised in.
+///
+/// The frame of `cr` is what it was opened with, and a decision never widens it. The targets of the option chosen
+/// that are outside it ([`outside_frame`], read after the take-back) are not recorded in `cr`, and the answer must say
+/// where they go (`AnswerOutside`): `Beyond::TakenBy` change requests, each not `cr`, not resolved and found among
+/// `others`, that between them frame every target outside, or `Beyond::Declined`. The change requests named are
+/// read whenever `TakenBy` is given, whether or not anything is outside. A withdrawal takes no `beyond`, which the
+/// answer itself refuses ([`Answer::with_beyond`]).
 ///
 /// An answer on the basis of a Policy line must cite a line the Policy of `project` has, at the revision it has now
 /// (the line applied is the line as it reads at the decision). A Crux that is answered already takes no other
@@ -40,6 +50,7 @@ pub fn decide(
     answer: Answer,
     project: &Project,
     replaced: Option<&Crux>,
+    others: &[ChangeRequest],
 ) -> Result<(), ChangeRequestError> {
     debug_assert_eq!(
         crux.raised_in(),
@@ -76,6 +87,7 @@ pub fn decide(
         return Err(ChangeRequestError::AlreadyResolved);
     }
     let answer_id = answer.id();
+    let beyond = answer.beyond().cloned();
     let mut answered = crux.clone();
     answered.answer(answer)?;
     if !cr.is_resolved() {
@@ -85,14 +97,70 @@ pub fn decide(
         if !withdrawn && let Some(replaced_answer) = taken_back(cr, replaced) {
             next.take_back_decided_expects(replaced_answer)?;
         }
-        // A decision that chose no option asks nothing.
+        // A decision that chose no option asks nothing. What it asks to be revised or retired outside the frame is
+        // not asked of this request.
+        let mut outside = Vec::new();
+        if let Some(option) = answered.chosen_option() {
+            let revised = option
+                .expects()
+                .iter()
+                .filter(|(_, kind)| **kind == ExpectKind::Target)
+                .map(|(target, _)| *target);
+            outside = outside_frame(&next, project, revised);
+            if !outside.is_empty() && beyond.is_none() {
+                return Err(ChangeRequestError::AnswerOutside {
+                    crux: crux.id(),
+                    option: option.choice().clone(),
+                    targets: outside,
+                });
+            }
+        }
+        if let Some(Beyond::TakenBy(named)) = &beyond {
+            check_taken_by(named, cr, others, project, &outside)?;
+        }
         if let Some(option) = answered.chosen_option() {
             let now = revisions_now(project, option.expects().keys().copied());
-            next.record_decided_expects(option, &now, answer_id)?;
+            let leave_out: BTreeSet<Target> = outside.into_iter().collect();
+            next.record_decided_expects(option, &now, answer_id, &leave_out)?;
         }
         *cr = next;
     }
     *crux = answered;
+    Ok(())
+}
+
+/// Whether the change requests `named`, among `others`, may take what an answer given in `cr` adds outside it, which
+/// is `outside`: each is there, is not `cr`, is not resolved, and between them they frame every target outside.
+fn check_taken_by(
+    named: &[ChangeRequestId],
+    cr: &ChangeRequest,
+    others: &[ChangeRequest],
+    project: &Project,
+    outside: &[Target],
+) -> Result<(), ChangeRequestError> {
+    let mut taking = Vec::with_capacity(named.len());
+    for id in named.iter().filter(|id| **id != cr.id()) {
+        taking.push(
+            others
+                .iter()
+                .find(|c| c.id() == *id)
+                .ok_or(ChangeRequestError::ReferenceUnknown(*id))?,
+        );
+    }
+    if taking.len() < named.len() {
+        return Err(ChangeRequestError::BeyondItself);
+    }
+    if let Some(done) = taking.iter().find(|c| c.is_resolved()) {
+        return Err(ChangeRequestError::BeyondResolved(done.id()));
+    }
+    for target in outside {
+        let framed = taking
+            .iter()
+            .any(|c| outside_frame(c, project, [*target]).is_empty());
+        if !framed {
+            return Err(ChangeRequestError::BeyondUnframed { target: *target });
+        }
+    }
     Ok(())
 }
 
@@ -108,12 +176,14 @@ pub fn taken_back(cr: &ChangeRequest, replaced: Option<&Crux>) -> Option<AnswerI
 }
 
 /// Raises a Crux in `cr`, the change request it stops, as `draft` says. `replaced` is the Crux `draft` supersedes, as
-/// the caller found it (none when `draft` supersedes none, or the Crux it names is not there).
+/// the caller found it (none when `draft` supersedes none, or the Crux it names is not there). `cruxes` are the
+/// Cruxes there are, to see whether the decision superseded is replaced already.
 ///
 /// It is read in this order, and the first rule broken is the refusal: the change request is resolved
-/// (`AlreadyResolved`); the Crux superseded does not exist or has no decision to replace ([`check_supersedes`]); the
-/// Crux's own rules ([`Crux::raise`]); then each option against `cr` ([`ChangeRequest::check_option`]), leaving out
-/// what the decision [`taken_back`] asked, since it no longer stands once this Crux is decided.
+/// (`AlreadyResolved`); the Crux superseded does not exist, has no decision to replace, or is replaced already
+/// ([`check_supersedes`]); the Crux's own rules ([`Crux::raise`]); then each option against `cr`
+/// ([`ChangeRequest::check_option`]), leaving out what the decision [`taken_back`] asked, since it no longer stands
+/// once this Crux is decided.
 ///
 /// Nothing is changed when it is refused: the change request is only read.
 pub fn raise(
@@ -121,6 +191,7 @@ pub fn raise(
     draft: CruxDraft,
     cr: &ChangeRequest,
     replaced: Option<&Crux>,
+    cruxes: &[Crux],
 ) -> Result<Crux, ChangeRequestError> {
     debug_assert_eq!(
         draft.raised_in,
@@ -135,7 +206,7 @@ pub fn raise(
         return Err(ChangeRequestError::AlreadyResolved);
     }
     if let Some(superseded) = draft.supersedes {
-        check_supersedes(superseded, replaced)?;
+        check_supersedes(superseded, replaced, cruxes)?;
     }
     let crux = Crux::raise(id, draft)?;
     let leaving_out = taken_back(cr, replaced);
@@ -145,15 +216,58 @@ pub fn raise(
     Ok(crux)
 }
 
+/// The Crux among `cruxes` that replaces the decision of `replaced`: one that supersedes it and has not been
+/// withdrawn, whether it is open or decided otherwise. A Crux that was withdrawn replaced nothing, so the decision
+/// stands again and may be superseded anew. One decision is replaced by one Crux, but a store written before that was
+/// a rule may hold two; the one with the smallest id, which is the one raised first, is the answer, so that the same
+/// store always gives the same one.
+pub fn superseded_by(replaced: CruxId, cruxes: &[Crux]) -> Option<&Crux> {
+    cruxes
+        .iter()
+        .filter(|q| q.supersedes() == Some(replaced))
+        .filter(|q| !matches!(q.decision(), Some(Decision::Withdrawn)))
+        .min_by_key(|q| q.id())
+}
+
+/// The Crux whose decision stands for the question `crux` was raised in: `crux` itself when none replaces it, else
+/// the end of the chain of [`superseded_by`]. It may be open, when the last Crux of the chain is not decided yet.
+pub fn standing<'a>(crux: &'a Crux, cruxes: &'a [Crux]) -> &'a Crux {
+    let mut seen = vec![crux.id()];
+    let mut at = crux;
+    while let Some(next) = superseded_by(at.id(), cruxes) {
+        if seen.contains(&next.id()) {
+            break;
+        }
+        seen.push(next.id());
+        at = next;
+    }
+    at
+}
+
 /// Whether a Crux may supersede the Crux `replaced`, which the caller looked up in the store (`found`; none: there is
-/// none). It must exist and have a decision to replace. A withdrawal is a decision, but there is nothing in it to
-/// replace, so it is not one. What was decided is not rewritten; a different decision is a new Crux that points at
-/// the one it replaces.
-pub fn check_supersedes(replaced: CruxId, found: Option<&Crux>) -> Result<(), ChangeRequestError> {
+/// none), among the Cruxes there are (`cruxes`). It must exist and have a decision to replace. A withdrawal is a
+/// decision, but there is nothing in it to replace, so it is not one. What was decided is not rewritten; a different
+/// decision is a new Crux that points at the one it replaces, and only one does: a decision another Crux replaces
+/// already is refused (`SupersededAlready`, naming that Crux, [`superseded_by`]); the Crux to supersede then is the
+/// one that stands ([`standing`]). The rule is read here, when a Crux is raised, and not when a store is read.
+pub fn check_supersedes(
+    replaced: CruxId,
+    found: Option<&Crux>,
+    cruxes: &[Crux],
+) -> Result<(), ChangeRequestError> {
     let crux = found.ok_or(ChangeRequestError::SupersedesUnknown(replaced))?;
     match crux.decision() {
-        Some(Decision::Withdrawn) | None => Err(ChangeRequestError::SupersedesUnanswered(replaced)),
-        Some(_) => Ok(()),
+        Some(Decision::Withdrawn) | None => {
+            return Err(ChangeRequestError::SupersedesUnanswered(replaced));
+        }
+        Some(_) => {}
+    }
+    match superseded_by(replaced, cruxes) {
+        Some(by) => Err(ChangeRequestError::SupersededAlready {
+            crux: replaced,
+            by: by.id(),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -189,6 +303,31 @@ mod tests {
     use crate::domain::vo::title::Title;
 
     use crate::domain::entity::context::Context;
+
+    // The tests that do not read the change requests there are, or the Cruxes there are, call these: the same
+    // functions with none.
+    fn decide(
+        crux: &mut Crux,
+        cr: &mut ChangeRequest,
+        answer: Answer,
+        project: &Project,
+        replaced: Option<&Crux>,
+    ) -> Result<(), ChangeRequestError> {
+        super::decide(crux, cr, answer, project, replaced, &[])
+    }
+
+    fn raise(
+        id: CruxId,
+        draft: CruxDraft,
+        cr: &ChangeRequest,
+        replaced: Option<&Crux>,
+    ) -> Result<Crux, ChangeRequestError> {
+        super::raise(id, draft, cr, replaced, &[])
+    }
+
+    fn check_supersedes(replaced: CruxId, found: Option<&Crux>) -> Result<(), ChangeRequestError> {
+        super::check_supersedes(replaced, found, &[])
+    }
 
     fn prose(s: &str) -> Prose {
         Prose::try_from(s).unwrap()
@@ -234,6 +373,7 @@ mod tests {
         p
     }
 
+    /// A change request that asks the Contract 300 to be revised: its frame holds the Clauses 30 and 31.
     fn cr() -> ChangeRequest {
         ChangeRequest::open(
             ChangeRequestId::from_uuid(test_uuid(1)),
@@ -243,7 +383,10 @@ mod tests {
                 intent: Intent::ChangeBehavior,
                 parent: None,
                 issuer: None,
-                expects: BTreeMap::new(),
+                expects: crate::domain::service::change_request::expectations_now(
+                    &project(),
+                    [(contract(300), ExpectKind::Target)],
+                ),
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
@@ -439,7 +582,10 @@ mod tests {
                 issuer: None,
                 expects: crate::domain::service::change_request::expectations_now(
                     &p,
-                    [(clause(31), ExpectKind::Keep)],
+                    [
+                        (clause(31), ExpectKind::Keep),
+                        (contract(300), ExpectKind::Target),
+                    ],
                 ),
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
@@ -665,7 +811,10 @@ mod tests {
                 issuer: None,
                 expects: crate::domain::service::change_request::expectations_now(
                     &p,
-                    [(clause(31), ExpectKind::Keep)],
+                    [
+                        (clause(31), ExpectKind::Keep),
+                        (contract(300), ExpectKind::Target),
+                    ],
                 ),
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
@@ -709,7 +858,10 @@ mod tests {
                 intent: Intent::ChangeBehavior,
                 parent: None,
                 issuer: None,
-                expects: BTreeMap::new(),
+                expects: crate::domain::service::change_request::expectations_now(
+                    &p,
+                    [(contract(300), ExpectKind::Target)],
+                ),
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
             },
@@ -926,7 +1078,10 @@ mod tests {
                 issuer: None,
                 expects: crate::domain::service::change_request::expectations_now(
                     &p,
-                    [(clause(30), ExpectKind::Target)],
+                    [
+                        (clause(30), ExpectKind::Target),
+                        (contract(300), ExpectKind::Target),
+                    ],
                 ),
                 assumptions: Vec::new(),
                 addresses: Vec::new(),
@@ -983,5 +1138,371 @@ mod tests {
         decide(&mut answered, &mut c, chosen(1), &p, None).unwrap();
         let all = [answered, open.clone()];
         assert_eq!(awaiting_decision(&all), [&open]);
+    }
+
+    // Replacing a decision once.
+
+    #[test]
+    fn a_decision_is_replaced_by_one_crux_unless_that_one_was_withdrawn() {
+        let p = project();
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        let mut b = crux_asking(&c, 502, &[], Some(&a));
+        // `b` is open, and replaces `a` already.
+        let cruxes = [a.clone(), b.clone()];
+        assert_eq!(superseded_by(a.id(), &cruxes).map(Crux::id), Some(b.id()));
+        assert_eq!(superseded_by(b.id(), &cruxes), None);
+        let refused = ChangeRequestError::SupersededAlready {
+            crux: a.id(),
+            by: b.id(),
+        };
+        assert_eq!(
+            super::check_supersedes(a.id(), Some(&a), &cruxes),
+            Err(refused.clone())
+        );
+        let draft = raising(&c, vec![option_asking(1, "up", &[])], Some(&a));
+        assert_eq!(
+            super::raise(new_id(), draft, &c, Some(&a), &cruxes),
+            Err(refused)
+        );
+        // Decided otherwise, it still replaces it.
+        decide(&mut b, &mut c, chosen_with(902), &p, Some(&a)).unwrap();
+        let cruxes = [a.clone(), b.clone()];
+        assert_eq!(superseded_by(a.id(), &cruxes).map(Crux::id), Some(b.id()));
+        // A Crux that was withdrawn replaced nothing: the decision stands, and may be superseded anew.
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        let mut w = crux_asking(&c, 502, &[], Some(&a));
+        decide(
+            &mut w,
+            &mut c,
+            answer_on(Decision::Withdrawn, arbitrary()),
+            &p,
+            Some(&a),
+        )
+        .unwrap();
+        let cruxes = [a.clone(), w];
+        assert_eq!(superseded_by(a.id(), &cruxes), None);
+        assert_eq!(super::check_supersedes(a.id(), Some(&a), &cruxes), Ok(()));
+        let draft = raising(&c, vec![option_asking(1, "up", &[])], Some(&a));
+        assert!(super::raise(new_id(), draft, &c, Some(&a), &cruxes).is_ok());
+    }
+
+    #[test]
+    fn the_decision_that_stands_is_the_end_of_the_chain_and_may_be_a_crux_not_decided_yet() {
+        let p = project();
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        let mut b = crux_asking(&c, 502, &[], Some(&a));
+        decide(&mut b, &mut c, chosen_with(902), &p, Some(&a)).unwrap();
+        let open = crux_asking(&c, 503, &[], Some(&b));
+        let cruxes = [a.clone(), b.clone(), open.clone()];
+        for from in [&a, &b, &open] {
+            assert_eq!(standing(from, &cruxes).id(), open.id());
+        }
+        assert!(standing(&open, &cruxes).is_open());
+        // Without the last link, the chain ends at `b`; a Crux nothing replaces stands for itself.
+        let cruxes = [a.clone(), b.clone()];
+        assert_eq!(standing(&a, &cruxes).id(), b.id());
+        assert_eq!(standing(&b, &[]).id(), b.id());
+    }
+
+    #[test]
+    fn a_store_that_holds_two_cruxes_replacing_one_decision_gives_the_one_raised_first() {
+        let p = project();
+        let mut c = cr();
+        let mut a = crux_asking(&c, 501, &[], None);
+        decide(&mut a, &mut c, chosen_with(901), &p, None).unwrap();
+        let late = crux_asking(&c, 509, &[], Some(&a));
+        let early = crux_asking(&c, 503, &[], Some(&a));
+        for cruxes in [
+            [a.clone(), late.clone(), early.clone()],
+            [early.clone(), a.clone(), late.clone()],
+        ] {
+            assert_eq!(
+                superseded_by(a.id(), &cruxes).map(Crux::id),
+                Some(early.id())
+            );
+            assert_eq!(standing(&a, &cruxes).id(), early.id());
+        }
+    }
+
+    // What an answer adds outside its change request.
+
+    /// The Project of the tests above, with a second Contract (301) of one Clause (32) that a request framing the
+    /// first Contract does not frame.
+    fn project_with_a_second_contract() -> Project {
+        let mut p = project();
+        p.put_contract(
+            ContextId::from_uuid(test_uuid(1)),
+            ContractId::from_uuid(test_uuid(301)),
+            Title::try_from("U").unwrap(),
+            vec![(
+                ClauseId::from_uuid(test_uuid(32)),
+                ClauseContent::new(
+                    ClauseLabel::try_from("C3").unwrap(),
+                    ClauseText::try_from("a sum is whole").unwrap(),
+                ),
+            )],
+        )
+        .unwrap();
+        p
+    }
+
+    fn contract(n: u128) -> Target {
+        Target::Contract(ContractId::from_uuid(test_uuid(n)))
+    }
+
+    /// The change request `n` that asks `framed` to be revised, as `p` has them now.
+    fn request_framing(p: &Project, n: u128, title: &str, framed: &[Target]) -> ChangeRequest {
+        ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(n)),
+            ChangeRequestDraft {
+                title: Title::try_from(title).unwrap(),
+                situation: None,
+                intent: Intent::ChangeBehavior,
+                parent: None,
+                issuer: None,
+                expects: crate::domain::service::change_request::expectations_now(
+                    p,
+                    framed.iter().map(|t| (*t, ExpectKind::Target)),
+                ),
+                assumptions: Vec::new(),
+                addresses: Vec::new(),
+            },
+        )
+    }
+
+    fn taken_by(requests: &[&ChangeRequest]) -> Beyond {
+        Beyond::taken_by(requests.iter().map(|c| c.id()).collect()).unwrap()
+    }
+
+    #[test]
+    fn an_option_inside_the_frame_is_recorded_and_says_nothing_beyond() {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(&c, 501, &[(clause(31), ExpectKind::Target)], None);
+        decide(&mut q, &mut c, chosen_with(901), &p, None).unwrap();
+        assert_eq!(c.decided_expects().len(), 1);
+        assert_eq!(c.decided_expects()[0].target, clause(31));
+        assert_eq!(q.answer_given().and_then(Answer::beyond), None);
+    }
+
+    #[test]
+    fn an_option_that_names_a_target_outside_the_frame_needs_the_answer_to_say_where_it_goes() {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let before = c.clone();
+        let mut q = crux_asking(
+            &c,
+            501,
+            &[
+                (clause(31), ExpectKind::Target),
+                (clause(32), ExpectKind::Target),
+            ],
+            None,
+        );
+        assert_eq!(
+            decide(&mut q, &mut c, chosen_with(901), &p, None),
+            Err(ChangeRequestError::AnswerOutside {
+                crux: q.id(),
+                option: Choice::try_from("this").unwrap(),
+                targets: vec![clause(32)]
+            })
+        );
+        assert!(q.is_open());
+        assert_eq!(c, before);
+        // A keep protects, it does not widen: one outside the frame is recorded, and is not outside.
+        let mut keeps = crux_asking(&c, 502, &[(clause(32), ExpectKind::Keep)], None);
+        decide(&mut keeps, &mut c, chosen_with(902), &p, None).unwrap();
+        assert_eq!(c.decided_expects().len(), 1);
+        assert_eq!(c.decided_expects()[0].kind, ExpectKind::Keep);
+    }
+
+    #[test]
+    fn what_lies_outside_goes_to_the_requests_that_frame_it_and_is_not_recorded_in_this_one() {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let other = request_framing(&p, 2, "Other", &[clause(32)]);
+        let mut q = crux_asking(
+            &c,
+            501,
+            &[
+                (clause(31), ExpectKind::Target),
+                (clause(32), ExpectKind::Target),
+            ],
+            None,
+        );
+        let beyond = taken_by(&[&other]);
+        let all = [c.clone(), other.clone()];
+        super::decide(
+            &mut q,
+            &mut c,
+            chosen_with(901).with_beyond(beyond.clone()).unwrap(),
+            &p,
+            None,
+            &all,
+        )
+        .unwrap();
+        assert!(!q.is_open());
+        assert_eq!(q.answer_given().and_then(Answer::beyond), Some(&beyond));
+        // The target inside is recorded, the one outside is not, and the frame did not grow by it.
+        let recorded: Vec<Target> = c.decided_expects().iter().map(|d| d.target).collect();
+        assert_eq!(recorded, [clause(31)]);
+        assert!(!crate::domain::service::change_request::frame(&c).contains(&clause(32)));
+    }
+
+    #[test]
+    fn what_lies_outside_may_be_declined_and_is_not_recorded_either() {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(&c, 501, &[(clause(32), ExpectKind::Target)], None);
+        let declined = Beyond::declined(prose("not now"));
+        super::decide(
+            &mut q,
+            &mut c,
+            chosen_with(901).with_beyond(declined.clone()).unwrap(),
+            &p,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(q.answer_given().and_then(Answer::beyond), Some(&declined));
+        assert!(c.decided_expects().is_empty());
+    }
+
+    #[test]
+    fn the_requests_an_answer_names_are_there_not_this_one_not_resolved_and_frame_what_is_outside()
+    {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(
+            &c,
+            501,
+            &[
+                (clause(31), ExpectKind::Target),
+                (clause(32), ExpectKind::Target),
+            ],
+            None,
+        );
+        let before = (c.clone(), q.clone());
+        let elsewhere = request_framing(&p, 2, "Elsewhere", &[clause(30)]);
+        let mut done = request_framing(&p, 3, "Done", &[clause(32)]);
+        done.resolve(Resolution::new(
+            ResolutionKind::Done,
+            prose("done"),
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(7),
+        ))
+        .unwrap();
+        let framing = request_framing(&p, 4, "Framing", &[contract(301)]);
+        let ghost = ChangeRequestId::from_uuid(test_uuid(99));
+        let all = [c.clone(), elsewhere.clone(), done.clone(), framing.clone()];
+        for (named, refused) in [
+            (
+                vec![elsewhere.id()],
+                ChangeRequestError::BeyondUnframed { target: clause(32) },
+            ),
+            (vec![c.id()], ChangeRequestError::BeyondItself),
+            (
+                vec![done.id()],
+                ChangeRequestError::BeyondResolved(done.id()),
+            ),
+            // One that frames it does not make up for one that is refused.
+            (
+                vec![framing.id(), done.id()],
+                ChangeRequestError::BeyondResolved(done.id()),
+            ),
+            (vec![ghost], ChangeRequestError::ReferenceUnknown(ghost)),
+        ] {
+            let answer = chosen_with(901)
+                .with_beyond(Beyond::taken_by(named).unwrap())
+                .unwrap();
+            assert_eq!(
+                super::decide(&mut q, &mut c, answer, &p, None, &all),
+                Err(refused)
+            );
+            assert_eq!((c.clone(), q.clone()), before, "nothing was changed");
+        }
+        // Two requests that frame a target between them, each one, are enough.
+        let one = request_framing(&p, 5, "One", &[clause(32)]);
+        let all = [c.clone(), elsewhere.clone(), one.clone()];
+        let answer = chosen_with(901)
+            .with_beyond(taken_by(&[&elsewhere, &one]))
+            .unwrap();
+        super::decide(&mut q, &mut c, answer, &p, None, &all).unwrap();
+        // They are read when nothing is outside too: a worded answer may reach outside in its words.
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(&c, 502, &[(clause(31), ExpectKind::Target)], None);
+        let answer = chosen_with(901).with_beyond(taken_by(&[&c])).unwrap();
+        let all = [c.clone()];
+        assert_eq!(
+            super::decide(&mut q, &mut c, answer, &p, None, &all),
+            Err(ChangeRequestError::BeyondItself)
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_cannot_be_given_a_beyond_so_no_decision_carries_one() {
+        let p = project_with_a_second_contract();
+        let declined = Beyond::declined(prose("nothing"));
+        assert_eq!(
+            answer_on(Decision::Withdrawn, arbitrary()).with_beyond(declined.clone()),
+            Err(ChangeRequestError::BeyondOnWithdrawal)
+        );
+        // Any other decision may, and a withdrawal without one is decided in a resolved request as it was.
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(&c, 501, &[], None);
+        c.resolve(Resolution::new(
+            ResolutionKind::WontDo,
+            prose("not needed"),
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(7),
+        ))
+        .unwrap();
+        decide(
+            &mut q,
+            &mut c,
+            answer_on(Decision::Withdrawn, arbitrary()),
+            &p,
+            None,
+        )
+        .unwrap();
+        assert!(
+            answer_on(Decision::Unspecified { keep: Vec::new() }, arbitrary())
+                .with_beyond(declined)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn what_the_decision_replaced_asked_is_taken_back_before_the_frame_is_read() {
+        let p = project_with_a_second_contract();
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        // A request widened by an earlier decision, as a store written before a decision stopped doing that has it.
+        let mut a = crux_asking(&c, 501, &[(clause(32), ExpectKind::Target)], None);
+        a.answer(chosen_with(901)).unwrap();
+        let now = revisions_now(&p, [clause(32)]);
+        c.record_decided_expects(
+            a.chosen_option().unwrap(),
+            &now,
+            AnswerId::from_uuid(test_uuid(901)),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(crate::domain::service::change_request::frame(&c).contains(&clause(32)));
+        // The same ask again, as a decision that replaces it: the take-back leaves it outside the frame.
+        let mut b = crux_asking(&c, 502, &[(clause(32), ExpectKind::Target)], Some(&a));
+        assert_eq!(
+            decide(&mut b, &mut c, chosen_with(902), &p, Some(&a)),
+            Err(ChangeRequestError::AnswerOutside {
+                crux: b.id(),
+                option: Choice::try_from("this").unwrap(),
+                targets: vec![clause(32)]
+            })
+        );
     }
 }

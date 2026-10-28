@@ -3,8 +3,10 @@
 //! is `Corrupt`, never quietly repaired.
 //!
 //! The schemas are numbered per kind of document: the Project and the Pin are at 2, the change request at 3 and the
-//! Crux at 1. A change request document of schema 1 or 2 held its Crux; it is read only by the migration of the store
-//! to layout 2 ([`layout2`]), which writes it again as schema 3, and never by [`decode_change_request`].
+//! Crux at 2 (its answer may say where what it added outside its change request went; a Crux of schema 1 is read as
+//! it is, with no such answer). A change request document of schema 1 or 2 held its Crux; it is read only by the
+//! migration of the store to layout 2 ([`layout2`]), which writes it again as schema 3, and never by
+//! [`decode_change_request`].
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -376,7 +378,14 @@ pub(crate) mod fixture {
                 intent: Intent::ChangeBehavior,
                 parent: Some(ChangeRequestId::from_uuid(id(60))),
                 issuer: Some(Issuer::try_from("yutaka").unwrap()),
-                expects: expectations_now(p, targets.map(|t| (t, ExpectKind::Target))),
+                // The Interface frames the Item the decision asks, which the request does not name.
+                expects: expectations_now(
+                    p,
+                    targets
+                        .into_iter()
+                        .chain([Target::Interface(InterfaceId::from_uuid(id(IFACE)))])
+                        .map(|t| (t, ExpectKind::Target)),
+                ),
                 assumptions: vec![assumption()],
                 addresses: vec![
                     FindingRef::new(
@@ -430,6 +439,7 @@ pub(crate) mod fixture {
             ),
             p,
             None,
+            &[],
         )
         .unwrap();
         // An open question raised from findings, in a request that was resolved without it: a record of what was.
@@ -627,6 +637,7 @@ pub(crate) mod fixture {
                 answer(n, decision, basis, alice(), at),
                 p,
                 None,
+                &[],
             )
             .unwrap();
             crs.push(cr);
@@ -772,6 +783,63 @@ mod tests {
         for q in all.into_iter().chain(other_cruxes) {
             let text = encode_crux(&q).unwrap();
             assert_eq!(decode_crux(CURRENT_CRUX, &text).unwrap(), q);
+        }
+    }
+
+    #[test]
+    fn a_crux_of_schema_1_is_read_as_it_is_and_an_answer_writes_its_beyond_only_when_it_has_one() {
+        use crate::domain::vo::answer::Beyond;
+        use crate::domain::vo::id::ChangeRequestId;
+        use crate::domain::vo::prose::Prose;
+
+        let p = project();
+        let answered = cruxes(&p).remove(0);
+        let text = encode_crux(&answered).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["schema"], CURRENT_CRUX);
+        // An answer that says nothing of what lies outside writes no `beyond`.
+        assert!(doc["state"]["answered"].get("beyond").is_none());
+        // The document as schema 1 wrote it is the same without the number: it reads, and its record says 1.
+        doc["schema"] = serde_json::json!(1);
+        assert_eq!(decode_crux(1, &doc.to_string()).unwrap(), answered);
+        assert!(decode_crux(CURRENT_CRUX, &doc.to_string()).is_err());
+
+        // Both forms of `beyond` come back as they were written.
+        let request = ChangeRequestId::from_uuid(id(1));
+        for (written, read) in [
+            (
+                serde_json::json!({"requests": [id(1).to_string(), id(2).to_string()]}),
+                Beyond::taken_by(vec![request, ChangeRequestId::from_uuid(id(2))]).unwrap(),
+            ),
+            (
+                serde_json::json!({"declined": "later"}),
+                Beyond::declined(Prose::try_from("later").unwrap()),
+            ),
+        ] {
+            let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+            doc["state"]["answered"]["beyond"] = written;
+            let q = decode_crux(CURRENT_CRUX, &doc.to_string()).unwrap();
+            assert_eq!(q.answer_given().and_then(|a| a.beyond()), Some(&read));
+            let back: serde_json::Value = serde_json::from_str(&encode_crux(&q).unwrap()).unwrap();
+            assert_eq!(back, doc);
+        }
+        // What the domain refuses is corrupt: none, one twice, an id that is none, a blank reason, a form unknown.
+        for odd in [
+            serde_json::json!({"requests": []}),
+            serde_json::json!({"requests": [id(1).to_string(), id(1).to_string()]}),
+            serde_json::json!({"requests": ["not an id"]}),
+            serde_json::json!({"declined": "  "}),
+            serde_json::json!({"neither": true}),
+        ] {
+            let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+            doc["state"]["answered"]["beyond"] = odd;
+            assert!(
+                matches!(
+                    decode_crux(CURRENT_CRUX, &doc.to_string()),
+                    Err(StoreError::Corrupt(_))
+                ),
+                "{doc}"
+            );
         }
     }
 

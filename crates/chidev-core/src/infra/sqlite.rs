@@ -2561,7 +2561,7 @@ mod tests {
             reason: None,
         };
         let revision = app.store().revision().await.unwrap();
-        let refused = app.decide_crux(&id, &chosen, &basis, &by).await;
+        let refused = app.decide_crux(&id, &chosen, None, &basis, &by).await;
         assert!(
             matches!(
                 refused,
@@ -2574,7 +2574,7 @@ mod tests {
         );
         assert_eq!(app.store().revision().await.unwrap(), revision);
 
-        app.decide_crux(&id, &DecisionInput::Withdrawn, &basis, &by)
+        app.decide_crux(&id, &DecisionInput::Withdrawn, None, &basis, &by)
             .await
             .unwrap();
         let store = app.into_store();

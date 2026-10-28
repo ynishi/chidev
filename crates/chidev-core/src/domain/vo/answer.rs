@@ -7,11 +7,12 @@ use std::fmt;
 use thiserror::Error;
 
 use super::crux::Decision;
-use super::id::AnswerId;
+use super::id::{AnswerId, ChangeRequestId};
 use super::policy::PolicyLineId;
 use super::prose::Prose;
 use super::revision::Revision;
 use super::timestamp::Timestamp;
+use crate::domain::entity::change_request::ChangeRequestError;
 
 /// What a decision rests on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,53 @@ pub enum Basis {
         /// Why.
         reason: Prose,
     },
+}
+
+/// Why a list of change requests is not a `beyond` an answer can carry.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BeyondError {
+    /// The list is empty.
+    #[error("`beyond` names no change request")]
+    Empty,
+    /// A change request is in the list twice.
+    #[error("the change request {0} is named twice in `beyond`")]
+    Twice(ChangeRequestId),
+}
+
+/// Where what an answer adds outside the change request it was given in goes. An answer may choose an option that
+/// names targets the change request does not frame, and the change request does not take them (its frame is what it
+/// was opened with), so the answer says what became of them. It is part of the answer: written with it, never
+/// rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Beyond {
+    /// Change requests opened for it, each framing the targets that are outside. Build it with
+    /// [`Beyond::taken_by`], which refuses a list that is empty or names a change request twice.
+    TakenBy(Vec<ChangeRequestId>),
+    /// It is not done.
+    Declined {
+        /// Why.
+        reason: Prose,
+    },
+}
+
+impl Beyond {
+    /// `Beyond::TakenBy` of `requests`, which are at least one and none twice.
+    pub fn taken_by(requests: Vec<ChangeRequestId>) -> Result<Beyond, BeyondError> {
+        if requests.is_empty() {
+            return Err(BeyondError::Empty);
+        }
+        for (i, id) in requests.iter().enumerate() {
+            if requests[..i].contains(id) {
+                return Err(BeyondError::Twice(*id));
+            }
+        }
+        Ok(Beyond::TakenBy(requests))
+    }
+
+    /// `Beyond::Declined`, with the reason it is not done.
+    pub fn declined(reason: Prose) -> Beyond {
+        Beyond::Declined { reason }
+    }
 }
 
 /// Why a text is not the name of a decision maker.
@@ -116,7 +164,8 @@ impl fmt::Display for DecisionMaker {
 }
 
 /// The answer to a Crux: its id, the decision, the basis it rests on, who decided it, and when. An answer is
-/// immutable; a different decision is a new Crux that supersedes the one answered.
+/// immutable; a different decision is a new Crux that supersedes the one answered. It may say where what it adds
+/// outside its change request goes ([`Beyond`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
     id: AnswerId,
@@ -124,10 +173,11 @@ pub struct Answer {
     basis: Basis,
     by: DecisionMaker,
     at: Timestamp,
+    beyond: Option<Beyond>,
 }
 
 impl Answer {
-    /// An answer.
+    /// An answer that says nothing of what lies outside its change request.
     pub fn new(
         id: AnswerId,
         decision: Decision,
@@ -141,7 +191,18 @@ impl Answer {
             basis,
             by,
             at,
+            beyond: None,
         }
+    }
+
+    /// This answer, saying where what it adds outside its change request goes. A withdrawal asks nothing and adds
+    /// nothing, so it has no outside to speak of (`BeyondOnWithdrawal`).
+    pub fn with_beyond(mut self, beyond: Beyond) -> Result<Answer, ChangeRequestError> {
+        if matches!(self.decision, Decision::Withdrawn) {
+            return Err(ChangeRequestError::BeyondOnWithdrawal);
+        }
+        self.beyond = Some(beyond);
+        Ok(self)
     }
 
     /// Its id.
@@ -168,11 +229,74 @@ impl Answer {
     pub fn at(&self) -> Timestamp {
         self.at
     }
+
+    /// Where what it adds outside its change request goes, when it says.
+    pub fn beyond(&self) -> Option<&Beyond> {
+        self.beyond.as_ref()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::vo::id::test_uuid;
+
+    fn request(n: u128) -> ChangeRequestId {
+        ChangeRequestId::from_uuid(test_uuid(n))
+    }
+
+    #[test]
+    fn a_beyond_names_at_least_one_change_request_and_none_twice() {
+        assert_eq!(Beyond::taken_by(Vec::new()), Err(BeyondError::Empty));
+        assert_eq!(
+            Beyond::taken_by(vec![request(1), request(2), request(1)]),
+            Err(BeyondError::Twice(request(1)))
+        );
+        assert_eq!(
+            Beyond::taken_by(vec![request(2), request(1)]),
+            Ok(Beyond::TakenBy(vec![request(2), request(1)]))
+        );
+    }
+
+    #[test]
+    fn an_answer_says_nothing_beyond_until_it_is_given_a_beyond() {
+        let answer = Answer::new(
+            AnswerId::from_uuid(test_uuid(900)),
+            Decision::Worded {
+                wording: Prose::try_from("a half rounds up").unwrap(),
+                reason: None,
+            },
+            Basis::Arbitrary {
+                reason: Prose::try_from("settled").unwrap(),
+            },
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(5),
+        );
+        assert_eq!(answer.beyond(), None);
+        let declined = Beyond::declined(Prose::try_from("not needed").unwrap());
+        assert_eq!(
+            answer.with_beyond(declined.clone()).unwrap().beyond(),
+            Some(&declined)
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_takes_no_beyond() {
+        let withdrawal = Answer::new(
+            AnswerId::from_uuid(test_uuid(900)),
+            Decision::Withdrawn,
+            Basis::Arbitrary {
+                reason: Prose::try_from("not needed").unwrap(),
+            },
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(5),
+        );
+        let declined = Beyond::declined(Prose::try_from("nothing").unwrap());
+        assert_eq!(
+            withdrawal.with_beyond(declined),
+            Err(ChangeRequestError::BeyondOnWithdrawal)
+        );
+    }
 
     #[test]
     fn a_decision_maker_is_a_role_or_a_person_with_a_name_that_is_not_blank() {

@@ -432,6 +432,7 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
             option: raised.options[0].id.to_string(),
             reason: None,
         },
+        None,
         &BasisInput::Arbitrary("nothing derives it".into()),
         &DecisionMakerInput::Person("alice".into()),
     )

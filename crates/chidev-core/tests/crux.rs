@@ -7,12 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, BasisInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxKind, DecisionInput,
-    DecisionMakerInput, FindingInput, Importance, Intent, OptionInput, RaiseCruxInput, Raised,
-    RecommendationInput, ResolutionInput, SubjectInput, TargetInput,
+    App, AppError, BasisInput, BeyondInput, BeyondStatus, ChangeRequestInput, ClauseInput,
+    ClauseRef, CruxKind, DecisionInput, DecisionMakerInput, FindingInput, Importance, Intent,
+    OptionInput, RaiseCruxInput, Raised, RecommendationInput, ResolutionInput, SubjectInput,
+    TargetInput,
 };
 use chidev_core::domain::entity::change_request::ChangeRequestError;
 use chidev_core::domain::repository::{ChangeRequestRepository, CruxRepository};
+use chidev_core::domain::vo::answer::Beyond;
 use chidev_core::domain::vo::crux::Decision;
 use chidev_core::domain::vo::target::ExpectKind;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -65,8 +67,23 @@ fn clause(label: &str) -> TargetInput {
     })
 }
 
+/// The Contract `rounding`, as a request names it to be revised: its frame holds C1 and C2.
+fn rounding() -> TargetInput {
+    TargetInput::Contract {
+        context: "core".into(),
+        contract: "rounding".into(),
+    }
+}
+
+/// A request that asks the Contract `rounding` to be revised.
+fn framing(title: &str) -> ChangeRequestInput {
+    let mut input = request(title);
+    input.targets = vec![rounding()];
+    input
+}
+
 /// A Project with the Context `core` and its Contract `rounding` (C1 and C2), and the change request
-/// `Round halves`, which asks nothing of a target.
+/// `Round halves`, which asks the Contract to be revised.
 async fn project() -> Test {
     let store = SqliteStore::open(fresh_path()).await.unwrap();
     let mut app = App::new(
@@ -95,7 +112,7 @@ async fn project() -> Test {
     )
     .await
     .unwrap();
-    app.open_change_request(&request("Round halves"))
+    app.open_change_request(&framing("Round halves"))
         .await
         .unwrap();
     app
@@ -148,7 +165,17 @@ async fn decide(
     crux: &str,
     decision: &DecisionInput,
 ) -> Result<chidev_core::app::Checked<()>, AppError> {
-    app.decide_crux(crux, decision, &arbitrary(), &alice())
+    decide_beyond(app, crux, decision, None).await
+}
+
+/// A decision that says where what it adds outside its change request goes.
+async fn decide_beyond(
+    app: &mut Test,
+    crux: &str,
+    decision: &DecisionInput,
+    beyond: Option<&BeyondInput>,
+) -> Result<chidev_core::app::Checked<()>, AppError> {
+    app.decide_crux(crux, decision, beyond, &arbitrary(), &alice())
         .await
 }
 
@@ -728,6 +755,7 @@ async fn a_decision_names_an_option_the_crux_has_and_a_crux_that_exists() {
         .decide_crux(
             &id,
             &chosen(&raised, 0),
+            None,
             &BasisInput::Policy("P1".into()),
             &alice(),
         )
@@ -814,7 +842,6 @@ async fn a_crux_supersedes_only_a_crux_that_exists_and_has_a_decision_to_replace
     for (target, code) in [
         (open.id.to_string(), "cr.supersedes-unanswered"),
         (gone.id.to_string(), "cr.supersedes-unanswered"),
-        (Uuid::from_u128(7_777).to_string(), "cr.supersedes-unknown"),
     ] {
         let err = app.raise_crux(&supersede(target)).await.unwrap_err();
         assert_eq!(codes(&app, &err).await, [code]);
@@ -824,6 +851,130 @@ async fn a_crux_supersedes_only_a_crux_that_exists_and_has_a_decision_to_replace
         Err(AppError::Input(_))
     ));
     assert_eq!(revision(&app).await, at);
+}
+
+#[tokio::test]
+async fn a_supersedes_that_names_no_crux_is_a_name_that_does_not_exist_with_the_cruxes_that_do() {
+    let mut app = project().await;
+    let first = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("a")]),
+    )
+    .await;
+    let at = revision(&app).await;
+    let ghost = Uuid::from_u128(7_777).to_string();
+    let mut near = first.id.to_string();
+    near.pop();
+    near.push(if near.ends_with('f') { 'e' } else { 'f' });
+    for (named, close) in [(ghost.clone(), false), (near.clone(), true)] {
+        let mut input = ask("Round halves", CruxKind::Ambiguity, vec![option("b")]);
+        input.supersedes = Some(named.clone());
+        let err = app.raise_crux(&input).await.unwrap_err();
+        assert_eq!(err, AppError::UnknownSupersedes(named.clone()));
+        assert_eq!(codes(&app, &err).await, ["input.unknown-name"]);
+        let d = only(&app, &err).await;
+        assert_eq!(d.values["kind"], "crux");
+        assert_eq!(d.values["name"], named.as_str());
+        assert_eq!(d.field.as_deref(), Some("supersedes"));
+        // a Crux id is not made by naming it
+        assert!(d.suggestions.is_empty(), "{d:#?}");
+        if close {
+            assert_eq!(d.did_you_mean, [first.id.to_string()]);
+        }
+    }
+    assert_eq!(revision(&app).await, at);
+}
+
+/// The ids of the Cruxes of a chain: `first`, decided, then one superseding each decided one in turn.
+async fn chain(app: &mut Test, links: usize) -> Vec<Raised> {
+    let mut out: Vec<Raised> = Vec::new();
+    for k in 0..links {
+        let mut input = ask(
+            "Round halves",
+            CruxKind::Ambiguity,
+            vec![option("up"), option("down")],
+        );
+        input.supersedes = out.last().map(|r| r.id.to_string());
+        let raised = raise(app, &input).await;
+        decide(app, &raised.id.to_string(), &chosen(&raised, k % 2))
+            .await
+            .unwrap();
+        out.push(raised);
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_decision_is_replaced_by_one_crux_and_the_suggestion_names_the_one_that_stands() {
+    let mut app = project().await;
+    let links = chain(&mut app, 2).await;
+    let at = revision(&app).await;
+    // The first decision is replaced by the second already.
+    let mut again = ask("Round halves", CruxKind::Ambiguity, vec![option("third")]);
+    again.supersedes = Some(links[0].id.to_string());
+    let err = app.raise_crux(&again).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.supersedes-superseded"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["by"], links[1].id.to_string().as_str());
+    // The way out is to supersede the decision that stands.
+    assert_eq!(d.suggestions.len(), 1);
+    assert_eq!(d.suggestions[0].op["op"], "cr_crux_raise");
+    assert_eq!(d.suggestions[0].op["in"], "Round halves");
+    assert_eq!(
+        d.suggestions[0].op["supersedes"],
+        links[1].id.to_string().as_str()
+    );
+    assert_eq!(revision(&app).await, at, "nothing was kept");
+    // The one that stands may be superseded.
+    again.supersedes = Some(links[1].id.to_string());
+    raise(&mut app, &again).await;
+
+    // A Crux that replaces it but is not decided yet is the one to decide.
+    let mut app = project().await;
+    let links = chain(&mut app, 1).await;
+    let mut open = ask("Round halves", CruxKind::Ambiguity, vec![option("third")]);
+    open.supersedes = Some(links[0].id.to_string());
+    let pending = raise(&mut app, &open).await;
+    let err = app.raise_crux(&open).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.supersedes-superseded"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.suggestions.len(), 1);
+    assert_eq!(d.suggestions[0].op["op"], "cr_crux_decide");
+    assert_eq!(d.suggestions[0].op["crux"], pending.id.to_string().as_str());
+
+    // One that was withdrawn replaced nothing: the decision may be superseded anew.
+    decide(&mut app, &pending.id.to_string(), &DecisionInput::Withdrawn)
+        .await
+        .unwrap();
+    raise(&mut app, &open).await;
+}
+
+#[tokio::test]
+async fn the_suggestion_to_supersede_a_decision_of_a_resolved_request_reopens_it_first() {
+    let mut app = project().await;
+    let raised = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("up")]),
+    )
+    .await;
+    let id = raised.id.to_string();
+    decide(&mut app, &id, &chosen(&raised, 0)).await.unwrap();
+    app.resolve_change_request("Round halves", &ResolutionInput::Done, "shipped", &alice())
+        .await
+        .unwrap();
+    let err = decide(&mut app, &id, &chosen(&raised, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.crux-answered"]);
+    let suggestions = &only(&app, &err).await.suggestions;
+    let ops: Vec<&str> = suggestions
+        .iter()
+        .map(|s| s.op["op"].as_str().unwrap())
+        .collect();
+    assert_eq!(ops, ["cr_reopen", "cr_crux_raise"]);
+    assert_eq!(suggestions[0].op["title"], "Round halves");
+    assert_eq!(suggestions[1].op["in"], "Round halves");
+    assert_eq!(suggestions[1].op["supersedes"], id.as_str());
 }
 
 #[tokio::test]
@@ -1183,7 +1334,7 @@ async fn a_crux_that_supersedes_one_of_two_decisions_that_keep_a_target_leaves_t
 #[tokio::test]
 async fn a_crux_that_supersedes_a_decision_of_another_request_leaves_that_request_as_it_is() {
     let mut app = project().await;
-    app.open_change_request(&request("Other")).await.unwrap();
+    app.open_change_request(&framing("Other")).await.unwrap();
     let first = raise(
         &mut app,
         &asking_of("Other", "reword C2", "C2", ExpectKind::Target),
@@ -1224,8 +1375,8 @@ async fn a_crux_that_supersedes_a_decision_of_another_request_leaves_that_reques
 async fn a_decision_that_supersedes_one_and_is_refused_takes_nothing_back() {
     let mut app = project().await;
     // The request itself asks C2 to be revised.
-    let mut asked = request("Asks C2");
-    asked.targets = vec![clause("C2")];
+    let mut asked = framing("Asks C2");
+    asked.targets.push(clause("C2"));
     app.open_change_request(&asked).await.unwrap();
     let first = raise(
         &mut app,
@@ -1306,4 +1457,253 @@ async fn the_suggestion_for_an_open_or_an_answered_crux_names_that_crux_only() {
     let told = &app.diagnose(&err).await[0];
     assert_eq!(told.code, "cr.crux-answered");
     assert!(told.suggestions.is_empty(), "{:?}", told.suggestions);
+}
+
+/// A Clause of the Contract `billing`, which `with_billing` makes.
+fn billing_clause() -> TargetInput {
+    TargetInput::Clause(ClauseRef {
+        context: Some("core".into()),
+        contract: "billing".into(),
+        label: "C1".into(),
+    })
+}
+
+/// `project()` with a second Contract, `billing` (C1), and the change request `Billing totals`, which asks it to be
+/// revised: it frames what `Round halves` does not.
+async fn with_billing() -> Test {
+    let mut app = project().await;
+    app.put_contract(
+        "core",
+        "billing",
+        "Billing",
+        &[ClauseInput {
+            label: "C1".into(),
+            text: "a total is summed".into(),
+            replaces: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let mut billing = request("Billing totals");
+    billing.targets = vec![TargetInput::Contract {
+        context: "core".into(),
+        contract: "billing".into(),
+    }];
+    app.open_change_request(&billing).await.unwrap();
+    app
+}
+
+/// A Crux in `Round halves` whose first option asks C1 of `rounding` and C1 of `billing` to be revised: the second
+/// is outside the request.
+async fn raise_outside(app: &mut Test) -> Raised {
+    let mut input = ask(
+        "Round halves",
+        CruxKind::Ambiguity,
+        vec![option("sum first"), option("round first")],
+    );
+    input.options[0].targets = vec![clause("C1"), billing_clause()];
+    raise(app, &input).await
+}
+
+#[tokio::test]
+async fn an_option_chosen_that_names_a_target_outside_the_request_is_refused_until_the_answer_says_where_it_goes()
+ {
+    let mut app = with_billing().await;
+    let raised = raise_outside(&mut app).await;
+    let id = raised.id.to_string();
+    let at = revision(&app).await;
+    let err = decide(&mut app, &id, &chosen(&raised, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.crux-answer-outside"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["option"], "sum first");
+    let outside = d.values["targets"].as_array().unwrap();
+    assert_eq!(outside.len(), 1, "{d:#?}");
+    assert!(outside[0].as_str().unwrap().contains("billing"), "{d:#?}");
+    assert_eq!(d.subjects[0].name, "Round halves");
+    // the way out: a request for them, the decision naming it, or the decision declining them
+    let ops: Vec<&str> = d
+        .suggestions
+        .iter()
+        .map(|s| s.op["op"].as_str().unwrap())
+        .collect();
+    assert_eq!(ops, ["cr_open", "cr_crux_decide", "cr_crux_decide"]);
+    assert_eq!(
+        d.suggestions[0].op["targets"],
+        serde_json::json!([{"clause": {"context": "core", "contract": "billing", "label": "C1"}}])
+    );
+    assert_eq!(d.suggestions[1].op["crux"], id.as_str());
+    assert!(d.suggestions[1].op["beyond"]["requests"].is_array());
+    assert!(d.suggestions[2].op["beyond"]["declined"].is_string());
+    assert_eq!(revision(&app).await, at, "nothing was kept");
+    assert!(
+        app.store()
+            .crux(raised.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_open()
+    );
+}
+
+#[tokio::test]
+async fn the_requests_an_answer_names_are_read_by_title_and_by_the_rules_of_a_decision() {
+    let mut app = with_billing().await;
+    app.open_change_request(&request("Quiet")).await.unwrap();
+    let raised = raise_outside(&mut app).await;
+    let id = raised.id.to_string();
+    let decision = chosen(&raised, 0);
+    let at = revision(&app).await;
+    let requests =
+        |titles: &[&str]| BeyondInput::Requests(titles.iter().map(ToString::to_string).collect());
+    // a title that names no change request is a name that does not exist, as for `cr_resolve`
+    let err = decide_beyond(&mut app, &id, &decision, Some(&requests(&["Nobody"])))
+        .await
+        .unwrap_err();
+    assert_eq!(err, AppError::UnknownChangeRequest("Nobody".into()));
+    assert_eq!(codes(&app, &err).await, ["input.unknown-name"]);
+    assert_eq!(only(&app, &err).await.values["kind"], "change request");
+    // the change request the Crux was raised in, one that does not frame what is outside
+    for (titles, code) in [
+        (vec!["Round halves"], "cr.crux-beyond-itself"),
+        (vec!["Quiet"], "cr.crux-beyond-unframed"),
+        (
+            vec!["Billing totals", "Round halves"],
+            "cr.crux-beyond-itself",
+        ),
+    ] {
+        let err = decide_beyond(&mut app, &id, &decision, Some(&requests(&titles)))
+            .await
+            .unwrap_err();
+        assert_eq!(codes(&app, &err).await, [code], "{titles:?}");
+    }
+    // a list that is none, a title twice, a reason that is blank
+    for beyond in [
+        requests(&[]),
+        requests(&["Billing totals", "Billing totals"]),
+        BeyondInput::Declined("  ".into()),
+    ] {
+        let err = decide_beyond(&mut app, &id, &decision, Some(&beyond))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Input(_)), "{err:?}");
+    }
+    assert_eq!(revision(&app).await, at, "none of them kept anything");
+    // a request that is resolved takes no more work: it is the first subject, the sentence names it, and it is the
+    // one to reopen
+    app.resolve_change_request(
+        "Billing totals",
+        &ResolutionInput::WontDo,
+        "later",
+        &alice(),
+    )
+    .await
+    .unwrap();
+    let at_resolved = revision(&app).await;
+    let err = decide_beyond(
+        &mut app,
+        &id,
+        &decision,
+        Some(&requests(&["Billing totals"])),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.already-resolved"]);
+    let d = only(&app, &err).await;
+    let subjects: Vec<&str> = d.subjects.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(subjects, ["Billing totals", "Round halves"]);
+    assert!(d.message.contains("Billing totals"), "{}", d.message);
+    assert!(!d.message.contains("Round halves"), "{}", d.message);
+    assert_eq!(d.suggestions[0].op["op"], "cr_reopen");
+    assert_eq!(d.suggestions[0].op["title"], "Billing totals");
+    assert_eq!(revision(&app).await, at_resolved);
+    // a withdrawal asks nothing and adds nothing
+    let other = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("x")]),
+    )
+    .await;
+    let err = decide_beyond(
+        &mut app,
+        &other.id.to_string(),
+        &DecisionInput::Withdrawn,
+        Some(&BeyondInput::Declined("nothing".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.crux-beyond-withdrawn"]);
+}
+
+#[tokio::test]
+async fn what_lies_outside_goes_to_the_request_that_frames_it_and_is_read_back_whole() {
+    let mut app = with_billing().await;
+    let raised = raise_outside(&mut app).await;
+    decide_beyond(
+        &mut app,
+        &raised.id.to_string(),
+        &chosen(&raised, 0),
+        Some(&BeyondInput::Requests(vec!["Billing totals".into()])),
+    )
+    .await
+    .unwrap();
+    // the request keeps what it was opened with and what is inside it; the Clause of `billing` is not its target
+    let here = request_titled(&app, "Round halves").await;
+    assert_eq!(here.decided_expects().len(), 1);
+    assert_eq!(here.expects().len(), 1);
+    let billing = request_titled(&app, "Billing totals").await;
+    assert!(billing.decided_expects().is_empty());
+    // the answer says where it went, and the store gives it back
+    let stored = app.store().crux(raised.id).await.unwrap().unwrap();
+    let beyond = stored.answer_given().and_then(|a| a.beyond()).unwrap();
+    assert_eq!(beyond, &Beyond::TakenBy(vec![billing.id()]));
+    let status = app.status().await.unwrap();
+    let told = status
+        .cruxes
+        .iter()
+        .find(|q| q.id == raised.id.to_string())
+        .unwrap();
+    assert_eq!(
+        told.answer.as_ref().unwrap().beyond,
+        Some(BeyondStatus::Requests(vec!["Billing totals".into()]))
+    );
+
+    // declined: the same, and nothing is asked of anyone
+    let declined = raise_outside(&mut app).await;
+    decide_beyond(
+        &mut app,
+        &declined.id.to_string(),
+        &chosen(&declined, 0),
+        Some(&BeyondInput::Declined("billing waits".into())),
+    )
+    .await
+    .unwrap();
+    let after = request_titled(&app, "Round halves").await;
+    assert_eq!(after.decided_expects().len(), 2, "C1 of rounding, twice");
+    let status = app.status().await.unwrap();
+    let told = status
+        .cruxes
+        .iter()
+        .find(|q| q.id == declined.id.to_string())
+        .unwrap();
+    assert_eq!(
+        told.answer.as_ref().unwrap().beyond,
+        Some(BeyondStatus::Declined("billing waits".into()))
+    );
+    // a decision that says nothing outside has no `beyond`
+    let plain = raise(
+        &mut app,
+        &ask("Round halves", CruxKind::Ambiguity, vec![option("x")]),
+    )
+    .await;
+    decide(&mut app, &plain.id.to_string(), &chosen(&plain, 0))
+        .await
+        .unwrap();
+    let status = app.status().await.unwrap();
+    let told = status
+        .cruxes
+        .iter()
+        .find(|q| q.id == plain.id.to_string())
+        .unwrap();
+    assert_eq!(told.answer.as_ref().unwrap().beyond, None);
 }

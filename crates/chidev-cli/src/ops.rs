@@ -7,15 +7,15 @@ use std::path::{Component, Path};
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, CaseInput,
-    ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef, ClausesPut, ContractPut,
-    CruxKind, CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic,
-    EvidenceInput, EvidenceStatus, FindingInput, Found, HarnessKind, HarnessPut, Importance,
-    Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect,
-    OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
-    RecommendationInput, RecommendedStatus, RenameInput, ReportInput, ReportedFinding,
-    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleStanding,
-    RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
+    App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, BeyondInput,
+    BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef,
+    ClausesPut, ContractPut, CruxKind, CruxStatus, DecisionInput, DecisionMakerInput,
+    DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput, Found, HarnessKind,
+    HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice,
+    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
+    RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, RenameInput, ReportInput,
+    ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -147,7 +147,8 @@ enum Op {
     /// a `kind`), the `options` (each may name the `targets` it asks to be revised or retired, and the `keep` it asks
     /// to stay as they are, once it is chosen; at most one is `recommended`), the `findings` it is raised from
     /// (written like the `addresses` of `cr_open`), how much it matters (`importance`), and the Crux it replaces
-    /// (`supersedes`, an id; that one must have a decision to replace). The change request cannot be resolved until
+    /// (`supersedes`, an id; that one must exist, have a decision to replace, and be replaced by no other Crux that
+    /// is not withdrawn). The change request cannot be resolved until
     /// the Crux is decided. A resolved change request takes none. The result has the id of the Crux and of each
     /// option, which `cr_crux_decide` points at.
     CrCruxRaise(Box<RaiseDto>),
@@ -155,7 +156,9 @@ enum Op {
     /// `reason`), `wording` (the behaviour in the decision maker's words; with an optional `reason`), `unspecified`
     /// (what must still hold, for a behaviour left free) and `withdrawn: true` (the question is not needed any more),
     /// the `basis` it rests on (a Policy line or an arbitrary reason), and who decides (`by`, a claim that nothing
-    /// checks). The targets the option chosen asks for are recorded in the change request the Crux was raised in.
+    /// checks). The targets the option chosen asks for are recorded in the change request the Crux was raised in
+    /// when they are inside its frame. The ones outside it are not added to it: `beyond` says where they go,
+    /// `{"requests":["<title>"]}` (the change requests opened for them, each framing them) or `{"declined":"<why>"}`.
     CrCruxDecide(Box<DecideDto>),
     /// Appends an Assumption to a change request that is not resolved.
     CrAssume {
@@ -1131,83 +1134,12 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
         .collect()
 }
 
-/// A target by name, in the shape a reference to it is written in: `{"project": true}`, `{"context": "core"}`,
-/// `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum TargetOut {
-    Project(bool),
-    Context(String),
-    Contract {
-        context: String,
-        contract: String,
-    },
-    Interface {
-        context: String,
-        interface: String,
-    },
-    Harness {
-        context: String,
-        harness: String,
-    },
-    Item {
-        context: Option<String>,
-        interface: String,
-        key: String,
-    },
-    Clause {
-        context: Option<String>,
-        contract: String,
-        label: String,
-    },
-    Case {
-        context: String,
-        harness: String,
-        name: String,
-    },
-}
-
-impl From<TargetInput> for TargetOut {
-    fn from(t: TargetInput) -> TargetOut {
-        match t {
-            TargetInput::Project => TargetOut::Project(true),
-            TargetInput::Context(name) => TargetOut::Context(name),
-            TargetInput::Contract { context, contract } => {
-                TargetOut::Contract { context, contract }
-            }
-            TargetInput::Interface { context, interface } => {
-                TargetOut::Interface { context, interface }
-            }
-            TargetInput::Harness { context, harness } => TargetOut::Harness { context, harness },
-            TargetInput::Item(r) => TargetOut::Item {
-                context: r.context,
-                interface: r.interface,
-                key: r.key,
-            },
-            TargetInput::Clause(r) => TargetOut::Clause {
-                context: r.context,
-                contract: r.contract,
-                label: r.label,
-            },
-            TargetInput::Case {
-                context,
-                harness,
-                name,
-            } => TargetOut::Case {
-                context,
-                harness,
-                name,
-            },
-        }
-    }
-}
-
 /// A target (or keep) a change request recorded, in the result of `cr_open`.
 #[derive(Debug, Serialize)]
 struct OpenedExpectOut {
     /// `target` or `keep`.
     kind: &'static str,
-    target: TargetOut,
+    target: TargetRef,
     /// The revision the target had when the change request was opened.
     recorded: u64,
 }
@@ -1313,12 +1245,32 @@ impl<'a> From<&'a DecisionStatus> for DecisionOut<'a> {
     }
 }
 
-/// The answer to a Crux, in the result of `status`: the decision, what it rests on, who gave it, and when
-/// (milliseconds since the epoch).
+/// Where what an answer added outside its change request went, in the result of `status`: the titles of the change
+/// requests opened for it, or why it is not done.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BeyondOut<'a> {
+    Requests(&'a [String]),
+    Declined(&'a str),
+}
+
+impl<'a> From<&'a BeyondStatus> for BeyondOut<'a> {
+    fn from(b: &'a BeyondStatus) -> BeyondOut<'a> {
+        match b {
+            BeyondStatus::Requests(titles) => BeyondOut::Requests(titles),
+            BeyondStatus::Declined(reason) => BeyondOut::Declined(reason),
+        }
+    }
+}
+
+/// The answer to a Crux, in the result of `status`: the decision, where what it added outside its change request
+/// went (left out when it says nothing), what it rests on, who gave it, and when (milliseconds since the epoch).
 #[derive(Debug, Serialize)]
 struct AnswerOut<'a> {
     id: &'a str,
     decision: DecisionOut<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beyond: Option<BeyondOut<'a>>,
     basis: BasisOut<'a>,
     by: MakerOut<'a>,
     at: u64,
@@ -1562,6 +1514,7 @@ impl<'a> From<&'a CruxStatus> for CruxOut<'a> {
             answer: q.answer.as_ref().map(|a| AnswerOut {
                 id: &a.id,
                 decision: DecisionOut::from(&a.decision),
+                beyond: a.beyond.as_ref().map(BeyondOut::from),
                 basis: match &a.basis {
                     BasisStatus::Policy {
                         line,
@@ -1987,8 +1940,30 @@ struct DecideDto {
     /// has its reason in the `basis`.
     #[serde(default)]
     reason: Option<String>,
+    /// Where what the option chosen adds outside the change request goes: `{"requests":["<title>"]}`, the change
+    /// requests opened for it, or `{"declined":"<why>"}`.
+    #[serde(default)]
+    beyond: Option<BeyondDto>,
     basis: BasisDto,
     by: MakerDto,
+}
+
+/// Where what an answer adds outside its change request goes: the titles of the change requests opened for it, or
+/// why it is not done.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum BeyondDto {
+    Requests(Vec<String>),
+    Declined(String),
+}
+
+impl From<BeyondDto> for BeyondInput {
+    fn from(b: BeyondDto) -> BeyondInput {
+        match b {
+            BeyondDto::Requests(titles) => BeyondInput::Requests(titles),
+            BeyondDto::Declined(reason) => BeyondInput::Declined(reason),
+        }
+    }
 }
 
 impl DecideDto {
@@ -2759,10 +2734,15 @@ where
         Op::CrCruxDecide(decide) => {
             let decision = decide.decision()?;
             let DecideDto {
-                crux, basis, by, ..
+                crux,
+                beyond,
+                basis,
+                by,
+                ..
             } = *decide;
+            let beyond = beyond.map(BeyondInput::from);
             let done = app
-                .decide_crux(&crux, &decision, &basis.into(), &by.into())
+                .decide_crux(&crux, &decision, beyond.as_ref(), &basis.into(), &by.into())
                 .await?;
             to_value(&DoneOut {
                 op: "cr_crux_decide",

@@ -343,6 +343,7 @@ async fn the_edits_of_a_change_request_run_the_checks_of_an_edit_and_report_only
         .decide_crux(
             &raised.value.id.to_string(),
             &chose(&raised.value),
+            None,
             &arbitrary(),
             &alice(),
         )
@@ -413,6 +414,7 @@ async fn a_mandatory_check_refuses_each_edit_of_a_change_request_that_introduces
         .decide_crux(
             &raised.id.to_string(),
             &chose(&raised),
+            None,
             &arbitrary(),
             &alice(),
         )
@@ -638,6 +640,7 @@ async fn what_the_store_holds_after_an_edit_or_a_confirmation_is_the_state_that_
     app.decide_crux(
         &raised.id.to_string(),
         &chose(&raised),
+        None,
         &arbitrary(),
         &alice(),
     )
@@ -794,6 +797,7 @@ async fn the_checks_a_use_case_ran_are_recorded_under_its_trigger() {
     app.decide_crux(
         &first.id().to_string(),
         &DecisionInput::Withdrawn,
+        None,
         &arbitrary(),
         &alice(),
     )
@@ -804,6 +808,7 @@ async fn the_checks_a_use_case_ran_are_recorded_under_its_trigger() {
     app.decide_crux(
         &raised.id.to_string(),
         &chose(&raised),
+        None,
         &arbitrary(),
         &alice(),
     )

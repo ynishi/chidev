@@ -237,6 +237,7 @@ fn moved(
     let state = match &old.answer {
         None => StateDoc::Open,
         Some(a) => StateDoc::Answered(AnswerDoc {
+            beyond: None,
             id: new_id().to_string(),
             decision: match &a.decision {
                 OldDecision::Chosen(r) => DecisionDoc::Chosen {
