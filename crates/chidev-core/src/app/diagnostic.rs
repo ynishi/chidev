@@ -1016,7 +1016,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// The words for a party: how the Project describes a target (what a change set makes is in `words`, and
-    /// the names it is about to give in `pending`), a change request by its title, a line by its id.
+    /// the names it is about to give in `pending`), a change request by its title, a Crux by its id (the id is how
+    /// an operation addresses it), a line by its id.
     pub(super) async fn words_of(
         &self,
         p: &Project,

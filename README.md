@@ -1375,7 +1375,7 @@ Interfaces, Harness implementation, code), not only to the specification.
   answer is never rewritten: deciding a Crux that has one is refused
   (`cr.crux-answered`), and an option the Crux does not have is not one
   (`cr.crux-unknown-option`). A `crux` that no Crux has the id of is a name that does
-  not exist (`input.unknown-name`, `values.kind` `crux`, with the ids that exist in
+  not exist (`input.unknown-name`, `values.kind` `crux`, with the closest ids in
   `did_you_mean`). Changing a decision means raising a new Crux that
   `supersedes` the old one; the old answer stays as it was given. A Crux of kind
   `model` is the one exception to "undefined is an answer": without the word the
