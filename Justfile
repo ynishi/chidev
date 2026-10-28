@@ -22,6 +22,10 @@ rust-test:
 deny:
     cargo deny check
 
+# Rewrites README's check tables from the registry (the test that checks them is in `just check`).
+readme:
+    CHIDEV_BLESS=1 cargo test -p chidev-core --test readme
+
 # One worktree per issue, cut from a freshly fetched origin/main.
 worktree-new type slug:
     git fetch origin

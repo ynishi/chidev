@@ -84,7 +84,7 @@ pub struct SimShapeKept;
 static SIM_SHAPE_KEPT: Descriptor = Descriptor {
     id: RuleId::from_static("sim.shape-kept"),
     summary: Cow::Borrowed(
-        "a sim harness kept in a shape the protocol does not run, which a put of it would be refused for",
+        "a sim harness kept in a shape a put of it is refused for (one the store held before the rule, or one beside another sim harness of its context), about the case, the clause or the context; it refuses no change, and one label in two contracts of the sweep is fine",
     ),
     help: Cow::Borrowed(
         "A put of a sim harness that breaks one of the `sim.*` invariants is refused; the finding names the one it \
@@ -154,7 +154,7 @@ pub struct SimUncitedClause;
 static SIM_UNCITED_CLAUSE: Descriptor = Descriptor {
     id: RuleId::from_static("sim.uncited-clause"),
     summary: Cow::Borrowed(
-        "a clause of a contract a sim harness takes on (cites a clause of) that no sim case cites",
+        "a clause that no sim case cites, of a contract a sim harness takes on (cites at least one clause of); a contract the sim cites nothing of is left to the tests",
     ),
     help: Cow::Borrowed(
         "The simulation takes this contract on (the sweep cites a clause of it) but never checks this clause. \
@@ -244,7 +244,9 @@ pub struct SimStale;
 
 static SIM_STALE: Descriptor = Descriptor {
     id: RuleId::from_static("sim.stale"),
-    summary: Cow::Borrowed("a simulation that no longer describes the sim harness and the program"),
+    summary: Cow::Borrowed(
+        "a simulation after which the script, a case or the builds of the harness, a contract it cites a clause of, a built interface, the code pinned for it, or the settings moved",
+    ),
     help: Cow::Borrowed(
         "The script, the cases or `builds` of the harness, a contract it cites a clause of, a built interface, \
            the code pinned for the program, or the measure \
@@ -286,7 +288,9 @@ pub struct SimFinding;
 
 static SIM_FINDING: Descriptor = Descriptor {
     id: RuleId::from_static("sim.finding"),
-    summary: Cow::Borrowed("a clause the program broke in a simulated case"),
+    summary: Cow::Borrowed(
+        "a clause the program broke in a simulated case, one per clause, with the first case and step",
+    ),
     help: Cow::Borrowed(
         "The script drove the program through a schedule and saw a promise of this clause not hold. Either the \
            program is wrong (change it and pin it again), or the clause and the script read it differently (a \
@@ -338,7 +342,7 @@ pub struct SimUnreached;
 
 static SIM_UNREACHED: Descriptor = Descriptor {
     id: RuleId::from_static("sim.unreached"),
-    summary: Cow::Borrowed("a clause whose situation no simulated case reached"),
+    summary: Cow::Borrowed("a clause whose situation no simulated case reached, one per clause"),
     help: Cow::Borrowed(
         "The script cites this clause but no seed drove the program to the situation the clause needs, so the \
            clause was not checked. Change the schedule the script makes (or add a regress case for the \
@@ -388,7 +392,9 @@ pub struct SimNondeterministic;
 
 static SIM_NONDETERMINISTIC: Descriptor = Descriptor {
     id: RuleId::from_static("sim.nondeterministic"),
-    summary: Cow::Borrowed("a simulated case that did not give the same schedule and trace twice"),
+    summary: Cow::Borrowed(
+        "a simulated case that did not give the same schedule and trace twice, about the case; no policy lowers it",
+    ),
     help: Cow::Borrowed(
         "A case was run again in a fresh copy. A different schedule means the script draws something besides its \
            seed (a clock, the order of a set, an unseeded random number): fix the script. The same schedule with a \
@@ -451,7 +457,9 @@ pub struct SimError;
 
 static SIM_ERROR: Descriptor = Descriptor {
     id: RuleId::from_static("sim.error"),
-    summary: Cow::Borrowed("a simulation that failed, or whose script failed for some case"),
+    summary: Cow::Borrowed(
+        "a simulation whose run failed (no_build, no_start, protocol, budget, ...), or whose script failed for a case or could not start the program in it (CANNOT_START)",
+    ),
     help: Cow::Borrowed(
         "The run could not finish (the program does not build, the script could not start the program in any case, \
            the script broke the protocol, the time ran out), or the script itself failed for a case (an exit other \
