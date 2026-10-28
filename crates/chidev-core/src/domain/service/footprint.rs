@@ -3,8 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::entity::project::Project;
+use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::footprint::{Citations, Footprint, Move};
-use crate::domain::vo::id::CaseId;
+use crate::domain::vo::id::{CaseId, ClauseId, ItemId};
+use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
 
@@ -59,10 +61,56 @@ pub(crate) fn citations(project: &Project) -> BTreeMap<CaseId, Vec<Target>> {
         .collect()
 }
 
+/// The Clauses that have another label in `after` than in `before`, by id, with the label they had and the one
+/// they have. A Clause that is only in one of them is not given a new name.
+fn relabels(before: &Project, after: &Project) -> BTreeMap<ClauseId, (ClauseLabel, ClauseLabel)> {
+    let labels = |p: &Project| -> BTreeMap<ClauseId, ClauseLabel> {
+        p.contexts()
+            .flat_map(|c| c.contracts())
+            .flat_map(|c| c.clauses())
+            .map(|clause| (clause.id(), clause.label()))
+            .collect()
+    };
+    let was = labels(before);
+    labels(after)
+        .into_iter()
+        .filter_map(|(id, to)| {
+            was.get(&id)
+                .filter(|from| **from != to)
+                .map(|from| (id, (*from, to)))
+        })
+        .collect()
+}
+
+/// The Items that have another key in `after` than in `before`, by id, with the key they had and the one they have.
+/// An Item that is only in one of them is not given a new name.
+fn rekeys(before: &Project, after: &Project) -> BTreeMap<ItemId, (ItemKey, ItemKey)> {
+    let keys = |p: &Project| -> BTreeMap<ItemId, ItemKey> {
+        p.contexts()
+            .flat_map(|c| c.interfaces())
+            .flat_map(|i| i.items())
+            .map(|item| (item.id(), item.key().clone()))
+            .collect()
+    };
+    let was = keys(before);
+    keys(after)
+        .into_iter()
+        .filter_map(|(id, to)| {
+            was.get(&id)
+                .filter(|from| **from != to)
+                .map(|from| (id, (from.clone(), to)))
+        })
+        .collect()
+}
+
 /// The footprint, at `store_revision`, of the change set that took the Project from `before` to `after`: the
-/// targets that moved, the ones made, the ones whose revision went up, and the ones that are gone, each with the
-/// containers it was in (as `after` has it, or as `before` had it for one that is gone), in the order of the
-/// targets. A container whose revision moved because something in it was added or removed is a move of its own.
+/// targets that moved, the ones made, the ones whose revision went up, and the ones that are gone, and the Clauses
+/// and Items that were given a new name, each with the containers it was in (as `after` has it, or as `before` had
+/// it for one that is gone), in the order of the targets; a target is in it once. A Clause or Item present in both
+/// with another label or key is a rename, with the name it had and the name it has: when its revision moved too it
+/// is that one move, else a move of its own that moves no container, because no revision moved. A container whose
+/// revision moved because something in it was added or removed is a move of its own. A Clause dropped while another
+/// is added under its label is no rename: they are two ids.
 ///
 /// A Case that moved also carries what it cites: in `after` for one that was made, in `before` for one that is
 /// gone, and in both together for one that was changed, so that a change set that retires a Clause and moves the
@@ -91,9 +139,22 @@ pub fn footprint_between(store_revision: u64, before: &Project, after: &Project)
             Citations::new(cites.into_iter().collect(), within.into_iter().collect()),
         );
     };
+    let (relabels, rekeys) = (relabels(before, after), rekeys(before, after));
     for (target, (revision, within)) in &now {
-        if was.get(target).map(|(r, _)| r) != Some(revision) {
-            moves.push(Move::new(*target, within.clone()));
+        let revised = was.get(target).map(|(r, _)| r) != Some(revision);
+        let named = match target {
+            Target::Clause(id) => relabels
+                .get(id)
+                .map(|(from, to)| Move::relabeled(*id, within.clone(), *from, *to, revised)),
+            Target::Item(id) => rekeys.get(id).map(|(from, to)| {
+                Move::rekeyed(*id, within.clone(), from.clone(), to.clone(), revised)
+            }),
+            _ => None,
+        };
+        if let Some(moved) = named.or_else(|| revised.then(|| Move::new(*target, within.clone()))) {
+            moves.push(moved);
+        }
+        if revised {
             if was.contains_key(target) {
                 note(*target, &[(&was, &was_cites), (&now, &now_cites)]);
             } else {
@@ -118,7 +179,8 @@ mod tests {
     use super::*;
     use crate::domain::entity::context::Context;
     use crate::domain::vo::case::{CaseCites, CaseName};
-    use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+    use crate::domain::vo::clause::{ClauseContent, ClauseText};
+    use crate::domain::vo::footprint::{Change, Rename};
     use crate::domain::vo::id::{
         CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
         test_uuid,
@@ -323,6 +385,126 @@ mod tests {
         for other in [Target::Harness(harness_id()), contract, c1] {
             assert!(!footprint.cites_inside(other, contract));
         }
+    }
+
+    fn label(n: u32) -> ClauseLabel {
+        ClauseLabel::try_from(format!("C{n}").as_str()).unwrap()
+    }
+
+    #[test]
+    fn a_clause_given_a_new_label_alone_is_a_move_of_its_own_and_moves_no_contract() {
+        let before = project();
+        let mut after = before.clone();
+        put(&mut after, &[(30, "C3", "one"), (31, "C2", "two")]);
+        let moves = moves_between(&before, &after);
+        assert_eq!(
+            moves,
+            [Move::relabeled(
+                clause_id(30),
+                vec![
+                    Target::Project,
+                    Target::Context(core()),
+                    Target::Contract(contract_id())
+                ],
+                label(1),
+                label(3),
+                false,
+            )]
+        );
+        assert!(!moves[0].is_revised());
+        assert_eq!(
+            moves[0].rename(),
+            Some(&Rename::Label {
+                from: label(1),
+                to: label(3)
+            })
+        );
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.target() == Target::Contract(contract_id()))
+        );
+    }
+
+    #[test]
+    fn a_clause_given_a_new_label_and_a_new_sentence_is_one_move_with_both_and_its_contract_moves()
+    {
+        let before = project();
+        let mut after = before.clone();
+        put(&mut after, &[(30, "C3", "one, revised"), (31, "C2", "two")]);
+        let footprint = footprint_between(2, &before, &after);
+        let moves = footprint.moves();
+        assert_eq!(
+            moves.iter().map(Move::target).collect::<Vec<_>>(),
+            [
+                Target::Contract(contract_id()),
+                Target::Clause(clause_id(30))
+            ]
+        );
+        assert_eq!(moves[0].change(), &Change::Revised);
+        assert!(matches!(moves[1].change(), Change::RevisedAndRenamed(_)));
+        assert!(moves[1].is_revised());
+        assert_eq!(
+            footprint.renames().collect::<Vec<_>>(),
+            [(
+                Target::Clause(clause_id(30)),
+                &Rename::Label {
+                    from: label(1),
+                    to: label(3)
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn an_item_given_a_new_key_alone_is_a_move_of_its_own() {
+        let before = with_an_interface();
+        let mut after = before.clone();
+        after
+            .put_interface(
+                core(),
+                InterfaceId::from_uuid(test_uuid(100)),
+                Source::new("fn a()\n".to_string()),
+                vec![(
+                    item_id(),
+                    ItemKey::try_from("fn b").unwrap(),
+                    LineRange::new(1, 1).unwrap(),
+                )],
+            )
+            .unwrap();
+        let moves = moves_between(&before, &after);
+        assert_eq!(
+            moves,
+            [Move::rekeyed(
+                item_id(),
+                vec![
+                    Target::Project,
+                    Target::Context(core()),
+                    Target::Interface(InterfaceId::from_uuid(test_uuid(100)))
+                ],
+                ItemKey::try_from("fn a").unwrap(),
+                ItemKey::try_from("fn b").unwrap(),
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn a_clause_dropped_while_another_is_added_under_its_label_is_no_rename() {
+        let before = project();
+        let mut after = before.clone();
+        put(&mut after, &[(32, "C1", "one"), (31, "C2", "two")]);
+        let footprint = footprint_between(2, &before, &after);
+        assert_eq!(footprint.renames().count(), 0);
+        assert!(footprint.moves().iter().all(Move::is_revised));
+        assert_eq!(
+            footprint.targets().collect::<Vec<_>>(),
+            [
+                Target::Contract(contract_id()),
+                Target::Clause(clause_id(30)),
+                Target::Clause(clause_id(32))
+            ]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `clauses_put`, the `clauses` entry of a change set, and `replaces` in a Clause of `contract_put`, through
-//! `chidev exec`: a new label moves no revision (so nothing goes stale and a request's footprint is empty), a partial
-//! put leaves the other Clauses as they are, and a name that cannot be carried out is refused by a rule with
-//! everything the entry has wrong said at once.
+//! `chidev exec`: a new label moves no revision (so nothing goes stale) and is a move of its own in a request's
+//! footprint, as a new key of an Item is; a partial put leaves the other Clauses as they are; and a name that cannot
+//! be carried out is refused by a rule with everything the entry has wrong said at once.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -204,7 +204,7 @@ fn a_new_label_by_replaces_keeps_the_id_and_moves_no_revision_in_either_put() {
 }
 
 #[test]
-fn a_relabel_for_a_request_is_outside_no_frame_breaks_no_keep_and_is_no_work() {
+fn a_relabel_for_a_request_is_its_work_breaks_no_keep_and_is_a_move_of_the_clause_alone() {
     let clause =
         |label: &str| json!({"clause":{"context":"core","contract":"stock","label":label}});
     let (_, r) = after_setup(
@@ -226,18 +226,25 @@ fn a_relabel_for_a_request_is_outside_no_frame_breaks_no_keep_and_is_no_work() {
     assert_eq!(r[2]["ok"], true, "{:#?}", r[2]);
     assert!(!rules(&r[2]).contains(&"cr.out-of-frame"), "{:#?}", r[2]);
     assert!(!rules(&r[2]).contains(&"cr.keep-moved"), "{:#?}", r[2]);
-    // the request has no work: resolved as done, it is said, and its target reads as not touched
+    // the new name is the request's work: resolved as done, it is not said to be without any, and its target reads
+    // as revised
     assert_eq!(r[3]["ok"], true, "{:#?}", r[3]);
     assert!(
-        rules(&r[3]).contains(&"cr.resolved-without-work"),
+        !rules(&r[3]).contains(&"cr.resolved-without-work"),
         "{:#?}",
         r[3]
     );
     assert!(!rules(&r[3]).contains(&"cr.keep-moved"), "{:#?}", r[3]);
     let status = &r[4];
+    let request = cr_status(status, "Rename C2");
+    assert_eq!(request["targets"][0]["progress"], "revised", "{status:#?}");
+    // the work holds the new name, and no revision moved
+    let work = request["work"].as_array().expect("work");
+    assert_eq!(work.len(), 1, "{status:#?}");
+    assert_eq!(work[0]["moved"], json!([]), "{status:#?}");
     assert_eq!(
-        cr_status(status, "Rename C2")["targets"][0]["progress"],
-        "not touched yet",
+        work[0]["renamed"],
+        json!([{"target":"stock C7","from":"C2","to":"C7"}]),
         "{status:#?}"
     );
     // the keep is as it was
@@ -245,6 +252,73 @@ fn a_relabel_for_a_request_is_outside_no_frame_breaks_no_keep_and_is_no_work() {
         !rules(status).contains(&"cr.keep-moved"),
         "{:#?}",
         status["findings"]
+    );
+}
+
+#[test]
+fn a_relabel_outside_the_frame_of_a_request_is_out_of_frame_by_the_clause_alone() {
+    let (_, r) = after_setup(
+        "clauses-put-relabel-outside",
+        &[
+            json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior",
+                "targets":[{"clause":{"context":"core","contract":"stock","label":"C1"}}]}),
+            json!({"op":"change_set","for":"Reword C1","puts":[{"put":"clauses","context":"core",
+                "contract":"stock","clauses":[{"label":"C7","text":"a unit is released","replaces":"C2"}]}]}),
+            json!({"op":"status"}),
+        ],
+    );
+    assert_eq!(r[1]["ok"], true, "{:#?}", r[1]);
+    let outside: Vec<&Value> = r[1]["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter(|f| f["rule"] == "cr.out-of-frame")
+        .collect();
+    assert_eq!(outside.len(), 1, "{:#?}", r[1]);
+    assert!(
+        outside[0]["about"]
+            .as_str()
+            .is_some_and(|a| a.contains("Reword C1")),
+        "{:#?}",
+        r[1]
+    );
+    // the Clause alone is outside: the Contract holding it moved nothing
+    let request = cr_status(&r[2], "Reword C1");
+    assert_eq!(request["out_of_frame"], json!(["stock C7"]), "{:#?}", r[2]);
+}
+
+#[test]
+fn an_item_given_a_new_key_for_a_request_is_its_work_and_its_target_reads_revised() {
+    let item = |key: &str| json!({"item":{"context":"core","interface":"api","key":key}});
+    let (_, r) = after_setup(
+        "items-put-rekey-request",
+        &[
+            json!({"op":"cr_open","title":"Rename price","intent":"change_behavior","targets":[item("price")]}),
+            json!({"op":"change_set","for":"Rename price","puts":[{"put":"interface","context":"core",
+                "name":"api","source":"fn price()\n","items":[{"key":"cost","lines":[1,1],"replaces":"price"}]}]}),
+            json!({"op":"cr_resolve","title":"Rename price","resolution":"done",
+                "reason":"price is cost now","by":{"person":"alice"}}),
+            json!({"op":"status"}),
+        ],
+    );
+    assert_eq!(r[1]["ok"], true, "{:#?}", r[1]);
+    assert!(!rules(&r[1]).contains(&"cr.out-of-frame"), "{:#?}", r[1]);
+    assert_eq!(r[2]["ok"], true, "{:#?}", r[2]);
+    assert!(
+        !rules(&r[2]).contains(&"cr.resolved-without-work"),
+        "{:#?}",
+        r[2]
+    );
+    let request = cr_status(&r[3], "Rename price");
+    assert_eq!(request["targets"][0]["progress"], "revised", "{:#?}", r[3]);
+    let work = request["work"].as_array().expect("work");
+    assert_eq!(work.len(), 1, "{:#?}", r[3]);
+    assert_eq!(work[0]["moved"], json!([]), "{:#?}", r[3]);
+    assert_eq!(
+        work[0]["renamed"],
+        json!([{"target":"api cost","from":"price","to":"cost"}]),
+        "{:#?}",
+        r[3]
     );
 }
 

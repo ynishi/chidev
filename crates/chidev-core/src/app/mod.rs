@@ -86,6 +86,7 @@ pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+use crate::domain::vo::footprint::{Move, Rename};
 pub use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId,
@@ -1039,8 +1040,23 @@ pub struct ChangeRequestStatus {
 pub struct WorkStatus {
     /// The revision of the store the change set was kept at.
     pub store_revision: u64,
-    /// The targets it moved (made, revised, or gone), described.
+    /// The targets whose revision it moved (made, revised, or gone), described. A Clause or Item given a new name
+    /// alone is not here: it moved no revision.
     pub moved: Vec<String>,
+    /// The Clauses and Items it gave a new name, in the order of the moves, with the name each had and has. One
+    /// whose revision moved in the same change set is in `moved` too.
+    pub renamed: Vec<RenameStatus>,
+}
+
+/// A Clause or an Item given a new name by a change set, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameStatus {
+    /// The target, described (with the name it has now).
+    pub target: String,
+    /// The label or key it had.
+    pub from: String,
+    /// The label or key it has.
+    pub to: String,
 }
 
 /// A change request as it was opened.
@@ -2364,10 +2380,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for c in &crs {
             let mut work = Vec::with_capacity(c.work().len());
             for f in c.work() {
-                let targets: Vec<Target> = f.targets().collect();
+                let revised: Vec<Target> = f
+                    .moves()
+                    .iter()
+                    .filter(|m| m.is_revised())
+                    .map(Move::target)
+                    .collect();
+                let mut renamed = Vec::new();
+                for (target, rename) in f.renames() {
+                    let (from, to) = match rename {
+                        Rename::Label { from, to } => (from.to_string(), to.to_string()),
+                        Rename::Key { from, to } => (from.to_string(), to.to_string()),
+                    };
+                    renamed.push(RenameStatus {
+                        target: self.describe(&p, target).await?,
+                        from,
+                        to,
+                    });
+                }
                 work.push(WorkStatus {
                     store_revision: f.store_revision(),
-                    moved: self.describe_all(&p, &targets).await?,
+                    moved: self.describe_all(&p, &revised).await?,
+                    renamed,
                 });
             }
             let outside = match out_of_frame.iter().find(|o| o.cr == c.id()) {

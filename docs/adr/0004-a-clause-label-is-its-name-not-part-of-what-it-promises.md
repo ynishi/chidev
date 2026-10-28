@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Amended by [ADR 0005](0005-a-new-name-is-a-move-of-the-record.md): a new name is a
+move of the footprint.
+
 Builds on [ADR 0002](0002-every-use-case-that-changes-state-is-a-trigger-and-one-door-keeps.md):
 the new put below is an edit with a trigger of its own, and it reaches the
 Contract through the one door that already exists. This decision is about what a

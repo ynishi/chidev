@@ -941,6 +941,100 @@ mod tests {
     }
 
     #[test]
+    fn a_new_name_comes_back_as_it_was_kept_and_a_move_without_one_is_a_revision_move() {
+        use crate::domain::vo::clause::ClauseLabel;
+        use crate::domain::vo::footprint::{Change, Footprint, Move, Rename};
+        use crate::domain::vo::id::{ClauseId, ContextId, ContractId, InterfaceId, ItemId};
+        use crate::domain::vo::item_key::ItemKey;
+        use crate::domain::vo::target::Target;
+
+        let p = project();
+        let mut cr = change_requests(&p)
+            .into_iter()
+            .find(|c| !c.is_resolved())
+            .unwrap();
+        let context = Target::Context(ContextId::from_uuid(id(1)));
+        let contract = Target::Contract(ContractId::from_uuid(id(2)));
+        let interface = Target::Interface(InterfaceId::from_uuid(id(6)));
+        let label = |s: &str| ClauseLabel::try_from(s).unwrap();
+        let key = |s: &str| ItemKey::try_from(s).unwrap();
+        let in_contract = vec![Target::Project, context, contract];
+        let in_interface = vec![Target::Project, context, interface];
+        let moves = vec![
+            Move::relabeled(
+                ClauseId::from_uuid(id(3)),
+                in_contract.clone(),
+                label("C1"),
+                label("C2"),
+                false,
+            ),
+            Move::relabeled(
+                ClauseId::from_uuid(id(7)),
+                in_contract.clone(),
+                label("C3"),
+                label("C4"),
+                true,
+            ),
+            Move::rekeyed(
+                ItemId::from_uuid(id(4)),
+                in_interface,
+                key("fn a"),
+                key("fn b"),
+                false,
+            ),
+            Move::new(contract, vec![Target::Project, context]),
+        ];
+        cr.record_work(Footprint::new(7, moves.clone())).unwrap();
+        let text = encode_change_request(&cr).unwrap();
+        let read = decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap();
+        assert_eq!(read.work(), cr.work());
+        assert_eq!(read.work()[0].moves(), moves);
+        assert_eq!(read.work()[0].renames().count(), 3);
+        assert!(matches!(
+            read.work()[0].moves()[1].change(),
+            Change::RevisedAndRenamed(Rename::Label { .. })
+        ));
+        // a move kept before names were recorded has no `renamed`, and is a revision move
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for m in doc["work"][0]["moves"].as_array_mut().unwrap() {
+            m.as_object_mut().unwrap().remove("renamed");
+        }
+        let old = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
+        assert!(
+            old.work()[0]
+                .moves()
+                .iter()
+                .all(|m| m.change() == &Change::Revised)
+        );
+        // a move written without the `renamed` key at all, as it was kept before
+        let literal = serde_json::json!({
+            "target": "clause",
+            "id": id(3).to_string(),
+            "within": [],
+        });
+        assert!(literal.get("renamed").is_none());
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["work"][0]["moves"] = serde_json::json!([literal]);
+        let old = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
+        assert_eq!(old.work()[0].moves()[0].change(), &Change::Revised);
+        // a name on a target that has none, or one that cannot be read, is refused
+        for (target, from, to) in [("contract", "C1", "C2"), ("clause", "one", "C2")] {
+            let target_id = if target == "clause" { id(3) } else { id(2) };
+            let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+            doc["work"][0]["moves"] = serde_json::json!([{
+                "target": target,
+                "id": target_id.to_string(),
+                "within": [],
+                "renamed": { "from": from, "to": to },
+            }]);
+            assert!(
+                decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).is_err(),
+                "{doc}"
+            );
+        }
+    }
+
+    #[test]
     fn an_answer_comes_back_with_its_id_its_basis_its_maker_and_its_time() {
         use crate::domain::vo::answer::Basis;
         use crate::domain::vo::crux::Importance;
