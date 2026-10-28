@@ -1007,7 +1007,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
     }
 
-    /// The ids of the Cruxes.
+    /// The ids of the Cruxes, for `did_you_mean`. A store that cannot be read gives none, as for the names above: the
+    /// list is a hint, and the refusal it hints at was made from a read of the same Cruxes that succeeded, so a
+    /// failure here loses the hint and not the refusal.
     async fn crux_ids(&self) -> Vec<String> {
         match self.requests_and_cruxes().await {
             Ok((_, cruxes)) => cruxes.iter().map(|q| q.id().to_string()).collect(),
