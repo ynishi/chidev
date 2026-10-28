@@ -1590,7 +1590,8 @@ async fn the_requests_an_answer_names_are_read_by_title_and_by_the_rules_of_a_de
         assert!(matches!(err, AppError::Input(_)), "{err:?}");
     }
     assert_eq!(revision(&app).await, at, "none of them kept anything");
-    // a request that is resolved takes no more work: it is the second subject, and the one to reopen
+    // a request that is resolved takes no more work: it is the first subject, the sentence names it, and it is the
+    // one to reopen
     app.resolve_change_request(
         "Billing totals",
         &ResolutionInput::WontDo,
@@ -1611,7 +1612,9 @@ async fn the_requests_an_answer_names_are_read_by_title_and_by_the_rules_of_a_de
     assert_eq!(codes(&app, &err).await, ["cr.already-resolved"]);
     let d = only(&app, &err).await;
     let subjects: Vec<&str> = d.subjects.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(subjects, ["Round halves", "Billing totals"]);
+    assert_eq!(subjects, ["Billing totals", "Round halves"]);
+    assert!(d.message.contains("Billing totals"), "{}", d.message);
+    assert!(!d.message.contains("Round halves"), "{}", d.message);
     assert_eq!(d.suggestions[0].op["op"], "cr_reopen");
     assert_eq!(d.suggestions[0].op["title"], "Billing totals");
     assert_eq!(revision(&app).await, at_resolved);

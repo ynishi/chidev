@@ -147,7 +147,8 @@ enum Op {
     /// a `kind`), the `options` (each may name the `targets` it asks to be revised or retired, and the `keep` it asks
     /// to stay as they are, once it is chosen; at most one is `recommended`), the `findings` it is raised from
     /// (written like the `addresses` of `cr_open`), how much it matters (`importance`), and the Crux it replaces
-    /// (`supersedes`, an id; that one must have a decision to replace). The change request cannot be resolved until
+    /// (`supersedes`, an id; that one must exist, have a decision to replace, and be replaced by no other Crux that
+    /// is not withdrawn). The change request cannot be resolved until
     /// the Crux is decided. A resolved change request takes none. The result has the id of the Crux and of each
     /// option, which `cr_crux_decide` points at.
     CrCruxRaise(Box<RaiseDto>),

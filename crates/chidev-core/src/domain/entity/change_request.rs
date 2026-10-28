@@ -115,7 +115,7 @@ pub enum ChangeRequestError {
     /// The option chosen names targets the change request does not frame, and the answer says nothing of where they
     /// go (`beyond`).
     #[error(
-        "the option `{option}` names {} target(s) outside the change request, and the answer says where they go",
+        "the option `{option}` names {} target(s) outside the change request, and the answer does not say where they go",
         targets.len()
     )]
     AnswerOutside {

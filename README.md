@@ -1413,7 +1413,7 @@ Interfaces, Harness implementation, code), not only to the specification.
   `requests` are the titles of the change requests opened for them (a title that no
   request has is `input.unknown-name`, `values.kind` `change request`): at least one,
   none twice, none the request the Crux was raised in (`cr.crux-beyond-itself`), none
-  resolved (`cr.already-resolved`, with the request named as the second subject:
+  resolved (`cr.already-resolved`, with the request named as the first subject:
   reopen it), and between them they frame every target outside
   (`cr.crux-beyond-unframed`, `values.target`). They are read whenever `requests` is
   given, even when the option names nothing outside. `declined` is the reason they are

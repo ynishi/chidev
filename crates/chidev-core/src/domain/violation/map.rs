@@ -102,9 +102,11 @@ impl ChangeRequestError {
             ChangeRequestError::BeyondOnWithdrawal => {
                 Violation::of(CR_CRUX_BEYOND_WITHDRAWN).on(here)
             }
+            // The request that is resolved is the first subject, which the sentence of the rule names; the request the
+            // operation was on is the second.
             ChangeRequestError::BeyondResolved(named) => Violation::of(CR_ALREADY_RESOLVED)
-                .on(here)
                 .about(Party::ChangeRequest(*named))
+                .about(here)
                 .with_remedy(
                     Remedy::ReopenChangeRequest {
                         change_request: *named,
@@ -1085,12 +1087,12 @@ mod tests {
             assert_eq!(v.rule().as_str(), rule);
             assert!(v.remedies().is_empty() && v.values().is_empty());
         }
-        // A named request that is resolved is the second subject of `cr.already-resolved`, and the one to reopen.
+        // A named request that is resolved is the first subject of `cr.already-resolved`, and the one to reopen.
         let resolved = ChangeRequestError::BeyondResolved(cr(2)).violation(cr(1));
         assert_eq!(resolved.rule().as_str(), "cr.already-resolved");
         assert_eq!(
             resolved.subjects(),
-            &[Party::ChangeRequest(cr(1)), Party::ChangeRequest(cr(2))]
+            &[Party::ChangeRequest(cr(2)), Party::ChangeRequest(cr(1))]
         );
         assert_eq!(
             resolved.remedies()[0].0,

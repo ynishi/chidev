@@ -1190,30 +1190,38 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     return Vec::new();
                 };
                 let stands = standing(asked, cruxes);
+                let Some(raised_in) = crs.iter().find(|c| c.id() == stands.raised_in()) else {
+                    return Vec::new();
+                };
+                // A resolved change request takes only a withdrawal, and takes no Crux: it is reopened first, whether
+                // the Crux that stands is decided now or raised.
+                let reopen = || {
+                    suggest(
+                        json!({"op": "cr_reopen", "title": raised_in.title().to_string(),
+                            "reason": "<why the work goes on>", "by": by}),
+                        how,
+                    )
+                };
+                let mut out = Vec::new();
                 // An open Crux has no decision to replace yet: it is decided.
                 if stands.is_open() {
-                    return vec![suggest(
+                    if raised_in.is_resolved() {
+                        out.push(reopen());
+                    }
+                    out.push(suggest(
                         json!({"op": "cr_crux_decide", "crux": stands.id().to_string(),
                             "option": "<one of its option ids>",
                             "basis": {"arbitrary": "<why>"}, "by": by}),
                         how,
-                    )];
+                    ));
+                    return out;
                 }
                 // A decision that cannot be replaced (a withdrawal) gets none: the new Crux would be refused.
                 if check_supersedes(stands.id(), Some(stands), cruxes).is_err() {
                     return Vec::new();
                 }
-                let Some(raised_in) = crs.iter().find(|c| c.id() == stands.raised_in()) else {
-                    return Vec::new();
-                };
-                let mut out = Vec::new();
-                // A resolved change request takes no Crux: it is reopened first.
                 if raised_in.is_resolved() {
-                    out.push(suggest(
-                        json!({"op": "cr_reopen", "title": raised_in.title().to_string(),
-                            "reason": "<why the work goes on>", "by": by}),
-                        how,
-                    ));
+                    out.push(reopen());
                 }
                 out.push(suggest(
                     json!({"op": "cr_crux_raise", "in": raised_in.title().to_string(),
