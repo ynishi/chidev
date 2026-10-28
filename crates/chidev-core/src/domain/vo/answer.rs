@@ -12,6 +12,7 @@ use super::policy::PolicyLineId;
 use super::prose::Prose;
 use super::revision::Revision;
 use super::timestamp::Timestamp;
+use crate::domain::entity::change_request::ChangeRequestError;
 
 /// What a decision rests on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,10 +195,14 @@ impl Answer {
         }
     }
 
-    /// This answer, saying where what it adds outside its change request goes.
-    pub fn with_beyond(mut self, beyond: Beyond) -> Answer {
+    /// This answer, saying where what it adds outside its change request goes. A withdrawal asks nothing and adds
+    /// nothing, so it has no outside to speak of (`BeyondOnWithdrawal`).
+    pub fn with_beyond(mut self, beyond: Beyond) -> Result<Answer, ChangeRequestError> {
+        if matches!(self.decision, Decision::Withdrawn) {
+            return Err(ChangeRequestError::BeyondOnWithdrawal);
+        }
         self.beyond = Some(beyond);
-        self
+        Ok(self)
     }
 
     /// Its id.
@@ -257,7 +262,10 @@ mod tests {
     fn an_answer_says_nothing_beyond_until_it_is_given_a_beyond() {
         let answer = Answer::new(
             AnswerId::from_uuid(test_uuid(900)),
-            Decision::Withdrawn,
+            Decision::Worded {
+                wording: Prose::try_from("a half rounds up").unwrap(),
+                reason: None,
+            },
             Basis::Arbitrary {
                 reason: Prose::try_from("settled").unwrap(),
             },
@@ -267,8 +275,26 @@ mod tests {
         assert_eq!(answer.beyond(), None);
         let declined = Beyond::declined(Prose::try_from("not needed").unwrap());
         assert_eq!(
-            answer.with_beyond(declined.clone()).beyond(),
+            answer.with_beyond(declined.clone()).unwrap().beyond(),
             Some(&declined)
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_takes_no_beyond() {
+        let withdrawal = Answer::new(
+            AnswerId::from_uuid(test_uuid(900)),
+            Decision::Withdrawn,
+            Basis::Arbitrary {
+                reason: Prose::try_from("not needed").unwrap(),
+            },
+            DecisionMaker::person("alice").unwrap(),
+            Timestamp::from_millis(5),
+        );
+        let declined = Beyond::declined(Prose::try_from("nothing").unwrap());
+        assert_eq!(
+            withdrawal.with_beyond(declined),
+            Err(ChangeRequestError::BeyondOnWithdrawal)
         );
     }
 

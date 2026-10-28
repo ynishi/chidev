@@ -41,7 +41,7 @@ pub use self::rekey::{ItemRevised, KeyChanged, Rekeyed};
 pub mod subject;
 pub use self::subject::SubjectInput;
 mod target;
-pub use self::target::{OpenedExpect, TargetInput};
+pub use self::target::{OpenedExpect, TargetInput, TargetRef};
 mod view;
 pub use self::view::{ViewInput, ViewRead};
 pub mod ports;
@@ -2037,7 +2037,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             now,
         );
         if let Some(beyond) = beyond {
-            answer = answer.with_beyond(beyond);
+            answer = answer
+                .with_beyond(beyond)
+                .map_err(|e| AppError::on(&cr, e))?;
         }
         let before = cr.clone();
         let replaced = crux

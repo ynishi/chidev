@@ -15,7 +15,7 @@ use chidev_core::app::{
     ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
     RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, RenameInput, ReportInput,
     ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
-    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TransitionStatus, ViewInput,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -1134,83 +1134,12 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
         .collect()
 }
 
-/// A target by name, in the shape a reference to it is written in: `{"project": true}`, `{"context": "core"}`,
-/// `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum TargetOut {
-    Project(bool),
-    Context(String),
-    Contract {
-        context: String,
-        contract: String,
-    },
-    Interface {
-        context: String,
-        interface: String,
-    },
-    Harness {
-        context: String,
-        harness: String,
-    },
-    Item {
-        context: Option<String>,
-        interface: String,
-        key: String,
-    },
-    Clause {
-        context: Option<String>,
-        contract: String,
-        label: String,
-    },
-    Case {
-        context: String,
-        harness: String,
-        name: String,
-    },
-}
-
-impl From<TargetInput> for TargetOut {
-    fn from(t: TargetInput) -> TargetOut {
-        match t {
-            TargetInput::Project => TargetOut::Project(true),
-            TargetInput::Context(name) => TargetOut::Context(name),
-            TargetInput::Contract { context, contract } => {
-                TargetOut::Contract { context, contract }
-            }
-            TargetInput::Interface { context, interface } => {
-                TargetOut::Interface { context, interface }
-            }
-            TargetInput::Harness { context, harness } => TargetOut::Harness { context, harness },
-            TargetInput::Item(r) => TargetOut::Item {
-                context: r.context,
-                interface: r.interface,
-                key: r.key,
-            },
-            TargetInput::Clause(r) => TargetOut::Clause {
-                context: r.context,
-                contract: r.contract,
-                label: r.label,
-            },
-            TargetInput::Case {
-                context,
-                harness,
-                name,
-            } => TargetOut::Case {
-                context,
-                harness,
-                name,
-            },
-        }
-    }
-}
-
 /// A target (or keep) a change request recorded, in the result of `cr_open`.
 #[derive(Debug, Serialize)]
 struct OpenedExpectOut {
     /// `target` or `keep`.
     kind: &'static str,
-    target: TargetOut,
+    target: TargetRef,
     /// The revision the target had when the change request was opened.
     recorded: u64,
 }

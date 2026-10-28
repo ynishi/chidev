@@ -1151,14 +1151,16 @@ mod tests {
         let ghost = ChangeRequestId::from_uuid(test_uuid(77));
         let beyond = |id| Beyond::taken_by(vec![id]).unwrap();
         // The request it names is there.
-        q.answer(chosen(0).with_beyond(beyond(other.id()))).unwrap();
+        q.answer(chosen(0).with_beyond(beyond(other.id())).unwrap())
+            .unwrap();
         assert_eq!(
             check_requests_and_cruxes(&[c.clone(), other.clone()], &[q.clone()]),
             Ok(())
         );
         // It is not: the store was not written by a decision that was made here.
         let mut lost = asking(&c, 501);
-        lost.answer(chosen(0).with_beyond(beyond(ghost))).unwrap();
+        lost.answer(chosen(0).with_beyond(beyond(ghost)).unwrap())
+            .unwrap();
         assert_eq!(
             check_requests_and_cruxes(&[c.clone(), other], &[lost]),
             Err(RecordsInconsistent {

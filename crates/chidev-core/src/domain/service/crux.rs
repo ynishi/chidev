@@ -31,8 +31,8 @@ use crate::domain::vo::target::{ExpectKind, Target};
 /// that are outside it ([`outside_frame`], read after the take-back) are not recorded in `cr`, and the answer must say
 /// where they go (`AnswerOutside`): `Beyond::TakenBy` change requests, each not `cr`, not resolved and found among
 /// `others`, that between them frame every target outside, or `Beyond::Declined`. The change requests named are
-/// read whenever `TakenBy` is given, whether or not anything is outside. A withdrawal asks and adds nothing, so a
-/// `beyond` on it is refused (`BeyondOnWithdrawal`).
+/// read whenever `TakenBy` is given, whether or not anything is outside. A withdrawal takes no `beyond`, which the
+/// answer itself refuses ([`Answer::with_beyond`]).
 ///
 /// An answer on the basis of a Policy line must cite a line the Policy of `project` has, at the revision it has now
 /// (the line applied is the line as it reads at the decision). A Crux that is answered already takes no other
@@ -88,9 +88,6 @@ pub fn decide(
     }
     let answer_id = answer.id();
     let beyond = answer.beyond().cloned();
-    if withdrawn && beyond.is_some() {
-        return Err(ChangeRequestError::BeyondOnWithdrawal);
-    }
     let mut answered = crux.clone();
     answered.answer(answer)?;
     if !cr.is_resolved() {
@@ -1344,7 +1341,7 @@ mod tests {
         super::decide(
             &mut q,
             &mut c,
-            chosen_with(901).with_beyond(beyond.clone()),
+            chosen_with(901).with_beyond(beyond.clone()).unwrap(),
             &p,
             None,
             &all,
@@ -1367,7 +1364,7 @@ mod tests {
         super::decide(
             &mut q,
             &mut c,
-            chosen_with(901).with_beyond(declined.clone()),
+            chosen_with(901).with_beyond(declined.clone()).unwrap(),
             &p,
             None,
             &[],
@@ -1421,7 +1418,9 @@ mod tests {
             ),
             (vec![ghost], ChangeRequestError::ReferenceUnknown(ghost)),
         ] {
-            let answer = chosen_with(901).with_beyond(Beyond::taken_by(named).unwrap());
+            let answer = chosen_with(901)
+                .with_beyond(Beyond::taken_by(named).unwrap())
+                .unwrap();
             assert_eq!(
                 super::decide(&mut q, &mut c, answer, &p, None, &all),
                 Err(refused)
@@ -1431,12 +1430,14 @@ mod tests {
         // Two requests that frame a target between them, each one, are enough.
         let one = request_framing(&p, 5, "One", &[clause(32)]);
         let all = [c.clone(), elsewhere.clone(), one.clone()];
-        let answer = chosen_with(901).with_beyond(taken_by(&[&elsewhere, &one]));
+        let answer = chosen_with(901)
+            .with_beyond(taken_by(&[&elsewhere, &one]))
+            .unwrap();
         super::decide(&mut q, &mut c, answer, &p, None, &all).unwrap();
         // They are read when nothing is outside too: a worded answer may reach outside in its words.
         let mut c = request_framing(&p, 1, "T", &[contract(300)]);
         let mut q = crux_asking(&c, 502, &[(clause(31), ExpectKind::Target)], None);
-        let answer = chosen_with(901).with_beyond(taken_by(&[&c]));
+        let answer = chosen_with(901).with_beyond(taken_by(&[&c])).unwrap();
         let all = [c.clone()];
         assert_eq!(
             super::decide(&mut q, &mut c, answer, &p, None, &all),
@@ -1445,18 +1446,16 @@ mod tests {
     }
 
     #[test]
-    fn a_withdrawal_says_nothing_beyond_whatever_the_state_of_its_request() {
+    fn a_withdrawal_cannot_be_given_a_beyond_so_no_decision_carries_one() {
         let p = project_with_a_second_contract();
         let declined = Beyond::declined(prose("nothing"));
-        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
-        let mut q = crux_asking(&c, 501, &[], None);
-        let withdrawal =
-            || answer_on(Decision::Withdrawn, arbitrary()).with_beyond(declined.clone());
         assert_eq!(
-            decide(&mut q, &mut c, withdrawal(), &p, None),
+            answer_on(Decision::Withdrawn, arbitrary()).with_beyond(declined.clone()),
             Err(ChangeRequestError::BeyondOnWithdrawal)
         );
-        assert!(q.is_open());
+        // Any other decision may, and a withdrawal without one is decided in a resolved request as it was.
+        let mut c = request_framing(&p, 1, "T", &[contract(300)]);
+        let mut q = crux_asking(&c, 501, &[], None);
         c.resolve(Resolution::new(
             ResolutionKind::WontDo,
             prose("not needed"),
@@ -1464,11 +1463,19 @@ mod tests {
             Timestamp::from_millis(7),
         ))
         .unwrap();
-        assert_eq!(
-            decide(&mut q, &mut c, withdrawal(), &p, None),
-            Err(ChangeRequestError::BeyondOnWithdrawal)
+        decide(
+            &mut q,
+            &mut c,
+            answer_on(Decision::Withdrawn, arbitrary()),
+            &p,
+            None,
+        )
+        .unwrap();
+        assert!(
+            answer_on(Decision::Unspecified { keep: Vec::new() }, arbitrary())
+                .with_beyond(declined)
+                .is_ok()
         );
-        assert!(q.is_open());
     }
 
     #[test]

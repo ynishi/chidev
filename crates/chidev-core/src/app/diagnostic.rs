@@ -15,7 +15,7 @@ use serde_json::{Value as Json, json};
 
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetName, IdSource, Store};
-use super::{App, AppError, Found, TargetInput, no_provider};
+use super::{App, AppError, Found, TargetInput, TargetRef, no_provider};
 use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::crux::Crux;
@@ -1233,12 +1233,24 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 out
             }
             Remedy::TakeOutside { crux, targets } => {
-                let mut named = Vec::with_capacity(targets.len());
+                // Every target is named, or none is: a list with some left out would open a request that does not
+                // frame what the answer adds outside. The diagnostic is for a refusal already made, so a target the
+                // store cannot name loses the hint (a placeholder to fill in), not the refusal, as `crux_ids` says.
+                let mut named = Some(Vec::with_capacity(targets.len()));
                 for target in targets {
-                    if let Ok(Some(t)) = self.name_target(p, *target).await {
-                        named.push(reference_of(&t));
-                    }
+                    let reference = match self.name_target(p, *target).await {
+                        Ok(Some(t)) => serde_json::to_value(TargetRef::from(t)).ok(),
+                        Ok(None) | Err(_) => None,
+                    };
+                    named = named.zip(reference).map(|(mut all, one)| {
+                        all.push(one);
+                        all
+                    });
                 }
+                let named = match named {
+                    Some(all) => json!(all),
+                    None => json!(["<the targets outside>"]),
+                };
                 let decide = |beyond: Json| {
                     suggest(
                         json!({"op": "cr_crux_decide", "crux": crux.to_string(),
@@ -1354,35 +1366,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 vec![suggest(json!({"op": "context_add", "name": "<name>"}), how)]
             }
         }
-    }
-}
-
-/// A target in the form an operation names it by: `{"project": true}`, `{"context": "core"}`,
-/// `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on.
-fn reference_of(target: &TargetInput) -> Json {
-    match target {
-        TargetInput::Project => json!({"project": true}),
-        TargetInput::Context(name) => json!({"context": name}),
-        TargetInput::Contract { context, contract } => {
-            json!({"contract": {"context": context, "contract": contract}})
-        }
-        TargetInput::Interface { context, interface } => {
-            json!({"interface": {"context": context, "interface": interface}})
-        }
-        TargetInput::Harness { context, harness } => {
-            json!({"harness": {"context": context, "harness": harness}})
-        }
-        TargetInput::Item(r) => {
-            json!({"item": {"context": r.context, "interface": r.interface, "key": r.key}})
-        }
-        TargetInput::Clause(r) => {
-            json!({"clause": {"context": r.context, "contract": r.contract, "label": r.label}})
-        }
-        TargetInput::Case {
-            context,
-            harness,
-            name,
-        } => json!({"case": {"context": context, "harness": harness, "name": name}}),
     }
 }
 

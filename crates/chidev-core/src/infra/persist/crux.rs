@@ -242,7 +242,7 @@ impl TryFrom<&AnswerDoc> for Answer {
             Timestamp::from_millis(d.at),
         );
         Ok(match &d.beyond {
-            Some(beyond) => answer.with_beyond(Beyond::try_from(beyond)?),
+            Some(beyond) => answer.with_beyond(Beyond::try_from(beyond)?).map_err(bad)?,
             None => answer,
         })
     }
