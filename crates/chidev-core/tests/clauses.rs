@@ -491,21 +491,195 @@ async fn a_harness_in_the_same_set_cites_a_label_the_clauses_entry_adds_and_one_
 async fn a_contract_and_a_clauses_entry_for_one_contract_in_one_set_are_refused() {
     let mut app = stock("named-twice").await;
     let before = state(&app).await;
-    let set = ChangeSetInput {
-        change_request: None,
-        puts: vec![
-            PutInput::Contract(ContractPut {
-                context: "core".to_string(),
-                name: "stock".to_string(),
-                title: "Stock".to_string(),
-                clauses: all(),
-            }),
-            put_clauses_entry(vec![clause("C1", "x")], &[]),
-        ],
-        retires: Vec::new(),
+    let made = || {
+        PutInput::Contract(ContractPut {
+            context: "core".to_string(),
+            name: "stock".to_string(),
+            title: "Stock".to_string(),
+            clauses: all(),
+        })
     };
-    let err = app.apply_change_set(&set).await.unwrap_err();
-    let said = app.diagnose(&err).await;
-    assert_eq!(said[0].code, "change-set.named-twice", "{said:#?}");
+    let some = || put_clauses_entry(vec![clause("C1", "x")], &[]);
+    // in whichever order the two entries are listed
+    for puts in [vec![made(), some()], vec![some(), made()]] {
+        let err = app.apply_change_set(&set_of(puts)).await.unwrap_err();
+        let said = app.diagnose(&err).await;
+        assert_eq!(said[0].code, "change-set.named-twice", "{said:#?}");
+        assert_eq!(state(&app).await, before);
+    }
+}
+
+/// The Contract `contract` of the Context `core`, which a `contract` entry makes.
+fn make_contract(contract: &str) -> PutInput {
+    make_contract_in("core", contract)
+}
+
+/// The Contract `contract` of the Context `context`, which a `contract` entry makes.
+fn make_contract_in(context: &str, contract: &str) -> PutInput {
+    PutInput::Contract(ContractPut {
+        context: context.to_string(),
+        name: contract.to_string(),
+        title: "Fresh".to_string(),
+        clauses: all(),
+    })
+}
+
+/// Some Clauses to put onto the Contract `contract` of the Context `core`.
+fn clauses_for(contract: &str) -> PutInput {
+    clauses_for_in("core", contract)
+}
+
+/// Some Clauses to put onto the Contract `contract` of the Context `context`.
+fn clauses_for_in(context: &str, contract: &str) -> PutInput {
+    PutInput::Clauses(ClausesPut {
+        context: context.to_string(),
+        contract: contract.to_string(),
+        clauses: vec![clause("C1", "x")],
+        remove: Vec::new(),
+    })
+}
+
+fn set_of(puts: Vec<PutInput>) -> ChangeSetInput {
+    ChangeSetInput {
+        change_request: None,
+        puts,
+        retires: Vec::new(),
+    }
+}
+
+/// A Contract the same set makes is named twice by a `clauses` entry for it, in whichever order they are listed:
+/// the refusal is the domain's rule, not an unknown Contract.
+#[tokio::test]
+async fn a_clauses_entry_for_a_contract_the_same_set_makes_is_named_twice_in_either_order() {
+    for (name, puts) in [
+        (
+            "made-then-clauses",
+            vec![make_contract("fresh"), clauses_for("fresh")],
+        ),
+        (
+            "clauses-then-made",
+            vec![clauses_for("fresh"), make_contract("fresh")],
+        ),
+    ] {
+        let mut app = stock(name).await;
+        let before = state(&app).await;
+        let revision = app.store().revision().await.unwrap();
+        let err = app.apply_change_set(&set_of(puts)).await.unwrap_err();
+        assert!(matches!(err, AppError::Violated { .. }), "{name}: {err:?}");
+        let said = app.diagnose(&err).await;
+        assert_eq!(said.len(), 1, "{name}: {said:#?}");
+        assert_eq!(said[0].code, "change-set.named-twice", "{name}: {said:#?}");
+        assert!(said[0].message.contains("twice"), "{name}: {said:#?}");
+        assert!(said[0].message.contains("fresh"), "{name}: {said:#?}");
+        // nothing was kept: not the Contract, not a name for it
+        assert_eq!(state(&app).await, before, "{name}");
+        assert_eq!(app.store().revision().await.unwrap(), revision, "{name}");
+        assert_eq!(
+            app.store()
+                .project()
+                .await
+                .unwrap()
+                .unwrap()
+                .contexts()
+                .flat_map(|c| c.contracts())
+                .count(),
+            1,
+            "{name}"
+        );
+    }
+}
+
+/// A `clauses` entry makes no name: for a Contract that exists nowhere it is an unknown Contract, however valid the
+/// rest of the set is.
+#[tokio::test]
+async fn a_clauses_entry_for_a_contract_that_exists_nowhere_is_unknown_in_a_set_too() {
+    let mut app = stock("unknown-in-set").await;
+    let before = state(&app).await;
+    let revision = app.store().revision().await.unwrap();
+    for puts in [
+        vec![clauses_for("nope"), make_contract("fresh")],
+        vec![make_contract("fresh"), clauses_for("nope")],
+    ] {
+        let err = app.apply_change_set(&set_of(puts)).await.unwrap_err();
+        assert!(
+            matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name == "nope"),
+            "{err:?}"
+        );
+    }
     assert_eq!(state(&app).await, before);
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+}
+
+/// A `clauses` entry for a Contract that was retired is refused as retired, as a `contract` entry is.
+#[tokio::test]
+async fn a_clauses_entry_for_a_retired_contract_is_refused_as_retired() {
+    let mut app = stock("clauses-retired").await;
+    app.put_contract("core", "spare", "Spare", &all())
+        .await
+        .unwrap();
+    app.retire_contract("core", "spare").await.unwrap();
+    let revision = app.store().revision().await.unwrap();
+    let err = app
+        .apply_change_set(&set_of(vec![clauses_for("spare")]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, AppError::AssetRetired { kind: "contract", name, .. } if name == "spare"),
+        "{err:?}"
+    );
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+}
+
+/// In a Context the same set adds, a Contract the set makes is named twice by a `clauses` entry for it, and one it
+/// does not make is unknown.
+#[tokio::test]
+async fn in_a_context_the_set_adds_a_clauses_entry_is_named_twice_or_unknown() {
+    let mut app = stock("clauses-new-context").await;
+    let revision = app.store().revision().await.unwrap();
+    let edge = || PutInput::Context {
+        name: "edge".to_string(),
+        uses: Vec::new(),
+    };
+    let err = app
+        .apply_change_set(&set_of(vec![
+            edge(),
+            clauses_for_in("edge", "fresh"),
+            make_contract_in("edge", "fresh"),
+        ]))
+        .await
+        .unwrap_err();
+    let said = app.diagnose(&err).await;
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert_eq!(said[0].code, "change-set.named-twice", "{said:#?}");
+    let err = app
+        .apply_change_set(&set_of(vec![edge(), clauses_for_in("edge", "nope")]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name == "nope"),
+        "{err:?}"
+    );
+    assert_eq!(app.store().revision().await.unwrap(), revision);
+}
+
+/// A Contract named twice and a Contract that exists nowhere, in one set, are both said.
+#[tokio::test]
+async fn a_contract_named_twice_and_an_unknown_one_are_both_said() {
+    let mut app = stock("clauses-both-said").await;
+    let err = app
+        .apply_change_set(&set_of(vec![
+            make_contract("fresh"),
+            clauses_for("fresh"),
+            clauses_for("nope"),
+        ]))
+        .await
+        .unwrap_err();
+    let said = app.diagnose(&err).await;
+    let mut codes: Vec<&str> = said.iter().map(|d| d.code.as_str()).collect();
+    codes.sort_unstable();
+    assert_eq!(
+        codes,
+        ["change-set.named-twice", "input.unknown-name"],
+        "{said:#?}"
+    );
 }

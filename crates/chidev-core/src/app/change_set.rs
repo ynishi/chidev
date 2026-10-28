@@ -224,12 +224,29 @@ struct Plan {
     ids: BTreeMap<(ContextId, AssetKind, String), Uuid>,
     /// The names to keep with the Project, one for each asset put.
     names: Vec<AssetName>,
+    /// The ids `reserve` gave fresh because the store had none: the assets this change set makes.
+    made: BTreeSet<Uuid>,
     /// The Items of each Interface put: key and id.
     items: BTreeMap<InterfaceId, Vec<(String, ItemId)>>,
     /// The Clauses of each Contract put: label and id.
     clauses: BTreeMap<ContractId, Vec<(ClauseLabel, ClauseId)>>,
     /// How to say the Items, Clauses and Cases that the change set makes, which the stored Project does not have.
     words: BTreeMap<Target, String>,
+}
+
+impl Plan {
+    /// Records that the asset under `key` is `id` in this change set, with the name to keep for it; gives `id`.
+    fn name(&mut self, key: (ContextId, AssetKind, String), id: Uuid) -> Uuid {
+        let (context, kind, name) = key.clone();
+        self.ids.insert(key, id);
+        self.names.push(AssetName {
+            context,
+            kind,
+            name,
+            id,
+        });
+        id
+    }
 }
 
 impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
@@ -341,15 +358,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let p_before = p;
         let p = named;
 
-        // The definitions first: a Case that cites one finds the ids and labels of the change set's own.
+        // The definitions first: a Case that cites one finds the ids and labels of the change set's own. The
+        // Contracts and Interfaces the set makes come before the `clauses` entries: a `clauses` entry is put onto a
+        // Contract that is, so the ones the set makes are named first, whatever order the entries are listed in.
         for (n, put) in set.puts.iter().enumerate() {
             match put {
                 PutInput::Contract(c) => {
                     let done = self.contract_put(&p, &mut plan, c).await;
-                    keep_or_note(done, &mut puts, &mut problems);
-                }
-                PutInput::Clauses(c) => {
-                    let done = self.clauses_put(&p, &mut plan, c).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
                 PutInput::Interface(i) => {
@@ -358,9 +373,16 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     keep_or_note(done, &mut puts, &mut problems);
                 }
                 PutInput::Context { .. }
+                | PutInput::Clauses(_)
                 | PutInput::Uses { .. }
                 | PutInput::BaseOnContract { .. }
                 | PutInput::Harness(_) => {}
+            }
+        }
+        for put in &set.puts {
+            if let PutInput::Clauses(c) = put {
+                let done = self.clauses_put(&p, &mut plan, c).await;
+                keep_or_note(done, &mut puts, &mut problems);
             }
         }
         for put in &set.puts {
@@ -490,16 +512,41 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 refuse_retired(p, target_of(kind, id), context, kind, name)?;
                 id
             }
-            None => self.ids.next_uuid(),
+            None => {
+                let id = self.ids.next_uuid();
+                plan.made.insert(id);
+                id
+            }
         };
-        plan.ids.insert(key, id);
-        plan.names.push(AssetName {
-            context: ctx,
-            kind,
-            name: name.to_string(),
-            id,
-        });
-        Ok(id)
+        Ok(plan.name(key, id))
+    }
+
+    /// The id of the asset of `kind` named `name` in `ctx`, which must already be named: by an entry of this
+    /// change set, or in the store. It never draws an id, so it makes no name.
+    async fn reserved(
+        &mut self,
+        p: &Project,
+        plan: &mut Plan,
+        ctx: ContextId,
+        context: &str,
+        kind: AssetKind,
+        name: &str,
+    ) -> Result<Uuid, AppError> {
+        let key = (ctx, kind, name.to_string());
+        if let Some(id) = plan.ids.get(&key) {
+            return Ok(*id);
+        }
+        match self.store.asset_id(ctx, kind, name).await? {
+            Some(id) => {
+                refuse_retired(p, target_of(kind, id), context, kind, name)?;
+                Ok(plan.name(key, id))
+            }
+            None => Err(AppError::UnknownAsset {
+                context: context.to_string(),
+                kind: kind.word(),
+                name: name.to_string(),
+            }),
+        }
     }
 
     async fn contract_put(
@@ -520,7 +567,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// Some Clauses of a Contract to change: the Contract as it is, with the Clauses given set and the ones to remove
-    /// gone. The Contract must exist.
+    /// gone. The Contract must exist before the change set: a `clauses` entry makes no name. One that another entry
+    /// of the same set makes is named twice, and is refused by the domain's rule (`change-set.named-twice`), the same
+    /// as any asset named twice.
+    ///
+    /// This is the one place the app names a repeat itself: the domain's [`ChangeSet`] has no partial Contract put,
+    /// so the app composes a `clauses` entry into a whole Contract, which it cannot do for a Contract the set makes,
+    /// and the domain would not see the entry. Moving the partial put into the domain would remove this.
     async fn clauses_put(
         &mut self,
         p: &Project,
@@ -528,10 +581,22 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         c: &ClausesPut,
     ) -> Result<AssetPut, AppError> {
         let ctx = context_id(p, &c.context)?;
-        let id = ContractId::from_uuid(
-            self.reserve(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
-                .await?,
-        );
+        let id = self
+            .reserved(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
+            .await?;
+        if plan.made.contains(&id) {
+            return Err(self
+                .named_error(
+                    p,
+                    plan,
+                    ProjectError::Repeated {
+                        what: AssetKind::Contract.word(),
+                        id,
+                    },
+                )
+                .await?);
+        }
+        let id = ContractId::from_uuid(id);
         let old =
             p.context(ctx)
                 .and_then(|x| x.contract(id))
