@@ -146,7 +146,7 @@ impl Project {
     /// The things `set` names more than once (an asset put twice or put and retired, the settings of a Context
     /// given twice, a Context put into and retired), each as [`ProjectError::Repeated`]. It asks nothing of the
     /// Project: [`Project::apply`] refuses a set that has any, before it applies anything, and a caller that has
-    /// found other problems with the entries can add these to say every problem at once.
+    /// found other problems with some of the entries can add the repeats of the entries it has to say them together.
     pub fn repeated(set: &ChangeSet) -> Vec<ProjectError> {
         repeats(set)
     }

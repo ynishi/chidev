@@ -386,9 +386,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
         }
         for put in &set.puts {
-            if let PutInput::Clauses(c) = put {
-                let done = self.clauses_put(&p, &mut plan, c).await;
-                keep_or_note(done, &mut puts, &mut problems);
+            if let PutInput::Clauses(c) = put
+                && let Some(done) = self.clauses_put(&p, &mut plan, c, &mut problems).await
+            {
+                puts.push(done);
             }
         }
         for put in &set.puts {
@@ -423,7 +424,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
         if !problems.is_empty() {
             // The domain would refuse a thing named twice only when it applies the set, which it does not get to:
-            // so the repeats of what was planned are said with the problems found.
+            // so the repeats of what was planned are said with the problems found. An entry that could not be
+            // planned is not among them: a repeat with it is said once it is right.
             let planned = ChangeSet::new(puts, retires);
             for e in Project::repeated(&planned) {
                 problems.push(self.named_error(&p, &plan, e).await?);
@@ -587,27 +589,44 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ///
     /// A Contract that another entry of the same set makes is not in the Project yet, so nothing is resolved here:
     /// the entry goes to the domain all the same, which refuses it as a Contract named twice
-    /// (`change-set.named-twice`), the same as any asset named twice.
+    /// (`change-set.named-twice`), the same as any asset named twice. Such an entry is kept even when some of its
+    /// Clauses cannot be read (the problem is noted, and the set is refused anyway), so that the repeat is said with
+    /// the problems of planning. For a Contract the Project has, a problem is noted and there is no put.
     async fn clauses_put(
         &mut self,
         p: &Project,
         plan: &mut Plan,
         c: &ClausesPut,
-    ) -> Result<AssetPut, AppError> {
-        let ctx = context_id(p, &c.context)?;
-        let id = ContractId::from_uuid(
-            self.reserved(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
-                .await?,
-        );
+        problems: &mut Vec<AppError>,
+    ) -> Option<AssetPut> {
+        let ids = async {
+            let ctx = context_id(p, &c.context)?;
+            let id = self
+                .reserved(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
+                .await?;
+            Ok::<_, AppError>((ctx, ContractId::from_uuid(id)))
+        };
+        let (ctx, id) = match ids.await {
+            Ok(found) => found,
+            Err(e) => {
+                problems.push(e);
+                return None;
+            }
+        };
         let read = self.read_clauses(&c.clauses, &c.remove);
         if let Some(old) = p.context(ctx).and_then(|x| x.contract(id)) {
             let found = old.clauses_partial(&read.edits, &read.remove);
-            let given = read.settle((&c.context, &c.contract), found)?;
-            record_clauses(plan, id, &c.contract, &given);
-        } else if !read.problems.is_empty() {
-            return Err(one_or_many(read.problems));
+            match read.settle((&c.context, &c.contract), found) {
+                Ok(given) => record_clauses(plan, id, &c.contract, &given),
+                Err(e) => {
+                    problems.push(e);
+                    return None;
+                }
+            }
+        } else {
+            problems.extend(read.problems);
         }
-        Ok(AssetPut::Clauses {
+        Some(AssetPut::Clauses {
             context: ctx,
             id,
             edits: read.edits,

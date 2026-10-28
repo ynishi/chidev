@@ -557,7 +557,11 @@ pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
                     covered.insert(m.target());
-                    covered.extend(m.within().iter().copied());
+                    // A new name moved no container, so it covers none: a container that moved in the same set
+                    // moved for a reason of its own (a new title, another order).
+                    if m.is_revised() {
+                        covered.extend(m.within().iter().copied());
+                    }
                 }
                 for t in footprint.targets().filter(|t| !covered.contains(t)) {
                     moved.insert(t);
@@ -2168,6 +2172,46 @@ mod tests {
                 cr: c.id(),
                 moved: vec![clause()],
                 by_work: vec![(clause(), 2)],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_label_inside_the_frame_does_not_cover_its_contract_moved_for_another_reason() {
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // The framed Clause is given a new label, and the Contract a new title, in one set.
+        work(&mut p, &mut c, 2, |p| {
+            relabel_first(p, "C3");
+            let k = p
+                .context(core())
+                .unwrap()
+                .contract(ContractId::from_uuid(test_uuid(300)))
+                .unwrap();
+            let clauses = k
+                .clauses()
+                .iter()
+                .map(|c| (c.id(), ClauseContent::new(c.label(), c.text().clone())))
+                .collect();
+            p.put_contract(
+                core(),
+                ContractId::from_uuid(test_uuid(300)),
+                Title::try_from("U").unwrap(),
+                clauses,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            out_of_frame(std::slice::from_ref(&c)),
+            [OutOfFrame {
+                cr: c.id(),
+                moved: vec![contract()],
+                by_work: vec![(contract(), 2)],
             }]
         );
     }

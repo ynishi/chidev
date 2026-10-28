@@ -68,7 +68,13 @@ that the aggregate should not have left to the use case.
   from `Project::apply` for a `clauses` entry as for any other asset. A set that also
   has problems the use case finds while it plans (an unknown name) says the repeats
   with them: the use case asks `Project::repeated` of what it planned, so the rule
-  stays in the domain and every problem is said at once.
+  stays in the domain. It is the repeats of the entries that were planned that are
+  said with the problems of planning. A `contract` entry that could not be planned (a
+  title that cannot be read, a name problem) is not among them, so a repeat with it is
+  said once that entry is right; the set is refused either way. A `clauses` entry for a
+  Contract the same set makes is planned even when some of its Clauses cannot be read.
+- A name refusal that reaches the domain unchecked names the Contract but not its
+  Context. The use case never gets there: it checks the names first.
 - The rules about names are tested on the Contract, without a store or a use case.
 - One id is drawn for each edit, whether or not it makes a Clause, so ids that
   come after it in the same use case are drawn later than before. An id is a

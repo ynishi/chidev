@@ -2307,9 +2307,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok((crs, cruxes))
     }
 
-    /// Where the Project stands. It answers from one read of the store: the revision, the Project, the change requests
-    /// and the Cruxes are read once, at the top, and the check runs on them. The Pins are read per Interface by their
-    /// own calls.
+    /// Where the Project stands. The model it answers about is read once: the revision, the Project, the change
+    /// requests and the Cruxes are read at the top, and the checks run on them. The Pins, the names of assets, the
+    /// measurements and the reports of external and judged checks are read by their own calls after that.
     pub async fn status(&self) -> Result<Status, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
