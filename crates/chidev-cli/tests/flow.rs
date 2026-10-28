@@ -1582,6 +1582,141 @@ fn a_change_set_applied_again_for_a_request_is_ok_and_adds_no_work() {
 }
 
 #[test]
+fn parts_that_share_a_harness_are_designed_side_by_side_and_each_put_moves_only_its_own_cases() {
+    use serde_json::json;
+    let dir = fresh_dir("shared-harness");
+    let stock = |c1: &str, c2: &str| {
+        json!({"put":"contract","context":"core","name":"stock","title":"Stock",
+            "clauses":[{"label":"C1","text":c1},{"label":"C2","text":c2}]})
+    };
+    let interface = json!({"put":"interface","context":"core","name":"stock",
+        "source":"fn reserve()\nfn release()\n",
+        "items":[{"key":"reserve","lines":[1,1]},{"key":"release","lines":[2,2]}]});
+    // Case `reserve_refuses` cites C1 (part A's Clause), `release_frees` cites C2 (part B's)
+    let harness = json!({"put":"harness","context":"core","name":"stock-tests",
+        "source":"fn reserve_refuses() {}\nfn release_frees() {}\n",
+        "cases":[
+            {"name":"reserve_refuses","lines":[1,1],"items":[{"interface":"stock","key":"reserve"}],
+                "clauses":[{"contract":"stock","label":"C1"}]},
+            {"name":"release_frees","lines":[2,2],"items":[{"interface":"stock","key":"release"}],
+                "clauses":[{"contract":"stock","label":"C2"}]}]});
+    let clause =
+        |label: &str| json!({"clause":{"context":"core","contract":"stock","label":label}});
+    let ops: String = [
+        json!({"op":"init"}),
+        json!({"op":"context_add","name":"core"}),
+        // 3: the stock, in a change set for no request
+        json!({"op":"change_set","puts":[stock("one", "two"), interface, harness.clone()]}),
+        // 4, 5, 6: a parent and two parts, each part targeting one Clause
+        json!({"op":"cr_open","title":"Rework stock","intent":"change_behavior",
+            "situation":"both Clauses are reworded"}),
+        json!({"op":"cr_open","title":"Reword C1","intent":"change_behavior","parent":"Rework stock",
+            "targets":[clause("C1")]}),
+        json!({"op":"cr_open","title":"Reword C2","intent":"change_behavior","parent":"Rework stock",
+            "targets":[clause("C2")]}),
+        // 7, 8: both designs, side by side, before any Harness is put
+        json!({"op":"change_set","for":"Reword C1","puts":[stock("one, revised", "two")]}),
+        json!({"op":"change_set","for":"Reword C2","puts":[stock("one, revised", "two, revised")]}),
+        // 9: both Cases are stale
+        json!({"op":"status"}),
+        // 10, 11: the Harness put again, same code, for part A
+        json!({"op":"change_set","for":"Reword C1","puts":[harness.clone()]}),
+        json!({"op":"status"}),
+        // 12, 13: and for part B
+        json!({"op":"change_set","for":"Reword C2","puts":[harness]}),
+        json!({"op":"status"}),
+    ]
+    .iter()
+    .map(|op| format!("{op}\n"))
+    .collect();
+    let (results, code, err) = exec_in(&dir, &ops);
+    assert_eq!(code, Some(0), "{err}\n{results:#?}");
+    let out_of_frame = |r: &Value| -> usize {
+        r["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["rule"] == "cr.out-of-frame")
+            .count()
+    };
+    let stale_cases = |status: &Value| -> Vec<String> {
+        status["stale_cites"]
+            .as_array()
+            .expect("stale cites")
+            .iter()
+            .map(|c| c["case"].as_str().expect("a case").to_string())
+            .collect()
+    };
+    let last_work = |status: &Value, title: &str| -> Vec<String> {
+        let request = status["change_requests"]
+            .as_array()
+            .expect("change requests")
+            .iter()
+            .find(|c| c["title"] == title)
+            .unwrap_or_else(|| panic!("no change request {title}"));
+        let work = request["work"].as_array().expect("work");
+        work.last().expect("some work")["moved"]
+            .as_array()
+            .expect("moved")
+            .iter()
+            .map(|m| m.as_str().expect("a target").to_string())
+            .collect()
+    };
+    let out_of_frame_of = |status: &Value, title: &str| -> Value {
+        status["change_requests"]
+            .as_array()
+            .expect("change requests")
+            .iter()
+            .find(|c| c["title"] == title)
+            .unwrap_or_else(|| panic!("no change request {title}"))["out_of_frame"]
+            .clone()
+    };
+    // both Cases are stale after the two designs
+    assert_eq!(
+        stale_cases(at(&results, 9)).len(),
+        2,
+        "{:#?}",
+        at(&results, 9)
+    );
+
+    // the put for A brings up the Case that cites C1 and leaves the other where it was
+    assert_eq!(at(&results, 10)["ok"], true, "{:#?}", at(&results, 10));
+    assert_eq!(out_of_frame(at(&results, 10)), 0, "{:#?}", at(&results, 10));
+    let after_a = at(&results, 11);
+    let stale = stale_cases(after_a);
+    assert_eq!(stale.len(), 1, "{after_a:#?}");
+    assert!(stale[0].contains("release_frees"), "{stale:?}");
+    let moved = last_work(after_a, "Reword C1");
+    assert!(
+        moved.iter().any(|m| m.contains("reserve_refuses")),
+        "{moved:?}"
+    );
+    assert!(
+        !moved.iter().any(|m| m.contains("release_frees")),
+        "{moved:?}"
+    );
+    assert_eq!(out_of_frame_of(after_a, "Reword C1"), json!([]));
+    assert_eq!(out_of_frame_of(after_a, "Reword C2"), json!([]));
+
+    // the put for B brings up the other, and nothing is stale
+    assert_eq!(at(&results, 12)["ok"], true, "{:#?}", at(&results, 12));
+    assert_eq!(out_of_frame(at(&results, 12)), 0, "{:#?}", at(&results, 12));
+    let after_b = at(&results, 13);
+    assert!(stale_cases(after_b).is_empty(), "{after_b:#?}");
+    let moved = last_work(after_b, "Reword C2");
+    assert!(
+        moved.iter().any(|m| m.contains("release_frees")),
+        "{moved:?}"
+    );
+    assert!(
+        !moved.iter().any(|m| m.contains("reserve_refuses")),
+        "{moved:?}"
+    );
+    assert_eq!(out_of_frame_of(after_b, "Reword C1"), json!([]));
+    assert_eq!(out_of_frame_of(after_b, "Reword C2"), json!([]));
+}
+
+#[test]
 fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
     let dir = fresh_dir("every-kind");
     let ops = [

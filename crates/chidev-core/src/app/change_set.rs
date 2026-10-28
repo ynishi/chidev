@@ -22,6 +22,7 @@ use crate::domain::entity::context::Context;
 use crate::domain::entity::contract::Contract;
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
+use crate::domain::service::change_request::frame;
 use crate::domain::service::footprint::footprint_between;
 use crate::domain::violation::Violation;
 use crate::domain::vo::case::CaseName;
@@ -182,9 +183,11 @@ pub enum RetireInput {
 pub struct ChangeSetInput {
     /// The title of the change request this change set is applied for. The request must exist and not be resolved.
     /// What the set moves is recorded as work of that request, in the same commit: it is what `status` reads to say
-    /// whether the request's targets were revised or retired, and it is judged against the request's own frame.
-    /// None: the set belongs to no request, shows in the targets of none, and is judged by revision for the `keep`
-    /// of any request alone.
+    /// whether the request's targets were revised or retired, and it is judged against the request's own frame. The
+    /// frame also bounds which citations of the Cases of a Harness put in the set are brought up to the revision of
+    /// what they cite: those the frame holds, and new ones; a stale citation outside it stays as it was.
+    /// None: the set belongs to no request, shows in the targets of none, is judged by revision for the `keep`
+    /// of any request alone, and brings every citation of a Harness it puts up.
     pub change_request: Option<String>,
     /// What is put.
     pub puts: Vec<PutInput>,
@@ -267,6 +270,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// Project before and after, with the containers they were in) as work of that request, in the same commit; the
     /// request must exist and not be resolved. The checks of an edit see the request with that work, so a move
     /// outside its frame is found by the set that makes it.
+    ///
+    /// The set also carries the frame of that request into the Project: a Harness it puts brings up a citation of a
+    /// Case (records it at the revision its target has) only where the frame holds it, or the citation is new, so a
+    /// stale Case of another part stays stale and does not move. A set for no request brings every citation up.
     pub async fn apply_change_set(
         &mut self,
         set: &ChangeSetInput,
@@ -420,7 +427,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
 
         let mut after = p_before.clone();
-        if let Err(e) = after.apply(ChangeSet::new(puts, retires)) {
+        let mut change_set = ChangeSet::new(puts, retires);
+        if let Some(cr) = &applied_for {
+            change_set = change_set.for_frame(frame(cr));
+        }
+        if let Err(e) = after.apply(change_set) {
             return Err(self.set_error(&p, &plan, e).await?);
         }
         if let Some(cr) = &mut applied_for {

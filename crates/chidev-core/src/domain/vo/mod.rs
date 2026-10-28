@@ -11,6 +11,7 @@ pub mod crux;
 pub mod digest;
 pub mod finding;
 pub mod footprint;
+pub mod frame;
 pub mod harness_kind;
 pub mod id;
 pub mod intent;

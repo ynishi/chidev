@@ -24,6 +24,7 @@ use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::answer::Beyond;
 use crate::domain::vo::footprint::{Citations, Move};
+use crate::domain::vo::frame::Frame;
 use crate::domain::vo::id::{ChangeRequestId, ContextId};
 use crate::domain::vo::resolution::Resolution;
 use crate::domain::vo::revision::Revision;
@@ -434,8 +435,10 @@ pub fn keep_targeted(
         .iter()
         .flat_map(|c| {
             frame(c)
-                .into_iter()
-                .map(|t| (c.id(), t, project.holder_of(t)))
+                .targets()
+                .iter()
+                .map(|t| (c.id(), *t, project.holder_of(*t)))
+                .collect::<Vec<_>>()
         })
         .collect();
     open.iter()
@@ -461,11 +464,13 @@ pub fn keep_targeted(
 /// The targets `cr` names to revise or retire, its own and those its decisions recorded: its frame. A container in
 /// it frames everything inside. A decision never widens it (the targets of the option chosen that are outside it are
 /// left out, see [`outside_frame`]), but a decision recorded before that was a rule did, and is counted as it stands.
-pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
-    cr.expectations()
-        .filter(|(_, e)| e.kind == ExpectKind::Target)
-        .map(|(t, _)| t)
-        .collect()
+pub fn frame(cr: &ChangeRequest) -> Frame {
+    Frame::new(
+        cr.expectations()
+            .filter(|(_, e)| e.kind == ExpectKind::Target)
+            .map(|(t, _)| t)
+            .collect(),
+    )
 }
 
 /// The Contexts `cr` is about in `project`: the ones that hold a target it names to revise or retire (its frame) or
@@ -475,22 +480,6 @@ pub fn contexts_in(cr: &ChangeRequest, project: &Project) -> BTreeSet<ContextId>
     cr.expectations()
         .filter_map(|(target, _)| project.context_of_target(target))
         .collect()
-}
-
-/// Whether `target` is inside `frame`, as [`outside_frame`] says; `within` are the containers it is in and `cites`
-/// what it cites, if it is a Case. The work a request did ([`out_of_frame`]) and what an answer adds to a request
-/// ([`outside_frame`]) are both judged by it.
-fn inside_frame(
-    frame: &BTreeSet<Target>,
-    target: Target,
-    within: &[Target],
-    cites: Option<&Citations>,
-) -> bool {
-    frame.iter().any(|container| {
-        target == *container
-            || within.contains(container)
-            || cites.is_some_and(|c| c.is_inside(*container))
-    })
 }
 
 /// The targets among `targets` that are outside the frame of `cr` ([`frame`]), in the order given, as `project`
@@ -523,7 +512,7 @@ pub fn outside_frame(
                 }),
                 _ => None,
             };
-            !inside_frame(&framed, *target, within, cites.as_ref())
+            !framed.holds(*target, within, cites.as_ref())
         })
         .collect()
 }
@@ -563,12 +552,7 @@ pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -
             let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
                 let inside = |m: &Move| {
-                    inside_frame(
-                        &frame,
-                        m.target(),
-                        m.within(),
-                        footprint.citations_of(m.target()),
-                    )
+                    frame.holds(m.target(), m.within(), footprint.citations_of(m.target()))
                 };
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
@@ -1635,7 +1619,7 @@ mod tests {
         // as a decided expectation, and the frame is what it was.
         let all = BTreeSet::from([clause(), contract(), detail()]);
         assert_eq!(progress(&c), all);
-        assert_eq!(frame(&c), all);
+        assert_eq!(frame(&c).targets(), &all);
         assert_eq!(c.decided_expects().len(), 1);
         assert_eq!(c.decided_expects()[0].target, detail());
     }
@@ -1776,7 +1760,7 @@ mod tests {
         decided(&mut c, &mut crux, 1, &p);
         assert_eq!(c.decided_expects()[0].kind, ExpectKind::Keep);
         assert_eq!(keep_progress(&c, &p).len(), 1);
-        assert_eq!(frame(&c), BTreeSet::from([clause()]));
+        assert_eq!(frame(&c).targets(), &BTreeSet::from([clause()]));
     }
 
     // A keep that an open request's target breaks.

@@ -472,6 +472,10 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   the basis, the Harnesses, then the retirements. A Case can cite a Clause or an
   Item that the same change set makes or revises, and the citation records the
   revision it has there; a Case that cites what the set removes fails the set.
+  That is so for a set without `for`. A set `for` a request brings a citation up
+  (records it at the revision its target has) only where the request's frame holds
+  it or the citation is new, and leaves the others as they were: see "Attribution
+  and frame".
   A sim Harness entry (`"kind":"sim"`) may carry `builds`, the names of Interfaces
   of its Context, which may be ones the same set makes; one that is not in the
   Context, or that the set retires while the sim still builds it, fails the set.
@@ -1290,6 +1294,22 @@ no work and records no footprint:
   container is. For a move outside the frame: name the target when the request is
   opened, apply the change set `for` the request it belongs to, or take the change
   back.
+
+  The same frame decides what a Harness put `for` the request brings up. Each
+  citation of each Case of the put is recorded at the revision its target has when
+  the Case is new, the Case did not cite that target before, the target is inside
+  the frame, or the Case is (the Case, its Harness, its Context or the Project is
+  named). Any other citation stays at the revision the Case had recorded for it, so
+  a stale Case of another part stays stale and does not move, and the put does not
+  claim it current for a change nobody looked at. This is decided per citation: a
+  Case that cites a Clause of this request and a stale Clause of another is brought
+  up on the first and stays stale on the second. A Case whose code the put changes
+  still moves, as it does in any put. A set without `for` brings every citation up.
+  So parts that share a Harness can be designed side by side, each part's Harness put
+  moving only the Cases its frame holds and the Cases whose code it changes. The edge: a set that revises a Clause
+  outside its frame and puts a Harness whose unchanged Case cites it leaves that Case
+  stale right after the set, and the revision itself is `cr.out-of-frame`. The
+  decision is in ADR 0006.
 - A new Clause or Item is a move of its own: a frame that names only the other
   Clauses of the Contract has it outside, so name the Contract when the request
   adds to it.
