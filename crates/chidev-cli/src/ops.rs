@@ -15,7 +15,8 @@ use chidev_core::app::{
     ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
     RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, RenameInput, ReportInput,
     ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
-    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
+    RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus,
+    ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::vo::measure::MeasureKind;
@@ -25,8 +26,11 @@ use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod diagnostic;
+use diagnostic::DiagnosticOut;
+
 /// One operation. `op` names it; the other fields are its arguments.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
     /// Makes the project.
@@ -34,7 +38,7 @@ enum Op {
     /// Adds a Context.
     ContextAdd {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         uses: Vec<String>,
     },
     /// Sets the Contexts a Context uses.
@@ -58,9 +62,9 @@ enum Op {
     ClausesPut {
         context: String,
         contract: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         clauses: Vec<ClauseDto>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<String>,
     },
     /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
@@ -70,13 +74,13 @@ enum Op {
     InterfacePut {
         context: String,
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<ItemDto>>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         renames: Vec<RenameDto>,
     },
     /// Gives the Items of an Interface the keys and lines the provider of its language finds in the code the
@@ -92,13 +96,13 @@ enum Op {
     HarnessPut {
         context: String,
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         builds: Vec<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
         cases: Vec<CaseDto>,
     },
@@ -113,11 +117,11 @@ enum Op {
     /// reads from such work whether the request's targets were revised or retired. Without `for` the set belongs
     /// to no request.
     ChangeSet {
-        #[serde(default, rename = "for")]
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
         for_change_request: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         puts: Vec<PutDto>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         retires: Vec<RetireDto>,
     },
     /// Retires a Context and everything it owns: it leaves the model, its ids stay reserved, nothing brings it
@@ -133,9 +137,9 @@ enum Op {
     Pin {
         context: String,
         interface: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         code_file: Option<String>,
     },
     /// Opens a change request.
@@ -165,7 +169,7 @@ enum Op {
         title: String,
         statement: String,
         reason: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         evidence: Vec<EvidenceDto>,
     },
     /// Closes the record of a change request with a resolution: `resolution` is `"done"`, `"wont_do"`,
@@ -194,9 +198,9 @@ enum Op {
     Measure {
         kind: MeasureKindDto,
         context: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interface: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         harness: Option<String>,
     },
     /// Lists every rule: the invariants an operation is refused for, the rules an input must meet, and the checks
@@ -212,7 +216,7 @@ enum Op {
     /// `outside` is how many findings were left out (the Project's own, and change requests that name nothing of
     /// the Context). The whole run is made either way.
     Check {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
     },
     /// Explicitly executes external check-moment programs and records this run.
@@ -222,15 +226,15 @@ enum Op {
     /// The judged rules to judge (those of `moment`, or the one `rule`; all when neither is given), with a view of
     /// the model to judge them on. The agent that drives chidev judges; chidev keeps the results.
     CheckRules {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         moment: Option<String>,
         /// Only to be refused: the argument was `hook` before it was `moment`. Without the field the operation
         /// would run with no moment given, which is every rule. Kept apart from null, so `"hook": null` is refused
         /// too.
-        #[serde(default, deserialize_with = "present")]
+        #[serde(default, deserialize_with = "present", skip_serializing)]
         #[schemars(skip)]
         hook: Option<Option<serde_json::Value>>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<String>,
     },
     /// What an agent judged of one rule: replaces every finding the rule had.
@@ -245,22 +249,22 @@ enum Op {
 
 /// The fields of `view`. A field it does not know is refused: a misspelled `contexts` would otherwise read every
 /// Context, more than the reader was to be given.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ViewDto {
     sections: Vec<SectionDto>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     contexts: Option<Vec<String>>,
 }
 
 /// One entry of the `puts` of a `change_set`: the fields of the operation named by `put`, without `op`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "put", rename_all = "snake_case", deny_unknown_fields)]
 enum PutDto {
     /// As `context_add`.
     Context {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         uses: Vec<String>,
     },
     /// As `context_uses`.
@@ -278,42 +282,42 @@ enum PutDto {
     Clauses {
         context: String,
         contract: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         clauses: Vec<ClauseDto>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<String>,
     },
     /// As `interface_put`.
     Interface {
         context: String,
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<ItemDto>>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         renames: Vec<RenameDto>,
     },
     /// As `harness_put`.
     Harness {
         context: String,
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         builds: Vec<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
         cases: Vec<CaseDto>,
     },
 }
 
 /// One entry of the `retires` of a `change_set`: the fields of the retire operation named by `retire`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "retire", rename_all = "snake_case", deny_unknown_fields)]
 enum RetireDto {
     /// As `context_retire`.
@@ -605,6 +609,12 @@ impl JsonSchema for SectionDto {
     }
 }
 
+impl Serialize for SectionDto {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.word())
+    }
+}
+
 impl From<SectionDto> for ModelSection {
     fn from(s: SectionDto) -> ModelSection {
         s.0
@@ -612,7 +622,7 @@ impl From<SectionDto> for ModelSection {
 }
 
 /// What a `measure` measures.
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum MeasureKindDto {
     Mutate,
@@ -695,7 +705,6 @@ struct StepOut<'a> {
 /// The result of `measure`.
 #[derive(Debug, Serialize)]
 struct MeasureOut<'a> {
-    op: &'static str,
     kind: &'static str,
     id: &'a str,
     stamp: &'a str,
@@ -750,7 +759,7 @@ struct MeasurementOut<'a> {
 }
 
 /// The fields of `finding_report`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct ReportDto {
     rule: String,
     /// The rule digest returned by check_rules, echoed back. Required: a missing or null one is refused.
@@ -760,23 +769,24 @@ struct ReportDto {
     /// The store revision of the view it judged from (`store_revision` of `check_rules`).
     read_at: u64,
     /// Every finding of the rule; empty: it found nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     findings: Vec<ReportedFindingDto>,
 }
 
 /// A finding in a report.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct ReportedFindingDto {
     /// What it is about; none: the Project as a whole.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     subject: Option<SubjectDto>,
     message: String,
     /// `note`, `warning` or `error`, not above the rule's level; none: the rule's.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     level: Option<String>,
 }
 
 /// What a finding is about, tagged by its kind: `{ "clause": { ... } }`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum SubjectDto {
     Context(String),
@@ -851,7 +861,7 @@ impl TryFrom<ReportDto> for ReportInput {
 }
 
 /// How a change request ended: a word, or a word that points at another change request by its title.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ResolutionDto {
     Done,
@@ -875,50 +885,54 @@ impl From<ResolutionDto> for ResolutionInput {
 
 /// The fields of `cr_open`, boxed: they are far larger than any other operation's. A field it does not know is
 /// refused, so a word it ignored would not be lost silently.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct OpenDto {
     title: String,
     /// Why it is needed, in the words of whoever raised it. Kept with the request and shown by `status`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     situation: Option<String>,
     intent: IntentDto,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     /// Who raised it. Kept with the request and shown by `status`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     issuer: Option<String>,
     /// The targets it asks to be revised or retired. A parent need not name any.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     targets: Vec<RefDto>,
     /// The targets it asks to stay as they are.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     keep: Vec<RefDto>,
     /// The interpretations settled from the repository and general knowledge while raising it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     assumptions: Vec<AssumptionDto>,
     /// The findings it deals with.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     addresses: Vec<AddressDto>,
 }
 
 /// An Assumption: what is assumed, why it holds, and what it stands on.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AssumptionDto {
     statement: String,
     reason: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     evidence: Vec<EvidenceDto>,
 }
 
 /// What an Assumption stands on: a place in the repository, or general knowledge.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum EvidenceDto {
     Repo {
         path: String,
-        #[serde(default, deserialize_with = "maybe_two_lines")]
+        #[serde(
+            default,
+            deserialize_with = "maybe_two_lines",
+            skip_serializing_if = "Option::is_none"
+        )]
         lines: Option<(usize, usize)>,
     },
     Knowledge {
@@ -946,7 +960,7 @@ impl From<AssumptionDto> for AssumptionInput {
 }
 
 /// What a decision rests on: `{"policy": "P1"}` or `{"arbitrary": "<reason>"}`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum BasisDto {
     Policy(String),
@@ -963,7 +977,7 @@ impl From<BasisDto> for BasisInput {
 }
 
 /// Who decides: `{"role": "<name>"}` or `{"person": "<name>"}`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum MakerDto {
     Role(String),
@@ -980,7 +994,7 @@ impl From<MakerDto> for DecisionMakerInput {
 }
 
 /// One line of the decision Policy.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PolicyLineDto {
     id: String,
@@ -988,10 +1002,11 @@ struct PolicyLineDto {
 }
 
 /// A finding a change request addresses. New and legacy input forms normalize at the CLI boundary.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(try_from = "AddressWire")]
 struct AddressDto {
     rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     subject: Option<SubjectDto>,
 }
 
@@ -1091,7 +1106,7 @@ impl From<AddressDto> for FindingInput {
 #[derive(Debug, Serialize)]
 struct FindingOut<'a> {
     #[serde(flatten)]
-    diagnostic: Diagnostic,
+    diagnostic: DiagnosticOut<'a>,
     rule: &'a str,
     /// `open`, `addressed` or `decided`.
     state: &'static str,
@@ -1119,7 +1134,7 @@ fn findings_out(found: &[Found]) -> Vec<FindingOut<'_>> {
     found
         .iter()
         .map(|f| FindingOut {
-            diagnostic: Diagnostic::of_found(f),
+            diagnostic: DiagnosticOut::from(f),
             rule: f.rule.as_str(),
             state: f.state.word(),
             about: f.about.as_deref(),
@@ -1157,7 +1172,6 @@ impl From<OpenedExpect> for OpenedExpectOut {
 /// The result of `cr_open`.
 #[derive(Debug, Serialize)]
 struct CrOpenOut<'a> {
-    op: &'static str,
     cr: String,
     expects: Vec<OpenedExpectOut>,
     findings: Vec<FindingOut<'a>>,
@@ -1166,7 +1180,6 @@ struct CrOpenOut<'a> {
 /// The result of `cr_crux_raise`: the id of the Crux, and of each option with its choice.
 #[derive(Debug, Serialize)]
 struct CruxRaisedOut<'a> {
-    op: &'static str,
     crux: String,
     options: Vec<RaisedOptionOut<'a>>,
     findings: Vec<FindingOut<'a>>,
@@ -1573,7 +1586,6 @@ struct PolicyOut<'a> {
 /// The result of `policy_put`.
 #[derive(Debug, Serialize)]
 struct PolicyPutOut<'a> {
-    op: &'static str,
     revision: u64,
     findings: Vec<FindingOut<'a>>,
 }
@@ -1581,7 +1593,6 @@ struct PolicyPutOut<'a> {
 /// The result of an operation that gives nothing back but its name and what the checks of its edit said.
 #[derive(Debug, Serialize)]
 struct DoneOut<'a> {
-    op: &'static str,
     findings: Vec<FindingOut<'a>>,
 }
 
@@ -1617,7 +1628,6 @@ impl<'a> From<&'a RetiredStatus> for RetiredOut<'a> {
 /// The result of a retire operation: everything that left the model, the thing first.
 #[derive(Debug, Serialize)]
 struct RetireOut<'a> {
-    op: &'static str,
     retired: Vec<RetiredOut<'a>>,
     findings: Vec<FindingOut<'a>>,
 }
@@ -1626,7 +1636,6 @@ struct RetireOut<'a> {
 /// those no declaration was paired with.
 #[derive(Debug, Serialize)]
 struct RekeyOut<'a> {
-    op: &'static str,
     rekeyed: Vec<KeyChangedOut<'a>>,
     revised: Vec<ItemRevisedOut<'a>>,
     unmatched: &'a [String],
@@ -1648,27 +1657,55 @@ struct ItemRevisedOut<'a> {
     to: u64,
 }
 
-/// What one put of a `change_set` came to: the asset's name, id and revision (a setting of a Context has none).
+/// What one put of a `change_set` came to: the setting, the Context, or the asset.
 #[derive(Debug, Serialize)]
-struct PutOut<'a> {
-    put: &'static str,
-    context: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    revision: Option<u64>,
+#[serde(untagged)]
+enum PutOut<'a> {
+    Setting {
+        put: &'static str,
+        context: &'a str,
+    },
+    Context {
+        put: &'static str,
+        context: &'a str,
+        id: String,
+        revision: u64,
+    },
+    Asset {
+        put: &'static str,
+        context: &'a str,
+        name: &'a str,
+        id: String,
+        revision: u64,
+    },
 }
 
 impl<'a> From<&'a PutDone> for PutOut<'a> {
     fn from(d: &'a PutDone) -> PutOut<'a> {
-        PutOut {
-            put: d.kind,
-            context: &d.context,
-            name: d.name.as_deref(),
-            id: d.id.map(|id| id.to_string()),
-            revision: d.revision.map(|r| r.number()),
+        match d {
+            PutDone::Setting { kind, context } => PutOut::Setting {
+                put: kind.word(),
+                context: context.as_str(),
+            },
+            PutDone::Context { name, id, revision } => PutOut::Context {
+                put: "context",
+                context: name.as_str(),
+                id: id.to_string(),
+                revision: revision.number(),
+            },
+            PutDone::Asset {
+                kind,
+                context,
+                name,
+                id,
+                revision,
+            } => PutOut::Asset {
+                put: kind.word(),
+                context: context.as_str(),
+                name: name.as_str(),
+                id: id.to_string(),
+                revision: revision.number(),
+            },
         }
     }
 }
@@ -1677,7 +1714,6 @@ impl<'a> From<&'a PutDone> for PutOut<'a> {
 /// dropped, then what was retired).
 #[derive(Debug, Serialize)]
 struct ChangeSetOut<'a> {
-    op: &'static str,
     puts: Vec<PutOut<'a>>,
     retired: Vec<RetiredOut<'a>>,
     findings: Vec<FindingOut<'a>>,
@@ -1687,7 +1723,6 @@ struct ChangeSetOut<'a> {
 /// and the revision it has after the put.
 #[derive(Debug, Serialize)]
 struct AssetPutOut<'a> {
-    op: &'static str,
     id: String,
     revision: u64,
     findings: Vec<FindingOut<'a>>,
@@ -1696,7 +1731,6 @@ struct AssetPutOut<'a> {
 /// The result of `status`.
 #[derive(Debug, Serialize)]
 struct StatusOut<'a> {
-    op: &'static str,
     retired: Vec<RetiredOut<'a>>,
     pins: Vec<PinOut<'a>>,
     stale_cites: Vec<StaleCiteOut<'a>>,
@@ -1714,7 +1748,6 @@ struct StatusOut<'a> {
 /// The result of `check`.
 #[derive(Debug, Serialize)]
 struct CheckOut<'a> {
-    op: &'static str,
     findings: Vec<FindingOut<'a>>,
     /// How many findings the `context` asked for left out; only when one was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1749,7 +1782,6 @@ struct CheckEntryOut {
 /// The result of `check_list`: the checks, and a fingerprint of the policy they run under.
 #[derive(Debug, Serialize)]
 struct CheckListOut {
-    op: &'static str,
     policy: String,
     checks: Vec<CheckEntryOut>,
 }
@@ -1810,7 +1842,6 @@ impl<'a> RuleOut<'a> {
 /// The result of `check_rules`: the rules, and the model they are judged on (read at `store_revision`).
 #[derive(Debug, Serialize)]
 struct CheckRulesOut<'a> {
-    op: &'static str,
     store_revision: u64,
     rules: Vec<RuleOut<'a>>,
     model: &'a ModelView,
@@ -1819,7 +1850,6 @@ struct CheckRulesOut<'a> {
 /// The result of `view`: the part of the model asked for (read at `store_revision`).
 #[derive(Debug, Serialize)]
 struct ViewOut<'a> {
-    op: &'static str,
     store_revision: u64,
     view: &'a ModelSlice,
 }
@@ -1827,7 +1857,6 @@ struct ViewOut<'a> {
 /// The result of `finding_report`.
 #[derive(Debug, Serialize)]
 struct ReportOut<'a> {
-    op: &'static str,
     rule: &'a str,
     rule_digest: String,
     state: &'static str,
@@ -1860,7 +1889,7 @@ fn standing_out(standing: &[RuleStanding]) -> Vec<StandingOut<'_>> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum IntentDto {
     ChangeBehavior,
@@ -1878,7 +1907,7 @@ impl From<IntentDto> for Intent {
 
 /// The fields of `cr_crux_raise`, boxed: they are far larger than most operations'. There is no `default` for the
 /// decision maker: what depends on the answer waits for it.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RaiseDto {
     /// The title of the change request the Crux is raised in, which it stops.
@@ -1888,13 +1917,13 @@ struct RaiseDto {
     question: String,
     kind: KindDto,
     /// The findings it is raised from, written like the `addresses` of `cr_open`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     findings: Vec<AddressDto>,
     options: Vec<OptionDto>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     importance: Option<ImportanceDto>,
     /// The id of the Crux whose decision this one replaces.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     supersedes: Option<String>,
 }
 
@@ -1928,30 +1957,30 @@ impl TryFrom<RaiseDto> for RaiseCruxInput {
 }
 
 /// The fields of `cr_crux_decide`: the Crux, exactly one decision, what it rests on and who decides.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DecideDto {
     /// The id of the Crux.
     crux: String,
     /// The id of the option chosen.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     option: Option<String>,
     /// The behaviour in the decision maker's own words.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     wording: Option<String>,
     /// What must still hold, for a behaviour left free.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     unspecified: Option<Vec<String>>,
     /// `true`: the question is not needed any more.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     withdrawn: Option<bool>,
     /// Why the option or the wording was decided; a decision to leave it unspecified or to withdraw the question
     /// has its reason in the `basis`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Where what the option chosen adds outside the change request goes: `{"requests":["<title>"]}`, the change
     /// requests opened for it, or `{"declined":"<why>"}`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     beyond: Option<BeyondDto>,
     basis: BasisDto,
     by: MakerDto,
@@ -1959,7 +1988,7 @@ struct DecideDto {
 
 /// Where what an answer adds outside its change request goes: the titles of the change requests opened for it, or
 /// why it is not done.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum BeyondDto {
     Requests(Vec<String>),
@@ -2016,12 +2045,12 @@ impl DecideDto {
 }
 
 /// Why an option is recommended, and how sure (0 to 100).
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RecommendationDto {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     confidence: Option<u64>,
 }
 
@@ -2034,7 +2063,7 @@ impl From<RecommendationDto> for RecommendationInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ImportanceDto {
     Low,
@@ -2052,7 +2081,7 @@ impl From<ImportanceDto> for Importance {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum KindDto {
     Ambiguity,
@@ -2072,28 +2101,28 @@ impl From<KindDto> for CruxKind {
     }
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct OptionDto {
     choice: String,
     /// The exact new wording the option makes of the definitions; none: it words none.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     wording: Option<String>,
     /// The targets it asks to be revised or retired when it is chosen, besides those of the change request.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     targets: Vec<RefDto>,
     /// The targets it asks to stay as they are when it is chosen.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     keep: Vec<RefDto>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     consequence: Option<String>,
     /// Present: the Crux recommends this option (at most one option does), and why, and how sure (0 to 100).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     recommended: Option<RecommendationDto>,
 }
 
 /// A reference to a target of any kind. The Project is `{"project": true}`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RefDto {
     Project(bool),
@@ -2106,28 +2135,28 @@ enum RefDto {
     Case(CaseRefDto),
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ContractRefDto {
     context: String,
     contract: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InterfaceRefDto {
     context: String,
     interface: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HarnessRefDto {
     context: String,
     harness: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CaseRefDto {
     context: String,
@@ -2175,56 +2204,56 @@ fn targets_of(refs: Vec<RefDto>) -> Result<Vec<TargetInput>, AppError> {
     refs.into_iter().map(TargetInput::try_from).collect()
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct ClauseDto {
     label: String,
     text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     replaces: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RenameDto {
     from: String,
     to: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct ItemDto {
     key: String,
     #[serde(deserialize_with = "two_lines")]
     lines: [usize; 2],
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     replaces: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ItemRefDto {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     context: Option<String>,
     interface: String,
     key: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ClauseRefDto {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     context: Option<String>,
     contract: String,
     label: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct CaseDto {
     name: String,
     #[serde(deserialize_with = "two_lines")]
     lines: [usize; 2],
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     items: Vec<ItemRefDto>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     clauses: Vec<ClauseRefDto>,
 }
 
@@ -2291,9 +2320,22 @@ where
         let mut result = match result {
             Ok(Value::Object(mut fields)) => {
                 fields.insert("ok".to_string(), json!(true));
+                // serde matched raw["op"] against the variant's tag when reading Op,
+                // so raw["op"] is that variant's tag, derived once and never hand-written in replies.
+                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
+                    fields.insert("op".to_string(), op.clone());
+                }
                 Value::Object(fields)
             }
-            Ok(other) => json!({ "ok": true, "result": other }),
+            Ok(other) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("ok".to_string(), json!(true));
+                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
+                    obj.insert("op".to_string(), op.clone());
+                }
+                obj.insert("result".to_string(), other);
+                Value::Object(obj)
+            }
             Err(refusal) => {
                 all_ok = false;
                 refused_out(app, refusal, raw.as_ref()).await
@@ -2335,7 +2377,8 @@ where
             .map(|d| d.located_in(input))
             .collect();
     }
-    let mut out = json!({ "ok": false, "diagnostics": diagnostics });
+    let diag_outs: Vec<DiagnosticOut<'_>> = diagnostics.iter().map(DiagnosticOut::from).collect();
+    let mut out = json!({ "ok": false, "diagnostics": diag_outs });
     match error {
         Some(AppError::Refused(found)) => out["findings"] = json!(findings_out(&found)),
         Some(AppError::ExternalRefused { findings, external }) => {
@@ -2352,10 +2395,42 @@ fn to_value(out: &impl Serialize) -> Result<Value, AppError> {
     serde_json::to_value(out).map_err(|e| AppError::Input(format!("cannot write the result: {e}")))
 }
 
-/// The result of the retire operation `op`.
-fn retire_out(op: &'static str, done: &Checked<Retirement>) -> Result<Value, AppError> {
+/// The result of `rules`: every rule chidev knows.
+#[derive(Debug, Serialize)]
+struct RulesOut {
+    rules: Vec<RuleCard>,
+}
+
+/// The result of `check_run`.
+#[derive(Debug, Serialize)]
+struct CheckRunOut<'a> {
+    findings: Vec<FindingOut<'a>>,
+    external: &'a [chidev_core::app::ports::external::ExternalReport],
+}
+
+/// The result of `init`.
+#[derive(Debug, Serialize)]
+struct InitOut {
+    project: String,
+}
+
+/// The result of `context_add`.
+#[derive(Debug, Serialize)]
+struct ContextAddOut<'a> {
+    context: String,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// The result of `pin`.
+#[derive(Debug, Serialize)]
+struct PinResultOut<'a> {
+    pin: String,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// The result of a retire operation.
+fn retire_out(done: &Checked<Retirement>) -> Result<Value, AppError> {
     to_value(&RetireOut {
-        op,
         retired: done.value.retired.iter().map(RetiredOut::from).collect(),
         findings: findings_out(&done.findings),
     })
@@ -2368,15 +2443,14 @@ where
     E: ExternalExecutor,
 {
     Ok(match op {
-        Op::Rules => json!({ "op": "rules", "rules": app.rules() }),
-        Op::Explain { rule } => {
-            let mut explained = to_value(&app.explain(&rule)?)?;
-            explained["op"] = json!("explain");
-            explained
-        }
+        Op::Rules => to_value(&RulesOut { rules: app.rules() })?,
+        Op::Explain { rule } => to_value(&app.explain(&rule)?)?,
         Op::CheckRun => {
             let result = app.check_run().await?;
-            json!({ "op": "check_run", "findings": findings_out(&result.findings), "external": result.external })
+            to_value(&CheckRunOut {
+                findings: findings_out(&result.findings),
+                external: &result.external,
+            })?
         }
         Op::Measure {
             kind,
@@ -2405,7 +2479,6 @@ where
                 }
             };
             to_value(&MeasureOut {
-                op: "measure",
                 kind: done.kind,
                 id: &done.id,
                 stamp: &done.stamp,
@@ -2481,18 +2554,27 @@ where
                     .collect(),
             })?
         }
-        Op::Init => json!({ "op": "init", "project": app.init().await?.to_string() }),
+        Op::Init => to_value(&InitOut {
+            project: app.init().await?.to_string(),
+        })?,
         Op::ContextAdd { name, uses } => {
             let done = app.add_context(&name, &uses).await?;
-            json!({ "op": "context_add", "context": done.value.to_string(), "findings": findings_out(&done.findings) })
+            to_value(&ContextAddOut {
+                context: done.value.to_string(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::ContextUses { context, uses } => {
             let done = app.set_uses(&context, &uses).await?;
-            json!({ "op": "context_uses", "findings": findings_out(&done.findings) })
+            to_value(&DoneOut {
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::BaseOnContract { context } => {
             let done = app.base_on_contract(&context).await?;
-            json!({ "op": "base_on_contract", "findings": findings_out(&done.findings) })
+            to_value(&DoneOut {
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::ChangeSet {
             for_change_request,
@@ -2506,7 +2588,6 @@ where
             };
             let done = app.apply_change_set(&set).await?;
             to_value(&ChangeSetOut {
-                op: "change_set",
                 puts: done.value.puts.iter().map(PutOut::from).collect(),
                 retired: done.value.retired.iter().map(RetiredOut::from).collect(),
                 findings: findings_out(&done.findings),
@@ -2521,7 +2602,6 @@ where
             let clauses = clause_inputs(clauses);
             let done = app.put_contract(&context, &name, &title, &clauses).await?;
             to_value(&AssetPutOut {
-                op: "contract_put",
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
                 findings: findings_out(&done.findings),
@@ -2538,7 +2618,6 @@ where
                 .put_clauses(&context, &contract, &clauses, &remove)
                 .await?;
             to_value(&AssetPutOut {
-                op: "clauses_put",
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
                 findings: findings_out(&done.findings),
@@ -2565,7 +2644,6 @@ where
                 .put_interface_of(&context, &name, &source, items)
                 .await?;
             to_value(&AssetPutOut {
-                op: "interface_put",
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
                 findings: findings_out(&done.findings),
@@ -2594,7 +2672,6 @@ where
                 .put_harness_of(&context, &name, kind, &builds, &source, &cases)
                 .await?;
             to_value(&AssetPutOut {
-                op: "harness_put",
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
                 findings: findings_out(&done.findings),
@@ -2602,16 +2679,15 @@ where
         }
         Op::ContextRetire { context } => {
             let done = app.retire_context(&context).await?;
-            retire_out("context_retire", &done)?
+            retire_out(&done)?
         }
         Op::ContractRetire { context, contract } => {
             let done = app.retire_contract(&context, &contract).await?;
-            retire_out("contract_retire", &done)?
+            retire_out(&done)?
         }
         Op::ItemsRekey { context, interface } => {
             let done = app.items_rekey(&context, &interface).await?;
             to_value(&RekeyOut {
-                op: "items_rekey",
                 rekeyed: done
                     .value
                     .rekeyed
@@ -2638,11 +2714,11 @@ where
         }
         Op::InterfaceRetire { context, interface } => {
             let done = app.retire_interface(&context, &interface).await?;
-            retire_out("interface_retire", &done)?
+            retire_out(&done)?
         }
         Op::HarnessRetire { context, harness } => {
             let done = app.retire_harness(&context, &harness).await?;
-            retire_out("harness_retire", &done)?
+            retire_out(&done)?
         }
         Op::Pin {
             context,
@@ -2653,7 +2729,10 @@ where
             let label = format!("pin of the interface `{interface}`");
             let code = text_of(root, &label, ("code", code), ("code_file", code_file)).await?;
             let done = app.pin(&context, &interface, &code).await?;
-            json!({ "op": "pin", "pin": done.value.to_string(), "findings": findings_out(&done.findings) })
+            to_value(&PinResultOut {
+                pin: done.value.to_string(),
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::CrOpen(open) => {
             let OpenDto {
@@ -2680,7 +2759,6 @@ where
             };
             let done = app.open_change_request(&input).await?;
             to_value(&CrOpenOut {
-                op: "cr_open",
                 cr: done.value.id.to_string(),
                 expects: done
                     .value
@@ -2701,7 +2779,6 @@ where
                 .collect();
             let done = app.put_policy(&lines).await?;
             to_value(&PolicyPutOut {
-                op: "policy_put",
                 revision: done.value.revision.number(),
                 findings: findings_out(&done.findings),
             })?
@@ -2719,7 +2796,6 @@ where
             });
             let done = app.assume(&title, &assumption).await?;
             to_value(&DoneOut {
-                op: "cr_assume",
                 findings: findings_out(&done.findings),
             })?
         }
@@ -2728,7 +2804,6 @@ where
             let done = app.raise_crux(&input).await?;
             let Raised { id, options } = &done.value;
             to_value(&CruxRaisedOut {
-                op: "cr_crux_raise",
                 crux: id.to_string(),
                 options: options
                     .iter()
@@ -2754,7 +2829,6 @@ where
                 .decide_crux(&crux, &decision, beyond.as_ref(), &basis.into(), &by.into())
                 .await?;
             to_value(&DoneOut {
-                op: "cr_crux_decide",
                 findings: findings_out(&done.findings),
             })?
         }
@@ -2767,21 +2841,21 @@ where
             let done = app
                 .resolve_change_request(&title, &resolution.into(), &reason, &by.into())
                 .await?;
-            json!({ "op": "cr_resolve", "findings": findings_out(&done.findings) })
+            to_value(&DoneOut {
+                findings: findings_out(&done.findings),
+            })?
         }
         Op::CrReopen { title, reason, by } => {
             let done = app
                 .reopen_change_request(&title, &reason, &by.into())
                 .await?;
             to_value(&DoneOut {
-                op: "cr_reopen",
                 findings: findings_out(&done.findings),
             })?
         }
         Op::Status => {
             let s = app.status().await?;
             to_value(&StatusOut {
-                op: "status",
                 retired: s.retired.iter().map(RetiredOut::from).collect(),
                 pins: s
                     .pins
@@ -2961,7 +3035,6 @@ where
         Op::Check { context } => {
             let checked = app.check(context.as_deref()).await?;
             to_value(&CheckOut {
-                op: "check",
                 findings: findings_out(&checked.findings),
                 outside: context.as_ref().map(|_| checked.outside),
             })?
@@ -2978,7 +3051,6 @@ where
                 .transpose()?;
             let view = app.check_rules(moment, rule.as_deref()).await?;
             to_value(&CheckRulesOut {
-                op: "check_rules",
                 store_revision: view.store_revision.0,
                 rules: view.rules.iter().map(RuleOut::of).collect(),
                 model: &view.model,
@@ -2992,7 +3064,6 @@ where
                 })
                 .await?;
             to_value(&ViewOut {
-                op: "view",
                 store_revision: read.store_revision.0,
                 view: &read.view,
             })?
@@ -3000,7 +3071,6 @@ where
         Op::FindingReport(report) => {
             let done = app.finding_report(&ReportInput::try_from(*report)?).await?;
             to_value(&ReportOut {
-                op: "finding_report",
                 rule: done.rule.as_str(),
                 rule_digest: done.rule_digest.to_string(),
                 state: done.state.word(),
@@ -3039,7 +3109,6 @@ where
                 })
                 .collect();
             to_value(&CheckListOut {
-                op: "check_list",
                 policy: registry.policy().hash().to_string(),
                 checks,
             })?

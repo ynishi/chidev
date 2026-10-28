@@ -196,19 +196,102 @@ pub struct ChangeSetInput {
     pub retires: Vec<RetireInput>,
 }
 
+/// The kind of setting of a Context that a change set put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKind {
+    /// The other Contexts it uses.
+    Uses,
+    /// The Contract it is based on.
+    BaseOnContract,
+}
+
+impl SettingKind {
+    /// The word for the setting: `uses` or `base_on_contract`.
+    pub fn word(&self) -> &'static str {
+        match self {
+            SettingKind::Uses => "uses",
+            SettingKind::BaseOnContract => "base_on_contract",
+        }
+    }
+}
+
+/// The kind of asset that a change set put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetPutKind {
+    /// A Contract put whole.
+    Contract,
+    /// Clauses put into a Contract.
+    Clauses,
+    /// An Interface.
+    Interface,
+    /// A Harness.
+    Harness,
+}
+
+impl AssetPutKind {
+    /// The word for the asset put kind: `contract`, `clauses`, `interface` or `harness`.
+    pub fn word(&self) -> &'static str {
+        match self {
+            AssetPutKind::Contract => "contract",
+            AssetPutKind::Clauses => "clauses",
+            AssetPutKind::Interface => "interface",
+            AssetPutKind::Harness => "harness",
+        }
+    }
+}
+
 /// What one put of a change set came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutDone {
-    /// `context`, `uses`, `base_on_contract`, `contract`, `clauses`, `interface` or `harness`.
-    pub kind: &'static str,
-    /// The Context's name.
-    pub context: String,
-    /// The asset's name; none for a setting of a Context.
-    pub name: Option<String>,
-    /// The asset's id; none for a setting of a Context.
-    pub id: Option<Uuid>,
-    /// The asset's revision after the change; none for a setting of a Context.
-    pub revision: Option<Revision>,
+pub enum PutDone {
+    /// A Context was added.
+    Context {
+        /// The Context's name.
+        name: String,
+        /// The Context's id.
+        id: Uuid,
+        /// The Context's revision after the change.
+        revision: Revision,
+    },
+    /// A setting of a Context was changed.
+    Setting {
+        /// Which setting.
+        kind: SettingKind,
+        /// The Context's name.
+        context: String,
+    },
+    /// An asset was put.
+    Asset {
+        /// Which asset kind.
+        kind: AssetPutKind,
+        /// The Context's name.
+        context: String,
+        /// The asset's name.
+        name: String,
+        /// The asset's id.
+        id: Uuid,
+        /// The asset's revision after the change.
+        revision: Revision,
+    },
+}
+
+impl PutDone {
+    /// The kind word of the put (`context`, `uses`, `base_on_contract`, `contract`, `clauses`, `interface` or `harness`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PutDone::Context { .. } => "context",
+            PutDone::Setting { kind, .. } => kind.word(),
+            PutDone::Asset { kind, .. } => kind.word(),
+        }
+    }
+
+    /// The name of the Context the put is about.
+    pub fn context(&self) -> &str {
+        match self {
+            PutDone::Context { name, .. } => name.as_str(),
+            PutDone::Setting { context, .. } => context.as_str(),
+            PutDone::Asset { context, .. } => context.as_str(),
+        }
+    }
 }
 
 /// What a change set did: each put, in the order listed, and everything that left the model (what the puts dropped
@@ -452,7 +535,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .puts
             .iter()
             .map(|put| put_done(put, &p, &plan, &after))
-            .collect();
+            .collect::<Result<Vec<PutDone>, AppError>>()?;
         // The change request the set is applied for gains the work in the state after, which is how an edit can
         // introduce a finding about its request.
         let mut delta = ModelDelta::new().with_project(after).with_names(plan.names);
@@ -1308,78 +1391,120 @@ fn target_of(kind: AssetKind, id: Uuid) -> Target {
 }
 
 /// What a put came to, from the plan and the Project after the change (`before` resolves the Context's name).
-fn put_done(put: &PutInput, before: &Project, plan: &Plan, after: &Project) -> PutDone {
-    let (kind, context, asset_kind, name) = match put {
+fn put_done(
+    put: &PutInput,
+    before: &Project,
+    plan: &Plan,
+    after: &Project,
+) -> Result<PutDone, AppError> {
+    match put {
         PutInput::Context { name, .. } => {
             let found = context_id(after, name)
                 .ok()
                 .and_then(|id| after.context(id))
                 .map(|c| (c.id().as_uuid(), c.revision()));
-            return PutDone {
-                kind: "context",
-                context: name.clone(),
-                name: None,
-                id: found.map(|(id, _)| id),
-                revision: found.map(|(_, r)| r),
-            };
+            let (id, revision) = found.ok_or_else(|| {
+                AppError::Defect(format!(
+                    "the context `{name}` has no id or revision after put"
+                ))
+            })?;
+            Ok(PutDone::Context {
+                name: name.clone(),
+                id,
+                revision,
+            })
         }
-        PutInput::Uses { context, .. } => ("uses", context, None, None),
-        PutInput::BaseOnContract { context } => ("base_on_contract", context, None, None),
-        PutInput::Contract(c) => (
-            "contract",
-            &c.context,
-            Some(AssetKind::Contract),
-            Some(&c.name),
-        ),
-        PutInput::Clauses(c) => (
-            "clauses",
-            &c.context,
-            Some(AssetKind::Contract),
-            Some(&c.contract),
-        ),
-        PutInput::Interface(i) => (
-            "interface",
-            &i.context,
-            Some(AssetKind::Interface),
-            Some(&i.name),
-        ),
-        PutInput::Harness(h) => (
-            "harness",
-            &h.context,
-            Some(AssetKind::Harness),
-            Some(&h.name),
-        ),
-    };
-    let (Some(asset_kind), Some(name), Ok(ctx)) = (asset_kind, name, context_id(before, context))
-    else {
-        return PutDone {
-            kind,
+        PutInput::Uses { context, .. } => Ok(PutDone::Setting {
+            kind: SettingKind::Uses,
             context: context.clone(),
-            name: None,
-            id: None,
-            revision: None,
-        };
-    };
-    let context = context.clone();
-    let name = name.clone();
-    let id = plan.ids.get(&(ctx, asset_kind, name.clone())).copied();
-    let revision = id.and_then(|id| {
-        let c = after.context(ctx)?;
-        match asset_kind {
-            AssetKind::Contract => c.contract(ContractId::from_uuid(id)).map(|k| k.revision()),
-            AssetKind::Interface => c
-                .interface(InterfaceId::from_uuid(id))
-                .map(|i| i.revision()),
-            AssetKind::Harness => c.harness(HarnessId::from_uuid(id)).map(|h| h.revision()),
-        }
-    });
-    PutDone {
-        kind,
-        context,
-        name: Some(name),
+        }),
+        PutInput::BaseOnContract { context } => Ok(PutDone::Setting {
+            kind: SettingKind::BaseOnContract,
+            context: context.clone(),
+        }),
+        PutInput::Contract(c) => asset_put_done(
+            AssetPutKind::Contract,
+            AssetKind::Contract,
+            &c.context,
+            &c.name,
+            before,
+            plan,
+            after,
+        ),
+        PutInput::Clauses(c) => asset_put_done(
+            AssetPutKind::Clauses,
+            AssetKind::Contract,
+            &c.context,
+            &c.contract,
+            before,
+            plan,
+            after,
+        ),
+        PutInput::Interface(i) => asset_put_done(
+            AssetPutKind::Interface,
+            AssetKind::Interface,
+            &i.context,
+            &i.name,
+            before,
+            plan,
+            after,
+        ),
+        PutInput::Harness(h) => asset_put_done(
+            AssetPutKind::Harness,
+            AssetKind::Harness,
+            &h.context,
+            &h.name,
+            before,
+            plan,
+            after,
+        ),
+    }
+}
+
+fn asset_put_done(
+    put_kind: AssetPutKind,
+    asset_kind: AssetKind,
+    context: &str,
+    name: &str,
+    before: &Project,
+    plan: &Plan,
+    after: &Project,
+) -> Result<PutDone, AppError> {
+    let ctx = context_id(before, context)
+        .map_err(|_| AppError::Defect(format!("context `{context}` not found in before")))?;
+    let id = plan
+        .ids
+        .get(&(ctx, asset_kind, name.to_string()))
+        .copied()
+        .ok_or_else(|| {
+            AppError::Defect(format!(
+                "{} `{name}` in context `{context}` has no id in plan",
+                put_kind.word()
+            ))
+        })?;
+    let c = after
+        .context(ctx)
+        .ok_or_else(|| AppError::Defect(format!("context `{context}` not found in after")))?;
+    let revision = match asset_kind {
+        AssetKind::Contract => c.contract(ContractId::from_uuid(id)).map(|k| k.revision()),
+        AssetKind::Interface => c
+            .interface(InterfaceId::from_uuid(id))
+            .map(|i| i.revision()),
+        AssetKind::Harness => c.harness(HarnessId::from_uuid(id)).map(|h| h.revision()),
+    }
+    .ok_or_else(|| {
+        AppError::Defect(format!(
+            "{} `{name}` in context `{context}` has no revision in after",
+            put_kind.word()
+        ))
+    })?;
+    Ok(PutDone::Asset {
+        kind: put_kind,
+        context: context.to_string(),
+        name: name.to_string(),
         id,
         revision,
-    }
+    })
 }
 
 /// The change set of one setting of a Context (its `uses`, or what it is based on), which makes no asset.
@@ -1400,11 +1525,12 @@ pub(super) fn only_put<I>(
         .puts
         .into_iter()
         .next()
-        .and_then(|d| {
-            Some(Put {
-                id: make(d.id?),
-                revision: d.revision?,
-            })
+        .and_then(|d| match d {
+            PutDone::Asset { id, revision, .. } => Some(Put {
+                id: make(id),
+                revision,
+            }),
+            _ => None,
         })
         .ok_or_else(|| input("the change set made no asset"))?;
     Ok(Checked {

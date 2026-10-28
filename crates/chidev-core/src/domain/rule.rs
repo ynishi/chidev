@@ -663,9 +663,9 @@ static RULES: &[Rule] = &[
         id: INPUT_UNKNOWN_NAME,
         kind: RuleKind::Input,
         summary: "A name an operation uses (a Context, an asset, a clause label, an item key, a case, a change request title, a crux id) exists.",
-        help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does. A crux is named by its id, which `cr_crux_raise` gave and `view` and `status` list. A clause label that `replaces` or `remove` of a clause put names is one the contract must have: `field` says which of the two it is in, and `did_you_mean` lists the labels the contract has.",
+        help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does. A crux is named by its id, which `cr_crux_raise` gave and `view` and `status` list. A clause label that `replaces` or `remove` of a clause put names is one the contract must have: `field` says which of the two it is in, and `did_you_mean` lists the labels the contract has. `names_unread` says the names near it could not be read (the store failed), so an empty `did_you_mean` says nothing.",
         message: "no {kind} is named `{name}`",
-        values: &["kind", "name", "field"],
+        values: &["kind", "name", "field", "names_unread"],
         example: r#"{"op":"cr_crux_raise","in":"No such title","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"}]}"#,
     },
     Rule {

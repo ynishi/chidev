@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, BasisInput, BeyondInput, BeyondStatus, ChangeRequestInput, ClauseInput,
-    ClauseRef, CruxKind, DecisionInput, DecisionMakerInput, FindingInput, Importance, Intent,
-    OptionInput, RaiseCruxInput, Raised, RecommendationInput, ResolutionInput, SubjectInput,
-    TargetInput,
+    App, AppError, BasisInput, Beyond as SuggestedBeyond, BeyondInput, BeyondStatus,
+    ChangeRequestInput, ClauseInput, ClauseRef, CruxKind, DecisionInput, DecisionMakerInput,
+    FindingInput, Importance, Intent, Mend, OptionInput, RaiseCruxInput, Raised,
+    RecommendationInput, ResolutionInput, SubjectInput, SuggestedOp, TargetInput,
 };
 use chidev_core::domain::entity::change_request::ChangeRequestError;
 use chidev_core::domain::repository::{ChangeRequestRepository, CruxRepository};
@@ -675,8 +675,12 @@ async fn a_question_about_the_words_of_the_model_cannot_be_left_unspecified() {
     assert_eq!(d.values["crux"], raised.id.to_string());
     assert_eq!(d.values["kind"], "model");
     assert_eq!(d.subjects[0].name, "Round halves");
-    assert_eq!(d.suggestions[0].op["op"], "cr_crux_decide");
-    assert_eq!(d.suggestions[0].op["crux"], raised.id.to_string());
+    assert_eq!(
+        d.suggestions[0].mend,
+        Mend::Op(SuggestedOp::DecideCrux {
+            crux: raised.id.to_string()
+        })
+    );
     assert_eq!(revision(&app).await, at);
     // it can be worded or withdrawn
     decide(&mut app, &raised.id.to_string(), &DecisionInput::Withdrawn)
@@ -794,9 +798,13 @@ async fn a_crux_is_decided_once_and_a_different_decision_is_a_new_crux_that_supe
         .unwrap_err();
     assert_eq!(codes(&app, &err).await, ["cr.crux-answered"]);
     let suggestion = &app.diagnose(&err).await[0].suggestions[0];
-    assert_eq!(suggestion.op["op"], "cr_crux_raise");
-    assert_eq!(suggestion.op["supersedes"], id.as_str());
-    assert_eq!(suggestion.op["in"], "Round halves");
+    assert_eq!(
+        suggestion.mend,
+        Mend::Op(SuggestedOp::RaiseSuperseding {
+            change_request: "Round halves".to_string(),
+            supersedes: id.clone(),
+        })
+    );
     // even a withdrawal does not rewrite it
     let err = decide(&mut app, &id, &DecisionInput::Withdrawn)
         .await
@@ -918,11 +926,12 @@ async fn a_decision_is_replaced_by_one_crux_and_the_suggestion_names_the_one_tha
     assert_eq!(d.values["by"], links[1].id.to_string().as_str());
     // The way out is to supersede the decision that stands.
     assert_eq!(d.suggestions.len(), 1);
-    assert_eq!(d.suggestions[0].op["op"], "cr_crux_raise");
-    assert_eq!(d.suggestions[0].op["in"], "Round halves");
     assert_eq!(
-        d.suggestions[0].op["supersedes"],
-        links[1].id.to_string().as_str()
+        d.suggestions[0].mend,
+        Mend::Op(SuggestedOp::RaiseSuperseding {
+            change_request: "Round halves".to_string(),
+            supersedes: links[1].id.to_string(),
+        })
     );
     assert_eq!(revision(&app).await, at, "nothing was kept");
     // The one that stands may be superseded.
@@ -939,8 +948,12 @@ async fn a_decision_is_replaced_by_one_crux_and_the_suggestion_names_the_one_tha
     assert_eq!(codes(&app, &err).await, ["cr.supersedes-superseded"]);
     let d = only(&app, &err).await;
     assert_eq!(d.suggestions.len(), 1);
-    assert_eq!(d.suggestions[0].op["op"], "cr_crux_decide");
-    assert_eq!(d.suggestions[0].op["crux"], pending.id.to_string().as_str());
+    assert_eq!(
+        d.suggestions[0].mend,
+        Mend::Op(SuggestedOp::DecideCrux {
+            crux: pending.id.to_string(),
+        })
+    );
 
     // One that was withdrawn replaced nothing: the decision may be superseded anew.
     decide(&mut app, &pending.id.to_string(), &DecisionInput::Withdrawn)
@@ -967,14 +980,19 @@ async fn the_suggestion_to_supersede_a_decision_of_a_resolved_request_reopens_it
         .unwrap_err();
     assert_eq!(codes(&app, &err).await, ["cr.crux-answered"]);
     let suggestions = &only(&app, &err).await.suggestions;
-    let ops: Vec<&str> = suggestions
-        .iter()
-        .map(|s| s.op["op"].as_str().unwrap())
-        .collect();
-    assert_eq!(ops, ["cr_reopen", "cr_crux_raise"]);
-    assert_eq!(suggestions[0].op["title"], "Round halves");
-    assert_eq!(suggestions[1].op["in"], "Round halves");
-    assert_eq!(suggestions[1].op["supersedes"], id.as_str());
+    assert_eq!(
+        suggestions[0].mend,
+        Mend::Op(SuggestedOp::ReopenChangeRequest {
+            title: "Round halves".to_string()
+        })
+    );
+    assert_eq!(
+        suggestions[1].mend,
+        Mend::Op(SuggestedOp::RaiseSuperseding {
+            change_request: "Round halves".to_string(),
+            supersedes: id.clone(),
+        })
+    );
 }
 
 #[tokio::test]
@@ -1002,8 +1020,13 @@ async fn a_change_request_is_not_resolved_while_a_crux_raised_in_it_is_open_what
         assert_eq!(codes(&app, &err).await, ["cr.crux-unanswered"], "{how:?}");
         // the way out is to decide the Crux, and the suggestion names it
         let suggestion = &app.diagnose(&err).await[0].suggestions[0];
-        assert_eq!(suggestion.op["op"], "cr_crux_decide", "{how:?}");
-        assert_eq!(suggestion.op["crux"], raised.id.to_string().as_str());
+        assert_eq!(
+            suggestion.mend,
+            Mend::Op(SuggestedOp::DecideCrux {
+                crux: raised.id.to_string(),
+            }),
+            "{how:?}"
+        );
     }
     assert_eq!(revision(&app).await, at);
     // a request that has no open Crux is not held by another's
@@ -1426,8 +1449,10 @@ async fn the_suggestion_for_an_open_or_an_answered_crux_names_that_crux_only() {
     let told = &app.diagnose(&err).await[0];
     assert_eq!(told.code, "cr.crux-unanswered");
     assert_eq!(told.suggestions.len(), 1, "{:?}", told.suggestions);
-    let named = told.suggestions[0].op["crux"].as_str().unwrap().to_string();
-    assert!([&a, &b, &c].iter().any(|q| q.id.to_string() == named));
+    let Mend::Op(SuggestedOp::DecideCrux { crux: ref named }) = told.suggestions[0].mend else {
+        panic!("expected DecideCrux");
+    };
+    assert!([&a, &b, &c].iter().any(|q| q.id.to_string() == *named));
 
     // Two Cruxes answered: deciding the second again is refused, and the suggestion replaces that one, not the first.
     decide(&mut app, &a.id.to_string(), &chosen(&a, 0))
@@ -1442,10 +1467,12 @@ async fn the_suggestion_for_an_open_or_an_answered_crux_names_that_crux_only() {
     let told = &app.diagnose(&err).await[0];
     assert_eq!(told.code, "cr.crux-answered");
     assert_eq!(told.suggestions.len(), 1, "{:?}", told.suggestions);
-    assert_eq!(told.suggestions[0].op["op"], "cr_crux_raise");
     assert_eq!(
-        told.suggestions[0].op["supersedes"],
-        b.id.to_string().as_str()
+        told.suggestions[0].mend,
+        Mend::Op(SuggestedOp::RaiseSuperseding {
+            change_request: "Round halves".to_string(),
+            supersedes: b.id.to_string(),
+        })
     );
     // A withdrawn Crux has no decision to replace: there is nothing to suggest.
     decide(&mut app, &c.id.to_string(), &DecisionInput::Withdrawn)
@@ -1518,24 +1545,31 @@ async fn an_option_chosen_that_names_a_target_outside_the_request_is_refused_unt
     assert_eq!(codes(&app, &err).await, ["cr.crux-answer-outside"]);
     let d = only(&app, &err).await;
     assert_eq!(d.values["option"], "sum first");
-    let outside = d.values["targets"].as_array().unwrap();
+    let outside = d.values["targets"].as_list().unwrap();
     assert_eq!(outside.len(), 1, "{d:#?}");
-    assert!(outside[0].as_str().unwrap().contains("billing"), "{d:#?}");
+    assert!(outside[0].contains("billing"), "{d:#?}");
     assert_eq!(d.subjects[0].name, "Round halves");
     // the way out: a request for them, the decision naming it, or the decision declining them
-    let ops: Vec<&str> = d
-        .suggestions
-        .iter()
-        .map(|s| s.op["op"].as_str().unwrap())
-        .collect();
-    assert_eq!(ops, ["cr_open", "cr_crux_decide", "cr_crux_decide"]);
     assert_eq!(
-        d.suggestions[0].op["targets"],
-        serde_json::json!([{"clause": {"context": "core", "contract": "billing", "label": "C1"}}])
+        d.suggestions[0].mend,
+        Mend::Op(SuggestedOp::OpenRequestFor {
+            targets: Some(vec![billing_clause()])
+        })
     );
-    assert_eq!(d.suggestions[1].op["crux"], id.as_str());
-    assert!(d.suggestions[1].op["beyond"]["requests"].is_array());
-    assert!(d.suggestions[2].op["beyond"]["declined"].is_string());
+    assert_eq!(
+        d.suggestions[1].mend,
+        Mend::Op(SuggestedOp::DecideCruxBeyond {
+            crux: id.clone(),
+            beyond: SuggestedBeyond::RequestFor,
+        })
+    );
+    assert_eq!(
+        d.suggestions[2].mend,
+        Mend::Op(SuggestedOp::DecideCruxBeyond {
+            crux: id.clone(),
+            beyond: SuggestedBeyond::Declined,
+        })
+    );
     assert_eq!(revision(&app).await, at, "nothing was kept");
     assert!(
         app.store()
@@ -1615,8 +1649,12 @@ async fn the_requests_an_answer_names_are_read_by_title_and_by_the_rules_of_a_de
     assert_eq!(subjects, ["Billing totals", "Round halves"]);
     assert!(d.message.contains("Billing totals"), "{}", d.message);
     assert!(!d.message.contains("Round halves"), "{}", d.message);
-    assert_eq!(d.suggestions[0].op["op"], "cr_reopen");
-    assert_eq!(d.suggestions[0].op["title"], "Billing totals");
+    assert_eq!(
+        d.suggestions[0].mend,
+        Mend::Op(SuggestedOp::ReopenChangeRequest {
+            title: "Billing totals".to_string()
+        })
+    );
     assert_eq!(revision(&app).await, at_resolved);
     // a withdrawal asks nothing and adds nothing
     let other = raise(

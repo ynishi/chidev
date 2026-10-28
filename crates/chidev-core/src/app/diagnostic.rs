@@ -5,17 +5,19 @@
 //! `did_you_mean` (the names that exist and are close to one that does not).
 //!
 //! The domain gives a [`Violation`] (a rule id, ids, typed values, typed remedies); this layer is the one that has
-//! the names (the store's), so it writes the sentence, turns the remedies into operations, and computes the
-//! suggestions of a name that does not exist. An input, a CLI or an MCP server only lists the diagnostics.
+//! the names (the store's), so it writes the sentence, turns the remedies into mends in its own words (a
+//! [`SuggestedOp`] names what to do, with the names it knows), and computes the suggestions of a name that does not
+//! exist. An adapter lists the diagnostics and writes each suggested operation in its own operation form; the form of
+//! an operation on the wire is the adapter's, not this layer's.
 
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use serde_json::{Value as Json, json};
+use serde_json::Value as Json;
 
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetName, IdSource, Store};
-use super::{App, AppError, Found, TargetInput, TargetRef, no_provider};
+use super::{App, AppError, Found, TargetInput, no_provider};
 use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
 use crate::domain::entity::crux::Crux;
@@ -58,19 +60,320 @@ pub struct DiagSubject {
     pub name: String,
 }
 
-/// An operation that would mend a diagnostic, and how far it may be trusted. `op` is the operation as a JSON
-/// object an agent can send (with `"<..>"` where a value is to be filled in), or, when no single operation does
-/// it, a sentence saying what to do.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// A value of a diagnostic, typed: what a violation carries under a key of its rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum DiagValue {
+    /// How many, or which revision.
+    Count(u64),
+    /// Yes or no.
+    Flag(bool),
+    /// A word, a name, or a sentence.
+    Text(String),
+    /// Names, in order.
+    List(Vec<String>),
+    /// The value has none; written as `null`.
+    Absent,
+}
+
+impl DiagValue {
+    /// The text of `value`, or [`DiagValue::Absent`] when it has none.
+    fn of_option(value: Option<&str>) -> DiagValue {
+        value.map_or(DiagValue::Absent, |v| DiagValue::Text(v.to_string()))
+    }
+
+    /// The text, when the value is [`DiagValue::Text`].
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            DiagValue::Text(t) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The list of names, when the value is [`DiagValue::List`].
+    pub fn as_list(&self) -> Option<&[String]> {
+        match self {
+            DiagValue::List(l) => Some(l.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// The list of names, when the value is [`DiagValue::List`].
+    pub fn as_array(&self) -> Option<&[String]> {
+        self.as_list()
+    }
+
+    /// Whether this value is [`DiagValue::Absent`].
+    pub fn is_null(&self) -> bool {
+        matches!(self, DiagValue::Absent)
+    }
+}
+
+impl PartialEq<&str> for DiagValue {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == Some(*other)
+    }
+}
+
+impl PartialEq<DiagValue> for &str {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<String> for DiagValue {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == Some(other.as_str())
+    }
+}
+
+impl PartialEq<DiagValue> for String {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<u64> for DiagValue {
+    fn eq(&self, other: &u64) -> bool {
+        match self {
+            DiagValue::Count(n) => n == other,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<DiagValue> for u64 {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<i32> for DiagValue {
+    fn eq(&self, other: &i32) -> bool {
+        match self {
+            DiagValue::Count(n) => *n == (*other as u64),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<DiagValue> for i32 {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<i64> for DiagValue {
+    fn eq(&self, other: &i64) -> bool {
+        match self {
+            DiagValue::Count(n) => *n == (*other as u64),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<DiagValue> for i64 {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<usize> for DiagValue {
+    fn eq(&self, other: &usize) -> bool {
+        match self {
+            DiagValue::Count(n) => *n == (*other as u64),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<DiagValue> for usize {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<bool> for DiagValue {
+    fn eq(&self, other: &bool) -> bool {
+        match self {
+            DiagValue::Flag(b) => b == other,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<DiagValue> for bool {
+    fn eq(&self, other: &DiagValue) -> bool {
+        other == self
+    }
+}
+
+/// An operation that would mend a diagnostic, in the words of the application: what to do and to what, by the
+/// names that exist. The adapter writes it as an operation of its own (see [`Suggestion`]); a value the application
+/// cannot know (a reason, a title, a code) is not here, and the operation that is written leaves a hole for it, which
+/// [`SuggestedOp::has_hole`] says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuggestedOp {
+    /// Initialize the Project.
+    Init,
+    /// Add a Context. `None`: the name is to be filled in.
+    AddContext {
+        /// The name of the Context; `None` when it is not known.
+        name: Option<String>,
+    },
+    /// Set the uses of a Context to what it has, without one Context.
+    SetUsesWithout {
+        /// The Context whose uses are set.
+        context: String,
+        /// The Context to leave out; `None` when it is not known.
+        without: Option<String>,
+    },
+    /// Make a Contract.
+    MakeContract {
+        /// The Context it is made in; `None` when it is not known.
+        context: Option<String>,
+        /// The name of the Contract.
+        name: String,
+    },
+    /// Make an Interface.
+    MakeInterface {
+        /// The Context it is made in; `None` when it is not known.
+        context: Option<String>,
+        /// The name of the Interface.
+        name: String,
+    },
+    /// Make a Harness.
+    MakeHarness {
+        /// The Context it is made in; `None` when it is not known.
+        context: Option<String>,
+        /// The name of the Harness.
+        name: String,
+    },
+    /// Put a Harness again with its Cases but the citation that is refused.
+    PutHarnessWithoutCitation {
+        /// The Context of the Harness.
+        context: String,
+        /// The Harness.
+        harness: String,
+    },
+    /// Check an Interface: put a Harness one of whose Cases cites an Item of it.
+    CheckInterface {
+        /// The Context of the Interface.
+        context: String,
+        /// The Interface.
+        interface: String,
+    },
+    /// Retire a Harness.
+    RetireHarness {
+        /// The Context of the Harness.
+        context: String,
+        /// The Harness.
+        harness: String,
+    },
+    /// Open a change request that changes behavior. `None`: the title is to be filled in.
+    OpenChangeRequest {
+        /// The title; `None` when it is not known.
+        title: Option<String>,
+    },
+    /// Open a change request for the targets an answer adds outside the one it was made in.
+    OpenRequestFor {
+        /// The targets, when every one could be named; `None` when not all could, so the targets are to be filled in.
+        targets: Option<Vec<TargetInput>>,
+    },
+    /// Resolve a change request as done.
+    ResolveDone {
+        /// The title of the change request.
+        title: String,
+    },
+    /// Reopen a resolved change request.
+    ReopenChangeRequest {
+        /// The title of the change request.
+        title: String,
+    },
+    /// Decide a Crux by one of its own options.
+    DecideCrux {
+        /// The id of the Crux.
+        crux: String,
+    },
+    /// Decide a Crux by what lies beyond its options.
+    DecideCruxBeyond {
+        /// The id of the Crux.
+        crux: String,
+        /// What is decided beyond.
+        beyond: Beyond,
+    },
+    /// Raise a Crux in a change request that takes the place of the decision of another.
+    RaiseSuperseding {
+        /// The title of the change request the Crux is raised in.
+        change_request: String,
+        /// The id of the Crux that is superseded.
+        supersedes: String,
+    },
+    /// Put the decision Policy with one more line.
+    PutPolicy {
+        /// The lines it has now, by id and text.
+        lines: Vec<(String, String)>,
+        /// The id of the line to add; its text is to be filled in.
+        adding: String,
+    },
+}
+
+/// What a Crux is decided to, beyond the options it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Beyond {
+    /// Done in a request of its own.
+    RequestFor,
+    /// Not done.
+    Declined,
+}
+
+impl SuggestedOp {
+    /// Whether the operation that is written for it leaves a value for the reader to fill in. It is a fact of the
+    /// variant: a `None` is a value the application did not know, and a variant such as [`SuggestedOp::ResolveDone`]
+    /// always needs one the application cannot know (a reason).
+    pub fn has_hole(&self) -> bool {
+        match self {
+            SuggestedOp::Init => false,
+            SuggestedOp::AddContext { name } => name.is_none(),
+            SuggestedOp::SetUsesWithout { .. } => true,
+            SuggestedOp::MakeContract { .. }
+            | SuggestedOp::MakeInterface { .. }
+            | SuggestedOp::MakeHarness { .. }
+            | SuggestedOp::PutHarnessWithoutCitation { .. }
+            | SuggestedOp::CheckInterface { .. } => true,
+            SuggestedOp::RetireHarness { .. } => false,
+            SuggestedOp::OpenChangeRequest { title } => title.is_none(),
+            SuggestedOp::OpenRequestFor { .. }
+            | SuggestedOp::ResolveDone { .. }
+            | SuggestedOp::ReopenChangeRequest { .. }
+            | SuggestedOp::DecideCrux { .. }
+            | SuggestedOp::DecideCruxBeyond { .. }
+            | SuggestedOp::RaiseSuperseding { .. }
+            | SuggestedOp::PutPolicy { .. } => true,
+        }
+    }
+}
+
+/// What mends a diagnostic: an operation, or, when no single operation does it, a sentence saying what to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mend {
+    /// An operation.
+    Op(SuggestedOp),
+    /// A description of what to do.
+    Advice(String),
+}
+
+/// A mend and how far it may be trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Suggestion {
-    /// The operation, or a description.
-    pub op: Json,
-    /// `machine` (apply as it stands), `review` (look at it first) or `placeholder` (fill the `<..>` in).
-    pub applicability: &'static str,
+    /// What mends it.
+    pub mend: Mend,
+    /// How far it may be trusted: `Placeholder` whenever the mend is an operation with a hole to fill in.
+    pub applicability: Applicability,
 }
 
 /// One thing to tell: a refusal, an input that cannot be read, or a finding.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     /// The id of the rule; stable.
     pub code: String,
@@ -81,10 +384,9 @@ pub struct Diagnostic {
     /// What it is about, named, in order.
     pub subjects: Vec<DiagSubject>,
     /// Where in the input it is about (`for`, `puts[0].context`), when it is about the input.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     /// The typed values of the violation, by key. A key is never removed from a rule, only added.
-    pub values: BTreeMap<String, Json>,
+    pub values: BTreeMap<String, DiagValue>,
     /// Why the rule holds and how to mend a violation of it.
     pub help: String,
     /// Operations that mend it.
@@ -94,12 +396,12 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// A diagnostic of `rule` about `subjects`, with `values` (a JSON value for each key of the rule) and
+    /// A diagnostic of `rule` about `subjects`, with `values` (a typed value for each key of the rule) and
     /// `shown` (the same values as the words the template says).
     fn of_rule(
         rule: &Rule,
         subjects: Vec<DiagSubject>,
-        values: Vec<(&'static str, Json)>,
+        values: Vec<(&'static str, DiagValue)>,
         shown: &[(&str, String)],
     ) -> Diagnostic {
         let names: Vec<String> = subjects.iter().map(|s| s.name.clone()).collect();
@@ -124,10 +426,10 @@ impl Diagnostic {
         let Some(r) = rule::rule(rule.as_str()) else {
             return Diagnostic::app_unmapped(name);
         };
-        let mut values = vec![("name", json!(name))];
+        let mut values = vec![("name", DiagValue::Text(name.to_string()))];
         let mut shown = vec![("name", name.to_string())];
         if let Some(kind) = kind {
-            values.push(("kind", json!(kind)));
+            values.push(("kind", DiagValue::Text(kind.to_string())));
             shown.push(("kind", kind.to_string()));
         }
         Diagnostic::of_rule(r, Vec::new(), values, &shown)
@@ -139,7 +441,7 @@ impl Diagnostic {
             Some(r) => Diagnostic::of_rule(
                 r,
                 Vec::new(),
-                vec![("error", json!(text))],
+                vec![("error", DiagValue::Text(text.to_string()))],
                 &[("error", text.to_string())],
             ),
             None => Diagnostic {
@@ -160,8 +462,11 @@ impl Diagnostic {
     /// is the subject, and the help is its rule's. `state` and `stale` are values.
     pub fn of_found(f: &Found) -> Diagnostic {
         let mut values = BTreeMap::new();
-        values.insert("state".to_string(), json!(f.state.word()));
-        values.insert("stale".to_string(), json!(f.stale));
+        values.insert(
+            "state".to_string(),
+            DiagValue::Text(f.state.word().to_string()),
+        );
+        values.insert("stale".to_string(), DiagValue::Flag(f.stale));
         Diagnostic {
             code: f.rule.to_string(),
             level: f.level.word(),
@@ -206,7 +511,8 @@ impl Diagnostic {
             );
             if !is_op {
                 d.message = format!("`{name}` is not one of the values this field takes");
-                d.values = BTreeMap::from([("detail".to_string(), json!(plain))]);
+                d.values =
+                    BTreeMap::from([("detail".to_string(), DiagValue::Text(plain.to_string()))]);
             }
             d.did_you_mean = did_you_mean(&name, &expected);
             d.field = input.and_then(|i| locate_field(i, &name));
@@ -226,7 +532,7 @@ impl Diagnostic {
                 Some(r) => Diagnostic::of_rule(
                     r,
                     Vec::new(),
-                    vec![("detail", json!(plain))],
+                    vec![("detail", DiagValue::Text(plain.to_string()))],
                     &[("detail", plain.to_string())],
                 ),
                 None => Diagnostic::app_unmapped(plain),
@@ -238,8 +544,8 @@ impl Diagnostic {
                 Diagnostic::of_rule(
                     r,
                     Vec::new(),
-                    vec![("detail", json!(detail))],
-                    &[("detail", detail.clone())],
+                    vec![("detail", DiagValue::Text(detail.clone()))],
+                    &[("detail", detail)],
                 )
             }
             None => Diagnostic::app_unmapped(plain),
@@ -251,7 +557,7 @@ impl Diagnostic {
     /// the reader of the input does.
     pub fn located_in(mut self, input: &Json) -> Diagnostic {
         if self.field.is_none()
-            && let Some(name) = self.values.get("name").and_then(Json::as_str)
+            && let Some(DiagValue::Text(name)) = self.values.get("name")
         {
             self.field = locate_field(input, name);
         }
@@ -421,26 +727,16 @@ fn locate_key(input: &Json, key: &str) -> Option<String> {
     walk(input, key, "")
 }
 
-/// Whether an operation (or a description) still has a hole for a value to be filled in: a string `<..>`.
-fn has_hole(v: &Json) -> bool {
-    match v {
-        Json::String(s) => s.contains('<') && s.contains('>'),
-        Json::Array(items) => items.iter().any(has_hole),
-        Json::Object(fields) => fields.values().any(has_hole),
-        _ => false,
-    }
-}
-
-/// A suggestion: `op` with how far it may be trusted, which is `placeholder` whenever it has a hole to fill.
-fn suggest(op: Json, how: Applicability) -> Suggestion {
-    let how = if has_hole(&op) && how != Applicability::Placeholder {
-        Applicability::Placeholder
-    } else {
-        how
+/// A suggestion: `mend` with how far it may be trusted, which is `Placeholder` whenever it is an operation with a
+/// hole to fill.
+pub fn suggest(mend: Mend, how: Applicability) -> Suggestion {
+    let applicability = match &mend {
+        Mend::Op(op) if op.has_hole() => Applicability::Placeholder,
+        Mend::Op(_) | Mend::Advice(_) => how,
     };
     Suggestion {
-        op,
-        applicability: how.word(),
+        mend,
+        applicability,
     }
 }
 
@@ -637,14 +933,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             name: name.clone(),
                         },
                     ],
-                    vec![("kind", json!(kind))],
+                    vec![("kind", DiagValue::Text((*kind).to_string()))],
                     &[("kind", (*kind).to_string())],
                 )],
                 None => vec![Diagnostic::app_unmapped(&e.to_string())],
             },
             AppError::UnknownContext(name) => {
                 let names = self.context_names().await;
-                vec![self.unknown_name("context", name, &names, Vec::new())]
+                vec![self.unknown_name("context", name, names, Vec::new())]
             }
             AppError::UnknownAsset {
                 context,
@@ -656,7 +952,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "context",
                     name: context.clone(),
                 }];
-                vec![self.unknown_name(kind, name, &names, scope)]
+                vec![self.unknown_name(kind, name, names, scope)]
             }
             AppError::UnknownItem {
                 context,
@@ -668,7 +964,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "interface",
                     name: interface.clone(),
                 }];
-                vec![self.unknown_name("item", key, &names, scope)]
+                vec![self.unknown_name("item", key, names, scope)]
             }
             AppError::ReplacesKept {
                 context,
@@ -759,7 +1055,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "contract",
                     name: contract.clone(),
                 }];
-                vec![self.unknown_name("clause", label, &names, scope)]
+                vec![self.unknown_name("clause", label, names, scope)]
             }
             AppError::ClauseUnknown {
                 context,
@@ -772,10 +1068,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "contract",
                     name: contract.clone(),
                 }];
-                let mut d = self.unknown_name("clause", label, &names, scope);
+                let mut d = self.unknown_name("clause", label, names, scope);
                 // The label is not a Clause to cite or to add: the operation that would add it is not the mend.
                 d.suggestions.clear();
-                d.values.insert("field".to_string(), json!(field));
+                d.values
+                    .insert("field".to_string(), DiagValue::Text(field.to_string()));
                 vec![d]
             }
             AppError::ClauseReplacesKept {
@@ -809,21 +1106,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     kind: "harness",
                     name: harness.clone(),
                 }];
-                vec![self.unknown_name("case", name, &names, scope)]
+                vec![self.unknown_name("case", name, names, scope)]
             }
             AppError::UnknownChangeRequest(title) => {
                 let names = self.change_request_titles().await;
-                vec![self.unknown_name("change request", title, &names, Vec::new())]
+                vec![self.unknown_name("change request", title, names, Vec::new())]
             }
             AppError::UnknownCrux(id) => {
                 let ids = self.crux_ids().await;
-                vec![self.unknown_name("crux", id, &ids, Vec::new())]
+                vec![self.unknown_name("crux", id, ids, Vec::new())]
             }
             AppError::UnknownSupersedes(id) => {
                 let ids = self.crux_ids().await;
                 // The id is not a Crux to make by naming it, so there is nothing to suggest: `unknown_name` has none
                 // for a crux.
-                let mut d = self.unknown_name("crux", id, &ids, Vec::new());
+                let mut d = self.unknown_name("crux", id, ids, Vec::new());
                 d.field = Some("supersedes".to_string());
                 vec![d]
             }
@@ -836,7 +1133,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .iter()
                         .map(|c| c.descriptor.id.to_string()),
                 );
-                vec![self.unknown_name("rule", id, &names, Vec::new())]
+                vec![self.unknown_name("rule", id, Ok(names), Vec::new())]
             }
             AppError::ContextNotGiven => {
                 vec![Diagnostic::input(INPUT_MISSING_FIELD, None, "context")]
@@ -850,7 +1147,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Some(r) => vec![Diagnostic::of_rule(
                     r,
                     Vec::new(),
-                    vec![("detail", json!(text))],
+                    vec![("detail", DiagValue::Text(text.clone()))],
                     &[("detail", text.clone())],
                 )],
                 None => vec![Diagnostic::app_unmapped(text)],
@@ -865,6 +1162,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             | AppError::Runner(_)
             | AppError::Measurement(_)
             | AppError::Store(_)
+            | AppError::Defect(_)
             | AppError::RuleVersionMismatch { .. }
             | AppError::NotJudged { .. }
             | AppError::RuleOff(_) => vec![Diagnostic::app_unmapped(&e.to_string())],
@@ -877,72 +1175,87 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self,
         kind: &str,
         name: &str,
-        existing: &[String],
+        existing: Result<Vec<String>, AppError>,
         scope: Vec<DiagSubject>,
     ) -> Diagnostic {
         let mut d = Diagnostic::input(INPUT_UNKNOWN_NAME, Some(kind), name);
         d.subjects = scope;
-        d.did_you_mean = did_you_mean(name, existing);
+        match existing {
+            Ok(existing) => d.did_you_mean = did_you_mean(name, &existing),
+            Err(e) => {
+                d.did_you_mean = Vec::new();
+                d.values
+                    .insert("names_unread".to_string(), DiagValue::Text(e.to_string()));
+                d.message
+                    .push_str(&format!(" (the names that exist could not be read: {e})"));
+            }
+        }
         let make = match kind {
             "context" => Some((
-                json!({"op": "context_add", "name": name}),
+                Mend::Op(SuggestedOp::AddContext {
+                    name: Some(name.to_string()),
+                }),
                 Applicability::Review,
             )),
             "change request" => Some((
-                json!({"op": "cr_open", "title": name, "intent": "change_behavior"}),
+                Mend::Op(SuggestedOp::OpenChangeRequest {
+                    title: Some(name.to_string()),
+                }),
                 Applicability::Review,
             )),
             "contract" | "interface" | "harness" => {
-                let context = d.subjects.first().map_or("<context>", |s| s.name.as_str());
+                let context = d.subjects.first().map(|s| s.name.clone());
                 let op = match kind {
-                    "contract" => json!({"op": "contract_put", "context": context, "name": name,
-                        "title": "<title>", "clauses": ["<clauses>"]}),
-                    "interface" => json!({"op": "interface_put", "context": context, "name": name,
-                        "source": "<code>", "items": ["<items>"]}),
-                    _ => json!({"op": "harness_put", "context": context, "name": name,
-                        "source": "<code>", "cases": ["<cases>"]}),
+                    "contract" => SuggestedOp::MakeContract {
+                        context,
+                        name: name.to_string(),
+                    },
+                    "interface" => SuggestedOp::MakeInterface {
+                        context,
+                        name: name.to_string(),
+                    },
+                    _ => SuggestedOp::MakeHarness {
+                        context,
+                        name: name.to_string(),
+                    },
                 };
-                Some((op, Applicability::Placeholder))
+                Some((Mend::Op(op), Applicability::Placeholder))
             }
             "item" => Some((
-                json!(format!(
+                Mend::Advice(format!(
                     "put the interface again with the item `{name}` (interface_put)"
                 )),
                 Applicability::Review,
             )),
             "clause" => Some((
-                json!(format!(
+                Mend::Advice(format!(
                     "put the contract again with the clause `{name}` (contract_put)"
                 )),
                 Applicability::Review,
             )),
             "case" => Some((
-                json!(format!(
+                Mend::Advice(format!(
                     "put the harness again with the case `{name}` (harness_put)"
                 )),
                 Applicability::Review,
             )),
             _ => None,
         };
-        if let Some((op, how)) = make {
-            d.suggestions.push(suggest(op, how));
+        if let Some((mend, how)) = make {
+            d.suggestions.push(suggest(mend, how));
         }
         d
     }
 
     /// The names of the Contexts.
-    async fn context_names(&self) -> Vec<String> {
-        match self.project().await {
-            Ok(p) => p.contexts().map(|c| c.name().to_string()).collect(),
-            Err(_) => Vec::new(),
-        }
+    async fn context_names(&self) -> Result<Vec<String>, AppError> {
+        let p = self.project().await?;
+        Ok(p.contexts().map(|c| c.name().to_string()).collect())
     }
 
     /// The names of the assets of `kind` in the Context `context`.
-    async fn asset_names(&self, context: &str, kind: &str) -> Vec<String> {
-        let Ok(p) = self.project().await else {
-            return Vec::new();
-        };
+    async fn asset_names(&self, context: &str, kind: &str) -> Result<Vec<String>, AppError> {
+        let p = self.project().await?;
         let mut out = Vec::new();
         for c in p.contexts().filter(|c| c.name().as_str() == context) {
             let ids: Vec<uuid::Uuid> = match kind {
@@ -952,77 +1265,60 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 _ => Vec::new(),
             };
             for id in ids {
-                if let Ok(name) = self.name_of(id).await {
-                    out.push(name);
-                }
+                out.push(self.name_of(id).await?);
             }
         }
-        out
+        Ok(out)
     }
 
     /// What the asset `asset` of `kind` in the Context `context` has in it: the keys of an Interface, the
     /// labels of a Contract, the names of the Cases of a Harness.
-    async fn member_names(&self, context: &str, kind: &str, asset: &str) -> Vec<String> {
-        let Ok(p) = self.project().await else {
-            return Vec::new();
-        };
+    async fn member_names(
+        &self,
+        context: &str,
+        kind: &str,
+        asset: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let p = self.project().await?;
         let mut out = Vec::new();
         for c in p.contexts().filter(|c| c.name().as_str() == context) {
             match kind {
                 "interface" => {
                     for i in c.interfaces() {
-                        if self
-                            .name_of(i.id().as_uuid())
-                            .await
-                            .is_ok_and(|n| n == asset)
-                        {
+                        if self.name_of(i.id().as_uuid()).await? == asset {
                             out.extend(i.items().iter().map(|it| it.key().to_string()));
                         }
                     }
                 }
                 "contract" => {
                     for k in c.contracts() {
-                        if self
-                            .name_of(k.id().as_uuid())
-                            .await
-                            .is_ok_and(|n| n == asset)
-                        {
+                        if self.name_of(k.id().as_uuid()).await? == asset {
                             out.extend(k.clauses().iter().map(|cl| cl.label().to_string()));
                         }
                     }
                 }
                 _ => {
                     for h in c.harnesses() {
-                        if self
-                            .name_of(h.id().as_uuid())
-                            .await
-                            .is_ok_and(|n| n == asset)
-                        {
+                        if self.name_of(h.id().as_uuid()).await? == asset {
                             out.extend(h.cases().iter().map(|k| k.name().to_string()));
                         }
                     }
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// The titles of the change requests.
-    async fn change_request_titles(&self) -> Vec<String> {
-        match self.requests_and_cruxes().await {
-            Ok((crs, _)) => crs.iter().map(|c| c.title().to_string()).collect(),
-            Err(_) => Vec::new(),
-        }
+    async fn change_request_titles(&self) -> Result<Vec<String>, AppError> {
+        let (crs, _) = self.requests_and_cruxes().await?;
+        Ok(crs.iter().map(|c| c.title().to_string()).collect())
     }
 
-    /// The ids of the Cruxes, for `did_you_mean`. A store that cannot be read gives none, as for the names above: the
-    /// list is a hint, and the refusal it hints at was made from a read of the same Cruxes that succeeded, so a
-    /// failure here loses the hint and not the refusal.
-    async fn crux_ids(&self) -> Vec<String> {
-        match self.requests_and_cruxes().await {
-            Ok((_, cruxes)) => cruxes.iter().map(|q| q.id().to_string()).collect(),
-            Err(_) => Vec::new(),
-        }
+    /// The ids of the Cruxes, for `did_you_mean`.
+    async fn crux_ids(&self) -> Result<Vec<String>, AppError> {
+        let (_, cruxes) = self.requests_and_cruxes().await?;
+        Ok(cruxes.iter().map(|q| q.id().to_string()).collect())
     }
 
     /// The words for a party: how the Project describes a target (what a change set makes is in `words`, and
@@ -1091,16 +1387,16 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let mut values = Vec::new();
         let mut shown = Vec::new();
         for (key, value) in v.values() {
-            let (json, words) = match value {
-                Value::Count(n) => (json!(n), n.to_string()),
-                Value::Word(w) => (json!(w), (*w).to_string()),
-                Value::Revision(r) => (json!(r.number()), r.number().to_string()),
-                Value::Text(t) => (json!(t), t.clone()),
-                Value::Choice(c) => (json!(c.as_str()), format!("`{c}`")),
+            let (v, words) = match value {
+                Value::Count(n) => (DiagValue::Count((*n) as u64), n.to_string()),
+                Value::Word(w) => (DiagValue::Text((*w).to_string()), (*w).to_string()),
+                Value::Revision(r) => (DiagValue::Count(r.number()), r.number().to_string()),
+                Value::Text(t) => (DiagValue::Text(t.clone()), t.clone()),
+                Value::Choice(c) => (DiagValue::Text(c.as_str().to_string()), format!("`{c}`")),
                 Value::Party(party) => {
                     let said = say(party);
                     let words = format!("`{said}`");
-                    (json!(said), words)
+                    (DiagValue::Text(said), words)
                 }
                 Value::Parties(parties) => {
                     let said: Vec<String> = parties.iter().map(&say).collect();
@@ -1109,10 +1405,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .map(|s| format!("`{s}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    (json!(said), words)
+                    (DiagValue::List(said), words)
                 }
             };
-            values.push((*key, json));
+            values.push((*key, v));
             shown.push((*key, words));
         }
         let mut d = match rule::rule(v.rule().as_str()) {
@@ -1155,32 +1451,30 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 })
                 .unwrap_or_else(|| id.to_string())
         };
-        let by = json!({"person": "<who>"});
         match remedy {
-            Remedy::OpenChangeRequest => vec![suggest(
-                json!({"op": "cr_open", "title": "<title>", "intent": "change_behavior"}),
-                how,
-            )],
+            Remedy::OpenChangeRequest => {
+                vec![suggest(Mend::Op(SuggestedOp::OpenChangeRequest { title: None }), how)]
+            }
             Remedy::ResolveParts { parts } => parts
                 .iter()
                 .map(|c| {
                     suggest(
-                        json!({"op": "cr_resolve", "title": title(c), "resolution": "done",
-                            "reason": "<why>", "by": by}),
+                        Mend::Op(SuggestedOp::ResolveDone { title: title(c) }),
                         how,
                     )
                 })
                 .collect(),
             // The Crux the violation is about, and no other: the change request may have several.
             Remedy::AnswerCrux { crux, .. } => vec![suggest(
-                json!({"op": "cr_crux_decide", "crux": crux.to_string(),
-                    "option": "<one of its option ids>",
-                    "basis": {"arbitrary": "<why>"}, "by": by}),
+                Mend::Op(SuggestedOp::DecideCrux {
+                    crux: crux.to_string(),
+                }),
                 how,
             )],
             Remedy::ReopenChangeRequest { change_request } => vec![suggest(
-                json!({"op": "cr_reopen", "title": title(change_request),
-                    "reason": "<why the work goes on>", "by": by}),
+                Mend::Op(SuggestedOp::ReopenChangeRequest {
+                    title: title(change_request),
+                }),
                 how,
             )],
             Remedy::SupersedeCrux { crux, .. } => {
@@ -1197,8 +1491,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 // the Crux that stands is decided now or raised.
                 let reopen = || {
                     suggest(
-                        json!({"op": "cr_reopen", "title": raised_in.title().to_string(),
-                            "reason": "<why the work goes on>", "by": by}),
+                        Mend::Op(SuggestedOp::ReopenChangeRequest {
+                            title: raised_in.title().to_string(),
+                        }),
                         how,
                     )
                 };
@@ -1209,9 +1504,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         out.push(reopen());
                     }
                     out.push(suggest(
-                        json!({"op": "cr_crux_decide", "crux": stands.id().to_string(),
-                            "option": "<one of its option ids>",
-                            "basis": {"arbitrary": "<why>"}, "by": by}),
+                        Mend::Op(SuggestedOp::DecideCrux {
+                            crux: stands.id().to_string(),
+                        }),
                         how,
                     ));
                     return out;
@@ -1224,10 +1519,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     out.push(reopen());
                 }
                 out.push(suggest(
-                    json!({"op": "cr_crux_raise", "in": raised_in.title().to_string(),
-                        "question": "<the question>", "kind": "ambiguity",
-                        "options": [{"choice": "<the new choice>"}],
-                        "supersedes": stands.id().to_string()}),
+                    Mend::Op(SuggestedOp::RaiseSuperseding {
+                        change_request: raised_in.title().to_string(),
+                        supersedes: stands.id().to_string(),
+                    }),
                     how,
                 ));
                 out
@@ -1239,7 +1534,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let mut named = Some(Vec::with_capacity(targets.len()));
                 for target in targets {
                     let reference = match self.name_target(p, *target).await {
-                        Ok(Some(t)) => serde_json::to_value(TargetRef::from(t)).ok(),
+                        Ok(Some(t)) => Some(t),
                         Ok(None) | Err(_) => None,
                     };
                     named = named.zip(reference).map(|(mut all, one)| {
@@ -1247,37 +1542,41 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         all
                     });
                 }
-                let named = match named {
-                    Some(all) => json!(all),
-                    None => json!(["<the targets outside>"]),
-                };
-                let decide = |beyond: Json| {
-                    suggest(
-                        json!({"op": "cr_crux_decide", "crux": crux.to_string(),
-                            "option": "<the option chosen>", "beyond": beyond,
-                            "basis": {"arbitrary": "<why>"}, "by": by}),
-                        how,
-                    )
-                };
                 vec![
                     suggest(
-                        json!({"op": "cr_open", "title": "<title of the request for them>",
-                            "intent": "change_behavior", "targets": named}),
+                        Mend::Op(SuggestedOp::OpenRequestFor { targets: named }),
                         how,
                     ),
-                    decide(json!({"requests": ["<title of the request for them>"]})),
-                    decide(json!({"declined": "<why they are not done>"})),
+                    suggest(
+                        Mend::Op(SuggestedOp::DecideCruxBeyond {
+                            crux: crux.to_string(),
+                            beyond: Beyond::RequestFor,
+                        }),
+                        how,
+                    ),
+                    suggest(
+                        Mend::Op(SuggestedOp::DecideCruxBeyond {
+                            crux: crux.to_string(),
+                            beyond: Beyond::Declined,
+                        }),
+                        how,
+                    ),
                 ]
             }
             Remedy::PutPolicyLine { line } => {
-                let mut lines: Vec<Json> = p
+                let lines: Vec<(String, String)> = p
                     .policy()
                     .lines()
                     .iter()
-                    .map(|l| json!({"id": l.id().to_string(), "text": l.text().to_string()}))
+                    .map(|l| (l.id().to_string(), l.text().to_string()))
                     .collect();
-                lines.push(json!({"id": line.to_string(), "text": "<the line>"}));
-                vec![suggest(json!({"op": "policy_put", "lines": lines}), how)]
+                vec![suggest(
+                    Mend::Op(SuggestedOp::PutPolicy {
+                        lines,
+                        adding: line.to_string(),
+                    }),
+                    how,
+                )]
             }
             Remedy::RetireReferrersFirst { referrers } => {
                 let mut seen = Vec::new();
@@ -1293,7 +1592,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 seen.into_iter()
                     .map(|(context, harness)| {
                         suggest(
-                            json!({"op": "harness_retire", "context": context, "harness": harness}),
+                            Mend::Op(SuggestedOp::RetireHarness { context, harness }),
                             how,
                         )
                     })
@@ -1307,10 +1606,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .subjects()
                         .first()
                         .and_then(|s| names.get(s))
-                        .unwrap_or("<the context>");
+                        .map(ToString::to_string);
                     suggest(
-                        json!({"op": "context_uses", "context": c.name().to_string(),
-                            "uses": [format!("<its uses without {retired}>")]}),
+                        Mend::Op(SuggestedOp::SetUsesWithout {
+                            context: c.name().to_string(),
+                            without: retired,
+                        }),
                         how,
                     )
                 })
@@ -1320,8 +1621,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     Ok(Some(TargetInput::Case {
                         context, harness, ..
                     })) => vec![suggest(
-                        json!({"op": "harness_put", "context": context, "name": harness,
-                            "source": "<its code>", "cases": ["<its cases, without the citation>"]}),
+                        Mend::Op(SuggestedOp::PutHarnessWithoutCitation { context, harness }),
                         how,
                     )],
                     _ => Vec::new(),
@@ -1332,38 +1632,38 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .get(&Party::Target(*cited))
                     .map_or_else(|| format!("the {}", cited.word()), str::to_string);
                 vec![suggest(
-                    json!(format!(
+                    Mend::Advice(format!(
                         "keep `{what}`: put it in the same change set, or make the context use the one that owns it"
                     )),
                     how,
                 )]
             }
             Remedy::NameOnce { .. } => vec![suggest(
-                json!(
+                Mend::Advice(
                     "name the thing once in the change set: merge the entries, or drop the one that is not wanted"
+                        .to_string(),
                 ),
                 how,
             )],
             Remedy::PutAnotherContract => vec![suggest(
-                json!(
+                Mend::Advice(
                     "put another contract in the same change set as the retirement, or keep this one"
+                        .to_string(),
                 ),
                 how,
             )],
             Remedy::CheckTheInterface { interface } => {
                 match self.name_target(p, *interface).await {
                     Ok(Some(TargetInput::Interface { context, interface })) => vec![suggest(
-                        json!({"op": "harness_put", "context": context, "name": "<harness>",
-                            "source": "<tests>", "cases": [{"name": "<case>", "lines": [1, 1],
-                                "items": [{"interface": interface, "key": "<key>"}]}]}),
+                        Mend::Op(SuggestedOp::CheckInterface { context, interface }),
                         how,
                     )],
                     _ => Vec::new(),
                 }
             }
-            Remedy::InitProject => vec![suggest(json!({"op": "init"}), how)],
+            Remedy::InitProject => vec![suggest(Mend::Op(SuggestedOp::Init), how)],
             Remedy::AddContext => {
-                vec![suggest(json!({"op": "context_add", "name": "<name>"}), how)]
+                vec![suggest(Mend::Op(SuggestedOp::AddContext { name: None }), how)]
             }
         }
     }
@@ -1413,7 +1713,10 @@ fn asset_put_rule(
                     name: at.1.to_string(),
                 },
             ],
-            values.iter().map(|(k, v)| (*k, json!(v))).collect(),
+            values
+                .iter()
+                .map(|(k, v)| (*k, DiagValue::of_option(*v)))
+                .collect(),
             &values
                 .iter()
                 .map(|(k, v)| (*k, v.unwrap_or_default().to_string()))
@@ -1434,6 +1737,7 @@ fn flatten<'a>(error: &'a AppError, out: &mut Vec<&'a AppError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn names(of: &[&str]) -> Vec<String> {
         of.iter().map(ToString::to_string).collect()
@@ -1557,25 +1861,5 @@ mod tests {
         );
         let distinct: std::collections::BTreeSet<&String> = ids.iter().collect();
         assert_eq!(distinct.len(), ids.len(), "an id is used twice: {ids:?}");
-    }
-
-    #[test]
-    fn a_suggestion_with_a_hole_is_a_placeholder_whatever_it_was_given() {
-        assert_eq!(
-            suggest(json!({"op": "x", "a": ["<fill>"]}), Applicability::Machine).applicability,
-            "placeholder"
-        );
-        assert_eq!(
-            suggest(json!({"op": "init"}), Applicability::Machine).applicability,
-            "machine"
-        );
-        assert_eq!(
-            suggest(
-                json!({"op": "cr_open", "title": "T"}),
-                Applicability::Review
-            )
-            .applicability,
-            "review"
-        );
     }
 }

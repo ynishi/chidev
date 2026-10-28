@@ -477,7 +477,7 @@ async fn a_harness_in_the_same_set_cites_a_label_the_clauses_entry_adds_and_one_
         retires: Vec::new(),
     };
     let done = app.apply_change_set(&set).await.unwrap();
-    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind).collect();
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind()).collect();
     assert_eq!(kinds, ["clauses", "harness"]);
     let (revision, after) = state(&app).await;
     // the added Clause moves the Contract, the new label alone does not move the Clause
