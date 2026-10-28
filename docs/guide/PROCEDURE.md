@@ -100,10 +100,20 @@ Crux names there waits on that question. `view` does not give a request's
      design; it does not get a part of its own. Give it its `kind`, its
      `question`, its `options` and a recommendation. The change an option makes
      is its `wording` and its `targets`: name there the assets that already
-     exist and that choosing it would change beyond what the request names (an
-     Interface whose types it changes); a target has to exist when the Crux is
-     raised. Say in its `consequence` what else choosing it affects (what a
-     user of the program sees, what is not there yet to be named). The request
+     exist and that choosing it would change (an Interface whose types it
+     changes); a target has to exist when the Crux is raised. Say in its
+     `consequence` what else choosing it affects (what a user of the program
+     sees, what is not there yet to be named). A target inside what the request
+     names becomes the request's work when the option is chosen. A target
+     outside it never does: the request's scope is what it was opened with. So
+     an answer that reaches outside is decided with `beyond`: either a new
+     request opened for what it adds, naming those targets, and taken next as
+     a request of its own, not as another part under the same parent
+     (`{"requests":["<title>"]}`), or a stated decline (`{"declined":"<why>"}`).
+     Deciding it without either is refused (`cr.crux-answer-outside`). An
+     answer that shows the request itself was wrong is not a reason to widen
+     it: resolve it as `{"superseded":"<new title>"}` and open the corrected
+     one. The request
      waits: it is not resolved, however it would end, until its Cruxes are
      decided. The work that depends on the answer waits as well: the Clause that
      promises the point, the Cases that check it, and the code that keeps it.
@@ -117,10 +127,11 @@ Crux names there waits on that question. `view` does not give a request's
 3. **Design.** Make the change as a `change_set` `for` the part: the Contracts
    and the Interfaces it asks for, in one operation, checked on the state it
    ends in. When a Crux raised in the part is decided, the targets of the
-   option chosen become expectations of the part, so the work the answer asks
-   for is `for` the part too; if the part cannot take it (it is resolved, or
-   what the answer changes is outside what it names), open a new request for
-   it. Keep an Item's id across a rename with `replaces`, and a Clause's id
+   option chosen that are inside what the part names become expectations of
+   the part, so the work the answer asks for there is `for` the part too. What
+   the answer changes outside the part is the work of the request its `beyond`
+   names, `for` that request (see step 2). A resolved part takes no work:
+   reopen it, or open a new request. Keep an Item's id across a rename with `replaces`, and a Clause's id
    across a new label the same way. To change some Clauses of a Contract (reword
    one, add one, remove one) put only those with `clauses_put`, or the `clauses`
    entry of the set: the Clauses not named stay as they are, so a Clause
@@ -214,8 +225,12 @@ Crux names there waits on that question. `view` does not give a request's
    the Policy, or with a reason. Deciding that the behaviour is left
    unspecified, or withdrawing a question that is not needed any more, is a
    decision too; a Crux is not left without one. (A question about the words of
-   the model cannot be left unspecified.) Then the work the answer asks for
-   goes through 3 to 6, `for` the part the Crux was raised in.
+   the model cannot be left unspecified.) An answer whose option names a
+   target outside the part is decided with its `beyond` (step 2). Then the
+   work the answer asks for goes through 3 to 6, `for` the part the Crux was
+   raised in, and what it adds outside, `for` the request `beyond` names. A
+   decision is replaced once: a second Crux that supersedes the same decision
+   is refused (`cr.supersedes-superseded`); supersede the one that replaced it.
 8. **Resolve.** `cr_resolve` each part with how it ended, why and who says so,
    then the parent. The decision maker resolves (see Roles), on the
    implementer's report that the work is done and the checks of step 6 are
