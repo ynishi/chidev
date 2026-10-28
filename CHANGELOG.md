@@ -10,6 +10,24 @@ and this project adheres to
 
 ### Changed
 
+- Diagnostic suggestions in `chidev-core` are typed values (`Diagnostic::suggestions`
+  returns `&[Suggestion]`, with `Mend`, `SuggestedOp`, and `DiagValue`),
+  round-tripped into the CLI's output schema with target and input references
+  preserved (see #39). In Rust, `Diagnostic::suggest` builds a suggestion using
+  typed builders, and `Applicability` is exported from `chidev_core::app`.
+- CLI `Reply` derives `op` from the raw request object (`op_of`), removing manual
+  `op: &'static str` from all 15 reply structs and converting untyped JSON maps in
+  `apply` to typed `*Out` structs (see #38).
+- `PutDone` distinguishes variants for Context, Setting, and Asset (with `name`
+  and `revision` non-optional for assets, and `key` for settings), matching
+  ADR 0011. `put_done` returns `Result<PutDone, AppError>`.
+- `input.unknown-name` diagnostic tracks and reports stores that could not be
+  read during candidate search via `names_unread` and a message note.
+- Check summary tables in `README.md` are generated from
+  `domain::check::builtin::all()`, guarded by `crates/chidev-core/tests/readme.rs`
+  and updateable via `just readme` (see #37). Builtin check descriptors have
+  aligned, detailed summary and help texts matching the tables.
+
 - A new name is a move of the footprint (see
   `docs/adr/0005-a-new-name-is-a-move-of-the-record.md`). A Clause given a new
   label by `replaces`, or an Item a new key by `replaces` or `renames`, still
