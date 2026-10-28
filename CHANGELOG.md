@@ -10,6 +10,32 @@ and this project adheres to
 
 ### Changed
 
+- Breaking: a decision no longer widens the request its Crux was raised in.
+  A target of the option chosen that is outside the request's frame is not
+  added to it; the decision says where it goes with `beyond`, either the
+  requests opened for it (`{"requests":["<title>",..]}`, each another request,
+  open, that frames it) or a stated decline (`{"declined":"<why>"}`). Without
+  it the decision is refused (`cr.crux-answer-outside`, `option`, `targets`);
+  a request named that frames none of it, the request itself, a resolved one
+  and a `beyond` on a withdrawal are refused (`cr.crux-beyond-unframed`
+  `target`, `cr.crux-beyond-itself`, `cr.already-resolved` with the resolved
+  request first, `cr.crux-beyond-withdrawn`). `status` and `view` show the
+  answer's `beyond`. The Crux document is at schema 2; schema 1 reads as it
+  is. In Rust, `Answer` has `beyond` (`vo::answer::Beyond`, given with
+  `Answer::with_beyond`, which refuses one on a withdrawal),
+  `service::crux::decide` takes the change requests,
+  `service::change_request::outside_frame` says what is outside a frame, and
+  `app::TargetRef` is the wire form of a target reference.
+- Breaking: a decision is replaced once. A Crux that supersedes a decision
+  another Crux (not withdrawn) replaces already is refused
+  (`cr.supersedes-superseded`, `by`); a withdrawn one replaced nothing. A store
+  that holds two such Cruxes still loads. A `supersedes` that names no Crux is
+  `input.unknown-name` (`kind` `crux`, `field` `supersedes`, the closest ids in
+  `did_you_mean`), where it was `cr.supersedes-unknown` with a suggestion to
+  open a change request. The suggestion to supersede an answered Crux names the
+  decision that stands, in the request it was raised in, after a `cr_reopen`
+  when that request is resolved. In Rust, `service::crux` has `superseded_by`
+  and `standing`, and `check_supersedes` and `raise` take the Cruxes.
 - Breaking: every refusal of `cr_crux_raise` and `cr_crux_decide` has a rule id
   of its own, with its values, where some were `input.invalid` or
   `domain.unmapped`: `cr.crux-no-option`, `cr.crux-option-twice` (`option`),
