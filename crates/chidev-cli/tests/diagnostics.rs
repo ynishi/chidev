@@ -218,17 +218,18 @@ fn a_crux_is_refused_in_a_resolved_change_request_against_its_targets_and_withou
     assert_eq!(one(&r[2])["suggestions"][0]["op"]["op"], "cr_reopen");
     // an option cannot ask the other of a target than the change request does
     let clash = one(&r[4]);
-    assert_eq!(clash["code"], "input.invalid");
+    assert_eq!(clash["code"], "cr.crux-expect-conflict");
+    assert_eq!(clash["values"]["option"], "reword");
     assert!(
-        clash["message"]
-            .as_str()
-            .unwrap()
-            .contains("target and kept")
+        clash["values"]["target"].as_str().unwrap().contains("C1"),
+        "{clash:#?}"
     );
+    assert_eq!(clash["subjects"][0]["name"], "Keeps C1");
     // at most one option is recommended
     let two = one(&r[5]);
-    assert_eq!(two["code"], "input.invalid");
-    assert!(two["message"].as_str().unwrap().contains("at most one"));
+    assert_eq!(two["code"], "cr.crux-recommended-twice");
+    assert_eq!(two["values"]["count"], 2);
+    assert_eq!(two["subjects"][0]["name"], "Keeps C1");
     assert_eq!(r[6]["ok"], true, "{r:#?}");
     let crux = r[6]["crux"].as_str().expect("the id of the Crux");
     let up = r[6]["options"][0]["id"].as_str().expect("an option id");
@@ -268,14 +269,138 @@ fn a_crux_is_refused_in_a_resolved_change_request_against_its_targets_and_withou
     );
     assert_eq!(one(&more[5])["code"], "cr.crux-unknown-option");
     assert_eq!(one(&more[6])["code"], "input.invalid");
-    assert_eq!(one(&more[7])["code"], "input.invalid");
-    assert!(
-        one(&more[7])["message"]
-            .as_str()
-            .unwrap()
-            .contains("no crux")
+    // a Crux that no id names is a name that does not exist, as a change request title is
+    let ghost = one(&more[7]);
+    assert_eq!(ghost["code"], "input.unknown-name");
+    assert_eq!(ghost["values"]["kind"], "crux");
+    assert_eq!(
+        ghost["values"]["name"],
+        "b4d5f6a7-0000-7000-8000-000000000000"
     );
+    assert_eq!(ghost["field"], "crux");
     assert_eq!(more[8]["ok"], true, "{more:#?}");
+}
+
+#[test]
+fn a_crux_with_no_option_or_a_choice_twice_or_a_model_question_left_unspecified_is_refused_by_a_rule()
+ {
+    let raise = |options: Value, kind: &str| json!({"op":"cr_crux_raise","in":"Round","question":"q","kind":kind,"options":options});
+    let (dir, r) = after_setup_in(
+        "diag-crux-form",
+        &[
+            cr_open("Round", None),
+            raise(json!([]), "ambiguity"),
+            raise(json!([{"choice":"up"},{"choice":"up"}]), "ambiguity"),
+            raise(json!([{"choice":"a Cart"}]), "model"),
+            // a well-formed raise into a resolved request is still told so
+            json!({"op":"cr_open","title":"Closed","intent":"change_behavior"}),
+            json!({"op":"cr_resolve","title":"Closed","resolution":"wont_do","reason":"r","by":by_alice()}),
+            json!({"op":"cr_crux_raise","in":"Closed","question":"q","kind":"ambiguity",
+                "options":[{"choice":"up"}]}),
+        ],
+    );
+    let none = one(&r[1]);
+    assert_eq!(none["code"], "cr.crux-no-option");
+    assert_eq!(none["subjects"][0]["name"], "Round");
+    let twice = one(&r[2]);
+    assert_eq!(twice["code"], "cr.crux-option-twice");
+    assert_eq!(twice["values"]["option"], "up");
+    assert_eq!(twice["subjects"][0]["name"], "Round");
+    assert_eq!(r[3]["ok"], true, "{r:#?}");
+    assert_eq!(one(&r[6])["code"], "cr.already-resolved");
+
+    let crux = r[3]["crux"].as_str().expect("the id of the Crux");
+    let more = exec_in(
+        &dir,
+        &[json!({"op":"cr_crux_decide","crux":crux,"unspecified":[],
+            "basis":{"arbitrary":"x"},"by":by_alice()})],
+    );
+    let free = one(&more[0]);
+    assert_eq!(free["code"], "cr.crux-unspecified-not-allowed");
+    assert_eq!(free["values"]["crux"], crux);
+    assert_eq!(free["values"]["kind"], "model");
+    assert_eq!(free["subjects"][0]["name"], "Round");
+    assert_eq!(free["suggestions"][0]["op"]["op"], "cr_crux_decide");
+    assert_eq!(free["suggestions"][0]["op"]["crux"], crux);
+}
+
+#[test]
+fn a_target_named_twice_is_refused_by_one_rule_in_cr_open_and_in_an_option() {
+    let c1 = json!({"clause":{"contract":"rounding","label":"C1","context":"core"}});
+    let r = after_setup(
+        "diag-target-twice",
+        &[
+            json!({"op":"cr_open","title":"Twice","intent":"change_behavior",
+                "targets":[c1.clone()],"keep":[c1.clone()]}),
+            cr_open("Round", None),
+            json!({"op":"cr_crux_raise","in":"Round","question":"q","kind":"ambiguity",
+                "options":[{"choice":"a"},{"choice":"reword","targets":[c1.clone(), c1.clone()]}]}),
+            json!({"op":"cr_crux_raise","in":"Round","question":"q","kind":"ambiguity",
+                "options":[{"choice":"split","targets":[c1.clone()],"keep":[c1.clone()]}]}),
+        ],
+    );
+    let open = one(&r[0]);
+    assert_eq!(open["code"], "cr.target-twice");
+    assert!(
+        open["values"]["target"].as_str().unwrap().contains("C1"),
+        "{open:#?}"
+    );
+    assert!(open["values"].get("option").is_none(), "{open:#?}");
+    assert_eq!(open["subjects"][0]["name"], "Twice");
+    for result in [&r[2], &r[3]] {
+        let d = one(result);
+        assert_eq!(d["code"], "cr.target-twice");
+        assert!(d["values"]["target"].as_str().unwrap().contains("C1"));
+        assert_eq!(d["subjects"][0]["name"], "Round");
+    }
+    assert_eq!(one(&r[2])["values"]["option"], "reword");
+    assert_eq!(one(&r[3])["values"]["option"], "split");
+}
+
+#[test]
+fn an_option_chosen_that_clashes_with_a_decision_that_stands_is_refused_by_the_rule_raising_has() {
+    let c1 = json!({"clause":{"contract":"rounding","label":"C1","context":"core"}});
+    let raise = |choice: &str, kind: &str| {
+        json!({"op":"cr_crux_raise","in":"Round","question":"q","kind":"ambiguity",
+            "options":[{"choice":choice,kind:[c1.clone()]}]})
+    };
+    let (dir, r) = after_setup_in(
+        "diag-decide-clash",
+        &[
+            cr_open("Round", None),
+            raise("reword", "targets"),
+            raise("leave", "keep"),
+        ],
+    );
+    assert_eq!(r[1]["ok"], true, "{r:#?}");
+    // the second is raised before the first is decided, so nothing stands against it yet
+    assert_eq!(r[2]["ok"], true, "{r:#?}");
+    let first = r[1]["crux"].as_str().expect("the id of the Crux");
+    let second = r[2]["crux"].as_str().expect("the id of the Crux");
+    let option_of = |result: &Value| result["options"][0]["id"].as_str().unwrap().to_string();
+    let decide = |crux: &str, option: String| {
+        json!({"op":"cr_crux_decide","crux":crux,"option":option,
+            "basis":{"arbitrary":"x"},"by":by_alice()})
+    };
+    let more = exec_in(
+        &dir,
+        &[
+            decide(first, option_of(&r[1])),
+            decide(second, option_of(&r[2])),
+        ],
+    );
+    assert_eq!(more[0]["ok"], true, "{more:#?}");
+    let clash = one(&more[1]);
+    assert_eq!(clash["code"], "cr.crux-expect-conflict");
+    assert_eq!(clash["values"]["option"], "leave");
+    assert!(
+        clash["values"]["target"].as_str().unwrap().contains("C1"),
+        "{clash:#?}"
+    );
+    assert_eq!(clash["subjects"][0]["name"], "Round");
+    // raising the same option now is refused by the same rule
+    let again = exec_in(&dir, &[raise("leave again", "keep")]);
+    assert_eq!(one(&again[0])["code"], "cr.crux-expect-conflict");
 }
 
 #[test]

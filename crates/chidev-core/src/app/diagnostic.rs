@@ -449,6 +449,7 @@ fn party_kind(p: &Party) -> &'static str {
     match p {
         Party::Target(t) => t.word(),
         Party::ChangeRequest(_) => "change_request",
+        Party::Crux(_) => "crux",
         Party::PolicyLine(_) => "policy_line",
         Party::Id(_) => "asset",
     }
@@ -814,6 +815,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.change_request_titles().await;
                 vec![self.unknown_name("change request", title, &names, Vec::new())]
             }
+            AppError::UnknownCrux(id) => {
+                let ids = self.crux_ids().await;
+                vec![self.unknown_name("crux", id, &ids, Vec::new())]
+            }
             AppError::UnknownRule(id) => {
                 let mut names: Vec<String> =
                     rule::rules().iter().map(|r| r.id.to_string()).collect();
@@ -1002,6 +1007,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
     }
 
+    /// The ids of the Cruxes.
+    async fn crux_ids(&self) -> Vec<String> {
+        match self.requests_and_cruxes().await {
+            Ok((_, cruxes)) => cruxes.iter().map(|q| q.id().to_string()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// The words for a party: how the Project describes a target (what a change set makes is in `words`, and
     /// the names it is about to give in `pending`), a change request by its title, a line by its id.
     pub(super) async fn words_of(
@@ -1023,6 +1036,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .iter()
                 .find(|c| c.id() == id)
                 .map_or_else(|| id.to_string(), |c| c.title().to_string())),
+            Party::Crux(id) => Ok(id.to_string()),
             Party::PolicyLine(line) => Ok(line.to_string()),
             Party::Id(id) => match p.contexts().find(|c| c.id().as_uuid() == id) {
                 Some(c) => Ok(c.name().to_string()),
@@ -1071,6 +1085,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Value::Word(w) => (json!(w), (*w).to_string()),
                 Value::Revision(r) => (json!(r.number()), r.number().to_string()),
                 Value::Text(t) => (json!(t), t.clone()),
+                Value::Choice(c) => (json!(c.as_str()), format!("`{c}`")),
+                Value::Party(party) => {
+                    let said = say(party);
+                    let words = format!("`{said}`");
+                    (json!(said), words)
+                }
                 Value::Parties(parties) => {
                     let said: Vec<String> = parties.iter().map(&say).collect();
                     let words = said

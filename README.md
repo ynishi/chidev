@@ -1075,7 +1075,8 @@ A reference names a target: `{"project":true}`, `{"context":"pricing"}`,
 `{"item":{"context":..,"interface":..,"key":..}}`,
 `{"clause":{"context":..,"contract":..,"label":..}}` and
 `{"case":{"context":..,"harness":..,"name":..}}`. Every target has to exist when
-the request opens, and a target is in one list, once. `cr_open` refuses a field it
+the request opens, and a target is in one list, once (`cr.target-twice`,
+`values.target`). `cr_open` refuses a field it
 does not know (`change` and `remove` of earlier versions, and `crux`, among them).
 
 - `targets`: what the request asks to have revised or retired. A request that
@@ -1339,11 +1340,15 @@ Interfaces, Harness implementation, code), not only to the specification.
                "consequence":"callers match a new error"}]}
   ```
 
-  `question`, `kind` and `options` are required; there is at least one option and no
-  choice is given twice. At most one option has `recommended` (its `reason` and
-  `confidence` are optional). An option's `targets` and `keep` are written like the
-  request's and have to exist when the Crux is raised; one that the request asks with
-  another kind, or that is given twice, is refused (`input.invalid`). The result has
+  `question`, `kind` and `options` are required; there is at least one option
+  (`cr.crux-no-option`) and no choice is given twice (`cr.crux-option-twice`,
+  `values.option`). At most one option has `recommended` (`cr.crux-recommended-twice`,
+  `values.count`; its `reason` and `confidence` are optional). An option's `targets`
+  and `keep` are written like the request's and have to exist when the Crux is
+  raised. A target that an option names twice is refused (`cr.target-twice`,
+  `values.target` and `values.option`), and one that the request, or a decision taken
+  in it that stands, asks with the other kind is refused (`cr.crux-expect-conflict`,
+  `values.option` and `values.target`). The result has
   the id of the Crux and of each option, which a decision points at:
   `{"op":"cr_crux_raise","crux":"<crux id>","options":[{"id":"<option id>","choice":"reuse InvalidDiscount"},..],"findings":[]}`.
   An id in angle brackets, here and below, is the one an earlier result gave.
@@ -1369,11 +1374,14 @@ Interfaces, Harness implementation, code), not only to the specification.
   it. The time comes from the clock of the application, never from the domain. An
   answer is never rewritten: deciding a Crux that has one is refused
   (`cr.crux-answered`), and an option the Crux does not have is not one
-  (`cr.crux-unknown-option`). Changing a decision means raising a new Crux that
+  (`cr.crux-unknown-option`). A `crux` that no Crux has the id of is a name that does
+  not exist (`input.unknown-name`, `values.kind` `crux`, with the ids that exist in
+  `did_you_mean`). Changing a decision means raising a new Crux that
   `supersedes` the old one; the old answer stays as it was given. A Crux of kind
   `model` is the one exception to "undefined is an answer": without the word the
   model cannot be written, so it can be worded, chosen or withdrawn but not left
-  unspecified. A Crux that is no longer needed is withdrawn (any kind may be); a
+  unspecified (`cr.crux-unspecified-not-allowed`, `values.crux` and `values.kind`).
+  A Crux that is no longer needed is withdrawn (any kind may be); a
   withdrawal is a decision and asks nothing of any target.
 - **Who may decide** a Crux (the authority to decide, `CruxAnswerable`) is a concept
   of the model, and it is managed outside chidev for now: chidev holds no identity of
@@ -1387,7 +1395,9 @@ Interfaces, Harness implementation, code), not only to the specification.
   expectations, in the same commit: each is recorded with the revision it has then;
   one an earlier decision recorded with the same kind keeps its first revision, one
   the request itself asks with the same kind is not added a second time, and one asked
-  with another kind, by the request or by an earlier decision, is refused. A Crux that
+  with another kind, by the request or by an earlier decision, is refused
+  (`cr.crux-expect-conflict`, the rule an option is read by when the Crux is raised).
+  A Crux that
   supersedes a decision taken in the same request takes that decision's expectations
   back first, in the same commit, so it may ask the opposite of a target. They are
   part of the request's frame (see "Attribution and frame"), and the work goes `for`

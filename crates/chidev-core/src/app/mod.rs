@@ -68,14 +68,15 @@ use crate::domain::entity::crux::{Crux, CruxDraft};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::repository::StoreError;
+use crate::domain::rule::{CR_CRUX_RECOMMENDED_TWICE, CR_TARGET_TWICE};
 use crate::domain::service::change_request::{
     check_requests_and_cruxes, contexts_in, expectations_now, keep_moved, keep_progress,
     out_of_frame, raised_in, resolve, state_of, target_progress,
 };
 use crate::domain::service::cite::stale_cites;
-use crate::domain::service::crux::{check_supersedes, decide};
+use crate::domain::service::crux::{decide, raise};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
-use crate::domain::violation::Violation;
+use crate::domain::violation::{Party, Value, Violation};
 use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::choice::Choice;
@@ -306,6 +307,9 @@ pub enum AppError {
     /// A change request has this title already; a change request is addressed by its title.
     #[error("a change request is titled `{0}` already")]
     TitleTaken(String),
+    /// No Crux has this id.
+    #[error("no crux has the id `{0}`")]
+    UnknownCrux(String),
     /// A citation outside a Harness does not say which Context it is in.
     #[error("a citation outside a harness names its context")]
     ContextNotGiven,
@@ -420,6 +424,17 @@ impl AppError {
             title: cr.title().to_string(),
             error,
         }
+    }
+}
+
+/// The refusal of an input that breaks `violation`, a rule of the input form that is read while the input is: the
+/// change request `cr` it is about is named by its title, which the store may not have yet.
+fn violated(cr: (ChangeRequestId, &Title), violation: Violation) -> AppError {
+    let mut names = Names::default();
+    names.insert(Party::ChangeRequest(cr.0), cr.1.to_string());
+    AppError::Violated {
+        violations: vec![violation],
+        names,
     }
 }
 
@@ -1720,10 +1735,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             for r in refs {
                 let target = self.target_of(&p, r).await?;
                 if wanted.iter().any(|(t, _)| *t == target) {
-                    return Err(AppError::Input(format!(
-                        "{} is given twice; a target is a target or kept, once",
-                        self.describe(&p, target).await?
-                    )));
+                    // The request is not stored yet, so it is named by the title it is being opened with.
+                    return Err(violated(
+                        (id, &title),
+                        Violation::of(CR_TARGET_TWICE)
+                            .on(Party::ChangeRequest(id))
+                            .with_value("target", Value::Party(Party::Target(target))),
+                    ));
                 }
                 wanted.push((target, kind));
             }
@@ -1794,36 +1812,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .into_iter()
             .find(|r| r.title().as_str() == c.cr.trim())
             .ok_or_else(|| AppError::UnknownChangeRequest(c.cr.clone()))?;
-        let refused = |error: ChangeRequestError| AppError::on(&cr, error);
-        if cr.is_resolved() {
-            return Err(refused(ChangeRequestError::AlreadyResolved));
-        }
+        // The input is read first (its form, and the names it uses), then the rules of the change request and of the
+        // Crux are read against it (`service::crux::raise`).
         let question = Prose::try_from(c.question.as_str()).map_err(input)?;
-        if c.options.iter().filter(|o| o.recommended.is_some()).count() > 1 {
-            return Err(AppError::Input(
-                "at most one option is recommended".to_string(),
+        let recommending = c.options.iter().filter(|o| o.recommended.is_some()).count();
+        if recommending > 1 {
+            return Err(violated(
+                (cr.id(), cr.title()),
+                Violation::of(CR_CRUX_RECOMMENDED_TWICE)
+                    .on(Party::ChangeRequest(cr.id()))
+                    .with_value("count", Value::Count(recommending)),
             ));
         }
-        // The Crux replaced is read first: what its decision asked of targets does not stand once this Crux is
-        // decided, so the options are read against what stands without it.
-        let supersedes = match &c.supersedes {
-            None => None,
-            Some(text) => {
-                let replaced = CruxId::from_uuid(uuid_of("a crux", text)?);
-                check_supersedes(replaced, cruxes.iter().find(|q| q.id() == replaced))
-                    .map_err(refused)?;
-                Some(replaced)
-            }
-        };
-        let leaving_out = supersedes
-            .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced))
-            .filter(|q| q.raised_in() == cr.id())
-            .and_then(Crux::answer_given)
-            .map(Answer::id);
+        let supersedes = c
+            .supersedes
+            .as_deref()
+            .map(|text| uuid_of("a crux", text).map(CruxId::from_uuid))
+            .transpose()?;
         let id = CruxId::from_uuid(self.ids.next_uuid());
         let mut options = Vec::with_capacity(c.options.len());
         let mut recommended = None;
         for o in &c.options {
+            let choice = Choice::try_from(o.choice.as_str()).map_err(input)?;
             let mut expects = BTreeMap::new();
             for (kind, refs) in [
                 (ExpectKind::Target, &o.targets),
@@ -1831,23 +1841,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             ] {
                 for r in refs {
                     let target = self.target_of(&p, r).await?;
-                    let twice = expects.insert(target, kind).is_some();
-                    // What the request asks itself, and what the decisions taken in it ask and still stand.
-                    let clashes = cr
-                        .kind_asked(&target, leaving_out)
-                        .is_some_and(|asked| asked != kind);
-                    if twice || clashes {
-                        return Err(AppError::Input(format!(
-                            "{} is a target and kept, or given twice, by the change request (or a decision taken in it) and the option `{}`",
-                            self.describe(&p, target).await?,
-                            o.choice
-                        )));
+                    if expects.insert(target, kind).is_some() {
+                        return Err(violated(
+                            (cr.id(), cr.title()),
+                            Violation::of(CR_TARGET_TWICE)
+                                .on(Party::ChangeRequest(cr.id()))
+                                .with_value("target", Value::Party(Party::Target(target)))
+                                .with_value("option", Value::Choice(choice)),
+                        ));
                     }
                 }
             }
             let option = CruxOption::new(
                 CruxOptionId::from_uuid(self.ids.next_uuid()),
-                Choice::try_from(o.choice.as_str()).map_err(input)?,
+                choice,
                 prose(&o.change)?,
                 expects,
                 prose(&o.consequence)?,
@@ -1867,7 +1874,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for f in &c.findings {
             findings.push(self.finding_ref(&p, f).await?);
         }
-        let crux = Crux::raise(
+        let replaced = supersedes.and_then(|r| cruxes.iter().find(|q| q.id() == r));
+        let crux = raise(
             id,
             CruxDraft {
                 raised_in: cr.id(),
@@ -1879,8 +1887,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 importance: c.importance,
                 supersedes,
             },
+            &cr,
+            replaced,
         )
-        .map_err(refused)?;
+        .map_err(|error| AppError::on(&cr, error))?;
         let raised = Raised {
             id,
             options: crux
@@ -1923,7 +1933,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .iter()
             .find(|q| q.id() == wanted)
             .cloned()
-            .ok_or_else(|| AppError::Input(format!("no crux has the id `{wanted}`")))?;
+            .ok_or_else(|| AppError::UnknownCrux(crux.trim().to_string()))?;
         let mut cr = crs
             .into_iter()
             .find(|c| c.id() == crux.raised_in())
@@ -1972,18 +1982,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let replaced = crux
             .supersedes()
             .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced));
-        match decide(&mut crux, &mut cr, answer, &p, replaced) {
-            Ok(()) => {}
-            // A target the option asks the other of than the change request does: the refusal that raising a
-            // Crux gives for the same clash.
-            Err(ChangeRequestError::ExpectationConflict(target)) => {
-                return Err(AppError::Input(format!(
-                    "{} is a target and kept, or given twice, by the change request and the option chosen",
-                    self.describe(&p, target).await?
-                )));
-            }
-            Err(e) => return Err(AppError::on(&cr, e)),
-        }
+        decide(&mut crux, &mut cr, answer, &p, replaced).map_err(|e| AppError::on(&cr, e))?;
         // The Crux and the change request it was raised in are kept together; the change request is left alone when
         // the decision asked nothing of it.
         let mut delta = ModelDelta::new().with_crux(crux);

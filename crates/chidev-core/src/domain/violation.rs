@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::domain::rule::UNMAPPED;
+use crate::domain::vo::choice::Choice;
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId};
 use crate::domain::vo::policy::PolicyLineId;
@@ -51,13 +52,22 @@ pub enum Party {
     Target(Target),
     /// A change request.
     ChangeRequest(ChangeRequestId),
+    /// A Crux, named by its id: the id is how an operation addresses it.
+    Crux(CruxId),
     /// A line of the decision Policy.
     PolicyLine(PolicyLineId),
     /// An asset or Context by the uuid alone, when the error holds no more (the application finds its name).
     Id(Uuid),
 }
 
-/// A value of a violation, typed. No sentence: a count, a word of a closed set, a revision, the things it lists.
+/// A value of a violation, typed. No sentence: a count, a word of a closed set, a revision, the choice of an
+/// option, the things it lists.
+///
+/// A violation says what it is about in two ways, and each value is for one of them. A subject
+/// ([`Violation::subjects`]) is what the violation is about, in order, and is what the sentence of the rule names
+/// (`{s0}`, `{s1}`). A value is a typed attribute that a program reads by its key: a [`Value::Party`] is one thing
+/// that plays a part the key names (the target an option asks twice), and [`Value::Parties`] is a list of them.
+/// Both are looked up by the application, which names them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// How many.
@@ -66,6 +76,10 @@ pub enum Value {
     Word(&'static str),
     /// A revision.
     Revision(Revision),
+    /// The choice of an option, as it was given: a short label, a value of the Crux, not a sentence.
+    Choice(Choice),
+    /// One thing, by id.
+    Party(Party),
     /// Things, by id.
     Parties(Vec<Party>),
     /// The debug text of an error that has no rule yet. Only [`UNMAPPED`] carries it.
@@ -223,8 +237,14 @@ impl Violation {
     pub fn parties(&self) -> Vec<Party> {
         let mut out = self.subjects.clone();
         for v in self.values.values() {
-            if let Value::Parties(parties) = v {
-                out.extend(parties.iter().copied());
+            match v {
+                Value::Party(party) => out.push(*party),
+                Value::Parties(parties) => out.extend(parties.iter().copied()),
+                Value::Count(_)
+                | Value::Word(_)
+                | Value::Revision(_)
+                | Value::Choice(_)
+                | Value::Text(_) => {}
             }
         }
         for (r, _) in &self.remedies {
