@@ -47,7 +47,9 @@ pub struct MeasureFailed;
 
 static MEASURE_FAILED: Descriptor = Descriptor {
     id: RuleId::from_static("measure.failed"),
-    summary: Cow::Borrowed("the latest measurement of an interface's code failed"),
+    summary: Cow::Borrowed(
+        "the latest measurement of an interface's code failed (baseline, provider, protocol, timeout, budget, io)",
+    ),
     help: Cow::Borrowed(
         "The run could not measure the code: the code and the harness did not pass before any change, the provider \
            or a command failed, or the time ran out. The evidence of the run is in its record. Fix the cause and run \
@@ -122,7 +124,9 @@ pub struct Stale;
 
 static STALE: Descriptor = Descriptor {
     id: RuleId::from_static("mutation.stale"),
-    summary: Cow::Borrowed("a mutation run that no longer describes the interface's code"),
+    summary: Cow::Borrowed(
+        "a mutation run after which the pin's code, the interface, a harness that checks it, a contract it cites, or the settings moved",
+    ),
     help: Cow::Borrowed(
         "The pinned code, the interface, a harness that checks it, a contract it cites, or the measure settings \
            changed after the run. Its result says nothing of the code as it is now. Run the measure again.",
@@ -164,7 +168,9 @@ pub struct Capped;
 
 static CAPPED: Descriptor = Descriptor {
     id: RuleId::from_static("mutation.capped"),
-    summary: Cow::Borrowed("a mutation run that evaluated fewer mutants than the code has sites"),
+    summary: Cow::Borrowed(
+        "a mutation run that ended ok having evaluated fewer mutants than the provider found sites, max_mutants having limited it; about the interface, evaluated N of M sites",
+    ),
     help: Cow::Borrowed(
         "The provider found more places to change than `max_mutants` allows, so the run sampled them and the \
            rest were never tried: a harness that killed every mutant of the run may still miss a change at a site \
@@ -208,7 +214,9 @@ pub struct Survived;
 
 static SURVIVED: Descriptor = Descriptor {
     id: RuleId::from_static("mutation.survived"),
-    summary: Cow::Borrowed("a change of the code that no case of the harness noticed"),
+    summary: Cow::Borrowed(
+        "a mutant no case noticed, one per mutant, about the interface, with its key, line, column, operator and change",
+    ),
     help: Cow::Borrowed(
         "The code was changed at one place and every test still passed, so the harness does not check what that \
            place does. Either a case is missing (change the harness), or the change does not alter behaviour (an \

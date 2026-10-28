@@ -26,7 +26,9 @@ pub struct ResolvedWithoutWork;
 
 static RESOLVED_WITHOUT_WORK: Descriptor = Descriptor {
     id: RuleId::from_static("cr.resolved-without-work"),
-    summary: Cow::Borrowed("a change request resolved as done that no change set was applied for"),
+    summary: Cow::Borrowed(
+        "a change request resolved as done for which no change set, for it or its parts, moved anything",
+    ),
     help: Cow::Borrowed(
         "The change request was resolved as done, but no change set applied `for` it, or for a part of it, moved \
            anything. The resolution stands (it is a decision, not a reading of the work); the record and the work \
@@ -66,7 +68,7 @@ pub struct TargetsUntouched;
 static TARGETS_UNTOUCHED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.targets-untouched"),
     summary: Cow::Borrowed(
-        "a change request resolved as done, one of whose targets no work of it or of its parts touched",
+        "a change request resolved as done, with work, one of whose targets no work of it or of its parts touched",
     ),
     help: Cow::Borrowed(
         "The change request asked for a target to be revised or retired and was resolved as done, but no change \
@@ -253,7 +255,7 @@ pub struct KeepMoved;
 static KEEP_MOVED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.keep-moved"),
     summary: Cow::Borrowed(
-        "an unresolved change request that keeps a target as it is, and the target moved",
+        "an unresolved change request, or the one being resolved, that keeps a target as it is, and the target moved",
     ),
     help: Cow::Borrowed(
         "The change request says a target stays as it is; the target changed (or went) anyway. Resolving it as \
@@ -304,7 +306,7 @@ pub struct KeepTargeted;
 static KEEP_TARGETED: Descriptor = Descriptor {
     id: RuleId::from_static("cr.keep-targeted"),
     summary: Cow::Borrowed(
-        "an open change request that keeps a target which an open change request names to revise or retire",
+        "an open change request that keeps a target which an open change request (itself included) names to revise or retire: the same target, or a clause, item or case of the contract, interface or harness it keeps",
     ),
     help: Cow::Borrowed(
         "One open change request says a target stays as it is, and an open change request (the same one, or \
@@ -369,7 +371,7 @@ pub struct OutOfFrame;
 static OUT_OF_FRAME: Descriptor = Descriptor {
     id: RuleId::from_static("cr.out-of-frame"),
     summary: Cow::Borrowed(
-        "an unresolved change request whose change sets moved a target it did not name",
+        "an unresolved change request, or the one being resolved, whose change sets moved something it did not name (a case that cites what it names is inside)",
     ),
     help: Cow::Borrowed(
         "The targets a change request names are its frame, and naming a container frames everything inside it. \

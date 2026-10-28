@@ -391,6 +391,20 @@ kind are listed where the types are, in the RustDoc of `chidev_core::app::commit
 that did not go through the entry of its kind. Each check run is kept with the use
 case that ran it.
 
+The builtin checks of the assets, their citations and their Pins:
+
+<!-- checks: cite context pin -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `cite.stale` | warning | edit, check | a case cites an item or clause that changed after the case was written |
+| `pin.stale` | warning | edit, pin, check | a pin whose code no longer stands on what it was pinned against |
+| `pin.unpinned` | note | pin, resolve, check | an interface whose code was never pinned |
+| `cite.uncited-clause` | warning | pin, resolve, check | a clause of a contract that no case cites |
+| `cite.uncited-item` | warning | pin, resolve, check | an item of an interface that no case cites |
+| `context.no-interface` | note | pin, resolve, check | a context with no interface |
+| `context.no-harness` | note | pin, resolve, check | a context with no harness |
+<!-- /checks -->
+
 The moments were called `hooks`, `hook` in `check_rules`, and the moment `edit` was
 `put`. Those words are refused, and the message names the one to write instead.
 
@@ -638,13 +652,15 @@ kind and Interface is current, the older stay as history
 
 The checks read the record and run nothing (they are builtin, at the `check` moment):
 
-| rule | default | finds |
-|---|---|---|
-| `measure.failed` | warning | the latest run failed (baseline, provider, protocol, timeout, budget, io) |
-| `mutation.unmeasured` | note | a pinned Interface with no run |
-| `mutation.stale` | warning | the Pin's code, the Interface, a Harness that checks it, a Contract it cites, or the settings moved after the run |
-| `mutation.capped` | note | the run ended (`ok`) having evaluated fewer mutants than the provider found sites, `max_mutants` having limited it; about the Interface, `evaluated N of M sites` |
-| `mutation.survived` | note | one per mutant no case noticed, about the Interface, with key, line, column, operator and the change |
+<!-- checks: measure mutation -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `measure.failed` | warning | check | the latest measurement of an interface's code failed (baseline, provider, protocol, timeout, budget, io) |
+| `mutation.unmeasured` | note | check | a pinned interface whose code was never mutation-tested |
+| `mutation.stale` | warning | check | a mutation run after which the pin's code, the interface, a harness that checks it, a contract it cites, or the settings moved |
+| `mutation.capped` | note | check | a mutation run that ended ok having evaluated fewer mutants than the provider found sites, max_mutants having limited it; about the interface, evaluated N of M sites |
+| `mutation.survived` | note | check | a mutant no case noticed, one per mutant, about the interface, with its key, line, column, operator and change |
+<!-- /checks -->
 
 A stale run is judged stale first, so a survivor of an old run is not reported for
 moved code. `status.measurements` lists the latest run per Interface: stamp,
@@ -1019,16 +1035,18 @@ retire the old one in the same change set. The shape is asked of the Harness a p
 names, so a store that holds a sim Harness from before the rule is read as it is, and
 only a put of that Harness is refused; `sim.shape-kept` reports it.
 
-| rule | default | finds |
-|---|---|---|
-| `sim.shape-kept` | error | a sim Harness kept in a shape a put of it is refused for: one the store held before the rule, or one beside another sim Harness of its Context; about the Case, the Clause or the Context (moment `check` only; it does not refuse a change). One label in two Contracts of the sweep is fine |
-| `sim.uncited-clause` | warning | a Clause that no sim Case cites, of a Contract a sim Harness takes on (cites at least one Clause of); a Contract the sim cites nothing of is left to the tests and not reported |
-| `sim.unrun` | warning | a sim Harness never simulated |
-| `sim.stale` | warning | the script, a Case or the `builds` of the Harness, a Contract it cites a Clause of, a built Interface, the code pinned for it, or the settings moved after the run |
-| `sim.finding` | error | one per Clause with findings, about the Clause, with the first case and step |
-| `sim.unreached` | error | one per Clause no seed reached, about the Clause |
-| `sim.nondeterministic` | error, **mandatory** | a case that gave another schedule or trace the second time, about the Case; no policy lowers it |
-| `sim.error` | warning | the run failed (`no_build`, `no_start`, protocol, budget, ...) or the script failed for a case, or could not start the program in it (`CANNOT_START`) |
+<!-- checks: sim -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `sim.shape-kept` | error | check | a sim harness kept in a shape a put of it is refused for (one the store held before the rule, or one beside another sim harness of its context), about the case, the clause or the context; it refuses no change, and one label in two contracts of the sweep is fine |
+| `sim.uncited-clause` | warning | pin, resolve, check | a clause that no sim case cites, of a contract a sim harness takes on (cites at least one clause of); a contract the sim cites nothing of is left to the tests |
+| `sim.unrun` | warning | check | a sim harness that was never simulated |
+| `sim.stale` | warning | check | a simulation after which the script, a case or the builds of the harness, a contract it cites a clause of, a built interface, the code pinned for it, or the settings moved |
+| `sim.finding` | error | check | a clause the program broke in a simulated case, one per clause, with the first case and step |
+| `sim.unreached` | error | check | a clause whose situation no simulated case reached, one per clause |
+| `sim.nondeterministic` | error, **mandatory** | check | a simulated case that did not give the same schedule and trace twice, about the case; no policy lowers it |
+| `sim.error` | warning | check | a simulation whose run failed (no_build, no_start, protocol, budget, ...), or whose script failed for a case or could not start the program in it (CANNOT_START) |
+<!-- /checks -->
 
 A stale run is judged stale first (only a second run that did not reproduce is
 still reported). A failed run is judged by `sim.error` alone. `status.measurements`
@@ -1215,15 +1233,18 @@ kind, options with what each names and its `consequence`, the recommendation wit
 confidence, and the importance), and the unresolved requests one of whose `keep`
 moved under `keep_moved`. The checks:
 
-| check | level | says |
-|---|---|---|
-| `cr.awaiting-decision` | warning | a Crux has no decision, whether or not the request it was raised in is resolved |
-| `cr.keep-moved` | warning | an unresolved request, or the one being resolved, keeps a target and it moved |
-| `cr.keep-targeted` | warning | an unresolved request keeps a target that an unresolved request (itself included) names to revise or retire: the same target, or a Clause, Item or Case of the Contract, Interface or Harness it keeps |
-| `cr.out-of-frame` | warning | the work for an unresolved request, or for the one being resolved, moved something it did not name (a Case that cites what it names is inside) |
-| `cr.resolved-without-work` | warning | resolved as `done`, yet no change set `for` it or its parts moved anything |
-| `cr.targets-untouched` | note | resolved as `done`, with work, yet a target it named was never touched by it or its parts |
-| `cr.intent-mismatch` | note | the intent and the targets disagree |
+<!-- checks: cr crux -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `cr.awaiting-decision` | warning | resolve, check | a crux no decision maker has answered, whether or not its change request is resolved |
+| `cr.keep-moved` | warning | edit, resolve, check | an unresolved change request, or the one being resolved, that keeps a target as it is, and the target moved |
+| `cr.keep-targeted` | warning | edit, check | an open change request that keeps a target which an open change request (itself included) names to revise or retire: the same target, or a clause, item or case of the contract, interface or harness it keeps |
+| `cr.out-of-frame` | warning | edit, resolve, check | an unresolved change request, or the one being resolved, whose change sets moved something it did not name (a case that cites what it names is inside) |
+| `cr.resolved-without-work` | warning | resolve, check | a change request resolved as done for which no change set, for it or its parts, moved anything |
+| `cr.targets-untouched` | note | resolve, check | a change request resolved as done, with work, one of whose targets no work of it or of its parts touched |
+| `cr.intent-mismatch` | note | resolve, check | an unresolved change request whose intent and whose targets disagree |
+| `crux.policy-line-gone` | note | edit, check | a decision rests on a policy line that is gone or whose text changed since |
+<!-- /checks -->
 
 `cr.unapplied` of earlier versions is gone: it judged the closing of a request by
 the revisions of its targets, which a resolution no longer does; `status` shows

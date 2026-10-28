@@ -4,7 +4,8 @@
 use chidev_core::app::ports::{AssetKind, AssetNames, IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, Diagnostic,
-    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, ItemsInput, PutInput, RetireInput,
+    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, ItemsInput, PutDone, PutInput,
+    RetireInput,
 };
 use chidev_core::domain::entity::contract::Clause;
 use chidev_core::domain::repository::ProjectRepository;
@@ -364,14 +365,13 @@ async fn a_change_set_removes_what_cases_cite_with_the_harness_in_one_commit() {
         before.0 + 1,
         "one commit"
     );
-    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind).collect();
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind()).collect();
     assert_eq!(kinds, ["contract", "interface", "harness"]);
-    assert!(
-        done.value
-            .puts
-            .iter()
-            .all(|p| p.revision.map(|r| r.number()) == Some(2))
-    );
+    assert!(done.value.puts.iter().all(|p| match p {
+        PutDone::Asset { revision, .. } => revision.number() == 2,
+        PutDone::Context { revision, .. } => revision.number() == 2,
+        _ => false,
+    }));
     // what the puts dropped, by name
     let gone: Vec<&str> = done.value.retired.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(
@@ -731,7 +731,7 @@ async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
         retires: Vec::new(),
     };
     let done = app.apply_change_set(&set).await.unwrap();
-    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind).collect();
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind()).collect();
     assert_eq!(kinds, ["context", "contract", "interface", "context"]);
     let after = app.store().project().await.unwrap().unwrap();
     assert_eq!(after.revision().number(), project.revision().number() + 2);
@@ -1821,10 +1821,10 @@ mod diagnostics {
 
     use chidev_core::app::{
         App, ChangeRequestInput, ChangeSetInput, ClauseRef, DecisionMakerInput, Diagnostic, Intent,
-        PutInput, ResolutionInput, TargetInput,
+        Mend, PutInput, ResolutionInput, SuggestedOp, TargetInput,
     };
+    use chidev_core::domain::violation::Applicability;
     use chidev_core::infra::sqlite::SqliteStore;
-    use serde_json::json;
 
     use super::{Counter, app, clauses};
 
@@ -1903,10 +1903,12 @@ mod diagnostics {
         assert!(d.did_you_mean.is_empty());
         assert_eq!(d.suggestions.len(), 1);
         assert_eq!(
-            d.suggestions[0].op,
-            json!({"op": "cr_open", "title": "Not opened", "intent": "change_behavior"})
+            d.suggestions[0].mend,
+            Mend::Op(SuggestedOp::OpenChangeRequest {
+                title: Some("Not opened".to_string())
+            })
         );
-        assert_eq!(d.suggestions[0].applicability, "review");
+        assert_eq!(d.suggestions[0].applicability, Applicability::Review);
     }
 
     #[tokio::test]
@@ -1920,8 +1922,10 @@ mod diagnostics {
         assert_eq!(d.code, "input.unknown-name");
         assert_eq!(d.did_you_mean, ["core"]);
         assert_eq!(
-            d.suggestions[0].op,
-            json!({"op": "context_add", "name": "cor"})
+            d.suggestions[0].mend,
+            Mend::Op(SuggestedOp::AddContext {
+                name: Some("cor".to_string())
+            })
         );
 
         let err = app.status().await.and_then(|_| {
@@ -1968,9 +1972,13 @@ mod diagnostics {
             "the change request `Parent` has 1 part(s) that are not resolved: `Part one`"
         );
         assert_eq!(d.values["count"], 1);
-        assert_eq!(d.suggestions[0].op["op"], "cr_resolve");
-        assert_eq!(d.suggestions[0].op["title"], "Part one");
-        assert_eq!(d.suggestions[0].applicability, "placeholder");
+        assert_eq!(
+            d.suggestions[0].mend,
+            Mend::Op(SuggestedOp::ResolveDone {
+                title: "Part one".to_string()
+            })
+        );
+        assert_eq!(d.suggestions[0].applicability, Applicability::Placeholder);
     }
 
     #[tokio::test]
@@ -1989,7 +1997,12 @@ mod diagnostics {
         let d = only(&app, err).await;
         assert_eq!(d.code, "cr.already-resolved");
         assert_eq!(d.subjects[0].name, "Done already");
-        assert_eq!(d.suggestions[0].op["op"], "cr_reopen");
+        assert_eq!(
+            d.suggestions[0].mend,
+            Mend::Op(SuggestedOp::ReopenChangeRequest {
+                title: "Done already".to_string()
+            })
+        );
     }
 
     #[tokio::test]

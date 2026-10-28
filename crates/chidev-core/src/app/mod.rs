@@ -12,8 +12,8 @@
 
 mod change_set;
 pub use self::change_set::{
-    ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, HarnessPut, InterfacePut, ItemsInput,
-    PutDone, PutInput, RetireInput,
+    AssetPutKind, ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, HarnessPut, InterfacePut,
+    ItemsInput, PutDone, PutInput, RetireInput, SettingKind,
 };
 use self::change_set::{only_put, only_setting};
 mod check;
@@ -21,9 +21,10 @@ pub mod commit;
 use self::commit::{ConfirmTrigger, EditTrigger, ModelDelta};
 mod diagnostic;
 pub use self::diagnostic::{
-    DiagSubject, Diagnostic, Names, RuleCard, RuleExplanation, Suggestion, did_you_mean,
-    locate_field,
+    Beyond, DiagSubject, DiagValue, Diagnostic, Mend, Names, RuleCard, RuleExplanation,
+    SuggestedOp, Suggestion, did_you_mean, locate_field, suggest,
 };
+pub use crate::domain::violation::Applicability;
 mod external;
 pub use self::external::{ExternalChecked, ExternalStanding, ExternalState};
 use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
@@ -77,7 +78,7 @@ use crate::domain::service::cite::stale_cites;
 use crate::domain::service::crux::{decide, raise};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::violation::{Party, Value, Violation};
-use crate::domain::vo::answer::{Answer, Basis, Beyond, DecisionMaker};
+use crate::domain::vo::answer::{self, Answer, Basis, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::ClauseLabel;
@@ -418,6 +419,9 @@ pub enum AppError {
         /// All external attempts made while checking the candidate.
         external: Vec<ExternalReport>,
     },
+    /// chidev reached a state it cannot be in (a defect of the program, not of the store).
+    #[error("chidev reached a state it cannot be in: {0}")]
+    Defect(String),
 }
 
 impl AppError {
@@ -1345,10 +1349,10 @@ fn answer_status(a: &Answer, title_of: &impl Fn(ChangeRequestId) -> String) -> A
         id: a.id().to_string(),
         decision: decision_status(a.decision()),
         beyond: a.beyond().map(|b| match b {
-            Beyond::TakenBy(requests) => {
+            answer::Beyond::TakenBy(requests) => {
                 BeyondStatus::Requests(requests.iter().map(|id| title_of(*id)).collect())
             }
-            Beyond::Declined { reason } => BeyondStatus::Declined(reason.to_string()),
+            answer::Beyond::Declined { reason } => BeyondStatus::Declined(reason.to_string()),
         }),
         basis: match a.basis() {
             Basis::Policy {
@@ -1477,7 +1481,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let id = value
             .puts
             .first()
-            .and_then(|d| d.id)
+            .and_then(|d| match d {
+                PutDone::Context { id, .. } => Some(*id),
+                _ => None,
+            })
             .map(ContextId::from_uuid)
             .ok_or_else(|| input("the change set made no context"))?;
         Ok(Checked {
@@ -2039,9 +2046,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             .ok_or_else(|| AppError::UnknownChangeRequest(title.clone()))?,
                     );
                 }
-                Some(Beyond::taken_by(named).map_err(input)?)
+                Some(answer::Beyond::taken_by(named).map_err(input)?)
             }
-            Some(BeyondInput::Declined(reason)) => Some(Beyond::declined(
+            Some(BeyondInput::Declined(reason)) => Some(answer::Beyond::declined(
                 Prose::try_from(reason.as_str()).map_err(input)?,
             )),
         };
