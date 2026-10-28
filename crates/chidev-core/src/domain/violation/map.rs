@@ -18,13 +18,16 @@ use crate::domain::rule::{
     CR_CRUX_OPTION_TWICE, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
     CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF,
     CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_SUPERSEDED, CR_SUPERSEDES_UNANSWERED,
-    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
-    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
-    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
-    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
-    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INPUT_RENAME_CONFLICT, INPUT_REPLACES_KEPT,
+    INPUT_UNKNOWN_NAME, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE,
+    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
+    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
+    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
+    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
+use crate::domain::vo::clause::ClauseLabel;
+use crate::domain::vo::clause_edit::ClauseNameProblem;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
 use crate::domain::vo::policy::PolicyError;
 use crate::domain::vo::target::Target;
@@ -332,6 +335,27 @@ impl ContractError {
             ContractError::DuplicateId(_) | ContractError::DuplicateLabel(_) => {
                 Violation::unmapped(self)
             }
+            ContractError::ClauseName { contract, problem } => {
+                let about = Party::Target(Target::Contract(*contract));
+                let text = |label: &ClauseLabel| Value::Text(label.to_string());
+                let violation = match problem {
+                    ClauseNameProblem::Unknown { label, field } => {
+                        Violation::of(INPUT_UNKNOWN_NAME)
+                            .with_value("kind", Value::Word("clause"))
+                            .with_value("name", text(label))
+                            .with_value("field", Value::Word(field.word()))
+                    }
+                    ClauseNameProblem::Conflict { label, side } => {
+                        Violation::of(INPUT_RENAME_CONFLICT)
+                            .with_value("key", text(label))
+                            .with_value("side", Value::Word(side.word()))
+                    }
+                    ClauseNameProblem::ReplacesKept { label } => Violation::of(INPUT_REPLACES_KEPT)
+                        .with_value("key", text(label))
+                        .with_value("field", Value::Word("label")),
+                };
+                violation.about(about)
+            }
         }
     }
 }
@@ -469,10 +493,10 @@ mod tests {
     use super::*;
     use crate::domain::rule::{UNMAPPED, rule};
     use crate::domain::vo::choice::Choice;
-    use crate::domain::vo::clause::ClauseLabel;
+    use crate::domain::vo::clause_edit::{NameField, NameSide};
     use crate::domain::vo::crux::CruxKind;
     use crate::domain::vo::id::{
-        ClauseId, ContextId, CruxId, CruxOptionId, InterfaceId, ItemId, test_uuid,
+        ClauseId, ContextId, ContractId, CruxId, CruxOptionId, InterfaceId, ItemId, test_uuid,
     };
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::name::ContextName;
@@ -673,6 +697,19 @@ mod tests {
             ContextError::Contract(ContractError::DuplicateId(ClauseId::from_uuid(test_uuid(
                 1,
             )))),
+            ContextError::Contract(ContractError::ClauseName {
+                contract: ContractId::from_uuid(test_uuid(2)),
+                problem: ClauseNameProblem::Unknown {
+                    label: ClauseLabel::try_from("C9").unwrap(),
+                    field: NameField::Replaces,
+                },
+            }),
+            ContextError::Contract(ContractError::ClauseName {
+                contract: ContractId::from_uuid(test_uuid(2)),
+                problem: ClauseNameProblem::ReplacesKept {
+                    label: ClauseLabel::try_from("C1").unwrap(),
+                },
+            }),
             ContextError::Interface(InterfaceError::DuplicateId(ItemId::from_uuid(test_uuid(1)))),
             ContextError::Harness(HarnessError::BuildsOfTests(HarnessId::from_uuid(
                 test_uuid(400),
@@ -747,6 +784,17 @@ mod tests {
             (
                 "ContractError::DuplicateLabel",
                 ContractError::DuplicateLabel(ClauseLabel::try_from("C1").unwrap()).violation(),
+            ),
+            (
+                "ContractError::ClauseName",
+                ContractError::ClauseName {
+                    contract: ContractId::from_uuid(test_uuid(1)),
+                    problem: ClauseNameProblem::Conflict {
+                        label: ClauseLabel::try_from("C1").unwrap(),
+                        side: NameSide::Label,
+                    },
+                }
+                .violation(),
             ),
             (
                 "InterfaceError::DuplicateId",
@@ -862,7 +910,7 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 26 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
+        assert_eq!(gives().len(), 26 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2 + 1);
         assert_eq!(STILL_UNMAPPED.len(), 23);
     }
 

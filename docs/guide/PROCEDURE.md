@@ -83,8 +83,8 @@ Crux names there waits on that question. `view` does not give a request's
    or retire (`targets`) and what must stay (`keep`). Name the container when a
    part adds something (the Contract that takes a new Clause). Keep the
    Contracts, the Interfaces and the Harness of one Context in one part unless
-   there is a reason to split them; parts that share a Harness are then taken
-   through steps 3 and 4 one after the other (see step 4). Keep the unit to
+   there is a reason to split them; parts that share a Harness can then be
+   taken through steps 3 and 4 side by side (see step 4). Keep the unit to
    protect: an Item, not the whole Interface, when only its signature must stay. Do not keep what another
    part targets: a part that keeps an Interface and a part that names one of its
    Items contradict each other. `cr.keep-targeted` in an answer says so; resolve
@@ -132,7 +132,10 @@ Crux names there waits on that question. `view` does not give a request's
    the answer changes outside the part is the work of the request its `beyond`
    names, `for` that request (see step 2). A resolved part takes no work:
    reopen it, or open a new request. Keep an Item's id across a rename with `replaces`, and a Clause's id
-   across a new label the same way. To change some Clauses of a Contract (reword
+   across a new label the same way. A new name is work of the part it is `for`
+   (`status` shows it under `renamed`), so give it in the set of the part that
+   names the Clause or Item, or its Contract or Interface: anywhere else it is
+   `cr.out-of-frame`. To change some Clauses of a Contract (reword
    one, add one, remove one) put only those with `clauses_put`, or the `clauses`
    entry of the set: the Clauses not named stay as they are, so a Clause
    meant to stay cannot change by a slip. Use `contract_put` to make a Contract,
@@ -164,21 +167,17 @@ Crux names there waits on that question. `view` does not give a request's
    one part: the put that adds the Cases of an answered Crux, and only those, is
    applied `for` the part the Crux was raised in. The Cases that follow a
    part's Clauses are that part's work, so they are inside its frame. When the
-   Cases of one Harness follow the Clauses or Items of several parts, a put
-   `for` one of them is made while no other part's work has left a Case of the
-   Harness stale: a put records the revision of everything each Case cites, so
-   it brings every stale Case up, and one brought up that neither is nor cites
-   anything inside the frame of the part the put is `for` moves outside it. So
-   the parts go through steps 3 and 4 one after the other, each part's Harness
-   put before the next part's design, and a later put `for` an earlier part (a
-   corrected Case, the Cases of an answered Crux) waits until the Harness is put
-   for the parts designed since. A Case that cites the work of two parts is
-   inside both frames and moves in each of their puts. The Harness is not put
-   `for` the parent: its frame is its own targets, not its parts' (see
-   [Attribution and frame](../../README.md#attribution-and-frame)). When another
-   part's design is in already, no put can leave its Cases as they are: make the
-   put, and `cr.out-of-frame` names them; say so in the report the decision
-   maker resolves the part on (step 8). A Case
+   Cases of one Harness follow the Clauses or Items of several parts, the parts
+   can be designed side by side: a put `for` one part brings a Case's citation
+   up to the revision of what it cites only where that part's frame holds it,
+   and leaves the Cases another part's design made stale as they are, stale and
+   unmoved, until the Harness is put `for` that part. A Case that cites the work
+   of two parts is brought up on each part's citations by that part's put, and
+   moves in each. A Case whose code a put changes moves whichever part the put
+   is `for`, so a change to a Case's code goes in the put `for` the part it is
+   for. The Harness is not put `for` the
+   parent: its frame is its own targets, not its parts' (see
+   [Attribution and frame](../../README.md#attribution-and-frame)). A Case
    the implementer finds wrong against its Clause goes back to the Harness
    writer with that Clause,
    and the writer puts the corrected Harness `for` the same part. The acceptance examples the
@@ -212,7 +211,8 @@ Crux names there waits on that question. `view` does not give a request's
    A project that does not measure keeps the note `mutation.unmeasured` for each
    pinned Interface: it says no run was made, not that the work missed
    something. A stale Pin means implement and pin again; a stale citation means
-   bring the tests up to the target, then put the Harness again. An edit (a put,
+   bring the tests up to the target, then put the Harness again `for` the part
+   whose frame holds the citation (a put `for` another part leaves it stale). An edit (a put,
    a retire, `context_add`, `items_rekey`, a change request opened, a Crux
    raised or decided) says only what that edit broke (a citation it made stale, a Pin it left
    behind), so a Clause no Case cites yet, or a Context with no Interface, is

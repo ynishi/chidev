@@ -86,6 +86,7 @@ pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
+use crate::domain::vo::footprint::{Move, Rename};
 pub use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId,
@@ -1039,8 +1040,23 @@ pub struct ChangeRequestStatus {
 pub struct WorkStatus {
     /// The revision of the store the change set was kept at.
     pub store_revision: u64,
-    /// The targets it moved (made, revised, or gone), described.
+    /// The targets whose revision it moved (made, revised, or gone), described. A Clause or Item given a new name
+    /// alone is not here: it moved no revision.
     pub moved: Vec<String>,
+    /// The Clauses and Items it gave a new name, in the order of the moves, with the name each had and has. One
+    /// whose revision moved in the same change set is in `moved` too.
+    pub renamed: Vec<RenameStatus>,
+}
+
+/// A Clause or an Item given a new name by a change set, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameStatus {
+    /// The target, described (with the name it has now).
+    pub target: String,
+    /// The label or key it had.
+    pub from: String,
+    /// The label or key it has.
+    pub to: String,
 }
 
 /// A change request as it was opened.
@@ -2228,18 +2244,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read.
-    async fn checked(
-        &self,
-    ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
-        let at = self.store.revision().await?;
-        let p = self.project().await?;
-        let (crs, cruxes) = self.requests_and_cruxes().await?;
-        self.checked_on(at, &p, &crs, &cruxes).await
-    }
-
-    /// [`App::checked`] on the Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at
-    /// `at`.
+    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read, on the
+    /// Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at `at`.
     async fn checked_on(
         &self,
         at: StoreRevision,
@@ -2301,10 +2307,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok((crs, cruxes))
     }
 
-    /// Where the Project stands.
+    /// Where the Project stands. The model it answers about is read once: the revision, the Project, the change
+    /// requests and the Cruxes are read at the top, and the checks run on them. The Pins, the names of assets, the
+    /// measurements and the reports of external and judged checks are read by their own calls after that.
     pub async fn status(&self) -> Result<Status, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         let mut pins = Vec::new();
         let mut seen = BTreeSet::new();
         for c in p.contexts() {
@@ -2358,8 +2367,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 now: s.now.number(),
             });
         }
-        let (crs, cruxes) = self.requests_and_cruxes().await?;
-        let (findings, judged, measured) = self.checked().await?;
+        let (findings, judged, measured) = self.checked_on(at, &p, &crs, &cruxes).await?;
         let measurements = self.measurement_standings(&p, &measured).await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
@@ -2372,10 +2380,28 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         for c in &crs {
             let mut work = Vec::with_capacity(c.work().len());
             for f in c.work() {
-                let targets: Vec<Target> = f.targets().collect();
+                let revised: Vec<Target> = f
+                    .moves()
+                    .iter()
+                    .filter(|m| m.is_revised())
+                    .map(Move::target)
+                    .collect();
+                let mut renamed = Vec::new();
+                for (target, rename) in f.renames() {
+                    let (from, to) = match rename {
+                        Rename::Label { from, to } => (from.to_string(), to.to_string()),
+                        Rename::Key { from, to } => (from.to_string(), to.to_string()),
+                    };
+                    renamed.push(RenameStatus {
+                        target: self.describe(&p, target).await?,
+                        from,
+                        to,
+                    });
+                }
                 work.push(WorkStatus {
                     store_revision: f.store_revision(),
-                    moved: self.describe_all(&p, &targets).await?,
+                    moved: self.describe_all(&p, &revised).await?,
+                    renamed,
                 });
             }
             let outside = match out_of_frame.iter().find(|o| o.cr == c.id()) {

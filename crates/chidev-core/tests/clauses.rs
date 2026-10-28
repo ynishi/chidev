@@ -683,3 +683,28 @@ async fn a_contract_named_twice_and_an_unknown_one_are_both_said() {
         "{said:#?}"
     );
 }
+
+/// A `clauses` entry for a Contract the same set makes, with a label that cannot be read, is named twice too: the
+/// entry goes on to the domain with the Clauses that could be read, so the repeat is said with the reading problem.
+#[tokio::test]
+async fn a_contract_named_twice_and_a_label_that_cannot_be_read_are_both_said() {
+    let mut app = stock("clauses-both-said-unreadable").await;
+    let entry = PutInput::Clauses(ClausesPut {
+        context: "core".to_string(),
+        contract: "fresh".to_string(),
+        clauses: vec![clause("C1", "x"), clause("one", "y")],
+        remove: Vec::new(),
+    });
+    let err = app
+        .apply_change_set(&set_of(vec![make_contract("fresh"), entry]))
+        .await
+        .unwrap_err();
+    let said = app.diagnose(&err).await;
+    let mut codes: Vec<&str> = said.iter().map(|d| d.code.as_str()).collect();
+    codes.sort_unstable();
+    assert_eq!(
+        codes,
+        ["change-set.named-twice", "input.invalid"],
+        "{said:#?}"
+    );
+}

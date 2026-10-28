@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 
 use super::case::CaseName;
-use super::clause::ClauseContent;
+use super::clause::{ClauseContent, ClauseLabel};
+use super::clause_edit::ClauseEdit;
+use super::frame::Frame;
 use super::harness_kind::HarnessKind;
 use super::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId};
 use super::line_range::LineRange;
@@ -98,6 +100,22 @@ pub enum AssetPut {
         /// Its Clauses.
         clauses: Vec<(ClauseId, ClauseContent)>,
     },
+    /// Some Clauses of a Contract that is: the Clauses not named stay in their order, and so does the title. A
+    /// Clause an edit names (by its label, or the one it replaces) is set in its place, one in `remove` is gone, and
+    /// a new one comes after the others, in the order given. The Contract composes the list
+    /// ([`Contract::clauses_partial`](crate::domain::entity::contract::Contract::clauses_partial)) and the Project
+    /// puts it as it puts a Contract: this is not a second way into the Contract. It is a put of the Contract, so
+    /// the set names it once: with a `Contract` put of the same id, or another `Clauses` put, it is refused.
+    Clauses {
+        /// The Context.
+        context: ContextId,
+        /// The Contract, which the Project has before the set.
+        id: ContractId,
+        /// The Clauses to set. The id of an edit is the one a new Clause takes.
+        edits: Vec<ClauseEdit>,
+        /// The labels of the Clauses to remove.
+        remove: Vec<ClauseLabel>,
+    },
     /// An Interface is made or revised.
     Interface {
         /// The Context.
@@ -159,18 +177,38 @@ pub enum AssetRetire {
 /// Harness can cite what the same change makes. The order in which the entries are listed does not matter; they are
 /// applied in the order the rules need (settings, Contracts and Interfaces, Harnesses, then retirements).
 /// A thing is named once in a change set: putting it twice, or putting and retiring it, is refused.
+///
+/// A set applied for a change request carries that request's [`Frame`], which bounds which citations a Harness put
+/// brings up: a Case is claimed current only for what the request is about. A set that belongs to no request carries
+/// none, and every citation of a Harness it puts is brought up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeSet {
     /// What is put.
     pub puts: Vec<AssetPut>,
     /// What is retired.
     pub retires: Vec<AssetRetire>,
+    frame: Option<Frame>,
 }
 
 impl ChangeSet {
-    /// A change set of `puts` and `retires`.
+    /// A change set of `puts` and `retires`, for no change request.
     pub fn new(puts: Vec<AssetPut>, retires: Vec<AssetRetire>) -> ChangeSet {
-        ChangeSet { puts, retires }
+        ChangeSet {
+            puts,
+            retires,
+            frame: None,
+        }
+    }
+
+    /// This change set as applied for a change request whose frame is `frame`.
+    pub fn for_frame(mut self, frame: Frame) -> ChangeSet {
+        self.frame = Some(frame);
+        self
+    }
+
+    /// The frame of the change request it is applied for; none when it is applied for none.
+    pub fn frame(&self) -> Option<&Frame> {
+        self.frame.as_ref()
     }
 
     /// Whether it changes nothing because it names nothing.

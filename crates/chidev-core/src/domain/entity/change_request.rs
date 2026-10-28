@@ -415,7 +415,8 @@ impl ChangeRequest {
 
     /// Records what a change set applied for it moved. A resolved change request is a closed record and takes no
     /// more work (until it is reopened). A change set that moved nothing (the same puts applied again) is no work:
-    /// its footprint is not kept, so the work holds only footprints that moved something.
+    /// its footprint is not kept, so the work holds only footprints that moved something. A footprint of new names
+    /// alone is not empty: a Clause or an Item given a new name is a move.
     pub fn record_work(&mut self, footprint: Footprint) -> Result<(), ChangeRequestError> {
         if self.is_resolved() {
             return Err(ChangeRequestError::AlreadyResolved);

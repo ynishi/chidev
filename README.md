@@ -472,6 +472,10 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   the basis, the Harnesses, then the retirements. A Case can cite a Clause or an
   Item that the same change set makes or revises, and the citation records the
   revision it has there; a Case that cites what the set removes fails the set.
+  That is so for a set without `for`. A set `for` a request brings a citation up
+  (records it at the revision its target has) only where the request's frame holds
+  it or the citation is new, and leaves the others as they were: see "Attribution
+  and frame".
   A sim Harness entry (`"kind":"sim"`) may carry `builds`, the names of Interfaces
   of its Context, which may be ones the same set makes; one that is not in the
   Context, or that the set retires while the sim still builds it, fails the set.
@@ -501,7 +505,8 @@ checked once, on the state it ends in, and all of it is applied or none of it.
   every target whose revision differs between the Project before and after (made,
   revised or gone: a Clause, an Item or a Case a put dropped, a thing retired, and
   the Contract, Interface, Harness, Context or Project whose revision moved because
-  something in it was added or removed), each with the containers it was in. The
+  something in it was added or removed) and every Clause and Item given a new name,
+  with the old name and the new, each with the containers it was in. The
   answer is the same; `findings` includes `cr.out-of-frame` when the set left the
   frame (see "Change requests"; a Case that cites a Clause or an Item the frame
   holds is inside it, and the footprint keeps what each Case it moved cited). A
@@ -1200,7 +1205,10 @@ removing a feature):
 (`cruxes`), its `targets` with what the work did to each, its `keep` with whether
 each moved, its `work` and its `out_of_frame` (the moves of its work outside its
 frame, by the rule of "Attribution and frame": a Case that cites what the frame
-holds is inside). It lists every Crux under `cruxes` (the
+holds is inside). Each entry of `work` has the `store_revision` of the change set,
+`moved` (the targets whose revision it moved) and `renamed` (the Clauses and Items
+it gave a new name, each `{target, from, to}`, `target` described with the name it
+has now). It lists every Crux under `cruxes` (the
 record `view` gives, with the request it was raised in by its title as `raised_in`),
 each Crux that has no decision under `awaiting` (its id, `raised_in`, the question,
 kind, options with what each names and its `consequence`, the recommendation with its
@@ -1286,16 +1294,35 @@ no work and records no footprint:
   container is. For a move outside the frame: name the target when the request is
   opened, apply the change set `for` the request it belongs to, or take the change
   back.
+
+  The same frame decides what a Harness put `for` the request brings up. Each
+  citation of each Case of the put is recorded at the revision its target has when
+  the Case is new, the Case did not cite that target before, the target is inside
+  the frame, or the Case is (the Case, its Harness, its Context or the Project is
+  named). Any other citation stays at the revision the Case had recorded for it, so
+  a stale Case of another part stays stale and does not move, and the put does not
+  claim it current for a change nobody looked at. This is decided per citation: a
+  Case that cites a Clause of this request and a stale Clause of another is brought
+  up on the first and stays stale on the second. A Case whose code the put changes
+  still moves, as it does in any put. A set without `for` brings every citation up.
+  So parts that share a Harness can be designed side by side, each part's Harness put
+  moving only the Cases its frame holds and the Cases whose code it changes. The edge: a set that revises a Clause
+  outside its frame and puts a Harness whose unchanged Case cites it leaves that Case
+  stale right after the set, and the revision itself is `cr.out-of-frame`. The
+  decision is in ADR 0006.
 - A new Clause or Item is a move of its own: a frame that names only the other
   Clauses of the Contract has it outside, so name the Contract when the request
   adds to it.
-- **A new name moves nothing.** A Clause given another label, or an Item another key,
-  keeps its id and its revision (and its Contract's or Interface's), so the footprint
-  of the set that did it is empty: it is outside no frame, it breaks no `keep` of the
-  Clause or its container, and no citation goes stale. A request whose only work is
-  such a rename has no work: resolved as done, it is `cr.resolved-without-work`, and
-  a Clause or Item it names as a target reads `not touched yet` (`cr.targets-untouched`
-  when the request has other work).
+- **A new name is a move of its own.** A Clause given another label, or an Item
+  another key, keeps its id and its revision (and its Contract's or Interface's), and
+  the footprint of the set that did it holds the Clause or Item with the name it had
+  and the name it has, though no revision moved. It is work: a request whose only work
+  is such a rename is resolved with work, and a Clause or Item it names as a target
+  reads `revised`. It is outside a frame that does not hold the Clause or Item
+  (`cr.out-of-frame`, naming it alone). It moves no container, so the Contract or
+  Interface holding it is not in the footprint for it. It breaks no `keep`, which is
+  judged by revision: a name is not part of what a Clause promises (ADR 0004), and no
+  citation goes stale. The decision is in ADR 0005.
 
 ### Crux, Policy and Assumption
 

@@ -1405,6 +1405,15 @@ struct CrOut<'a> {
 struct WorkOut<'a> {
     store_revision: u64,
     moved: &'a [String],
+    renamed: Vec<RenameOut<'a>>,
+}
+
+/// A Clause or an Item a change set gave a new name, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct RenameOut<'a> {
+    target: &'a str,
+    from: &'a str,
+    to: &'a str,
 }
 
 /// A change request that keeps targets as they are, and they moved, in the result of `status`.
@@ -2858,6 +2867,15 @@ where
                             .map(|w| WorkOut {
                                 store_revision: w.store_revision,
                                 moved: &w.moved,
+                                renamed: w
+                                    .renamed
+                                    .iter()
+                                    .map(|r| RenameOut {
+                                        target: &r.target,
+                                        from: &r.from,
+                                        to: &r.to,
+                                    })
+                                    .collect(),
                             })
                             .collect(),
                         out_of_frame: &c.out_of_frame,

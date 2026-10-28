@@ -10,6 +10,41 @@ and this project adheres to
 
 ### Changed
 
+- A new name is a move of the footprint (see
+  `docs/adr/0005-a-new-name-is-a-move-of-the-record.md`). A Clause given a new
+  label by `replaces`, or an Item a new key by `replaces` or `renames`, still
+  moves no revision and makes no citation stale, but the footprint of a
+  `change_set` `for` a request records it, with the name it had and the name it
+  has: a request whose only work is a rename has work (no
+  `cr.resolved-without-work`), its target reads `revised`, a rename outside the
+  request's frame is `cr.out-of-frame` for the Clause or Item alone, and a
+  `keep` is not broken by it. In `status` each entry of a request's `work` has
+  `renamed` (`{target, from, to}`) beside `moved`, which lists only the targets
+  whose revision moved. A footprint stored before has no renames and reads as it
+  did. In Rust, `Move` has `change()` (`Change::Revised`, `Renamed` or
+  `RevisedAndRenamed`, with a `Rename` of labels or keys), `relabeled`,
+  `rekeyed`, `is_revised()` and `rename()`; `Footprint::renames()` and
+  `RenameStatus` are new and `WorkStatus` has `renamed`.
+- Breaking: a Harness put in a `change_set` `for` a request brings a Case's
+  citation up to the revision of what it cites only where the request's frame
+  holds it: when the Case is new, the citation is new, or the cited Clause or
+  Item, or the Case itself, is inside the frame (see
+  `docs/adr/0006-a-put-for-a-request-brings-up-only-what-its-frame-holds.md`).
+  Any other citation keeps the revision it had, so a put `for` one part leaves
+  the Cases another part's design made stale as they are and does not move them
+  out of its frame. A set without `for`, and a put alone, bring every citation
+  up as before. In Rust, `Frame` is new and is what
+  `service::change_request::frame` returns, and `ChangeSet` has `for_frame` and
+  `frame()`.
+- The partial put of a Contract is an entry of the domain's change set,
+  `AssetPut::Clauses`, and the Contract holds the rules about Clause names (see
+  `docs/adr/0007-the-contract-composes-a-partial-put.md`). Answers and refusal
+  codes are the same. A set that also has a problem found while it is planned
+  says the repeats among the entries it planned with it. One id is drawn for
+  each Clause given, used or not. In Rust, `ClauseEdit`, `ClauseNameProblem`,
+  `Contract::clauses_whole`, `Contract::clauses_partial`,
+  `Context::put_clauses`, `Project::repeated` and `ContractError::ClauseName`
+  are new.
 - Breaking: a decision no longer widens the request its Crux was raised in.
   A target of the option chosen that is outside the request's frame is not
   added to it; the decision says where it goes with `beyond`, either the
@@ -56,9 +91,8 @@ and this project adheres to
   Its revision counts changes of its sentence only, as an Item's counts changes
   of its signature, and a new label alone moves neither the Clause's revision
   nor the Contract's. So a Clause relabelled keeps its citations current, makes
-  no Pin or simulation stale, and moves nothing for a footprint: a request whose
-  only work is a relabel (or an Item rename) records no work, and resolved as
-  done it gets `cr.resolved-without-work`. A script of a simulation that still
+  no Pin or simulation stale; the footprint records it as a new name, not as a
+  revision (see above). A script of a simulation that still
   prints the old label is a protocol failure on its next run. The stored shape
   of a Clause is unchanged. In Rust, `Clause` has `label()` and `text()` in
   place of `content()`, and `ClauseContent` is the pair a caller gives to make
@@ -123,12 +157,11 @@ and this project adheres to
   evidence's `lines` are the first and last line.
 - The guide (`docs/guide/PROCEDURE.md`) says, in step 4, which part a Harness
   put is `for` when the Cases of one Harness follow the Clauses or Items of
-  several parts: the parts go through steps 3 and 4 one after the other, each
-  part's Harness put before the next part's design, and never `for` the parent.
-  A put records the revision of everything each Case cites, so it also brings
-  up the Cases another part's design made stale, and one that cites nothing
-  inside the frame of the part it is `for` is outside it. Step 2 points to it
-  where a Context's work is split.
+  several parts: the parts can go through steps 3 and 4 side by side, since a
+  put `for` one part brings up only the citations its frame holds; a change to
+  a Case's code goes in the put `for` the part it is for, and no put is `for`
+  the parent. Step 2 points to it where a Context's work is split, and step 6
+  says to put the Harness `for` the part whose frame holds a stale citation.
 - The guide (`docs/guide/PROCEDURE.md`) says, in step 8, that the decision
   maker resolves and `by` names the decision maker, not the role that did the
   work; and, in step 5, to check the gate once by pinning while the new tests
@@ -299,6 +332,9 @@ and this project adheres to
 
 ### Fixed
 
+- `status` reads the model once: it read the Project, the change requests and
+  the Cruxes, and then read them again for its checks, so a commit in between
+  gave one answer made of two states of the store.
 - A `change_set` with a `contract` entry that makes a Contract and a `clauses`
   entry for the same Contract is refused with `change-set.named-twice` ("the
   change set names the contract ... twice"), as it is when the Contract exists

@@ -31,7 +31,7 @@ use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
-use crate::domain::vo::footprint::{Citations, Footprint, Move};
+use crate::domain::vo::footprint::{Citations, Footprint, Move, Rename};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId,
@@ -858,12 +858,83 @@ struct TargetRefDoc {
     id: Option<String>,
 }
 
-/// A target a change set moved, with the containers it was in (the outermost first).
+/// A target a change set moved, with the containers it was in (the outermost first). A Clause or an Item given a new
+/// name also keeps the name it had and the name it has. A move kept before renames were recorded has no `renamed`
+/// and reads as a revision move.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MoveDoc {
     target: TargetDoc,
     id: Option<String>,
     within: Vec<TargetRefDoc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renamed: Option<RenameDoc>,
+}
+
+/// The new name a Clause (its label) or an Item (its key) was given, and whether its revision moved in the same
+/// change set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenameDoc {
+    from: String,
+    to: String,
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    revised: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
+/// The move `m` as it is kept.
+fn move_doc(m: &Move) -> MoveDoc {
+    let (target, id) = target_doc(&m.target());
+    let renamed = m.rename().map(|rename| {
+        let revised = m.is_revised();
+        let (from, to) = match rename {
+            Rename::Label { from, to } => (from.to_string(), to.to_string()),
+            Rename::Key { from, to } => (from.to_string(), to.to_string()),
+        };
+        RenameDoc { from, to, revised }
+    });
+    MoveDoc {
+        target,
+        id,
+        within: target_refs(m.within()),
+        renamed,
+    }
+}
+
+/// The move `d` as it was kept: a new name is read back by the kind of the target, which a Clause gives a label and
+/// an Item a key; a name that cannot be read, or one on any other target, is refused.
+fn move_of(d: &MoveDoc) -> Result<Move, Bad> {
+    let target = target_of(&d.target, &d.id)?;
+    let within = targets_of(&d.within)?;
+    let Some(r) = &d.renamed else {
+        return Ok(Move::new(target, within));
+    };
+    match target {
+        Target::Clause(clause) => Ok(Move::relabeled(
+            clause,
+            within,
+            ClauseLabel::try_from(r.from.as_str()).map_err(bad)?,
+            ClauseLabel::try_from(r.to.as_str()).map_err(bad)?,
+            r.revised,
+        )),
+        Target::Item(item) => Ok(Move::rekeyed(
+            item,
+            within,
+            ItemKey::try_from(r.from.as_str()).map_err(bad)?,
+            ItemKey::try_from(r.to.as_str()).map_err(bad)?,
+            r.revised,
+        )),
+        other => Err(format!(
+            "a {} has no name to change, but a move of it has one",
+            other.word()
+        )),
+    }
 }
 
 /// The Items and Clauses a moved Case cited and the containers of those, by the id of the Case.
@@ -891,7 +962,8 @@ fn targets_of(refs: &[TargetRefDoc]) -> Result<Vec<Target>, Bad> {
 }
 
 /// What one change set applied for a change request moved, and the store revision it was kept at. The Cases it
-/// moved keep what they cited; a footprint kept before that was recorded has none, and is read as citing nothing.
+/// moved keep what they cited; a footprint kept before that was recorded has none, and is read as citing nothing. A
+/// move kept before renames were recorded has no `renamed`, and reads as a revision move.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FootprintDoc {
     store_revision: u64,
@@ -904,18 +976,7 @@ impl From<&Footprint> for FootprintDoc {
     fn from(f: &Footprint) -> FootprintDoc {
         FootprintDoc {
             store_revision: f.store_revision(),
-            moves: f
-                .moves()
-                .iter()
-                .map(|m| {
-                    let (target, id) = target_doc(&m.target());
-                    MoveDoc {
-                        target,
-                        id,
-                        within: target_refs(m.within()),
-                    }
-                })
-                .collect(),
+            moves: f.moves().iter().map(move_doc).collect(),
             citations: f
                 .citations()
                 .iter()
@@ -933,16 +994,7 @@ impl TryFrom<&FootprintDoc> for Footprint {
     type Error = Bad;
 
     fn try_from(d: &FootprintDoc) -> Result<Footprint, Bad> {
-        let moves = d
-            .moves
-            .iter()
-            .map(|m| {
-                Ok::<_, Bad>(Move::new(
-                    target_of(&m.target, &m.id)?,
-                    targets_of(&m.within)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let moves = d.moves.iter().map(move_of).collect::<Result<Vec<_>, _>>()?;
         let citations = d
             .citations
             .iter()

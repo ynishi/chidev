@@ -10,9 +10,10 @@ use super::{
     harness_records, interface_records, refuse_cited, refused, sim_shape_problems,
 };
 use crate::domain::entity::context::{Context, ContextError};
-use crate::domain::entity::harness::CaseFound;
+use crate::domain::entity::harness::{CaseFound, Harness};
 use crate::domain::vo::case::CaseCites;
 use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
+use crate::domain::vo::frame::Frame;
 use crate::domain::vo::id::{ClauseId, ContextId, HarnessId, ItemId};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
@@ -29,9 +30,20 @@ impl Project {
     ///
     /// The entries are applied in the order the rules need, whatever order they are listed in: the Contexts
     /// added (the Project goes one revision up for each); the uses of the Contexts; the Contracts and Interfaces; the basis of the Contexts that are based on their Contracts; the
-    /// Harnesses (a citation is recorded at the revision its target has by then); the retirements. The Clauses, Items
+    /// Harnesses (a citation is recorded at the revision its target has by then, or, in a set that carries the frame
+    /// of a change request, only where the frame holds it: see below); the retirements. The Clauses, Items
     /// and Cases that a put drops from an asset are recorded as retired, as they are by a put alone. Each asset
     /// moves by one revision at most, because it is named once: a change set that names a thing twice is refused.
+    /// A put of some Clauses of a Contract ([`AssetPut::Clauses`]) is a put of that Contract, so it is named once
+    /// with it: the Contract composes the list and it goes in as any put of the Contract does.
+    ///
+    /// A set without a frame (a put alone, or a set for no change request) records every citation of every Case of
+    /// a Harness it puts at the revision its target has. A set with one claims a Case current only for what the
+    /// request is about: a citation is recorded at the revision its target has when the Case is new, the Case did
+    /// not cite that target before, the target is inside the frame, or the Case is; otherwise it stays at the
+    /// revision the Case had recorded for it, so a stale Case of another part stays stale. Whether the Case's code
+    /// changed does not decide it. A set that itself revises a Clause outside its frame therefore leaves the Cases
+    /// that cite it stale.
     ///
     /// When it is refused, nothing changes, and the error names every problem found: a single one as it is, several
     /// as [`ProjectError::Many`]. Problems with the entries themselves (an unknown Context, a Contract that breaks
@@ -41,11 +53,14 @@ impl Project {
     /// Context each is in (a Context has at most one sim Harness): to swap one, put the new and retire the old in
     /// one set. A sim Harness the set does not put is not asked, however it was kept.
     pub fn apply(&mut self, set: ChangeSet) -> Result<(), ProjectError> {
-        let repeated = repeats(&set);
+        let repeated = Project::repeated(&set);
         if !repeated.is_empty() {
             return Err(refused(repeated));
         }
-        let ChangeSet { mut puts, retires } = set;
+        let frame = set.frame().cloned();
+        let ChangeSet {
+            mut puts, retires, ..
+        } = set;
         let added = puts
             .iter()
             .filter(|p| matches!(p, AssetPut::Context(_)))
@@ -62,10 +77,13 @@ impl Project {
         let mut next = self.contexts.clone();
         let mut touched = BTreeSet::new();
         for put in puts {
-            let (context, done) = put_one(&mut next, put);
+            let (context, done) = put_one(&mut next, frame.as_ref(), put);
             touched.insert(context);
-            if let Err(e) = done {
-                problems.push(e);
+            match done {
+                Ok(()) => {}
+                // A put that has several problems of its own gives them all, each one apart.
+                Err(ProjectError::Many(all)) => problems.extend(all),
+                Err(e) => problems.push(e),
             }
         }
         let dropped: Vec<Retired> = touched
@@ -124,6 +142,14 @@ impl Project {
         self.revision = revision;
         Ok(())
     }
+
+    /// The things `set` names more than once (an asset put twice or put and retired, the settings of a Context
+    /// given twice, a Context put into and retired), each as [`ProjectError::Repeated`]. It asks nothing of the
+    /// Project: [`Project::apply`] refuses a set that has any, before it applies anything, and a caller that has
+    /// found other problems with some of the entries can add the repeats of the entries it has to say them together.
+    pub fn repeated(set: &ChangeSet) -> Vec<ProjectError> {
+        repeats(set)
+    }
 }
 
 /// When a put is applied: settings first, then the definitions, then the Harnesses that cite them.
@@ -131,15 +157,17 @@ fn stage(put: &AssetPut) -> u8 {
     match put {
         AssetPut::Context(_) => 0,
         AssetPut::Uses { .. } => 1,
-        AssetPut::Contract { .. } | AssetPut::Interface { .. } => 2,
+        AssetPut::Contract { .. } | AssetPut::Clauses { .. } | AssetPut::Interface { .. } => 2,
         AssetPut::BaseOnContract { .. } => 3,
         AssetPut::Harness { .. } => 4,
     }
 }
 
-/// The Context a put is about, and whether it was put on `next`.
+/// The Context a put is about, and whether it was put on `next`. `frame` is the frame of the change request the set
+/// is applied for, if it is.
 fn put_one(
     next: &mut BTreeMap<ContextId, Context>,
+    frame: Option<&Frame>,
     put: AssetPut,
 ) -> (ContextId, Result<(), ProjectError>) {
     match put {
@@ -164,6 +192,20 @@ fn put_one(
             context,
             edit(next, context, |c| c.put_contract(id, title, clauses)),
         ),
+        AssetPut::Clauses {
+            context,
+            id,
+            edits,
+            remove,
+        } => {
+            let done = match next.get_mut(&context) {
+                None => Err(ProjectError::UnknownContext(context)),
+                Some(c) => c
+                    .put_clauses(id, &edits, &remove)
+                    .map_err(|all| refused(all.into_iter().map(ProjectError::Context).collect())),
+            };
+            (context, done)
+        }
         AssetPut::Interface {
             context,
             id,
@@ -181,7 +223,11 @@ fn put_one(
             source,
             cases,
         } => {
-            let found: Vec<CaseFound> = cases.into_iter().map(|d| found_of(next, d)).collect();
+            let before = next.get(&context).and_then(|c| c.harness(id));
+            let found: Vec<CaseFound> = cases
+                .into_iter()
+                .map(|d| found_of(next, frame, (context, id), before, d))
+                .collect();
             let done = edit(next, context, |c| {
                 c.put_harness(id, kind, builds, source, found)
             });
@@ -203,20 +249,75 @@ fn edit(
     Ok(())
 }
 
-/// The Case as the Harness takes it, each citation at the revision its target has in `contexts` now. A target that
-/// is nowhere gets the first revision; the check of the citations finds it unreached.
-fn found_of(contexts: &BTreeMap<ContextId, Context>, draft: CaseDraft) -> CaseFound {
+/// The Case as the Harness takes it, each citation at the revision its target has in `contexts` now, or, when the
+/// set has a `frame`, only where it holds it.
+///
+/// `at` is the Context and the Harness the Case is put in, and `before` the Harness as `contexts` has it before the
+/// put. Without a frame every citation is recorded at the revision its target has. With one, a citation is recorded
+/// there when the Case is new (it is not in `before`), the Case did not cite that target before, the target is
+/// inside the frame, or the Case is; otherwise at the revision the Case had recorded for it, so a citation that was
+/// stale stays stale. The containers are worked out here (the Project, the Context and the Contract, Interface or
+/// Harness that hold the target, as `contexts` has them); whether the frame holds the target is [`Frame::contains`].
+///
+/// A target that is nowhere gets the first revision; the check of the citations finds it unreached.
+fn found_of(
+    contexts: &BTreeMap<ContextId, Context>,
+    frame: Option<&Frame>,
+    at: (ContextId, HarnessId),
+    before: Option<&Harness>,
+    draft: CaseDraft,
+) -> CaseFound {
+    let old = before.and_then(|h| h.case(draft.id()));
+    let case_inside = frame.is_some_and(|f| {
+        f.contains(
+            Target::Case(draft.id()),
+            &[
+                Target::Project,
+                Target::Context(at.0),
+                Target::Harness(at.1),
+            ],
+        )
+    });
+    // The revision `target` is recorded at: the one it has now, unless the frame keeps the Case's old citation.
+    let recorded = |target: Target, now: Revision, was: Option<Revision>, within: &[Target]| match (
+        frame, was,
+    ) {
+        (Some(f), Some(was)) if !case_inside && !f.contains(target, within) => was,
+        _ => now,
+    };
     let item = |id: &ItemId| {
-        contexts
+        let (now, within) = contexts
             .values()
-            .find_map(|c| c.interface_of(*id)?.item(*id))
-            .map_or_else(Revision::first, |it| it.revision())
+            .find_map(|c| {
+                let interface = c.interface_of(*id)?;
+                let now = interface.item(*id)?.revision();
+                let within = vec![
+                    Target::Project,
+                    Target::Context(c.id()),
+                    Target::Interface(interface.id()),
+                ];
+                Some((now, within))
+            })
+            .unwrap_or_else(|| (Revision::first(), Vec::new()));
+        let was = old.and_then(|c| c.cites().items().get(id).copied());
+        recorded(Target::Item(*id), now, was, &within)
     };
     let clause = |id: &ClauseId| {
-        contexts
+        let (now, within) = contexts
             .values()
-            .find_map(|c| c.contract_of(*id)?.clause(*id))
-            .map_or_else(Revision::first, |cl| cl.revision())
+            .find_map(|c| {
+                let contract = c.contract_of(*id)?;
+                let now = contract.clause(*id)?.revision();
+                let within = vec![
+                    Target::Project,
+                    Target::Context(c.id()),
+                    Target::Contract(contract.id()),
+                ];
+                Some((now, within))
+            })
+            .unwrap_or_else(|| (Revision::first(), Vec::new()));
+        let was = old.and_then(|c| c.cites().clauses().get(id).copied());
+        recorded(Target::Clause(*id), now, was, &within)
     };
     let cites = CaseCites::of(
         draft.items().iter().map(|i| (*i, item(i))).collect(),
@@ -303,7 +404,10 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
             AssetPut::Context(c) => note("context", "context", c.id().as_uuid()),
             AssetPut::Uses { context, .. } => note("uses", "context", context.as_uuid()),
             AssetPut::BaseOnContract { context } => note("base", "context", context.as_uuid()),
-            AssetPut::Contract { id, .. } => note("contract", "contract", id.as_uuid()),
+            // A partial put of a Contract is a put of it: it is named once, with a put of the whole.
+            AssetPut::Contract { id, .. } | AssetPut::Clauses { id, .. } => {
+                note("contract", "contract", id.as_uuid())
+            }
             AssetPut::Interface { id, .. } => note("interface", "interface", id.as_uuid()),
             AssetPut::Harness { id, .. } => note("harness", "harness", id.as_uuid()),
         }
@@ -312,6 +416,7 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
             AssetPut::Uses { context, .. }
             | AssetPut::BaseOnContract { context }
             | AssetPut::Contract { context, .. }
+            | AssetPut::Clauses { context, .. }
             | AssetPut::Interface { context, .. }
             | AssetPut::Harness { context, .. } => *context,
         };
@@ -348,9 +453,11 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::entity::contract::ContractError;
     use crate::domain::entity::harness::{CaseNameFault, Harness, SimShapeProblem};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+    use crate::domain::vo::clause_edit::{ClauseEdit, ClauseNameProblem, NameField};
     use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
     use crate::domain::vo::item_key::ItemKey;
@@ -841,6 +948,162 @@ mod tests {
         assert_eq!(p, before);
     }
 
+    /// An edit of the Clause `label` to say `text`, with `new` as the id it takes if it makes a Clause.
+    fn clause_edit(label: &str, text: &str, replaces: Option<&str>, new: u128) -> ClauseEdit {
+        ClauseEdit::new(
+            ClauseLabel::try_from(label).unwrap(),
+            ClauseText::try_from(text).unwrap(),
+            replaces.map(|r| ClauseLabel::try_from(r).unwrap()),
+            clause(new),
+        )
+    }
+
+    /// A partial put of the Contract of `project()`.
+    fn clauses_put(edits: Vec<ClauseEdit>, remove: &[&str]) -> AssetPut {
+        AssetPut::Clauses {
+            context: ctx(),
+            id: contract_id(),
+            edits,
+            remove: remove
+                .iter()
+                .map(|l| ClauseLabel::try_from(*l).unwrap())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_clauses_put_changes_the_clauses_it_names_and_keeps_the_rest_and_the_title() {
+        let mut p = project();
+        p.apply(ChangeSet::new(
+            vec![clauses_put(
+                vec![
+                    clause_edit("C1", "changed", None, 80),
+                    clause_edit("C2", "new", None, 90),
+                ],
+                &[],
+            )],
+            Vec::new(),
+        ))
+        .unwrap();
+        let k = p.context(ctx()).unwrap().contract(contract_id()).unwrap();
+        assert_eq!(k.title().as_str(), "T");
+        let seen: Vec<_> = k
+            .clauses()
+            .iter()
+            .map(|c| {
+                (
+                    c.id(),
+                    c.label().to_string(),
+                    c.text().as_str().to_string(),
+                    c.revision().number(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (clause(20), "C1".to_string(), "changed".to_string(), 2),
+                (clause(21), "C7".to_string(), "a".to_string(), 1),
+                (clause(90), "C2".to_string(), "new".to_string(), 1),
+            ]
+        );
+        assert_eq!(k.revision().number(), 2);
+    }
+
+    #[test]
+    fn a_clauses_put_can_remove_a_clause_no_case_cites() {
+        let mut p = project();
+        p.apply(ChangeSet::new(
+            vec![
+                clauses_put(vec![clause_edit("C2", "new", None, 90)], &[]),
+                harness(vec![draft(50, &[10], &[20])]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        p.apply(ChangeSet::new(
+            vec![clauses_put(Vec::new(), &["C7"])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let k = p.context(ctx()).unwrap().contract(contract_id()).unwrap();
+        let labels: Vec<_> = k.clauses().iter().map(|c| c.label().to_string()).collect();
+        assert_eq!(labels, ["C1", "C2"]);
+        assert!(p.retired_of(Target::Clause(clause(21))).is_some());
+    }
+
+    #[test]
+    fn a_clauses_put_with_a_put_of_the_same_contract_or_another_clauses_put_is_named_twice() {
+        let mut p = project();
+        let before = p.clone();
+        let repeated = ProjectError::Repeated {
+            what: "contract",
+            id: contract_id().as_uuid(),
+        };
+        let edits = || vec![clause_edit("C1", "changed", None, 80)];
+        for puts in [
+            vec![
+                contract(&[(20, "C1"), (21, "C7")]),
+                clauses_put(edits(), &[]),
+            ],
+            vec![
+                clauses_put(edits(), &[]),
+                contract(&[(20, "C1"), (21, "C7")]),
+            ],
+            vec![clauses_put(edits(), &[]), clauses_put(edits(), &[])],
+        ] {
+            assert_eq!(
+                p.apply(ChangeSet::new(puts, Vec::new())).unwrap_err(),
+                repeated
+            );
+        }
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_clauses_put_of_a_contract_the_context_does_not_have_or_with_wrong_names_changes_nothing() {
+        let mut p = project();
+        let before = p.clone();
+        let missing = AssetPut::Clauses {
+            context: ctx(),
+            id: ContractId::from_uuid(test_uuid(999)),
+            edits: Vec::new(),
+            remove: Vec::new(),
+        };
+        assert!(matches!(
+            p.apply(ChangeSet::new(vec![missing], Vec::new())),
+            Err(ProjectError::Context(ContextError::NoSuchAsset {
+                kind: "contract",
+                ..
+            }))
+        ));
+        let wrong = clauses_put(vec![clause_edit("C3", "x", Some("C9"), 90)], &["C8"]);
+        let err = p
+            .apply(ChangeSet::new(vec![wrong], Vec::new()))
+            .unwrap_err();
+        let c = |l: &str| ClauseLabel::try_from(l).unwrap();
+        let said = |problem| {
+            ProjectError::Context(ContextError::Contract(ContractError::ClauseName {
+                contract: contract_id(),
+                problem,
+            }))
+        };
+        assert_eq!(
+            err,
+            ProjectError::Many(vec![
+                said(ClauseNameProblem::Unknown {
+                    label: c("C9"),
+                    field: NameField::Replaces
+                }),
+                said(ClauseNameProblem::Unknown {
+                    label: c("C8"),
+                    field: NameField::Remove
+                }),
+            ])
+        );
+        assert_eq!(p, before);
+    }
+
     #[test]
     fn a_context_is_retired_with_what_it_owns_and_the_project_moves_once_for_it() {
         let mut p = project();
@@ -1257,5 +1520,236 @@ mod tests {
         ))
         .unwrap();
         assert!(p.context(ctx()).unwrap().harness(sim_id(107)).is_none());
+    }
+
+    fn rev(n: u64) -> Revision {
+        (1..n).fold(Revision::first(), |r, _| r.next())
+    }
+
+    /// The Contract of `project()` with the Clauses in `reworded` given another sentence.
+    fn contract_reworded(reworded: &[u128]) -> AssetPut {
+        AssetPut::Contract {
+            context: ctx(),
+            id: contract_id(),
+            title: Title::try_from("T").unwrap(),
+            clauses: [(20, "C1"), (21, "C7")]
+                .iter()
+                .map(|&(n, label)| {
+                    let text = if reworded.contains(&n) { "b" } else { "a" };
+                    (
+                        clause(n),
+                        ClauseContent::new(
+                            ClauseLabel::try_from(label).unwrap(),
+                            ClauseText::try_from(text).unwrap(),
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// `puts` as a change set for a change request whose frame names `named`.
+    fn for_frame(puts: Vec<AssetPut>, named: &[Target]) -> ChangeSet {
+        ChangeSet::new(puts, Vec::new()).for_frame(Frame::new(named.iter().copied().collect()))
+    }
+
+    /// The Cases of `project()`, put again as they are: 50 cites Item 10 and Clause 20, 51 Item 11 and Clause 21.
+    fn the_cases() -> Vec<CaseDraft> {
+        vec![draft(50, &[10], &[20]), draft(51, &[11], &[21])]
+    }
+
+    fn case_of(p: &Project, n: u128) -> &crate::domain::entity::harness::Case {
+        p.context(ctx())
+            .unwrap()
+            .harness(harness_id())
+            .unwrap()
+            .case(CaseId::from_uuid(test_uuid(n)))
+            .unwrap()
+    }
+
+    fn cited_clause(p: &Project, case: u128, cited: u128) -> Option<Revision> {
+        case_of(p, case)
+            .cites()
+            .clauses()
+            .get(&clause(cited))
+            .copied()
+    }
+
+    fn cited_item(p: &Project, case: u128, cited: u128) -> Option<Revision> {
+        case_of(p, case).cites().items().get(&item(cited)).copied()
+    }
+
+    /// `project()` with the Clauses `reworded` revised and the Harness not put.
+    fn stale(reworded: &[u128]) -> Project {
+        let mut p = project();
+        p.apply(ChangeSet::new(
+            vec![contract_reworded(reworded)],
+            Vec::new(),
+        ))
+        .unwrap();
+        p
+    }
+
+    #[test]
+    fn a_put_for_a_frame_leaves_a_case_citing_a_stale_clause_outside_it_as_it_is() {
+        let mut p = stale(&[21]);
+        let a = Target::Clause(clause(20));
+        let (.., harness_was) = revisions(&p);
+        p.apply(for_frame(vec![harness(the_cases())], &[a]))
+            .unwrap();
+        // Case 51 cites Clause 21, which the frame does not hold: it keeps the revision it cited, and its own, and
+        // nothing of the Harness moved
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(1)));
+        assert_eq!(case_of(&p, 51).revision(), rev(1));
+        assert_eq!(case_of(&p, 50).revision(), rev(1));
+        assert_eq!(revisions(&p).3, harness_was);
+        // the Clause itself is at the revision the earlier set gave it, so the citation is stale
+        let c = p.context(ctx()).unwrap();
+        let revised = c.contract(contract_id()).unwrap().clause(clause(21));
+        assert_eq!(revised.unwrap().revision(), rev(2));
+    }
+
+    #[test]
+    fn a_put_for_a_frame_brings_up_the_cases_citing_what_the_frame_holds_and_no_other() {
+        let mut p = stale(&[20, 21]);
+        let a = Target::Clause(clause(20));
+        p.apply(for_frame(vec![harness(the_cases())], &[a]))
+            .unwrap();
+        // Case 50 cites Clause 20: brought up, and it moves with it
+        assert_eq!(cited_clause(&p, 50, 20), Some(rev(2)));
+        assert_eq!(case_of(&p, 50).revision(), rev(2));
+        // Case 51 cites Clause 21: still stale, and it did not move
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(1)));
+        assert_eq!(case_of(&p, 51).revision(), rev(1));
+        // the other part's put brings up its own
+        let b = Target::Clause(clause(21));
+        p.apply(for_frame(vec![harness(the_cases())], &[b]))
+            .unwrap();
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(2)));
+        assert_eq!(case_of(&p, 51).revision(), rev(2));
+        assert_eq!(cited_clause(&p, 50, 20), Some(rev(2)));
+        assert_eq!(case_of(&p, 50).revision(), rev(2));
+    }
+
+    #[test]
+    fn a_case_citing_both_is_brought_up_on_the_framed_citation_only() {
+        let mut cases = the_cases();
+        cases.push(draft(52, &[10], &[20, 21]));
+        let mut p = project();
+        p.apply(ChangeSet::new(vec![harness(cases.clone())], Vec::new()))
+            .unwrap();
+        p.apply(ChangeSet::new(
+            vec![contract_reworded(&[20, 21])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let (a, b) = (Target::Clause(clause(20)), Target::Clause(clause(21)));
+        p.apply(for_frame(vec![harness(cases.clone())], &[a]))
+            .unwrap();
+        assert_eq!(cited_clause(&p, 52, 20), Some(rev(2)));
+        assert_eq!(cited_clause(&p, 52, 21), Some(rev(1)));
+        assert_eq!(case_of(&p, 52).revision(), rev(2));
+        p.apply(for_frame(vec![harness(cases)], &[b])).unwrap();
+        assert_eq!(cited_clause(&p, 52, 20), Some(rev(2)));
+        assert_eq!(cited_clause(&p, 52, 21), Some(rev(2)));
+        assert_eq!(case_of(&p, 52).revision(), rev(3));
+    }
+
+    #[test]
+    fn a_stale_item_outside_the_frame_stays_stale_too() {
+        let mut p = project();
+        // Item 11 is given another declaration; nothing puts the Harness
+        p.apply(ChangeSet::new(
+            vec![AssetPut::Interface {
+                context: ctx(),
+                id: interface_id(),
+                source: Source::new("fn a()\nfn release() -> u8\n".to_string()),
+                items: items(&[(10, "fn a()"), (11, "fn release()")]),
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+        let a = Target::Clause(clause(20));
+        p.apply(for_frame(vec![harness(the_cases())], &[a]))
+            .unwrap();
+        assert_eq!(cited_item(&p, 51, 11), Some(rev(1)));
+        assert_eq!(case_of(&p, 51).revision(), rev(1));
+        // naming the Interface holds the Item
+        let i = Target::Interface(interface_id());
+        p.apply(for_frame(vec![harness(the_cases())], &[i]))
+            .unwrap();
+        assert_eq!(cited_item(&p, 51, 11), Some(rev(2)));
+        assert_eq!(case_of(&p, 51).revision(), rev(2));
+    }
+
+    #[test]
+    fn a_citation_the_case_did_not_have_and_a_new_case_are_current() {
+        let mut p = stale(&[21]);
+        let a = Target::Clause(clause(20));
+        let mut cases = the_cases();
+        // Case 50 now cites Clause 21 as well, and Case 52 is new and cites it
+        cases[0] = draft(50, &[10], &[20, 21]);
+        cases.push(draft(52, &[10], &[21]));
+        p.apply(for_frame(vec![harness(cases)], &[a])).unwrap();
+        assert_eq!(cited_clause(&p, 50, 21), Some(rev(2)));
+        assert_eq!(cited_clause(&p, 52, 21), Some(rev(2)));
+        assert_eq!(case_of(&p, 52).revision(), Revision::first());
+        // the Case that cited it before stays stale
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(1)));
+    }
+
+    #[test]
+    fn a_frame_that_holds_the_case_brings_up_all_it_cites() {
+        let named = [
+            Target::Case(CaseId::from_uuid(test_uuid(51))),
+            Target::Harness(harness_id()),
+            Target::Context(ctx()),
+            Target::Project,
+            Target::Contract(contract_id()),
+        ];
+        for target in named {
+            let mut p = stale(&[20, 21]);
+            p.apply(for_frame(vec![harness(the_cases())], &[target]))
+                .unwrap();
+            assert_eq!(cited_clause(&p, 51, 21), Some(rev(2)), "{target:?}");
+            let case_50 = if target == Target::Case(CaseId::from_uuid(test_uuid(51))) {
+                // a Case named brings up its own citations alone
+                rev(1)
+            } else {
+                rev(2)
+            };
+            assert_eq!(cited_clause(&p, 50, 20), Some(case_50), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_put_for_no_request_brings_every_citation_up() {
+        let mut p = stale(&[20, 21]);
+        p.apply(ChangeSet::new(vec![harness(the_cases())], Vec::new()))
+            .unwrap();
+        assert_eq!(cited_clause(&p, 50, 20), Some(rev(2)));
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(2)));
+        // a set for a request whose frame names nothing is not a set for no request: it holds nothing
+        let mut q = stale(&[20, 21]);
+        q.apply(for_frame(vec![harness(the_cases())], &[])).unwrap();
+        assert_eq!(cited_clause(&q, 50, 20), Some(rev(1)));
+        assert_eq!(cited_clause(&q, 51, 21), Some(rev(1)));
+    }
+
+    #[test]
+    fn a_set_that_revises_a_clause_outside_its_frame_leaves_the_cases_citing_it_stale() {
+        let mut p = project();
+        let a = Target::Clause(clause(20));
+        p.apply(for_frame(
+            vec![contract_reworded(&[21]), harness(the_cases())],
+            &[a],
+        ))
+        .unwrap();
+        let c = p.context(ctx()).unwrap();
+        let revised = c.contract(contract_id()).unwrap().clause(clause(21));
+        assert_eq!(revised.unwrap().revision(), rev(2));
+        // Case 51 cites it at the revision it had: stale right after the set
+        assert_eq!(cited_clause(&p, 51, 21), Some(rev(1)));
+        assert_eq!(case_of(&p, 51).revision(), rev(1));
     }
 }

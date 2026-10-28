@@ -1352,7 +1352,11 @@ mod tests {
         // The target inside is recorded, the one outside is not, and the frame did not grow by it.
         let recorded: Vec<Target> = c.decided_expects().iter().map(|d| d.target).collect();
         assert_eq!(recorded, [clause(31)]);
-        assert!(!crate::domain::service::change_request::frame(&c).contains(&clause(32)));
+        assert!(
+            !crate::domain::service::change_request::frame(&c)
+                .targets()
+                .contains(&clause(32))
+        );
     }
 
     #[test]
@@ -1493,7 +1497,11 @@ mod tests {
             &BTreeSet::new(),
         )
         .unwrap();
-        assert!(crate::domain::service::change_request::frame(&c).contains(&clause(32)));
+        assert!(
+            crate::domain::service::change_request::frame(&c)
+                .targets()
+                .contains(&clause(32))
+        );
         // The same ask again, as a decision that replaces it: the take-back leaves it outside the frame.
         let mut b = crux_asking(&c, 502, &[(clause(32), ExpectKind::Target)], Some(&a));
         assert_eq!(

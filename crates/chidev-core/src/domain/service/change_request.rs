@@ -24,6 +24,7 @@ use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::answer::Beyond;
 use crate::domain::vo::footprint::{Citations, Move};
+use crate::domain::vo::frame::Frame;
 use crate::domain::vo::id::{ChangeRequestId, ContextId};
 use crate::domain::vo::resolution::Resolution;
 use crate::domain::vo::revision::Revision;
@@ -193,7 +194,8 @@ fn moves_under<'a>(cr: &'a ChangeRequest, all: &'a [ChangeRequest]) -> Vec<&'a M
         .collect()
 }
 
-/// Whether the work of `cr` or of a part of it moved something (a change set that moved nothing is no work).
+/// Whether the work of `cr` or of a part of it moved something (a change set that moved nothing is no work). A
+/// Clause or an Item given a new name is a move, so a request whose only work is a new name has work.
 pub fn has_work(cr: &ChangeRequest, all: &[ChangeRequest]) -> bool {
     !moves_under(cr, all).is_empty()
 }
@@ -241,7 +243,8 @@ pub fn resolve(
 /// What the work did to a target a change request names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
-    /// The work moved it (or something in it) and it is still there.
+    /// The work moved it (or something in it) and it is still there: made it, revised it, or gave a Clause or an Item
+    /// in it a new name (the footprint's `work` says which).
     Revised,
     /// The work moved it and it is gone.
     Retired,
@@ -280,8 +283,8 @@ pub struct KeepProgress {
 
 /// Each target `cr` names to revise or retire (its own, then those the decision named), and what the footprints of
 /// its work and of its parts' work did to it: moved and still there is `Revised`, moved and gone `Retired`, never
-/// moved `NotTouched`. A container is moved when something inside it is. A target in the lists once. The revision of
-/// the target is not read, only whether the Project still has it.
+/// moved `NotTouched`. A move is a revision or a new name; a container is moved when something inside it is, by
+/// either. A target in the lists once. The revision of the target is not read, only whether the Project still has it.
 pub fn target_progress(
     cr: &ChangeRequest,
     project: &Project,
@@ -432,8 +435,10 @@ pub fn keep_targeted(
         .iter()
         .flat_map(|c| {
             frame(c)
-                .into_iter()
-                .map(|t| (c.id(), t, project.holder_of(t)))
+                .targets()
+                .iter()
+                .map(|t| (c.id(), *t, project.holder_of(*t)))
+                .collect::<Vec<_>>()
         })
         .collect();
     open.iter()
@@ -459,11 +464,13 @@ pub fn keep_targeted(
 /// The targets `cr` names to revise or retire, its own and those its decisions recorded: its frame. A container in
 /// it frames everything inside. A decision never widens it (the targets of the option chosen that are outside it are
 /// left out, see [`outside_frame`]), but a decision recorded before that was a rule did, and is counted as it stands.
-pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
-    cr.expectations()
-        .filter(|(_, e)| e.kind == ExpectKind::Target)
-        .map(|(t, _)| t)
-        .collect()
+pub fn frame(cr: &ChangeRequest) -> Frame {
+    Frame::new(
+        cr.expectations()
+            .filter(|(_, e)| e.kind == ExpectKind::Target)
+            .map(|(t, _)| t)
+            .collect(),
+    )
 }
 
 /// The Contexts `cr` is about in `project`: the ones that hold a target it names to revise or retire (its frame) or
@@ -473,22 +480,6 @@ pub fn contexts_in(cr: &ChangeRequest, project: &Project) -> BTreeSet<ContextId>
     cr.expectations()
         .filter_map(|(target, _)| project.context_of_target(target))
         .collect()
-}
-
-/// Whether `target` is inside `frame`, as [`outside_frame`] says; `within` are the containers it is in and `cites`
-/// what it cites, if it is a Case. The work a request did ([`out_of_frame`]) and what an answer adds to a request
-/// ([`outside_frame`]) are both judged by it.
-fn inside_frame(
-    frame: &BTreeSet<Target>,
-    target: Target,
-    within: &[Target],
-    cites: Option<&Citations>,
-) -> bool {
-    frame.iter().any(|container| {
-        target == *container
-            || within.contains(container)
-            || cites.is_some_and(|c| c.is_inside(*container))
-    })
 }
 
 /// The targets among `targets` that are outside the frame of `cr` ([`frame`]), in the order given, as `project`
@@ -521,7 +512,7 @@ pub fn outside_frame(
                 }),
                 _ => None,
             };
-            !inside_frame(&framed, *target, within, cites.as_ref())
+            !framed.holds(*target, within, cites.as_ref())
         })
         .collect()
 }
@@ -545,6 +536,9 @@ pub struct OutOfFrame {
 /// new Clause, the Context that holds a new asset) is not outside. The work of a part is judged for the part, not
 /// again for its parent. A request with no frame has all its work outside.
 ///
+/// A new name is a move of the Clause or the Item alone: it moved no container, so a name outside the frame is
+/// reported by itself, and it covers nothing above it.
+///
 /// A moved Case is judged by the citations the footprint recorded. A footprint is judged from itself alone, so the
 /// Project is not read; a footprint recorded without citations is judged by containment only. The request named by
 /// `resolving` is judged although it is resolved: it is the one a resolution is being made for.
@@ -558,17 +552,16 @@ pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -
             let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
                 let inside = |m: &Move| {
-                    inside_frame(
-                        &frame,
-                        m.target(),
-                        m.within(),
-                        footprint.citations_of(m.target()),
-                    )
+                    frame.holds(m.target(), m.within(), footprint.citations_of(m.target()))
                 };
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
                     covered.insert(m.target());
-                    covered.extend(m.within().iter().copied());
+                    // A new name moved no container, so it covers none: a container that moved in the same set
+                    // moved for a reason of its own (a new title, another order).
+                    if m.is_revised() {
+                        covered.extend(m.within().iter().copied());
+                    }
                 }
                 for t in footprint.targets().filter(|t| !covered.contains(t)) {
                     moved.insert(t);
@@ -1630,7 +1623,7 @@ mod tests {
         // as a decided expectation, and the frame is what it was.
         let all = BTreeSet::from([clause(), contract(), detail()]);
         assert_eq!(progress(&c), all);
-        assert_eq!(frame(&c), all);
+        assert_eq!(frame(&c).targets(), &all);
         assert_eq!(c.decided_expects().len(), 1);
         assert_eq!(c.decided_expects()[0].target, detail());
     }
@@ -1771,7 +1764,7 @@ mod tests {
         decided(&mut c, &mut crux, 1, &p);
         assert_eq!(c.decided_expects()[0].kind, ExpectKind::Keep);
         assert_eq!(keep_progress(&c, &p).len(), 1);
-        assert_eq!(frame(&c), BTreeSet::from([clause()]));
+        assert_eq!(frame(&c).targets(), &BTreeSet::from([clause()]));
     }
 
     // A keep that an open request's target breaks.
@@ -2117,6 +2110,127 @@ mod tests {
                 cr: c.id(),
                 moved: vec![interface(), item()],
                 by_work: vec![(interface(), 3), (item(), 3)],
+            }]
+        );
+    }
+
+    /// The contract with its first clause given the label `label`, and nothing else changed.
+    fn relabel_first(p: &mut Project, label: &str) {
+        let one = |n: u128, label: &str, text: &str| {
+            (
+                ClauseId::from_uuid(test_uuid(n)),
+                ClauseContent::new(
+                    ClauseLabel::try_from(label).unwrap(),
+                    ClauseText::try_from(text).unwrap(),
+                ),
+            )
+        };
+        p.put_contract(
+            core(),
+            ContractId::from_uuid(test_uuid(300)),
+            Title::try_from("T").unwrap(),
+            vec![
+                one(30, label, "a half rounds up"),
+                one(31, "C2", "a refusal is InvalidDiscount"),
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_request_whose_only_work_is_a_new_label_has_work_and_its_target_reads_revised() {
+        let mut p = project();
+        let mut c = cr(&p);
+        work(&mut p, &mut c, 2, |p| relabel_first(p, "C3"));
+        let all = [c.clone()];
+        assert!(has_work(&c, &all));
+        assert_eq!(
+            target_progress(&c, &p, &all),
+            [TargetProgress {
+                target: clause(),
+                progress: Progress::Revised
+            }]
+        );
+        finish(&mut c, &[]).unwrap();
+        assert!(resolved_without_work(&[c.clone()]).is_empty());
+        assert!(targets_untouched(&[c], &p).is_empty());
+    }
+
+    #[test]
+    fn a_new_label_outside_the_frame_is_out_of_frame_alone_and_covers_no_contract() {
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(detail(), ExpectKind::Target)],
+        );
+        work(&mut p, &mut c, 2, |p| relabel_first(p, "C3"));
+        assert_eq!(
+            out_of_frame(std::slice::from_ref(&c)),
+            [OutOfFrame {
+                cr: c.id(),
+                moved: vec![clause()],
+                by_work: vec![(clause(), 2)],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_label_inside_the_frame_does_not_cover_its_contract_moved_for_another_reason() {
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // The framed Clause is given a new label, and the Contract a new title, in one set.
+        work(&mut p, &mut c, 2, |p| {
+            relabel_first(p, "C3");
+            let k = p
+                .context(core())
+                .unwrap()
+                .contract(ContractId::from_uuid(test_uuid(300)))
+                .unwrap();
+            let clauses = k
+                .clauses()
+                .iter()
+                .map(|c| (c.id(), ClauseContent::new(c.label(), c.text().clone())))
+                .collect();
+            p.put_contract(
+                core(),
+                ContractId::from_uuid(test_uuid(300)),
+                Title::try_from("U").unwrap(),
+                clauses,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            out_of_frame(std::slice::from_ref(&c)),
+            [OutOfFrame {
+                cr: c.id(),
+                moved: vec![contract()],
+                by_work: vec![(contract(), 2)],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_label_does_not_move_a_clause_the_request_keeps() {
+        let mut p = project();
+        let mut c = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Keep), (detail(), ExpectKind::Target)],
+        );
+        work(&mut p, &mut c, 2, |p| relabel_first(p, "C3"));
+        assert_eq!(
+            keep_progress(&c, &p),
+            [KeepProgress {
+                target: clause(),
+                moved: false
             }]
         );
     }

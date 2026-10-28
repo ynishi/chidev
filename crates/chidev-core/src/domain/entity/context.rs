@@ -7,7 +7,8 @@ use thiserror::Error;
 use super::contract::{Contract, ContractError};
 use super::harness::{CaseFound, Harness, HarnessError, SimShapeProblem};
 use super::interface::{Interface, InterfaceError, ItemFound};
-use crate::domain::vo::clause::ClauseContent;
+use crate::domain::vo::clause::{ClauseContent, ClauseLabel};
+use crate::domain::vo::clause_edit::ClauseEdit;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
@@ -365,6 +366,37 @@ impl Context {
             }
         }
         Ok(())
+    }
+
+    /// Sets some Clauses of the Contract with this id, which the Context has: the Contract composes the list
+    /// ([`Contract::clauses_partial`]) and it is put with its own title through [`Context::put_contract`], the one
+    /// way into the aggregate. When the names of the put are wrong nothing changes, and every problem is refused
+    /// ([`ContractError::ClauseName`], one for each); any other refusal is the only one.
+    pub(super) fn put_clauses(
+        &mut self,
+        id: ContractId,
+        edits: &[ClauseEdit],
+        remove: &[ClauseLabel],
+    ) -> Result<(), Vec<ContextError>> {
+        let old = self.contracts.get(&id).ok_or_else(|| {
+            vec![ContextError::NoSuchAsset {
+                kind: "contract",
+                id: id.as_uuid(),
+            }]
+        })?;
+        let title = old.title().clone();
+        let clauses = old.clauses_partial(edits, remove).map_err(|problems| {
+            problems
+                .into_iter()
+                .map(|problem| {
+                    ContextError::Contract(ContractError::ClauseName {
+                        contract: id,
+                        problem,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })?;
+        self.put_contract(id, title, clauses).map_err(|e| vec![e])
     }
 
     /// Makes the Interface with this id, or revises it when the Context has it.
