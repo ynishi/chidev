@@ -77,7 +77,7 @@ use crate::domain::service::cite::stale_cites;
 use crate::domain::service::crux::{decide, raise};
 use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
 use crate::domain::violation::{Party, Value, Violation};
-use crate::domain::vo::answer::{Answer, Basis, DecisionMaker};
+use crate::domain::vo::answer::{Answer, Basis, Beyond, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::ClauseLabel;
@@ -310,6 +310,9 @@ pub enum AppError {
     /// No Crux has this id.
     #[error("no crux has the id `{0}`")]
     UnknownCrux(String),
+    /// The Crux a new Crux is to supersede (`supersedes`) is not there.
+    #[error("no crux has the id `{0}`, which `supersedes` names")]
+    UnknownSupersedes(String),
     /// A citation outside a Harness does not say which Context it is in.
     #[error("a citation outside a harness names its context")]
     ContextNotGiven,
@@ -830,6 +833,15 @@ pub enum DecisionInput {
     Withdrawn,
 }
 
+/// Where what a decision adds outside its change request goes, as a person writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeyondInput {
+    /// The titles of the change requests opened for it; at least one, none twice.
+    Requests(Vec<String>),
+    /// It is not done, and why.
+    Declined(String),
+}
+
 /// What a decision rests on, in the result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BasisStatus {
@@ -873,6 +885,15 @@ pub enum DecisionStatus {
     Withdrawn,
 }
 
+/// Where what an answer added outside its change request went, in the result of `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeyondStatus {
+    /// The change requests opened for it, by title.
+    Requests(Vec<String>),
+    /// It was not done, and why.
+    Declined(String),
+}
+
 /// The answer to a Crux, in the result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnswerStatus {
@@ -880,6 +901,8 @@ pub struct AnswerStatus {
     pub id: String,
     /// What was decided.
     pub decision: DecisionStatus,
+    /// Where what it added outside its change request went, when it says.
+    pub beyond: Option<BeyondStatus>,
     /// What it rests on.
     pub basis: BasisStatus,
     /// `role` or `person`.
@@ -1300,11 +1323,17 @@ fn assumption_status(a: &Assumption) -> AssumptionStatus {
     }
 }
 
-/// An answer to a Crux, for `status`.
-fn answer_status(a: &Answer) -> AnswerStatus {
+/// An answer to a Crux, for `status`; `title_of` names the change requests its `beyond` points at.
+fn answer_status(a: &Answer, title_of: &impl Fn(ChangeRequestId) -> String) -> AnswerStatus {
     AnswerStatus {
         id: a.id().to_string(),
         decision: decision_status(a.decision()),
+        beyond: a.beyond().map(|b| match b {
+            Beyond::TakenBy(requests) => {
+                BeyondStatus::Requests(requests.iter().map(|id| title_of(*id)).collect())
+            }
+            Beyond::Declined { reason } => BeyondStatus::Declined(reason.to_string()),
+        }),
         basis: match a.basis() {
             Basis::Policy {
                 line,
@@ -1800,8 +1829,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// Raises a Crux in the change request titled `c.cr`: the question a decision maker is to answer, of a kind, with
     /// the options (each may name the targets it asks to be revised, retired or kept once it is chosen, which are
     /// read against what the change request asks as `cr_open` reads its targets), the findings it is raised from,
-    /// and the Crux it replaces (by id; that one must have a decision to replace). One option at most is
-    /// recommended. The change request waits for the Crux: it cannot be resolved until the Crux is decided. A
+    /// and the Crux it replaces (by id; that one must exist, have a decision to replace, and be replaced by no other
+    /// Crux that is not withdrawn). One option at most is recommended. The change request waits for the Crux: it cannot be resolved until the Crux is decided. A
     /// resolved change request takes none (reopen it first). Gives back the id of the Crux and of each option, which
     /// the decision points at. An edit of the record (see [`App::open_change_request`]).
     pub async fn raise_crux(&mut self, c: &RaiseCruxInput) -> Result<Checked<Raised>, AppError> {
@@ -1829,6 +1858,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .as_deref()
             .map(|text| uuid_of("a crux", text).map(CruxId::from_uuid))
             .transpose()?;
+        // The id is well formed, so a name that no Crux has is a name that does not exist, as for `cr_crux_decide`.
+        if let (Some(wanted), Some(text)) = (supersedes, &c.supersedes)
+            && !cruxes.iter().any(|q| q.id() == wanted)
+        {
+            return Err(AppError::UnknownSupersedes(text.trim().to_string()));
+        }
         let id = CruxId::from_uuid(self.ids.next_uuid());
         let mut options = Vec::with_capacity(c.options.len());
         let mut recommended = None;
@@ -1889,6 +1924,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             },
             &cr,
             replaced,
+            &cruxes,
         )
         .map_err(|error| AppError::on(&cr, error))?;
         let raised = Raised {
@@ -1914,13 +1950,16 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// the Project's Policy, which must exist, or an arbitrary reason), who decided it (`by`), and when (from the
     /// clock). The decision is recorded once and never rewritten: a Crux already decided refuses another. The
     /// Policy line is cited at the revision the Policy has now. The targets the option chosen asks for are recorded
-    /// in the change request the Crux was raised in, in the same commit; if that change request is resolved, only a
-    /// withdrawal is taken (reopen it for any other decision). An edit of the record (see
-    /// [`App::open_change_request`]).
+    /// in the change request the Crux was raised in, in the same commit, when they are inside its frame; the ones
+    /// outside it are not recorded, and `beyond` says where they go: the titles of the change requests that frame
+    /// them, or a decline with its reason (see [`decide`]). A title that names no change request is
+    /// [`AppError::UnknownChangeRequest`]. If the change request is resolved, only a withdrawal is taken (reopen it
+    /// for any other decision). An edit of the record (see [`App::open_change_request`]).
     pub async fn decide_crux(
         &mut self,
         crux: &str,
         decision: &DecisionInput,
+        beyond: Option<&BeyondInput>,
         basis: &BasisInput,
         by: &DecisionMakerInput,
     ) -> Result<Checked<()>, AppError> {
@@ -1935,8 +1974,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .cloned()
             .ok_or_else(|| AppError::UnknownCrux(crux.trim().to_string()))?;
         let mut cr = crs
-            .into_iter()
+            .iter()
             .find(|c| c.id() == crux.raised_in())
+            .cloned()
             .ok_or_else(|| {
                 AppError::Store(StoreError::Corrupt(format!(
                     "the crux {wanted} was raised in a change request that does not exist"
@@ -1971,18 +2011,39 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             },
             DecisionInput::Withdrawn => Decision::Withdrawn,
         };
-        let answer = Answer::new(
+        let beyond = match beyond {
+            None => None,
+            Some(BeyondInput::Requests(titles)) => {
+                let mut named = Vec::with_capacity(titles.len());
+                for title in titles {
+                    named.push(
+                        crs.iter()
+                            .find(|c| c.title().as_str() == title.trim())
+                            .map(|c| c.id())
+                            .ok_or_else(|| AppError::UnknownChangeRequest(title.clone()))?,
+                    );
+                }
+                Some(Beyond::taken_by(named).map_err(input)?)
+            }
+            Some(BeyondInput::Declined(reason)) => Some(Beyond::declined(
+                Prose::try_from(reason.as_str()).map_err(input)?,
+            )),
+        };
+        let mut answer = Answer::new(
             AnswerId::from_uuid(self.ids.next_uuid()),
             decision,
             basis,
             by,
             now,
         );
+        if let Some(beyond) = beyond {
+            answer = answer.with_beyond(beyond);
+        }
         let before = cr.clone();
         let replaced = crux
             .supersedes()
             .and_then(|replaced| cruxes.iter().find(|q| q.id() == replaced));
-        decide(&mut crux, &mut cr, answer, &p, replaced).map_err(|e| AppError::on(&cr, e))?;
+        decide(&mut crux, &mut cr, answer, &p, replaced, &crs).map_err(|e| AppError::on(&cr, e))?;
         // The Crux and the change request it was raised in are kept together; the change request is left alone when
         // the decision asked nothing of it.
         let mut delta = ModelDelta::new().with_crux(crux);
@@ -2471,7 +2532,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }),
             supersedes: q.supersedes().map(|s| s.to_string()),
             state: q.state().word(),
-            answer: q.answer_given().map(answer_status),
+            answer: q.answer_given().map(|a| answer_status(a, title_of)),
         })
     }
 

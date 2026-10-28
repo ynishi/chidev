@@ -1266,6 +1266,7 @@ async fn a_program_that_reads_the_cruxes_is_sent_them_and_their_decision_makes_i
             option: raised.options[0].id.to_string(),
             reason: None,
         },
+        None,
         &BasisInput::Arbitrary("settled".into()),
         &DecisionMakerInput::Person("alice".into()),
     )

@@ -16,12 +16,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use super::cite::revision_of;
+use super::footprint::{citations, tree};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestError, ChangeRequestState,
 };
 use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
-use crate::domain::vo::footprint::Move;
+use crate::domain::vo::answer::Beyond;
+use crate::domain::vo::footprint::{Citations, Move};
 use crate::domain::vo::id::{ChangeRequestId, ContextId};
 use crate::domain::vo::resolution::Resolution;
 use crate::domain::vo::revision::Revision;
@@ -107,6 +109,10 @@ pub struct RecordsInconsistent {
 ///   what was, and `cr.awaiting-decision` goes on reporting the question.
 /// - Every expectation recorded for a decision names the answer of a Crux raised in the change request, and the decision
 ///   of that answer asks for it.
+/// - A change request that the `beyond` of an answer names is there.
+///
+/// Two Cruxes that supersede one decision are not refused: stores written before that was a rule may hold them, and
+/// the rule is read when a Crux is raised ([`check_supersedes`](super::crux::check_supersedes)).
 ///
 /// It is the last word on a pair read together; the first refusal is returned.
 pub fn check_requests_and_cruxes(
@@ -125,6 +131,14 @@ pub fn check_requests_and_cruxes(
                     error: ChangeRequestError::RaisedInUnknown(q.raised_in()),
                 });
             }
+        }
+        if let Some(Beyond::TakenBy(named)) = q.answer_given().and_then(|a| a.beyond())
+            && let Some(missing) = named.iter().find(|id| !by_request.contains_key(id))
+        {
+            return Err(RecordsInconsistent {
+                cr: q.raised_in(),
+                error: ChangeRequestError::ReferenceUnknown(*missing),
+            });
         }
     }
     for cr in crs {
@@ -442,8 +456,9 @@ pub fn keep_targeted(
         .collect()
 }
 
-/// The targets `cr` names to revise or retire, its own and those its decision named: its frame. A container in it
-/// frames everything inside.
+/// The targets `cr` names to revise or retire, its own and those its decisions recorded: its frame. A container in
+/// it frames everything inside. A decision never widens it (the targets of the option chosen that are outside it are
+/// left out, see [`outside_frame`]), but a decision recorded before that was a rule did, and is counted as it stands.
 pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
     cr.expectations()
         .filter(|(_, e)| e.kind == ExpectKind::Target)
@@ -457,6 +472,57 @@ pub fn frame(cr: &ChangeRequest) -> BTreeSet<Target> {
 pub fn contexts_in(cr: &ChangeRequest, project: &Project) -> BTreeSet<ContextId> {
     cr.expectations()
         .filter_map(|(target, _)| project.context_of_target(target))
+        .collect()
+}
+
+/// Whether `target` is inside `frame`, as [`outside_frame`] says; `within` are the containers it is in and `cites`
+/// what it cites, if it is a Case. The work a request did ([`out_of_frame`]) and what an answer adds to a request
+/// ([`outside_frame`]) are both judged by it.
+fn inside_frame(
+    frame: &BTreeSet<Target>,
+    target: Target,
+    within: &[Target],
+    cites: Option<&Citations>,
+) -> bool {
+    frame.iter().any(|container| {
+        target == *container
+            || within.contains(container)
+            || cites.is_some_and(|c| c.is_inside(*container))
+    })
+}
+
+/// The targets among `targets` that are outside the frame of `cr` ([`frame`]), in the order given, as `project`
+/// holds them now: what they are in, and what a Case cites.
+///
+/// A target is inside the frame when it is, or is inside, a target the frame names. A Case is also inside when any
+/// one of the Items and Clauses it cites is (the Cases that follow a Clause are the work of revising it). A target
+/// the Project does not have is outside unless the frame names it. A keep protects, it does not widen, so the
+/// caller passes only the targets to be revised or retired.
+pub fn outside_frame(
+    cr: &ChangeRequest,
+    project: &Project,
+    targets: impl IntoIterator<Item = Target>,
+) -> Vec<Target> {
+    let framed = frame(cr);
+    let placed = tree(project);
+    let cited = citations(project);
+    targets
+        .into_iter()
+        .filter(|target| {
+            let within = placed.get(target).map_or(&[][..], |(_, w)| w.as_slice());
+            let cites = match target {
+                Target::Case(case) => cited.get(case).map(|cites| {
+                    let containers = cites
+                        .iter()
+                        .filter_map(|c| placed.get(c))
+                        .flat_map(|(_, w)| w.iter().copied())
+                        .collect();
+                    Citations::new(cites.clone(), containers)
+                }),
+                _ => None,
+            };
+            !inside_frame(&framed, *target, within, cites.as_ref())
+        })
         .collect()
 }
 
@@ -474,16 +540,14 @@ pub struct OutOfFrame {
 }
 
 /// Every unresolved change request in `crs` with work that moved a target outside its own frame (the frames of the
-/// requests it is a part of do not count: a frame is per request). A target is inside the frame when it is, or is
-/// inside, a target the frame names. A container that moved only because something inside it moved within the
-/// frame (a Contract that took a new Clause, the Context that holds a new asset) is not outside. The work of a part
-/// is judged for the part, not again for its parent. A request with no frame has all its work outside.
+/// requests it is a part of do not count: a frame is per request). What is inside the frame is as [`outside_frame`]
+/// says it. A container that moved only because something inside it moved within the frame (a Contract that took a
+/// new Clause, the Context that holds a new asset) is not outside. The work of a part is judged for the part, not
+/// again for its parent. A request with no frame has all its work outside.
 ///
-/// A moved Case is also inside when any one of the Items and Clauses it cites, as the footprint recorded them, is
-/// inside the frame (a citation is inside when it is, or is inside, a target the frame names): the Cases that follow
-/// a Clause are the work of revising it. A footprint is judged from itself alone, so the Project is not read; a
-/// footprint recorded without citations is judged by containment only. The request named by `resolving` is judged
-/// although it is resolved: it is the one a resolution is being made for.
+/// A moved Case is judged by the citations the footprint recorded. A footprint is judged from itself alone, so the
+/// Project is not read; a footprint recorded without citations is judged by containment only. The request named by
+/// `resolving` is judged although it is resolved: it is the one a resolution is being made for.
 pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -> Vec<OutOfFrame> {
     crs.iter()
         .filter(|c| judged_open(c, resolving) && !c.work().is_empty())
@@ -494,9 +558,12 @@ pub fn out_of_frame(crs: &[ChangeRequest], resolving: Option<ChangeRequestId>) -
             let mut by_work = BTreeSet::new();
             for footprint in cr.work() {
                 let inside = |m: &Move| {
-                    frame.iter().any(|container| {
-                        m.is_inside(*container) || footprint.cites_inside(m.target(), *container)
-                    })
+                    inside_frame(
+                        &frame,
+                        m.target(),
+                        m.within(),
+                        footprint.citations_of(m.target()),
+                    )
                 };
                 let mut covered = BTreeSet::new();
                 for m in footprint.moves().iter().filter(|m| inside(m)) {
@@ -755,6 +822,21 @@ mod tests {
         )
     }
 
+    /// [`cr`], which also asks the Contract to be revised: its frame holds the Clauses the options of a Crux ask.
+    fn cr_framing_the_contract(p: &Project) -> ChangeRequest {
+        ChangeRequest::open(
+            ChangeRequestId::from_uuid(test_uuid(1)),
+            draft(
+                p,
+                Intent::ChangeBehavior,
+                &[
+                    (clause(), ExpectKind::Target),
+                    (contract(), ExpectKind::Target),
+                ],
+            ),
+        )
+    }
+
     fn option_id(n: u128) -> CruxOptionId {
         CruxOptionId::from_uuid(test_uuid(1000 + n))
     }
@@ -831,7 +913,7 @@ mod tests {
 
     /// `crux` decided for `c`: the option `k` chosen.
     fn decided(c: &mut ChangeRequest, crux: &mut Crux, k: u128, p: &Project) {
-        decide(crux, c, chosen(k), p, None).unwrap();
+        decide(crux, c, chosen(k), p, None, &[]).unwrap();
     }
 
     fn resolution(kind: ResolutionKind) -> Resolution {
@@ -871,7 +953,7 @@ mod tests {
             state_of(&c, &[first.clone(), elsewhere.clone()]),
             ChangeRequestState::Open
         );
-        decide(&mut elsewhere, &mut other, chosen(0), &p, None).unwrap();
+        decide(&mut elsewhere, &mut other, chosen(0), &p, None, &[]).unwrap();
         // One of two decided: open still.
         decided(&mut c, &mut first, 0, &p);
         let all = [first.clone(), second.clone(), elsewhere.clone()];
@@ -892,6 +974,7 @@ mod tests {
             ),
             &p,
             None,
+            &[],
         )
         .unwrap();
         let all = [first, second, elsewhere];
@@ -957,7 +1040,7 @@ mod tests {
     #[test]
     fn requests_and_cruxes_that_do_not_fit_together_are_refused() {
         let p = project();
-        let mut c = cr(&p);
+        let mut c = cr_framing_the_contract(&p);
         let mut q = asking(&c, 500);
         assert_eq!(
             check_requests_and_cruxes(&[c.clone()], &[q.clone()]),
@@ -1057,6 +1140,114 @@ mod tests {
         );
         // The kind that was asked is what the decision recorded.
         assert_eq!(c.decided_expects()[0].kind, ExpectKind::Target);
+    }
+
+    #[test]
+    fn a_beyond_naming_a_request_that_is_not_there_is_refused() {
+        let p = project();
+        let c = cr(&p);
+        let mut q = asking(&c, 500);
+        let other = open(&p, 2, Intent::ChangeBehavior, &[]);
+        let ghost = ChangeRequestId::from_uuid(test_uuid(77));
+        let beyond = |id| Beyond::taken_by(vec![id]).unwrap();
+        // The request it names is there.
+        q.answer(chosen(0).with_beyond(beyond(other.id()))).unwrap();
+        assert_eq!(
+            check_requests_and_cruxes(&[c.clone(), other.clone()], &[q.clone()]),
+            Ok(())
+        );
+        // It is not: the store was not written by a decision that was made here.
+        let mut lost = asking(&c, 501);
+        lost.answer(chosen(0).with_beyond(beyond(ghost))).unwrap();
+        assert_eq!(
+            check_requests_and_cruxes(&[c.clone(), other], &[lost]),
+            Err(RecordsInconsistent {
+                cr: c.id(),
+                error: ChangeRequestError::ReferenceUnknown(ghost)
+            })
+        );
+    }
+
+    #[test]
+    fn two_cruxes_replacing_one_decision_are_still_read_together() {
+        let p = project();
+        let mut c = cr(&p);
+        let mut first = asking(&c, 500);
+        decided(&mut c, &mut first, 0, &p);
+        let replacing = |n: u128| {
+            Crux::raise(
+                CruxId::from_uuid(test_uuid(n)),
+                CruxDraft {
+                    raised_in: c.id(),
+                    findings: Vec::new(),
+                    kind: CruxKind::Ambiguity,
+                    question: Prose::try_from("again?").unwrap(),
+                    options: vec![CruxOption::new(
+                        option_id(0),
+                        choice_of("up"),
+                        None,
+                        BTreeMap::new(),
+                        None,
+                    )],
+                    recommended: None,
+                    importance: None,
+                    supersedes: Some(first.id()),
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            check_requests_and_cruxes(
+                &[c.clone()],
+                &[first.clone(), replacing(501), replacing(502)]
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_target_is_outside_a_frame_unless_it_is_in_it_or_a_case_cites_what_is() {
+        let p = project_with_a_case_on_c1();
+        let case = Target::Case(CaseId::from_uuid(test_uuid(40)));
+        let framed_clause = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[(clause(), ExpectKind::Target)],
+        );
+        // The Case cites C1, which is framed; the Harness that holds it, the Project and a Clause the Project does
+        // not have are not.
+        let gone = Target::Clause(ClauseId::from_uuid(test_uuid(99)));
+        assert_eq!(
+            outside_frame(
+                &framed_clause,
+                &p,
+                [case, harness(), Target::Project, gone, detail(), clause()]
+            ),
+            [harness(), Target::Project, gone, detail()]
+        );
+        // A container frames what is in it.
+        let framed_contract = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(contract(), ExpectKind::Target)],
+        );
+        assert_eq!(
+            outside_frame(&framed_contract, &p, [clause(), detail(), case, harness()]),
+            [harness()]
+        );
+        // A frame that holds nothing has everything outside.
+        let nothing = open(&p, 3, Intent::ChangeBehavior, &[]);
+        assert_eq!(outside_frame(&nothing, &p, [clause()]), [clause()]);
+        // The Case that cites no framed Clause is outside.
+        let other = open(
+            &p,
+            4,
+            Intent::ChangeBehavior,
+            &[(detail(), ExpectKind::Target)],
+        );
+        assert_eq!(outside_frame(&other, &p, [case]), [case]);
     }
 
     // Resolving looks at explicit states only.
@@ -1423,18 +1614,23 @@ mod tests {
     #[test]
     fn what_the_chosen_option_names_is_a_target_too() {
         let p = project();
-        let mut c = cr(&p);
+        let mut c = cr_framing_the_contract(&p);
         let mut q = asking(&c, 500);
-        assert_eq!(target_progress(&c, &p, &[]).len(), 1);
-        decided(&mut c, &mut q, 1, &p);
-        assert_eq!(
-            target_progress(&c, &p, &[])
+        let progress = |c: &ChangeRequest| -> BTreeSet<Target> {
+            target_progress(c, &p, &[])
                 .iter()
                 .map(|t| t.target)
-                .collect::<Vec<_>>(),
-            [clause(), detail()]
-        );
-        assert_eq!(frame(&c), BTreeSet::from([clause(), detail()]));
+                .collect()
+        };
+        assert_eq!(progress(&c), BTreeSet::from([clause(), contract()]));
+        decided(&mut c, &mut q, 1, &p);
+        // The Clause the option chose is inside the frame the request was opened with: it is a target of the request
+        // as a decided expectation, and the frame is what it was.
+        let all = BTreeSet::from([clause(), contract(), detail()]);
+        assert_eq!(progress(&c), all);
+        assert_eq!(frame(&c), all);
+        assert_eq!(c.decided_expects().len(), 1);
+        assert_eq!(c.decided_expects()[0].target, detail());
     }
 
     #[test]
@@ -1457,7 +1653,16 @@ mod tests {
         let bare = open(&p, 2, Intent::ChangeBehavior, &[]);
         assert!(contexts_in(&bare, &p).is_empty());
         // An option names billing, but nothing is chosen: until it is, it is not settled what the request is about.
-        let mut asked = cr(&p);
+        // The Project frames the Context the option names.
+        let mut asked = open(
+            &p,
+            1,
+            Intent::ChangeBehavior,
+            &[
+                (clause(), ExpectKind::Target),
+                (Target::Project, ExpectKind::Target),
+            ],
+        );
         let mut crux = crux_with(
             &asked,
             500,
@@ -1771,7 +1976,13 @@ mod tests {
             Intent::KeepBehavior,
             &[(interface(), ExpectKind::Keep)],
         );
-        let mut b = open(&p, 2, Intent::ChangeBehavior, &[]);
+        // The Context frames the Item the option revises, without naming the Interface `a` keeps.
+        let mut b = open(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            &[(Target::Context(core()), ExpectKind::Target)],
+        );
         let mut crux = crux_with(
             &b,
             500,

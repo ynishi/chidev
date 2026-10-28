@@ -1,6 +1,9 @@
-//! The stored document of a Crux, schema 1: the aggregate on its own, with its options, its recommendation and its
+//! The stored document of a Crux, schema 2: the aggregate on its own, with its options, its recommendation and its
 //! answer. It refers to the change request it was raised in, to the Crux it supersedes, and to its own options by
 //! id, and reaches the domain only through [`Crux::restore`], which re-checks every rule.
+//!
+//! Schema 2 differs from schema 1 in the answer alone: it may say where what the decision added outside its change
+//! request went (`beyond`). A document of schema 1 has none and is read as it is.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +12,7 @@ use super::v1::{
     option_expects_of, prose, revision, target_doc, uuid,
 };
 use crate::domain::entity::crux::{Crux, CruxDraft, CruxState};
-use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, DecisionMaker};
+use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, Beyond, DecisionMaker};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::confidence::Confidence;
 use crate::domain::vo::crux::{CruxKind, CruxOption, Decision, Importance, Recommended};
@@ -20,7 +23,7 @@ use crate::domain::vo::prose::Prose;
 use crate::domain::vo::timestamp::Timestamp;
 
 /// The schema number a Crux document is written with.
-pub(crate) const SCHEMA: u32 = 1;
+pub(crate) const SCHEMA: u32 = 2;
 
 /// A Crux, with its answer once it has one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,9 +80,50 @@ pub(crate) struct RecommendedDoc {
 pub(crate) struct AnswerDoc {
     pub(super) id: String,
     pub(super) decision: DecisionDoc,
+    /// Where what the decision added outside its change request went; schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) beyond: Option<BeyondDoc>,
     pub(super) basis: AnswerBasisDoc,
     pub(super) by: MakerDoc,
     pub(super) at: u64,
+}
+
+/// The change requests opened for what an answer added outside its change request, by id, or why it is not done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BeyondDoc {
+    Requests(Vec<String>),
+    Declined(String),
+}
+
+impl From<&Beyond> for BeyondDoc {
+    fn from(b: &Beyond) -> BeyondDoc {
+        match b {
+            Beyond::TakenBy(requests) => {
+                BeyondDoc::Requests(requests.iter().map(|r| r.as_uuid().to_string()).collect())
+            }
+            Beyond::Declined { reason } => BeyondDoc::Declined(reason.to_string()),
+        }
+    }
+}
+
+impl TryFrom<&BeyondDoc> for Beyond {
+    type Error = Bad;
+
+    fn try_from(d: &BeyondDoc) -> Result<Beyond, Bad> {
+        match d {
+            BeyondDoc::Requests(requests) => Beyond::taken_by(
+                requests
+                    .iter()
+                    .map(|r| Ok::<_, Bad>(ChangeRequestId::from_uuid(uuid(r)?)))
+                    .collect::<Result<_, _>>()?,
+            )
+            .map_err(bad),
+            BeyondDoc::Declined(reason) => Ok(Beyond::declined(
+                Prose::try_from(reason.as_str()).map_err(bad)?,
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +191,7 @@ impl From<&Answer> for AnswerDoc {
         AnswerDoc {
             id: a.id().as_uuid().to_string(),
             decision: DecisionDoc::from(a.decision()),
+            beyond: a.beyond().map(BeyondDoc::from),
             basis: match a.basis() {
                 AnswerBasis::Policy {
                     line,
@@ -189,13 +234,17 @@ impl TryFrom<&AnswerDoc> for Answer {
             MakerDoc::Person(n) => DecisionMaker::person(n),
         }
         .map_err(bad)?;
-        Ok(Answer::new(
+        let answer = Answer::new(
             AnswerId::from_uuid(uuid(&d.id)?),
             Decision::try_from(&d.decision)?,
             basis,
             by,
             Timestamp::from_millis(d.at),
-        ))
+        );
+        Ok(match &d.beyond {
+            Some(beyond) => answer.with_beyond(Beyond::try_from(beyond)?),
+            None => answer,
+        })
     }
 }
 

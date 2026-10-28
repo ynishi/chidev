@@ -2,12 +2,12 @@
 //! targets it asks to be revised or retired, and the targets to keep. A question that only a decision maker can
 //! answer is a [`Crux`](super::crux::Crux), a record of its own that is raised in a change request and stops it; the
 //! change request does not hold it. The option a decision maker chooses may name more targets, and the change
-//! request records those when it is decided.
+//! request records those it is about when it is decided; the ones outside it are the answer's `beyond`.
 //!
 //! A request ends by an explicit resolution (how it ended, why, who, when), and can be opened again; the history of
 //! both is only appended to. Neither the targets nor the revisions of the definitions decide whether it may end.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
@@ -81,8 +81,8 @@ pub enum ChangeRequestError {
     /// The change request is not resolved; there is nothing to reopen.
     #[error("the change request is not resolved")]
     NotResolved,
-    /// A resolution points at a change request that does not exist.
-    #[error("the change request {0} that the resolution points at does not exist")]
+    /// A resolution, or the `beyond` of an answer, points at a change request that does not exist.
+    #[error("the change request {0} that a resolution or an answer points at does not exist")]
     ReferenceUnknown(ChangeRequestId),
     /// A resolution points at the change request it resolves.
     #[error("a change request cannot be resolved by pointing at itself")]
@@ -112,6 +112,45 @@ pub enum ChangeRequestError {
     /// A stored Crux was raised in a change request that does not exist.
     #[error("the change request {0} that a crux was raised in does not exist")]
     RaisedInUnknown(ChangeRequestId),
+    /// The option chosen names targets the change request does not frame, and the answer says nothing of where they
+    /// go (`beyond`).
+    #[error(
+        "the option `{option}` names {} target(s) outside the change request, and the answer says where they go",
+        targets.len()
+    )]
+    AnswerOutside {
+        /// The Crux being decided.
+        crux: CruxId,
+        /// The option chosen.
+        option: Choice,
+        /// The targets it names that are outside the frame of the change request, in order.
+        targets: Vec<Target>,
+    },
+    /// A target outside the change request is in the frame of none of the change requests the answer names.
+    #[error(
+        "{target:?} is outside the change request and in the frame of none of those the answer names"
+    )]
+    BeyondUnframed {
+        /// The target.
+        target: Target,
+    },
+    /// The answer names the change request it was given in as the place what lies outside it goes.
+    #[error("the answer names the change request it was given in")]
+    BeyondItself,
+    /// The answer names a change request that is resolved, which takes no more work.
+    #[error("the change request {0} that the answer names is resolved")]
+    BeyondResolved(ChangeRequestId),
+    /// A withdrawal asks nothing and adds nothing, so it has no outside to speak of.
+    #[error("a withdrawal says nothing of what lies outside the change request")]
+    BeyondOnWithdrawal,
+    /// A Crux is to supersede a decision that another Crux replaces already.
+    #[error("the decision of the crux {crux} is replaced by the crux {by} already")]
+    SupersededAlready {
+        /// The Crux whose decision is to be replaced.
+        crux: CruxId,
+        /// The Crux that replaces it.
+        by: CruxId,
+    },
 }
 
 /// Where a change request stands. It depends on the Cruxes raised in it, which it does not hold, so it is read
@@ -439,11 +478,15 @@ impl ChangeRequest {
     /// recorded, and one this decision recorded already is not recorded twice. A target that is asked with another
     /// kind, by the request or by another decision that stands, is refused ([`ChangeRequest::check_option`]), and
     /// nothing is recorded. A resolved request is a closed record and takes no more (until it is reopened).
+    ///
+    /// `leave_out` is the targets this decision does not ask of this request: they are not recorded, so that a
+    /// decision never widens what the request is about. The conflict check still reads the whole option.
     pub fn record_decided_expects(
         &mut self,
         option: &CruxOption,
         now: &BTreeMap<Target, Revision>,
         answer: AnswerId,
+        leave_out: &BTreeSet<Target>,
     ) -> Result<(), ChangeRequestError> {
         if self.is_resolved() {
             return Err(ChangeRequestError::AlreadyResolved);
@@ -451,7 +494,8 @@ impl ChangeRequest {
         self.check_option(option, None)?;
         let mut add = Vec::new();
         for (target, kind) in option.expects() {
-            if self.expects.contains_key(target)
+            if leave_out.contains(target)
+                || self.expects.contains_key(target)
                 || self
                     .decided_expects
                     .iter()
@@ -614,6 +658,11 @@ mod tests {
         BTreeMap::from([(line(), revision), (detail(), revision)])
     }
 
+    /// No target left out of a decision.
+    fn none() -> BTreeSet<Target> {
+        BTreeSet::new()
+    }
+
     #[test]
     fn a_new_change_request_is_open_and_keeps_what_it_was_opened_with() {
         let c = cr();
@@ -653,8 +702,13 @@ mod tests {
     fn a_decision_records_the_revisions_of_what_the_option_expects_and_leaves_its_own() {
         let mut c = cr();
         let later = Revision::first().next();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Target), &now(later), answer(1))
-            .unwrap();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Target),
+            &now(later),
+            answer(1),
+            &none(),
+        )
+        .unwrap();
         assert_eq!(
             c.decided_expects(),
             [DecidedExpectation {
@@ -673,8 +727,13 @@ mod tests {
     fn an_option_may_name_a_target_or_a_keep_and_records_the_kind() {
         for kind in [ExpectKind::Target, ExpectKind::Keep] {
             let mut c = cr();
-            c.record_decided_expects(&asks(detail(), kind), &now(Revision::first()), answer(1))
-                .unwrap();
+            c.record_decided_expects(
+                &asks(detail(), kind),
+                &now(Revision::first()),
+                answer(1),
+                &none(),
+            )
+            .unwrap();
             assert_eq!(c.decided_expects()[0].kind, kind);
         }
     }
@@ -686,22 +745,61 @@ mod tests {
             &asks(detail(), ExpectKind::Target),
             &BTreeMap::new(),
             answer(1),
+            &none(),
         )
         .unwrap();
         assert!(c.decided_expects().is_empty());
     }
 
     #[test]
+    fn a_target_left_out_is_not_recorded_but_is_still_read_for_a_clash() {
+        let mut c = cr();
+        let other = Target::Clause(ClauseId::from_uuid(test_uuid(32)));
+        let both = option_asking(
+            "both",
+            &[(detail(), ExpectKind::Target), (other, ExpectKind::Keep)],
+        );
+        let all = BTreeMap::from([
+            (detail(), Revision::first()),
+            (other, Revision::first()),
+            (line(), Revision::first()),
+        ]);
+        c.record_decided_expects(&both, &all, answer(1), &BTreeSet::from([detail()]))
+            .unwrap();
+        // Only the one that is not left out is recorded.
+        assert_eq!(c.decided_expects().len(), 1);
+        assert_eq!(c.decided_expects()[0].target, other);
+        // The clash is read on the whole option: the request asks `line` to be revised, and this keeps it.
+        let clash = option_asking(
+            "clash",
+            &[(detail(), ExpectKind::Target), (line(), ExpectKind::Keep)],
+        );
+        assert_eq!(
+            c.record_decided_expects(&clash, &all, answer(2), &BTreeSet::from([line()])),
+            Err(ChangeRequestError::ExpectationConflict {
+                option: clash.choice().clone(),
+                target: line()
+            })
+        );
+    }
+
+    #[test]
     fn a_target_two_decisions_ask_with_the_same_kind_has_an_entry_of_each_at_its_own_revision() {
         let mut c = cr();
         let first = Revision::first();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first), answer(1))
-            .unwrap();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Keep),
+            &now(first),
+            answer(1),
+            &none(),
+        )
+        .unwrap();
         // A later decision asks the same, when the target has moved on.
         c.record_decided_expects(
             &asks(detail(), ExpectKind::Keep),
             &now(first.next()),
             answer(2),
+            &none(),
         )
         .unwrap();
         let held: Vec<(AnswerId, Revision)> = c
@@ -727,6 +825,7 @@ mod tests {
             &asks(detail(), ExpectKind::Keep),
             &now(first.next().next()),
             answer(2),
+            &none(),
         )
         .unwrap();
         assert_eq!(c.decided_expects().len(), 2);
@@ -736,12 +835,18 @@ mod tests {
     fn taking_back_one_of_two_decisions_that_ask_a_target_leaves_what_the_other_asks() {
         let mut c = cr();
         let first = Revision::first();
-        c.record_decided_expects(&asks(detail(), ExpectKind::Keep), &now(first), answer(1))
-            .unwrap();
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Keep),
+            &now(first),
+            answer(1),
+            &none(),
+        )
+        .unwrap();
         c.record_decided_expects(
             &asks(detail(), ExpectKind::Keep),
             &now(first.next()),
             answer(2),
+            &none(),
         )
         .unwrap();
         c.take_back_decided_expects(answer(1)).unwrap();
@@ -766,6 +871,7 @@ mod tests {
             &asks(line(), ExpectKind::Target),
             &now(Revision::first().next()),
             answer(1),
+            &none(),
         )
         .unwrap();
         assert!(c.decided_expects().is_empty());
@@ -782,7 +888,7 @@ mod tests {
             &[(detail(), ExpectKind::Target), (line(), ExpectKind::Keep)],
         );
         assert_eq!(
-            c.record_decided_expects(&both, &now(Revision::first()), answer(1)),
+            c.record_decided_expects(&both, &now(Revision::first()), answer(1), &none()),
             Err(ChangeRequestError::ExpectationConflict {
                 option: both.choice().clone(),
                 target: line()
@@ -794,11 +900,12 @@ mod tests {
             &asks(detail(), ExpectKind::Target),
             &now(Revision::first()),
             answer(1),
+            &none(),
         )
         .unwrap();
         let keeps = asks(detail(), ExpectKind::Keep);
         assert_eq!(
-            c.record_decided_expects(&keeps, &now(Revision::first()), answer(2)),
+            c.record_decided_expects(&keeps, &now(Revision::first()), answer(2), &none()),
             Err(ChangeRequestError::ExpectationConflict {
                 option: keeps.choice().clone(),
                 target: detail()
@@ -837,6 +944,7 @@ mod tests {
             &asks(detail(), ExpectKind::Target),
             &now(Revision::first()),
             answer(1),
+            &none(),
         )
         .unwrap();
         let keeps_detail = asks(detail(), ExpectKind::Keep);
@@ -866,6 +974,7 @@ mod tests {
             &asks(detail(), ExpectKind::Target),
             &now(Revision::first()),
             answer(1),
+            &none(),
         )
         .unwrap();
         let other = Target::Clause(ClauseId::from_uuid(test_uuid(32)));
@@ -873,6 +982,7 @@ mod tests {
             &asks(other, ExpectKind::Keep),
             &BTreeMap::from([(other, Revision::first())]),
             answer(2),
+            &none(),
         )
         .unwrap();
         c.take_back_decided_expects(answer(1)).unwrap();
@@ -907,7 +1017,8 @@ mod tests {
             c.record_decided_expects(
                 &asks(detail(), ExpectKind::Target),
                 &now(Revision::first()),
-                answer(1)
+                answer(1),
+                &none()
             ),
             Err(ChangeRequestError::AlreadyResolved)
         );

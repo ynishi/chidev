@@ -413,7 +413,7 @@ async fn a_decision_is_in_the_view_in_the_words_of_its_kind() {
         (ids[2].clone(), DecisionInput::Withdrawn),
     ];
     for (crux, decision) in &decisions {
-        app.decide_crux(crux, decision, &arbitrary(), &alice())
+        app.decide_crux(crux, decision, None, &arbitrary(), &alice())
             .await
             .unwrap();
     }

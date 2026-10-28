@@ -27,7 +27,7 @@ use crate::domain::rule::{
     INPUT_WRONG_TYPE, ITEMS_FAILED, ITEMS_NO_PROVIDER, ITEMS_PROTOCOL, PROJECT_ASSET_RETIRED,
     PROJECT_EXISTS, PROJECT_NONE, Rule, RuleKind,
 };
-use crate::domain::service::crux::check_supersedes;
+use crate::domain::service::crux::{check_supersedes, standing};
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::ChangeRequestId;
@@ -819,6 +819,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let ids = self.crux_ids().await;
                 vec![self.unknown_name("crux", id, &ids, Vec::new())]
             }
+            AppError::UnknownSupersedes(id) => {
+                let ids = self.crux_ids().await;
+                // The id is not a Crux to make by naming it, so there is nothing to suggest: `unknown_name` has none
+                // for a crux.
+                let mut d = self.unknown_name("crux", id, &ids, Vec::new());
+                d.field = Some("supersedes".to_string());
+                vec![d]
+            }
             AppError::UnknownRule(id) => {
                 let mut names: Vec<String> =
                     rule::rules().iter().map(|r| r.id.to_string()).collect();
@@ -1175,26 +1183,71 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     "reason": "<why the work goes on>", "by": by}),
                 how,
             )],
-            Remedy::SupersedeCrux {
-                change_request,
-                crux,
-            } => {
-                // The Crux the violation is about, and no other. A decision that cannot be replaced (a withdrawal)
-                // gets none: the new Crux would be refused.
-                if cruxes
-                    .iter()
-                    .find(|q| q.id() == *crux)
-                    .is_some_and(|q| check_supersedes(q.id(), Some(q)).is_err())
-                {
+            Remedy::SupersedeCrux { crux, .. } => {
+                // The decision that stands for the question of the Crux the violation is about, which another Crux
+                // may have replaced since, and which is raised in the change request that Crux was raised in.
+                let Some(asked) = cruxes.iter().find(|q| q.id() == *crux) else {
+                    return Vec::new();
+                };
+                let stands = standing(asked, cruxes);
+                // An open Crux has no decision to replace yet: it is decided.
+                if stands.is_open() {
+                    return vec![suggest(
+                        json!({"op": "cr_crux_decide", "crux": stands.id().to_string(),
+                            "option": "<one of its option ids>",
+                            "basis": {"arbitrary": "<why>"}, "by": by}),
+                        how,
+                    )];
+                }
+                // A decision that cannot be replaced (a withdrawal) gets none: the new Crux would be refused.
+                if check_supersedes(stands.id(), Some(stands), cruxes).is_err() {
                     return Vec::new();
                 }
-                vec![suggest(
-                    json!({"op": "cr_crux_raise", "in": title(change_request),
+                let Some(raised_in) = crs.iter().find(|c| c.id() == stands.raised_in()) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                // A resolved change request takes no Crux: it is reopened first.
+                if raised_in.is_resolved() {
+                    out.push(suggest(
+                        json!({"op": "cr_reopen", "title": raised_in.title().to_string(),
+                            "reason": "<why the work goes on>", "by": by}),
+                        how,
+                    ));
+                }
+                out.push(suggest(
+                    json!({"op": "cr_crux_raise", "in": raised_in.title().to_string(),
                         "question": "<the question>", "kind": "ambiguity",
                         "options": [{"choice": "<the new choice>"}],
-                        "supersedes": crux.to_string()}),
+                        "supersedes": stands.id().to_string()}),
                     how,
-                )]
+                ));
+                out
+            }
+            Remedy::TakeOutside { crux, targets } => {
+                let mut named = Vec::with_capacity(targets.len());
+                for target in targets {
+                    if let Ok(Some(t)) = self.name_target(p, *target).await {
+                        named.push(reference_of(&t));
+                    }
+                }
+                let decide = |beyond: Json| {
+                    suggest(
+                        json!({"op": "cr_crux_decide", "crux": crux.to_string(),
+                            "option": "<the option chosen>", "beyond": beyond,
+                            "basis": {"arbitrary": "<why>"}, "by": by}),
+                        how,
+                    )
+                };
+                vec![
+                    suggest(
+                        json!({"op": "cr_open", "title": "<title of the request for them>",
+                            "intent": "change_behavior", "targets": named}),
+                        how,
+                    ),
+                    decide(json!({"requests": ["<title of the request for them>"]})),
+                    decide(json!({"declined": "<why they are not done>"})),
+                ]
             }
             Remedy::PutPolicyLine { line } => {
                 let mut lines: Vec<Json> = p
@@ -1293,6 +1346,35 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 vec![suggest(json!({"op": "context_add", "name": "<name>"}), how)]
             }
         }
+    }
+}
+
+/// A target in the form an operation names it by: `{"project": true}`, `{"context": "core"}`,
+/// `{"clause": {"context": ..., "contract": ..., "label": ...}}`, and so on.
+fn reference_of(target: &TargetInput) -> Json {
+    match target {
+        TargetInput::Project => json!({"project": true}),
+        TargetInput::Context(name) => json!({"context": name}),
+        TargetInput::Contract { context, contract } => {
+            json!({"contract": {"context": context, "contract": contract}})
+        }
+        TargetInput::Interface { context, interface } => {
+            json!({"interface": {"context": context, "interface": interface}})
+        }
+        TargetInput::Harness { context, harness } => {
+            json!({"harness": {"context": context, "harness": harness}})
+        }
+        TargetInput::Item(r) => {
+            json!({"item": {"context": r.context, "interface": r.interface, "key": r.key}})
+        }
+        TargetInput::Clause(r) => {
+            json!({"clause": {"context": r.context, "contract": r.contract, "label": r.label}})
+        }
+        TargetInput::Case {
+            context,
+            harness,
+            name,
+        } => json!({"case": {"context": context, "harness": harness, "name": name}}),
     }
 }
 

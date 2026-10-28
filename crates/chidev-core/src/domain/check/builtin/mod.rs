@@ -1048,7 +1048,15 @@ mod tests {
             None,
             &[(interface, ExpectKind::Keep)],
         );
-        let mut b = cr(&p, 2, Intent::ChangeBehavior, None, &[]);
+        // The request is about the Context, which frames the Item the option revises without naming the Interface
+        // another request keeps.
+        let mut b = cr(
+            &p,
+            2,
+            Intent::ChangeBehavior,
+            None,
+            &[(Target::Context(ctx()), ExpectKind::Target)],
+        );
         let mut q = crux(
             20,
             2,
@@ -1073,7 +1081,7 @@ mod tests {
             DecisionMaker::person("alice").unwrap(),
             Timestamp::from_millis(2),
         );
-        decide(&mut q, &mut b, answer, &p, None).unwrap();
+        decide(&mut q, &mut b, answer, &p, None, &[]).unwrap();
         let found = introduced(&was, &run(&KeepTargeted, &p, &[], &[keeping.clone(), b]));
         assert_eq!(
             subjects(&found),

@@ -9,7 +9,7 @@ use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
 
 /// Every target of `project` with the revision it has and the containers it is in (the Project first).
-fn tree(project: &Project) -> Tree {
+pub(crate) fn tree(project: &Project) -> Tree {
     let mut out = BTreeMap::new();
     out.insert(Target::Project, (project.revision(), Vec::new()));
     for context in project.contexts() {
@@ -47,10 +47,10 @@ fn tree(project: &Project) -> Tree {
 }
 
 /// Every target of a Project with the revision it has and the containers it is in, as `tree` gives it.
-type Tree = BTreeMap<Target, (Revision, Vec<Target>)>;
+pub(crate) type Tree = BTreeMap<Target, (Revision, Vec<Target>)>;
 
 /// What each Case of `project` cites: the Items and Clauses.
-fn citations(project: &Project) -> BTreeMap<CaseId, Vec<Target>> {
+pub(crate) fn citations(project: &Project) -> BTreeMap<CaseId, Vec<Target>> {
     project
         .contexts()
         .flat_map(|c| c.harnesses())

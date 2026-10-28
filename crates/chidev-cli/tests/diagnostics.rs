@@ -367,7 +367,9 @@ fn an_option_chosen_that_clashes_with_a_decision_that_stands_is_refused_by_the_r
     let (dir, r) = after_setup_in(
         "diag-decide-clash",
         &[
-            cr_open("Round", None),
+            // the Contract is the request's frame, which holds the Clause the first option asks
+            json!({"op":"cr_open","title":"Round","intent":"change_behavior",
+                "targets":[{"contract":{"context":"core","contract":"rounding"}}]}),
             raise("reword", "targets"),
             raise("leave", "keep"),
         ],

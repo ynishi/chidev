@@ -366,8 +366,12 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
             "a refused discount is an InvalidDiscount",
         ),
         "{\"op\":\"cr_resolve\",\"title\":\"Refuse big discounts\",\"resolution\":\"done\",\"reason\":\"C1 was changed\",\"by\":{\"person\":\"bob\"}}".to_string(),
-        // 15: a request, and a question whose second option names C2 as a target
-        "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\"}".to_string(),
+        // 15: a request about the Contract, and a question whose second option names C2 as a target: inside the frame
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Name the error\",\"intent\":\"change_behavior\",",
+            "\"targets\":[{\"contract\":{\"context\":\"pricing\",\"contract\":\"discount\"}}]}"
+        )
+        .to_string(),
         concat!(
             "{\"op\":\"cr_crux_raise\",\"in\":\"Name the error\",\"question\":\"Is the error new?\",",
             "\"kind\":\"ambiguity\",\"options\":[",
@@ -507,9 +511,11 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     assert_eq!(at(&results, 18)["ok"], true, "{results:#?}");
     let chosen = &at(&results, 19)["change_requests"][1];
     assert_eq!(chosen["state"], "decided");
-    assert_eq!(
-        chosen["targets"],
-        serde_json::json!([{ "target": "discount C2", "progress": "not touched yet" }])
+    assert!(
+        chosen["targets"].as_array().expect("targets").contains(
+            &serde_json::json!({ "target": "discount C2", "progress": "not touched yet" })
+        ),
+        "{chosen:#?}"
     );
     // resolved as done with C2 untouched and no work at all: a finding for the missing work
     assert_eq!(at(&results, 20)["ok"], true, "{results:#?}");
@@ -3288,4 +3294,146 @@ fn an_old_word_for_a_moment_is_refused_with_the_new_one() {
     assert_eq!(results[4]["ok"], true, "{results:#?}");
     assert_eq!(results[4]["rules"].as_array().unwrap().len(), 1);
     assert_eq!(results[5]["rules"], serde_json::json!([]));
+}
+
+#[test]
+fn the_schemas_of_the_operations_and_of_the_view_have_the_beyond_of_a_decision() {
+    for name in ["ops", "view"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_chidev"))
+            .args(["schema", name])
+            .output()
+            .expect("chidev runs");
+        assert!(out.status.success(), "{out:#?}");
+        let text = String::from_utf8(out.stdout).expect("utf-8");
+        for word in ["\"beyond\"", "\"requests\"", "\"declined\""] {
+            assert!(text.contains(word), "{name}: no {word} in {text}");
+        }
+    }
+}
+
+#[test]
+fn what_an_answer_adds_outside_its_request_goes_to_a_request_or_is_declined_and_status_and_view_show_it()
+ {
+    use serde_json::json;
+    let dir = fresh_dir("beyond");
+    let tax_c1 = json!({"clause": {"context": "pricing", "contract": "tax", "label": "C1"}});
+    let raise = |choice: &str| {
+        format!(
+            "{}\n",
+            json!({"op": "cr_crux_raise", "in": "Round", "question": "How is a total made?",
+                "kind": "ambiguity", "options": [{"choice": choice, "targets": [tax_c1.clone()]}, {"choice": "skip"}]})
+        )
+    };
+    let decide = |line: u64, choice: &str, beyond: Option<Value>| {
+        let mut op = json!({"op": "cr_crux_decide", "crux": format!("@{line}.crux"),
+            "option": format!("@{line}.option({choice})"),
+            "basis": {"arbitrary": "settled"}, "by": {"person": "alice"}});
+        if let Some(beyond) = beyond {
+            op["beyond"] = beyond;
+        }
+        format!("{op}\n")
+    };
+    let ops = [
+        "{\"op\":\"init\"}\n".to_string(),
+        "{\"op\":\"context_add\",\"name\":\"pricing\"}\n".to_string(),
+        discount_put(
+            "a half rounds up",
+            "a refused discount is an InvalidDiscount",
+        ),
+        // 4: the Contract the first request is not about
+        concat!(
+            "{\"op\":\"contract_put\",\"context\":\"pricing\",\"name\":\"tax\",\"title\":\"Tax\",",
+            "\"clauses\":[{\"label\":\"C1\",\"text\":\"a tax is summed\"}]}\n"
+        )
+        .to_string(),
+        // 5, 6: a request about each Contract
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Round\",\"intent\":\"change_behavior\",",
+            "\"targets\":[{\"contract\":{\"context\":\"pricing\",\"contract\":\"discount\"}}]}\n"
+        )
+        .to_string(),
+        concat!(
+            "{\"op\":\"cr_open\",\"title\":\"Tax work\",\"intent\":\"change_behavior\",",
+            "\"targets\":[{\"contract\":{\"context\":\"pricing\",\"contract\":\"tax\"}}]}\n"
+        )
+        .to_string(),
+        // 7: a question whose first option asks a Clause of the other Contract, which `Round` does not frame
+        raise("sum"),
+        // 8: it cannot be chosen without saying where that goes; 9: it goes to the request that frames it
+        decide(7, "sum", None),
+        decide(7, "sum", Some(json!({"requests": ["Tax work"]}))),
+        // 10, 11: the same question, and the Clause declined
+        raise("sum"),
+        decide(10, "sum", Some(json!({"declined": "tax waits"}))),
+        "{\"op\":\"status\"}\n".to_string(),
+        "{\"op\":\"view\",\"sections\":[\"change_requests\",\"cruxes\"],\"contexts\":[]}\n"
+            .to_string(),
+        // 14: a form `beyond` does not have is refused as an operation that cannot be read
+        decide(10, "sum", Some(json!({"request": ["Tax work"]}))),
+    ];
+    let (results, _) = exec_each(&dir, &dir.join("chidev.db"), &ops);
+
+    let outside = diag(at(&results, 8));
+    assert_eq!(outside["code"], "cr.crux-answer-outside");
+    let suggested: Vec<&str> = outside["suggestions"]
+        .as_array()
+        .expect("suggestions")
+        .iter()
+        .map(|s| s["op"]["op"].as_str().expect("an operation"))
+        .collect();
+    assert_eq!(suggested, ["cr_open", "cr_crux_decide", "cr_crux_decide"]);
+    assert_eq!(outside["suggestions"][0]["op"]["targets"], json!([tax_c1]));
+    assert_eq!(at(&results, 9)["ok"], true, "{results:#?}");
+    assert_eq!(at(&results, 11)["ok"], true, "{results:#?}");
+
+    // status gives the titles of the requests, view their ids, and the reason as it was written
+    let first = at(&results, 7)["crux"]
+        .as_str()
+        .expect("the id of the Crux");
+    let second = at(&results, 10)["crux"]
+        .as_str()
+        .expect("the id of the Crux");
+    let answer_of = |list: &Value, id: &str| -> Value {
+        list.as_array()
+            .expect("cruxes")
+            .iter()
+            .find(|q| q["id"] == id)
+            .unwrap_or_else(|| panic!("no crux {id}"))["answer"]
+            .clone()
+    };
+    let status = at(&results, 12);
+    assert_eq!(
+        answer_of(&status["cruxes"], first)["beyond"],
+        json!({"requests": ["Tax work"]})
+    );
+    assert_eq!(
+        answer_of(&status["cruxes"], second)["beyond"],
+        json!({"declined": "tax waits"})
+    );
+    let view = &at(&results, 13)["view"];
+    let tax_work = view["change_requests"]
+        .as_array()
+        .expect("change requests")
+        .iter()
+        .find(|c| c["title"] == "Tax work")
+        .expect("the request")["id"]
+        .clone();
+    assert_eq!(
+        answer_of(&view["cruxes"], first)["beyond"],
+        json!({"requests": [tax_work]})
+    );
+    assert_eq!(
+        answer_of(&view["cruxes"], second)["beyond"],
+        json!({"declined": "tax waits"})
+    );
+
+    let typo = diag(at(&results, 14));
+    assert_eq!(typo["code"], "input.invalid");
+    assert!(
+        typo["did_you_mean"]
+            .as_array()
+            .expect("did_you_mean")
+            .contains(&json!("requests")),
+        "{typo:#?}"
+    );
 }

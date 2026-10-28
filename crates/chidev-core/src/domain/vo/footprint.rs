@@ -118,14 +118,17 @@ impl Footprint {
         self.moves.iter().map(Move::target)
     }
 
+    /// What `target` cited when it moved, as recorded: only a Case that moved has it.
+    pub fn citations_of(&self, target: Target) -> Option<&Citations> {
+        match target {
+            Target::Case(case) => self.citations.get(&case),
+            _ => None,
+        }
+    }
+
     /// Whether `target` is a Case with a citation that is `container` or inside it.
     pub fn cites_inside(&self, target: Target, container: Target) -> bool {
-        match target {
-            Target::Case(case) => self
-                .citations
-                .get(&case)
-                .is_some_and(|c| c.is_inside(container)),
-            _ => false,
-        }
+        self.citations_of(target)
+            .is_some_and(|c| c.is_inside(container))
     }
 }

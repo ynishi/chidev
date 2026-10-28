@@ -13,14 +13,16 @@ use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_ALREADY_BASED, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET,
-    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION,
+    CR_ALREADY_RESOLVED, CR_CRUX_ANSWER_OUTSIDE, CR_CRUX_ANSWERED, CR_CRUX_BEYOND_ITSELF,
+    CR_CRUX_BEYOND_UNFRAMED, CR_CRUX_BEYOND_WITHDRAWN, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION,
     CR_CRUX_OPTION_TWICE, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
     CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF,
-    CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE,
-    INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED,
-    PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED,
-    PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM,
-    SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_SUPERSEDED, CR_SUPERSEDES_UNANSWERED,
+    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
+    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
+    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
+    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
+    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
@@ -57,12 +59,58 @@ impl ChangeRequestError {
                     Applicability::Review,
                 )
             }
-            ChangeRequestError::SupersedesUnknown(_) => Violation::of(CR_SUPERSEDES_UNKNOWN)
-                .on(here)
-                .with_remedy(Remedy::OpenChangeRequest, Applicability::Review),
+            ChangeRequestError::SupersedesUnknown(_) => {
+                Violation::of(CR_SUPERSEDES_UNKNOWN).on(here)
+            }
             ChangeRequestError::SupersedesUnanswered(_) => {
                 Violation::of(CR_SUPERSEDES_UNANSWERED).on(here)
             }
+            ChangeRequestError::SupersededAlready { crux, by } => {
+                Violation::of(CR_SUPERSEDES_SUPERSEDED)
+                    .on(here)
+                    .with_value("by", Value::Party(Party::Crux(*by)))
+                    .with_remedy(
+                        Remedy::SupersedeCrux {
+                            change_request: on,
+                            crux: *crux,
+                        },
+                        Applicability::Review,
+                    )
+            }
+            ChangeRequestError::AnswerOutside {
+                crux,
+                option,
+                targets,
+            } => Violation::of(CR_CRUX_ANSWER_OUTSIDE)
+                .on(here)
+                .with_value("option", Value::Choice(option.clone()))
+                .with_value(
+                    "targets",
+                    Value::Parties(targets.iter().map(|t| Party::Target(*t)).collect()),
+                )
+                .with_remedy(
+                    Remedy::TakeOutside {
+                        crux: *crux,
+                        targets: targets.clone(),
+                    },
+                    Applicability::Placeholder,
+                ),
+            ChangeRequestError::BeyondUnframed { target } => Violation::of(CR_CRUX_BEYOND_UNFRAMED)
+                .on(here)
+                .with_value("target", Value::Party(Party::Target(*target))),
+            ChangeRequestError::BeyondItself => Violation::of(CR_CRUX_BEYOND_ITSELF).on(here),
+            ChangeRequestError::BeyondOnWithdrawal => {
+                Violation::of(CR_CRUX_BEYOND_WITHDRAWN).on(here)
+            }
+            ChangeRequestError::BeyondResolved(named) => Violation::of(CR_ALREADY_RESOLVED)
+                .on(here)
+                .about(Party::ChangeRequest(*named))
+                .with_remedy(
+                    Remedy::ReopenChangeRequest {
+                        change_request: *named,
+                    },
+                    Applicability::Review,
+                ),
             ChangeRequestError::NotAnOption(_) => Violation::of(CR_CRUX_UNKNOWN_OPTION).on(here),
             ChangeRequestError::UnknownPolicyLine(line) => Violation::of(CR_POLICY_LINE_UNKNOWN)
                 .on(here)
@@ -465,6 +513,12 @@ mod tests {
             ChangeRequestError::UnaskedExpectation(_) => "UnaskedExpectation",
             ChangeRequestError::ExpectationConflict { .. } => "ExpectationConflict",
             ChangeRequestError::RaisedInUnknown(_) => "RaisedInUnknown",
+            ChangeRequestError::AnswerOutside { .. } => "AnswerOutside",
+            ChangeRequestError::BeyondUnframed { .. } => "BeyondUnframed",
+            ChangeRequestError::BeyondItself => "BeyondItself",
+            ChangeRequestError::BeyondResolved(_) => "BeyondResolved",
+            ChangeRequestError::BeyondOnWithdrawal => "BeyondOnWithdrawal",
+            ChangeRequestError::SupersededAlready { .. } => "SupersededAlready",
         }
     }
 
@@ -501,6 +555,21 @@ mod tests {
                 target: Target::Project,
             },
             ChangeRequestError::RaisedInUnknown(cr(2)),
+            ChangeRequestError::AnswerOutside {
+                crux: crux(2),
+                option: choice(),
+                targets: vec![Target::Project],
+            },
+            ChangeRequestError::BeyondUnframed {
+                target: Target::Project,
+            },
+            ChangeRequestError::BeyondItself,
+            ChangeRequestError::BeyondResolved(cr(2)),
+            ChangeRequestError::BeyondOnWithdrawal,
+            ChangeRequestError::SupersededAlready {
+                crux: crux(2),
+                by: crux(3),
+            },
         ]
     }
 
@@ -791,7 +860,7 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 20 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
+        assert_eq!(gives().len(), 26 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
         assert_eq!(STILL_UNMAPPED.len(), 23);
     }
 
@@ -964,6 +1033,96 @@ mod tests {
         let line_gone = ChangeRequestError::UnknownPolicyLine(line("P7")).violation(cr(1));
         assert_eq!(line_gone.rule().as_str(), "cr.policy-line-unknown");
         assert_eq!(line_gone.subjects()[1], Party::PolicyLine(line("P7")));
+    }
+
+    #[test]
+    fn an_answer_that_adds_targets_outside_its_request_is_refused_by_rule_with_the_ways_to_place_them()
+     {
+        let target = Target::Clause(ClauseId::from_uuid(test_uuid(30)));
+        let v = ChangeRequestError::AnswerOutside {
+            crux: crux(4),
+            option: choice(),
+            targets: vec![target],
+        }
+        .violation(cr(1));
+        assert_eq!(v.rule().as_str(), "cr.crux-answer-outside");
+        assert_eq!(v.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert_eq!(v.values().get("option"), Some(&Value::Choice(choice())));
+        assert_eq!(
+            v.values().get("targets"),
+            Some(&Value::Parties(vec![Party::Target(target)]))
+        );
+        assert_eq!(
+            v.remedies(),
+            &[(
+                Remedy::TakeOutside {
+                    crux: crux(4),
+                    targets: vec![target]
+                },
+                Applicability::Placeholder
+            )]
+        );
+        let parties = v.parties();
+        assert!(
+            parties.contains(&Party::Crux(crux(4))) && parties.contains(&Party::Target(target))
+        );
+
+        let unframed = ChangeRequestError::BeyondUnframed { target }.violation(cr(1));
+        assert_eq!(unframed.rule().as_str(), "cr.crux-beyond-unframed");
+        assert_eq!(
+            unframed.values().get("target"),
+            Some(&Value::Party(Party::Target(target)))
+        );
+        assert!(unframed.remedies().is_empty());
+        for (error, rule) in [
+            (ChangeRequestError::BeyondItself, "cr.crux-beyond-itself"),
+            (
+                ChangeRequestError::BeyondOnWithdrawal,
+                "cr.crux-beyond-withdrawn",
+            ),
+        ] {
+            let v = error.violation(cr(1));
+            assert_eq!(v.rule().as_str(), rule);
+            assert!(v.remedies().is_empty() && v.values().is_empty());
+        }
+        // A named request that is resolved is the second subject of `cr.already-resolved`, and the one to reopen.
+        let resolved = ChangeRequestError::BeyondResolved(cr(2)).violation(cr(1));
+        assert_eq!(resolved.rule().as_str(), "cr.already-resolved");
+        assert_eq!(
+            resolved.subjects(),
+            &[Party::ChangeRequest(cr(1)), Party::ChangeRequest(cr(2))]
+        );
+        assert_eq!(
+            resolved.remedies()[0].0,
+            Remedy::ReopenChangeRequest {
+                change_request: cr(2)
+            }
+        );
+    }
+
+    #[test]
+    fn a_second_replacement_of_a_decision_names_the_crux_that_replaces_it_and_an_unknown_one_has_no_remedy()
+     {
+        let v = ChangeRequestError::SupersededAlready {
+            crux: crux(5),
+            by: crux(6),
+        }
+        .violation(cr(1));
+        assert_eq!(v.rule().as_str(), "cr.supersedes-superseded");
+        assert_eq!(
+            v.values().get("by"),
+            Some(&Value::Party(Party::Crux(crux(6))))
+        );
+        assert_eq!(
+            v.remedies()[0].0,
+            Remedy::SupersedeCrux {
+                change_request: cr(1),
+                crux: crux(5)
+            }
+        );
+        assert!(v.parties().contains(&Party::Crux(crux(6))));
+        let unknown = ChangeRequestError::SupersedesUnknown(crux(9)).violation(cr(1));
+        assert!(unknown.remedies().is_empty());
     }
 
     #[test]
