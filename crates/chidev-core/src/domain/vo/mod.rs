@@ -6,6 +6,7 @@ pub mod case;
 pub mod change_set;
 pub mod choice;
 pub mod clause;
+pub mod clause_edit;
 pub mod confidence;
 pub mod crux;
 pub mod digest;

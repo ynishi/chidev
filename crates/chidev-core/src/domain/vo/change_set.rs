@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use super::case::CaseName;
-use super::clause::ClauseContent;
+use super::clause::{ClauseContent, ClauseLabel};
+use super::clause_edit::ClauseEdit;
 use super::frame::Frame;
 use super::harness_kind::HarnessKind;
 use super::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId};
@@ -98,6 +99,22 @@ pub enum AssetPut {
         title: Title,
         /// Its Clauses.
         clauses: Vec<(ClauseId, ClauseContent)>,
+    },
+    /// Some Clauses of a Contract that is: the Clauses not named stay in their order, and so does the title. A
+    /// Clause an edit names (by its label, or the one it replaces) is set in its place, one in `remove` is gone, and
+    /// a new one comes after the others, in the order given. The Contract composes the list
+    /// ([`Contract::clauses_partial`](crate::domain::entity::contract::Contract::clauses_partial)) and the Project
+    /// puts it as it puts a Contract: this is not a second way into the Contract. It is a put of the Contract, so
+    /// the set names it once: with a `Contract` put of the same id, or another `Clauses` put, it is refused.
+    Clauses {
+        /// The Context.
+        context: ContextId,
+        /// The Contract, which the Project has before the set.
+        id: ContractId,
+        /// The Clauses to set. The id of an edit is the one a new Clause takes.
+        edits: Vec<ClauseEdit>,
+        /// The labels of the Clauses to remove.
+        remove: Vec<ClauseLabel>,
     },
     /// An Interface is made or revised.
     Interface {

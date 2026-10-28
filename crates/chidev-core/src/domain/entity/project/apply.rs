@@ -34,6 +34,8 @@ impl Project {
     /// of a change request, only where the frame holds it: see below); the retirements. The Clauses, Items
     /// and Cases that a put drops from an asset are recorded as retired, as they are by a put alone. Each asset
     /// moves by one revision at most, because it is named once: a change set that names a thing twice is refused.
+    /// A put of some Clauses of a Contract ([`AssetPut::Clauses`]) is a put of that Contract, so it is named once
+    /// with it: the Contract composes the list and it goes in as any put of the Contract does.
     ///
     /// A set without a frame (a put alone, or a set for no change request) records every citation of every Case of
     /// a Harness it puts at the revision its target has. A set with one claims a Case current only for what the
@@ -51,7 +53,7 @@ impl Project {
     /// Context each is in (a Context has at most one sim Harness): to swap one, put the new and retire the old in
     /// one set. A sim Harness the set does not put is not asked, however it was kept.
     pub fn apply(&mut self, set: ChangeSet) -> Result<(), ProjectError> {
-        let repeated = repeats(&set);
+        let repeated = Project::repeated(&set);
         if !repeated.is_empty() {
             return Err(refused(repeated));
         }
@@ -77,8 +79,11 @@ impl Project {
         for put in puts {
             let (context, done) = put_one(&mut next, frame.as_ref(), put);
             touched.insert(context);
-            if let Err(e) = done {
-                problems.push(e);
+            match done {
+                Ok(()) => {}
+                // A put that has several problems of its own gives them all, each one apart.
+                Err(ProjectError::Many(all)) => problems.extend(all),
+                Err(e) => problems.push(e),
             }
         }
         let dropped: Vec<Retired> = touched
@@ -137,6 +142,14 @@ impl Project {
         self.revision = revision;
         Ok(())
     }
+
+    /// The things `set` names more than once (an asset put twice or put and retired, the settings of a Context
+    /// given twice, a Context put into and retired), each as [`ProjectError::Repeated`]. It asks nothing of the
+    /// Project: [`Project::apply`] refuses a set that has any, before it applies anything, and a caller that has
+    /// found other problems with the entries can add these to say every problem at once.
+    pub fn repeated(set: &ChangeSet) -> Vec<ProjectError> {
+        repeats(set)
+    }
 }
 
 /// When a put is applied: settings first, then the definitions, then the Harnesses that cite them.
@@ -144,7 +157,7 @@ fn stage(put: &AssetPut) -> u8 {
     match put {
         AssetPut::Context(_) => 0,
         AssetPut::Uses { .. } => 1,
-        AssetPut::Contract { .. } | AssetPut::Interface { .. } => 2,
+        AssetPut::Contract { .. } | AssetPut::Clauses { .. } | AssetPut::Interface { .. } => 2,
         AssetPut::BaseOnContract { .. } => 3,
         AssetPut::Harness { .. } => 4,
     }
@@ -179,6 +192,20 @@ fn put_one(
             context,
             edit(next, context, |c| c.put_contract(id, title, clauses)),
         ),
+        AssetPut::Clauses {
+            context,
+            id,
+            edits,
+            remove,
+        } => {
+            let done = match next.get_mut(&context) {
+                None => Err(ProjectError::UnknownContext(context)),
+                Some(c) => c
+                    .put_clauses(id, &edits, &remove)
+                    .map_err(|all| refused(all.into_iter().map(ProjectError::Context).collect())),
+            };
+            (context, done)
+        }
         AssetPut::Interface {
             context,
             id,
@@ -377,7 +404,10 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
             AssetPut::Context(c) => note("context", "context", c.id().as_uuid()),
             AssetPut::Uses { context, .. } => note("uses", "context", context.as_uuid()),
             AssetPut::BaseOnContract { context } => note("base", "context", context.as_uuid()),
-            AssetPut::Contract { id, .. } => note("contract", "contract", id.as_uuid()),
+            // A partial put of a Contract is a put of it: it is named once, with a put of the whole.
+            AssetPut::Contract { id, .. } | AssetPut::Clauses { id, .. } => {
+                note("contract", "contract", id.as_uuid())
+            }
             AssetPut::Interface { id, .. } => note("interface", "interface", id.as_uuid()),
             AssetPut::Harness { id, .. } => note("harness", "harness", id.as_uuid()),
         }
@@ -386,6 +416,7 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
             AssetPut::Uses { context, .. }
             | AssetPut::BaseOnContract { context }
             | AssetPut::Contract { context, .. }
+            | AssetPut::Clauses { context, .. }
             | AssetPut::Interface { context, .. }
             | AssetPut::Harness { context, .. } => *context,
         };
@@ -422,9 +453,11 @@ fn repeats(set: &ChangeSet) -> Vec<ProjectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::entity::contract::ContractError;
     use crate::domain::entity::harness::{CaseNameFault, Harness, SimShapeProblem};
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+    use crate::domain::vo::clause_edit::{ClauseEdit, ClauseNameProblem, NameField};
     use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
     use crate::domain::vo::item_key::ItemKey;
@@ -912,6 +945,162 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(p, before);
+    }
+
+    /// An edit of the Clause `label` to say `text`, with `new` as the id it takes if it makes a Clause.
+    fn clause_edit(label: &str, text: &str, replaces: Option<&str>, new: u128) -> ClauseEdit {
+        ClauseEdit::new(
+            ClauseLabel::try_from(label).unwrap(),
+            ClauseText::try_from(text).unwrap(),
+            replaces.map(|r| ClauseLabel::try_from(r).unwrap()),
+            clause(new),
+        )
+    }
+
+    /// A partial put of the Contract of `project()`.
+    fn clauses_put(edits: Vec<ClauseEdit>, remove: &[&str]) -> AssetPut {
+        AssetPut::Clauses {
+            context: ctx(),
+            id: contract_id(),
+            edits,
+            remove: remove
+                .iter()
+                .map(|l| ClauseLabel::try_from(*l).unwrap())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_clauses_put_changes_the_clauses_it_names_and_keeps_the_rest_and_the_title() {
+        let mut p = project();
+        p.apply(ChangeSet::new(
+            vec![clauses_put(
+                vec![
+                    clause_edit("C1", "changed", None, 80),
+                    clause_edit("C2", "new", None, 90),
+                ],
+                &[],
+            )],
+            Vec::new(),
+        ))
+        .unwrap();
+        let k = p.context(ctx()).unwrap().contract(contract_id()).unwrap();
+        assert_eq!(k.title().as_str(), "T");
+        let seen: Vec<_> = k
+            .clauses()
+            .iter()
+            .map(|c| {
+                (
+                    c.id(),
+                    c.label().to_string(),
+                    c.text().as_str().to_string(),
+                    c.revision().number(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (clause(20), "C1".to_string(), "changed".to_string(), 2),
+                (clause(21), "C7".to_string(), "a".to_string(), 1),
+                (clause(90), "C2".to_string(), "new".to_string(), 1),
+            ]
+        );
+        assert_eq!(k.revision().number(), 2);
+    }
+
+    #[test]
+    fn a_clauses_put_can_remove_a_clause_no_case_cites() {
+        let mut p = project();
+        p.apply(ChangeSet::new(
+            vec![
+                clauses_put(vec![clause_edit("C2", "new", None, 90)], &[]),
+                harness(vec![draft(50, &[10], &[20])]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        p.apply(ChangeSet::new(
+            vec![clauses_put(Vec::new(), &["C7"])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let k = p.context(ctx()).unwrap().contract(contract_id()).unwrap();
+        let labels: Vec<_> = k.clauses().iter().map(|c| c.label().to_string()).collect();
+        assert_eq!(labels, ["C1", "C2"]);
+        assert!(p.retired_of(Target::Clause(clause(21))).is_some());
+    }
+
+    #[test]
+    fn a_clauses_put_with_a_put_of_the_same_contract_or_another_clauses_put_is_named_twice() {
+        let mut p = project();
+        let before = p.clone();
+        let repeated = ProjectError::Repeated {
+            what: "contract",
+            id: contract_id().as_uuid(),
+        };
+        let edits = || vec![clause_edit("C1", "changed", None, 80)];
+        for puts in [
+            vec![
+                contract(&[(20, "C1"), (21, "C7")]),
+                clauses_put(edits(), &[]),
+            ],
+            vec![
+                clauses_put(edits(), &[]),
+                contract(&[(20, "C1"), (21, "C7")]),
+            ],
+            vec![clauses_put(edits(), &[]), clauses_put(edits(), &[])],
+        ] {
+            assert_eq!(
+                p.apply(ChangeSet::new(puts, Vec::new())).unwrap_err(),
+                repeated
+            );
+        }
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn a_clauses_put_of_a_contract_the_context_does_not_have_or_with_wrong_names_changes_nothing() {
+        let mut p = project();
+        let before = p.clone();
+        let missing = AssetPut::Clauses {
+            context: ctx(),
+            id: ContractId::from_uuid(test_uuid(999)),
+            edits: Vec::new(),
+            remove: Vec::new(),
+        };
+        assert!(matches!(
+            p.apply(ChangeSet::new(vec![missing], Vec::new())),
+            Err(ProjectError::Context(ContextError::NoSuchAsset {
+                kind: "contract",
+                ..
+            }))
+        ));
+        let wrong = clauses_put(vec![clause_edit("C3", "x", Some("C9"), 90)], &["C8"]);
+        let err = p
+            .apply(ChangeSet::new(vec![wrong], Vec::new()))
+            .unwrap_err();
+        let c = |l: &str| ClauseLabel::try_from(l).unwrap();
+        let said = |problem| {
+            ProjectError::Context(ContextError::Contract(ContractError::ClauseName {
+                contract: contract_id(),
+                problem,
+            }))
+        };
+        assert_eq!(
+            err,
+            ProjectError::Many(vec![
+                said(ClauseNameProblem::Unknown {
+                    label: c("C9"),
+                    field: NameField::Replaces
+                }),
+                said(ClauseNameProblem::Unknown {
+                    label: c("C8"),
+                    field: NameField::Remove
+                }),
+            ])
+        );
         assert_eq!(p, before);
     }
 
