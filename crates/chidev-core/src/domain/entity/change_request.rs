@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::domain::vo::assumption::Assumption;
 use crate::domain::vo::choice::Choice;
+use crate::domain::vo::crux::{CruxKind, CruxOption};
 use crate::domain::vo::finding::FindingRef;
 use crate::domain::vo::footprint::Footprint;
 use crate::domain::vo::id::{AnswerId, ChangeRequestId, CruxId, CruxOptionId};
@@ -39,9 +40,14 @@ pub enum ChangeRequestError {
     /// A recommendation or a decision names an option that the Crux does not have.
     #[error("the option {0} is not one of the options of the crux")]
     NotAnOption(CruxOptionId),
-    /// A model question is about words; it cannot be left unspecified.
-    #[error("a {0} question cannot be left unspecified")]
-    UnspecifiedNotAllowed(&'static str),
+    /// A question of a kind that is about words (`model`) cannot be left unspecified.
+    #[error("the crux {crux}, a {} question, cannot be left unspecified", kind.word())]
+    UnspecifiedNotAllowed {
+        /// The Crux.
+        crux: CruxId,
+        /// Its kind.
+        kind: CruxKind,
+    },
     /// The change request is resolved; it takes no more decisions and no more assumptions.
     #[error("the change request is resolved")]
     AlreadyResolved,
@@ -94,10 +100,15 @@ pub enum ChangeRequestError {
     /// decision does not ask it.
     #[error("{0:?} is not an expectation the decision it names asks")]
     UnaskedExpectation(Target),
-    /// The option chosen asks of a target the other of being revised or retired and kept, where the change request
-    /// (or an earlier decision) asks it already.
-    #[error("{0:?} is asked to be revised or retired and to be kept")]
-    ExpectationConflict(Target),
+    /// An option asks of a target the other of being revised or retired and kept, where the change request (or a
+    /// decision that stands) asks it already.
+    #[error("the option `{option}` asks {target:?} the other of being revised or retired and kept")]
+    ExpectationConflict {
+        /// The option that asks it.
+        option: Choice,
+        /// The target.
+        target: Target,
+    },
     /// A stored Crux was raised in a change request that does not exist.
     #[error("the change request {0} that a crux was raised in does not exist")]
     RaisedInUnknown(ChangeRequestId),
@@ -395,31 +406,51 @@ impl ChangeRequest {
         &self.history
     }
 
+    /// Whether `option` may be offered or chosen in this request: it asks of a target what the request and the
+    /// decisions that stand ask of it, or nothing of it. The first target it asks with the other kind (revised or
+    /// retired, where it is kept, or the reverse) is refused with the option and the target. `leaving_out` is the
+    /// answer of a decision that is about to be superseded, so that what it asked no longer stands (see
+    /// [`ChangeRequest::kind_asked`]). This is the one statement of the rule: raising a Crux reads it for the options
+    /// it offers, and deciding one reads it for the option chosen.
+    pub fn check_option(
+        &self,
+        option: &CruxOption,
+        leaving_out: Option<AnswerId>,
+    ) -> Result<(), ChangeRequestError> {
+        for (target, kind) in option.expects() {
+            if self
+                .kind_asked(target, leaving_out)
+                .is_some_and(|held| held != *kind)
+            {
+                return Err(ChangeRequestError::ExpectationConflict {
+                    option: option.choice().clone(),
+                    target: *target,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Records what the option chosen for a Crux raised in it expects, for the decision with the answer `answer`: each
-    /// target in `asked` is recorded with its kind and the revision in `now`, the one it has as the decision is taken
-    /// (a target missing from `now` is gone: it is not recorded). The entry is the decision's own: a target another
-    /// decision asks with the same kind has an entry of each, each with its revision, so that taking one decision
-    /// back leaves what the other asks. A target this request asks itself with the same kind is not recorded, and
-    /// one this decision recorded already is not recorded twice. A target that is asked with another kind, by the
-    /// request or by another decision that stands, is refused, and nothing is recorded. A resolved request is a
-    /// closed record and takes no more (until it is reopened).
+    /// target the option asks is recorded with its kind and the revision in `now`, the one it has as the decision is
+    /// taken (a target missing from `now` is gone: it is not recorded). The entry is the decision's own: a target
+    /// another decision asks with the same kind has an entry of each, each with its revision, so that taking one
+    /// decision back leaves what the other asks. A target this request asks itself with the same kind is not
+    /// recorded, and one this decision recorded already is not recorded twice. A target that is asked with another
+    /// kind, by the request or by another decision that stands, is refused ([`ChangeRequest::check_option`]), and
+    /// nothing is recorded. A resolved request is a closed record and takes no more (until it is reopened).
     pub fn record_decided_expects(
         &mut self,
-        asked: &BTreeMap<Target, ExpectKind>,
+        option: &CruxOption,
         now: &BTreeMap<Target, Revision>,
         answer: AnswerId,
     ) -> Result<(), ChangeRequestError> {
         if self.is_resolved() {
             return Err(ChangeRequestError::AlreadyResolved);
         }
+        self.check_option(option, None)?;
         let mut add = Vec::new();
-        for (target, kind) in asked {
-            match self.kind_asked(target, None) {
-                Some(held) if held != *kind => {
-                    return Err(ChangeRequestError::ExpectationConflict(*target));
-                }
-                _ => {}
-            }
+        for (target, kind) in option.expects() {
             if self.expects.contains_key(target)
                 || self
                     .decided_expects
@@ -563,8 +594,20 @@ mod tests {
         ChangeRequest::open(id(1), draft())
     }
 
-    fn asks(target: Target, kind: ExpectKind) -> BTreeMap<Target, ExpectKind> {
-        BTreeMap::from([(target, kind)])
+    /// An option, named `choice`, that asks every one of `asked`.
+    fn option_asking(choice: &str, asked: &[(Target, ExpectKind)]) -> CruxOption {
+        CruxOption::new(
+            CruxOptionId::from_uuid(test_uuid(1000)),
+            Choice::try_from(choice).unwrap(),
+            None,
+            asked.iter().copied().collect(),
+            None,
+        )
+    }
+
+    /// An option that asks the one target.
+    fn asks(target: Target, kind: ExpectKind) -> CruxOption {
+        option_asking("this", &[(target, kind)])
     }
 
     fn now(revision: Revision) -> BTreeMap<Target, Revision> {
@@ -734,10 +777,16 @@ mod tests {
     fn a_target_asked_with_another_kind_is_refused_and_nothing_is_recorded() {
         let mut c = cr();
         // The request asks `line` to be revised.
-        let both = BTreeMap::from([(detail(), ExpectKind::Target), (line(), ExpectKind::Keep)]);
+        let both = option_asking(
+            "both",
+            &[(detail(), ExpectKind::Target), (line(), ExpectKind::Keep)],
+        );
         assert_eq!(
             c.record_decided_expects(&both, &now(Revision::first()), answer(1)),
-            Err(ChangeRequestError::ExpectationConflict(line()))
+            Err(ChangeRequestError::ExpectationConflict {
+                option: both.choice().clone(),
+                target: line()
+            })
         );
         assert!(c.decided_expects().is_empty());
         // An earlier decision asked `detail` to be revised.
@@ -747,14 +796,66 @@ mod tests {
             answer(1),
         )
         .unwrap();
+        let keeps = asks(detail(), ExpectKind::Keep);
         assert_eq!(
-            c.record_decided_expects(
-                &asks(detail(), ExpectKind::Keep),
-                &now(Revision::first()),
-                answer(2)
-            ),
-            Err(ChangeRequestError::ExpectationConflict(detail()))
+            c.record_decided_expects(&keeps, &now(Revision::first()), answer(2)),
+            Err(ChangeRequestError::ExpectationConflict {
+                option: keeps.choice().clone(),
+                target: detail()
+            })
         );
+        assert_eq!(c.decided_expects().len(), 1);
+    }
+
+    #[test]
+    fn an_option_is_checked_against_the_request_and_the_decisions_that_stand() {
+        let mut c = cr();
+        // Asking nothing, or what the request asks, is no clash.
+        assert_eq!(c.check_option(&option_asking("none", &[]), None), Ok(()));
+        assert_eq!(
+            c.check_option(&asks(line(), ExpectKind::Target), None),
+            Ok(())
+        );
+        // The request asks `line` to be revised; keeping it is the clash, and the option and target are named.
+        let keeps_line = asks(line(), ExpectKind::Keep);
+        let clash = |option: &CruxOption, target| ChangeRequestError::ExpectationConflict {
+            option: option.choice().clone(),
+            target,
+        };
+        assert_eq!(
+            c.check_option(&keeps_line, None),
+            Err(clash(&keeps_line, line()))
+        );
+        // The first target asked with the other kind is the one named.
+        let two = option_asking(
+            "two",
+            &[(line(), ExpectKind::Keep), (detail(), ExpectKind::Keep)],
+        );
+        assert_eq!(c.check_option(&two, None), Err(clash(&two, line())));
+        // A decision that stands asks `detail` to be revised.
+        c.record_decided_expects(
+            &asks(detail(), ExpectKind::Target),
+            &now(Revision::first()),
+            answer(1),
+        )
+        .unwrap();
+        let keeps_detail = asks(detail(), ExpectKind::Keep);
+        assert_eq!(
+            c.check_option(&keeps_detail, None),
+            Err(clash(&keeps_detail, detail()))
+        );
+        // Leaving that decision out (it is about to be superseded) frees `detail`, but not what the request asks.
+        assert_eq!(c.check_option(&keeps_detail, Some(answer(1))), Ok(()));
+        assert_eq!(
+            c.check_option(&keeps_line, Some(answer(1))),
+            Err(clash(&keeps_line, line()))
+        );
+        // Another decision left out frees nothing.
+        assert_eq!(
+            c.check_option(&keeps_detail, Some(answer(2))),
+            Err(clash(&keeps_detail, detail()))
+        );
+        // It only reads.
         assert_eq!(c.decided_expects().len(), 1);
     }
 

@@ -1635,8 +1635,9 @@ fn a_reference_names_a_target_of_each_kind_and_cr_open_echoes_it_by_name() {
         "{}",
         error_at(&results, 8)
     );
-    assert!(
-        error_at(&results, 9).contains("given twice"),
+    assert_eq!(
+        at(&results, 9)["diagnostics"][0]["code"],
+        "cr.target-twice",
         "{}",
         error_at(&results, 9)
     );

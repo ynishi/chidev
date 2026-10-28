@@ -10,6 +10,21 @@ and this project adheres to
 
 ### Changed
 
+- Breaking: every refusal of `cr_crux_raise` and `cr_crux_decide` has a rule id
+  of its own, with its values, where some were `input.invalid` or
+  `domain.unmapped`: `cr.crux-no-option`, `cr.crux-option-twice` (`option`),
+  `cr.crux-recommended-twice` (`count`), `cr.target-twice` (`target`, and
+  `option` when an option names it; `cr_open` gives it too, for a target its
+  own `targets` and `keep` name twice), `cr.crux-expect-conflict` (`option`,
+  `target`: an option asks of a target the other kind than the request or a
+  decision that stands, when the Crux is raised or decided), and
+  `cr.crux-unspecified-not-allowed` (`crux`, `kind`). A `crux` id that names no
+  Crux is `input.unknown-name` with `kind` `crux`. A malformed input to a
+  resolved request is answered with the input's error before
+  `cr.already-resolved`. In Rust, `ChangeRequestError::ExpectationConflict`
+  names the option, `UnspecifiedNotAllowed` names the Crux, raising has
+  `service::crux::raise`, `ChangeRequest::record_decided_expects` takes the
+  option chosen, and `Party::Crux`, `Value::Party` and `Value::Choice` are new.
 - A Clause's label is its name, not part of what it promises (see
   `docs/adr/0004-a-clause-label-is-its-name-not-part-of-what-it-promises.md`).
   Its revision counts changes of its sentence only, as an Item's counts changes

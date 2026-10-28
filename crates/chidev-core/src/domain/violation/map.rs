@@ -13,13 +13,14 @@ use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_ALREADY_BASED, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET,
-    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
-    CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN,
-    CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INTERFACE_BLANK_ITEM,
-    INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE,
-    PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT,
-    SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
-    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CR_ALREADY_RESOLVED, CR_CRUX_ANSWERED, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION,
+    CR_CRUX_OPTION_TWICE, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
+    CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF,
+    CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE,
+    INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED,
+    PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED,
+    PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM,
+    SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
@@ -88,15 +89,34 @@ impl ChangeRequestError {
                     Applicability::Placeholder,
                 )
             }
-            ChangeRequestError::NoOption
-            | ChangeRequestError::DuplicateOption(_)
-            | ChangeRequestError::DuplicateOptionId(_)
-            | ChangeRequestError::UnspecifiedNotAllowed(_)
+            ChangeRequestError::NoOption => Violation::of(CR_CRUX_NO_OPTION).on(here),
+            ChangeRequestError::DuplicateOption(choice) => Violation::of(CR_CRUX_OPTION_TWICE)
+                .on(here)
+                .with_value("option", Value::Choice(choice.clone())),
+            ChangeRequestError::UnspecifiedNotAllowed { crux, kind } => {
+                Violation::of(CR_CRUX_UNSPECIFIED_NOT_ALLOWED)
+                    .on(here)
+                    .with_value("crux", Value::Party(Party::Crux(*crux)))
+                    .with_value("kind", Value::Word(kind.word()))
+                    .with_remedy(
+                        Remedy::AnswerCrux {
+                            change_request: on,
+                            crux: *crux,
+                        },
+                        Applicability::Placeholder,
+                    )
+            }
+            ChangeRequestError::ExpectationConflict { option, target } => {
+                Violation::of(CR_CRUX_EXPECT_CONFLICT)
+                    .on(here)
+                    .with_value("option", Value::Choice(option.clone()))
+                    .with_value("target", Value::Party(Party::Target(*target)))
+            }
+            ChangeRequestError::DuplicateOptionId(_)
             | ChangeRequestError::PolicyRevisionMismatch { .. }
             | ChangeRequestError::NotResolved
             | ChangeRequestError::HistoryOutOfOrder
             | ChangeRequestError::UnaskedExpectation(_)
-            | ChangeRequestError::ExpectationConflict(_)
             | ChangeRequestError::RaisedInUnknown(_) => Violation::unmapped(self).on(here),
         }
     }
@@ -400,6 +420,7 @@ mod tests {
     use crate::domain::rule::{UNMAPPED, rule};
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause::ClauseLabel;
+    use crate::domain::vo::crux::CruxKind;
     use crate::domain::vo::id::{
         ClauseId, ContextId, CruxId, CruxOptionId, InterfaceId, ItemId, test_uuid,
     };
@@ -428,7 +449,7 @@ mod tests {
             ChangeRequestError::DuplicateOption(_) => "DuplicateOption",
             ChangeRequestError::DuplicateOptionId(_) => "DuplicateOptionId",
             ChangeRequestError::NotAnOption(_) => "NotAnOption",
-            ChangeRequestError::UnspecifiedNotAllowed(_) => "UnspecifiedNotAllowed",
+            ChangeRequestError::UnspecifiedNotAllowed { .. } => "UnspecifiedNotAllowed",
             ChangeRequestError::AlreadyResolved => "AlreadyResolved",
             ChangeRequestError::Undecided(_) => "Undecided",
             ChangeRequestError::AlreadyAnswered(_) => "AlreadyAnswered",
@@ -442,7 +463,7 @@ mod tests {
             ChangeRequestError::HistoryOutOfOrder => "HistoryOutOfOrder",
             ChangeRequestError::ChildrenNotResolved { .. } => "ChildrenNotResolved",
             ChangeRequestError::UnaskedExpectation(_) => "UnaskedExpectation",
-            ChangeRequestError::ExpectationConflict(_) => "ExpectationConflict",
+            ChangeRequestError::ExpectationConflict { .. } => "ExpectationConflict",
             ChangeRequestError::RaisedInUnknown(_) => "RaisedInUnknown",
         }
     }
@@ -453,7 +474,10 @@ mod tests {
             ChangeRequestError::DuplicateOption(choice()),
             ChangeRequestError::DuplicateOptionId(CruxOptionId::from_uuid(test_uuid(8))),
             ChangeRequestError::NotAnOption(CruxOptionId::from_uuid(test_uuid(8))),
-            ChangeRequestError::UnspecifiedNotAllowed("model"),
+            ChangeRequestError::UnspecifiedNotAllowed {
+                crux: crux(2),
+                kind: CruxKind::Model,
+            },
             ChangeRequestError::AlreadyResolved,
             ChangeRequestError::Undecided(crux(2)),
             ChangeRequestError::AlreadyAnswered(crux(2)),
@@ -472,7 +496,10 @@ mod tests {
                 children: vec![cr(2), cr(3)],
             },
             ChangeRequestError::UnaskedExpectation(Target::Project),
-            ChangeRequestError::ExpectationConflict(Target::Project),
+            ChangeRequestError::ExpectationConflict {
+                option: choice(),
+                target: Target::Project,
+            },
             ChangeRequestError::RaisedInUnknown(cr(2)),
         ]
     }
@@ -586,16 +613,12 @@ mod tests {
     /// of the errors they wrap that are themselves listed. The count can only go down: a variant that is mapped
     /// leaves this list, and a new variant that is not mapped has to be added to it.
     const STILL_UNMAPPED: &[&str] = &[
-        "ChangeRequestError::DuplicateOption",
         "ChangeRequestError::DuplicateOptionId",
-        "ChangeRequestError::ExpectationConflict",
         "ChangeRequestError::HistoryOutOfOrder",
-        "ChangeRequestError::NoOption",
         "ChangeRequestError::NotResolved",
         "ChangeRequestError::PolicyRevisionMismatch",
         "ChangeRequestError::RaisedInUnknown",
         "ChangeRequestError::UnaskedExpectation",
-        "ChangeRequestError::UnspecifiedNotAllowed",
         "ContextError::NoContract",
         "ContextError::UsesItself",
         "ContractError::DuplicateId",
@@ -769,7 +792,7 @@ mod tests {
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
         assert_eq!(gives().len(), 20 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2);
-        assert_eq!(STILL_UNMAPPED.len(), 27);
+        assert_eq!(STILL_UNMAPPED.len(), 23);
     }
 
     #[test]
@@ -791,13 +814,72 @@ mod tests {
 
     #[test]
     fn an_unmapped_violation_carries_the_debug_text_and_is_tracked_by_the_bug_rule() {
-        let v = ChangeRequestError::NoOption.violation(cr(1));
+        let v = ChangeRequestError::NotResolved.violation(cr(1));
         assert_eq!(*v.rule(), UNMAPPED);
         assert_eq!(
             v.values().get("error"),
-            Some(&Value::Text("NoOption".to_string()))
+            Some(&Value::Text("NotResolved".to_string()))
         );
         assert_eq!(v.subjects(), &[Party::ChangeRequest(cr(1))]);
+    }
+
+    #[test]
+    fn a_crux_with_no_option_and_one_with_a_choice_twice_are_refused_by_rule() {
+        let none = ChangeRequestError::NoOption.violation(cr(1));
+        assert_eq!(none.rule().as_str(), "cr.crux-no-option");
+        assert_eq!(none.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert!(none.values().is_empty());
+
+        let twice = ChangeRequestError::DuplicateOption(choice()).violation(cr(1));
+        assert_eq!(twice.rule().as_str(), "cr.crux-option-twice");
+        assert_eq!(twice.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert_eq!(twice.values().get("option"), Some(&Value::Choice(choice())));
+    }
+
+    #[test]
+    fn a_model_crux_left_unspecified_names_the_crux_and_its_kind_and_asks_for_a_decision() {
+        let v = ChangeRequestError::UnspecifiedNotAllowed {
+            crux: crux(4),
+            kind: CruxKind::Model,
+        }
+        .violation(cr(1));
+        assert_eq!(v.rule().as_str(), "cr.crux-unspecified-not-allowed");
+        assert_eq!(v.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert_eq!(
+            v.values().get("crux"),
+            Some(&Value::Party(Party::Crux(crux(4))))
+        );
+        assert_eq!(v.values().get("kind"), Some(&Value::Word("model")));
+        assert_eq!(
+            v.remedies(),
+            &[(
+                Remedy::AnswerCrux {
+                    change_request: cr(1),
+                    crux: crux(4)
+                },
+                Applicability::Placeholder
+            )]
+        );
+        // The application names the Crux it is told of.
+        assert!(v.parties().contains(&Party::Crux(crux(4))));
+    }
+
+    #[test]
+    fn an_option_that_asks_the_other_kind_of_a_target_names_the_option_and_the_target() {
+        let target = Target::Clause(ClauseId::from_uuid(test_uuid(30)));
+        let v = ChangeRequestError::ExpectationConflict {
+            option: choice(),
+            target,
+        }
+        .violation(cr(1));
+        assert_eq!(v.rule().as_str(), "cr.crux-expect-conflict");
+        assert_eq!(v.subjects(), &[Party::ChangeRequest(cr(1))]);
+        assert_eq!(v.values().get("option"), Some(&Value::Choice(choice())));
+        assert_eq!(
+            v.values().get("target"),
+            Some(&Value::Party(Party::Target(target)))
+        );
+        assert!(v.parties().contains(&Party::Target(target)));
     }
 
     #[test]

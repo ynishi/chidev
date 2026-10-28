@@ -95,6 +95,19 @@ pub const CR_SUPERSEDES_UNANSWERED: RuleId = RuleId::from_static("cr.supersedes-
 pub const CR_POLICY_LINE_UNKNOWN: RuleId = RuleId::from_static("cr.policy-line-unknown");
 /// A change request is titled as another is.
 pub const CR_TITLE_TAKEN: RuleId = RuleId::from_static("cr.title-taken");
+/// A crux is raised with no option to choose.
+pub const CR_CRUX_NO_OPTION: RuleId = RuleId::from_static("cr.crux-no-option");
+/// A crux is raised with the same choice twice.
+pub const CR_CRUX_OPTION_TWICE: RuleId = RuleId::from_static("cr.crux-option-twice");
+/// A crux is raised with more than one option recommended.
+pub const CR_CRUX_RECOMMENDED_TWICE: RuleId = RuleId::from_static("cr.crux-recommended-twice");
+/// A change request, or an option of a crux, names a target as a target and as kept, or twice.
+pub const CR_TARGET_TWICE: RuleId = RuleId::from_static("cr.target-twice");
+/// An option asks of a target the other kind than the change request, or a decision that stands, asks of it.
+pub const CR_CRUX_EXPECT_CONFLICT: RuleId = RuleId::from_static("cr.crux-expect-conflict");
+/// A crux of the kind `model` is left unspecified.
+pub const CR_CRUX_UNSPECIFIED_NOT_ALLOWED: RuleId =
+    RuleId::from_static("cr.crux-unspecified-not-allowed");
 /// A Case cites an Item or a Clause it cannot reach.
 pub const PROJECT_CITE_UNREACHABLE: RuleId = RuleId::from_static("project.cite-unreachable");
 /// A sim Harness builds an Interface it cannot reach.
@@ -275,6 +288,60 @@ static RULES: &[Rule] = &[
         message: "a change request is titled {s0} already",
         values: &[],
         example: r#"{"op":"cr_open","title":"Round halves up","intent":"change_behavior"}"#,
+    },
+    Rule {
+        id: CR_CRUX_NO_OPTION,
+        kind: RuleKind::Invariant,
+        summary: "A crux offers at least one option for the decision maker to choose.",
+        help: "A crux is a question with answers to choose from, and a decision points at one of them by its id. Raise it again with `cr_crux_raise` and an `options` list that has an entry with a `choice`. A question that has no answers to offer is not a crux: settle it as an assumption (`cr_assume`) if the repository or general knowledge answers it.",
+        message: "the crux raised in {s0} offers no option",
+        values: &[],
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[]}"#,
+    },
+    Rule {
+        id: CR_CRUX_OPTION_TWICE,
+        kind: RuleKind::Invariant,
+        summary: "The options of a crux are different choices.",
+        help: "Two options with one `choice` could not be told apart by the person who decides. `values.option` is the choice given twice. Raise the crux again with one option for it, or give the two options different choices.",
+        message: "the crux raised in {s0} offers the option {option} twice",
+        values: &["option"],
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"},{"choice":"up"}]}"#,
+    },
+    Rule {
+        id: CR_CRUX_RECOMMENDED_TWICE,
+        kind: RuleKind::Input,
+        summary: "At most one option of a crux is recommended.",
+        help: "A recommendation says which one option to take, with a reason and a confidence, and a policy line is written against it. `values.count` is how many options have `recommended`. Keep `recommended` on the one option that is recommended and take it off the others.",
+        message: "the crux raised in {s0} recommends {count} options; at most one is recommended",
+        values: &["count"],
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up","recommended":{"reason":"the literal reading"}},{"choice":"to even","recommended":{"reason":"the fairer reading"}}]}"#,
+    },
+    Rule {
+        id: CR_TARGET_TWICE,
+        kind: RuleKind::Input,
+        summary: "A target is named once by a change request, or by one option of a crux, as a target or as kept.",
+        help: "A target is to be revised or retired, or kept, not both and not twice: `targets` and `keep` of `cr_open`, or of one option of `cr_crux_raise`, name it in one place. `values.target` is the target named twice, and `values.option` the choice of the option that names it, which is there only when an option does (not for `cr_open`). Take it out of one of the lists, or out of both when neither is meant.",
+        message: "{target} is named more than once, as a target or as kept, in what is given for {s0}",
+        values: &["target", "option"],
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up","targets":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}],"keep":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}]}]}"#,
+    },
+    Rule {
+        id: CR_CRUX_EXPECT_CONFLICT,
+        kind: RuleKind::Invariant,
+        summary: "An option asks of a target what the change request and the decisions taken in it ask of it, or nothing of it.",
+        help: "A target is revised or retired, or kept, not both. An option that keeps what the change request (or a decision taken in it) asks to be revised or retired, or the reverse, would break that once it is chosen. `values.option` is the choice of the option and `values.target` the target. This is read when the crux is raised, for each option, and again when an option is chosen. Take the target out of the option; or, to change a decision taken before, raise the crux with `supersedes` the crux of that decision, which takes back what the decision asked.",
+        message: "the option {option}, of a crux raised in {s0}, asks {target} the other of being revised or retired and kept than the change request or a decision in it asks",
+        values: &["option", "target"],
+        example: r#"{"op":"cr_crux_raise","in":"Round halves up","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"keep C1","keep":[{"clause":{"context":"core","contract":"rounding","label":"C1"}}]}]}"#,
+    },
+    Rule {
+        id: CR_CRUX_UNSPECIFIED_NOT_ALLOWED,
+        kind: RuleKind::Invariant,
+        summary: "A crux of the kind `model` is not left unspecified.",
+        help: "A question about the words of the model (kind `model`) is the one exception to \"undefined is an answer\": without the word the model cannot be written. `values.crux` is the crux and `values.kind` its kind. Decide it with `cr_crux_decide` by choosing an option (`option`), by wording it (`wording`) or by withdrawing it (`withdrawn`) if the question is not needed any more.",
+        message: "the crux {crux}, raised in {s0}, is a {kind} question and cannot be left unspecified",
+        values: &["crux", "kind"],
+        example: r#"{"op":"cr_crux_decide","crux":"018f6b1e-0000-7000-8000-000000000001","unspecified":[],"basis":{"arbitrary":"left free"},"by":{"person":"alice"}}"#,
     },
     Rule {
         id: PROJECT_CITE_UNREACHABLE,
@@ -540,8 +607,8 @@ static RULES: &[Rule] = &[
     Rule {
         id: INPUT_UNKNOWN_NAME,
         kind: RuleKind::Input,
-        summary: "A name an operation uses (a Context, an asset, a clause label, an item key, a case, a change request title) exists.",
-        help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does. A clause label that `replaces` or `remove` of a clause put names is one the contract must have: `field` says which of the two it is in, and `did_you_mean` lists the labels the contract has.",
+        summary: "A name an operation uses (a Context, an asset, a clause label, an item key, a case, a change request title, a crux id) exists.",
+        help: "Use a name the project has (`did_you_mean` lists the closest), or make the thing first: `suggestions` has the operation that does. A crux is named by its id, which `cr_crux_raise` gave and `view` and `status` list. A clause label that `replaces` or `remove` of a clause put names is one the contract must have: `field` says which of the two it is in, and `did_you_mean` lists the labels the contract has.",
         message: "no {kind} is named `{name}`",
         values: &["kind", "name", "field"],
         example: r#"{"op":"cr_crux_raise","in":"No such title","question":"How is a half rounded?","kind":"ambiguity","options":[{"choice":"up"}]}"#,

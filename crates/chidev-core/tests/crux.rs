@@ -160,6 +160,13 @@ async fn codes(app: &Test, error: &AppError) -> Vec<String> {
         .collect()
 }
 
+/// The one diagnostic of a refusal.
+async fn only(app: &Test, error: &AppError) -> chidev_core::app::Diagnostic {
+    let mut all = app.diagnose(error).await;
+    assert_eq!(all.len(), 1, "{all:#?}");
+    all.remove(0)
+}
+
 async fn revision(app: &Test) -> u64 {
     app.store().revision().await.unwrap().0
 }
@@ -252,10 +259,12 @@ async fn a_crux_carries_the_findings_it_is_raised_from_and_is_refused_when_it_is
         });
     }
     let refused = app.raise_crux(&two).await.unwrap_err();
-    assert!(
-        matches!(&refused, AppError::Input(m) if m.contains("at most one")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, AppError::Violated { .. }), "{refused:?}");
+    assert_eq!(codes(&app, &refused).await, ["cr.crux-recommended-twice"]);
+    let d = only(&app, &refused).await;
+    assert_eq!(d.values["count"], 2);
+    assert_eq!(d.subjects[0].kind, "change_request");
+    assert_eq!(d.subjects[0].name, "Round halves");
     // a choice twice, no option at all, a confidence out of range, and a change request that is not there
     let twice = ask(
         "Round halves",
@@ -273,6 +282,8 @@ async fn a_crux_carries_the_findings_it_is_raised_from_and_is_refused_when_it_is
         ),
         "{err:?}"
     );
+    assert_eq!(codes(&app, &err).await, ["cr.crux-option-twice"]);
+    assert_eq!(only(&app, &err).await.values["option"], "a");
     let none = ask("Round halves", CruxKind::Ambiguity, vec![]);
     let err = app.raise_crux(&none).await.unwrap_err();
     assert!(
@@ -285,6 +296,8 @@ async fn a_crux_carries_the_findings_it_is_raised_from_and_is_refused_when_it_is
         ),
         "{err:?}"
     );
+    assert_eq!(codes(&app, &err).await, ["cr.crux-no-option"]);
+    assert_eq!(only(&app, &err).await.subjects[0].name, "Round halves");
     let mut sure = ask("Round halves", CruxKind::Ambiguity, vec![option("a")]);
     sure.options[0].recommended = Some(RecommendationInput {
         reason: None,
@@ -324,6 +337,21 @@ async fn a_resolved_change_request_takes_no_crux_until_it_is_reopened() {
     assert_eq!(codes(&app, &err).await, ["cr.already-resolved"]);
     assert_eq!(revision(&app).await, at);
     assert!(app.store().cruxes().await.unwrap().is_empty());
+    // The input is read before the rules: one that is not well formed is told so, resolved or not.
+    let mut two = ask(
+        "Round halves",
+        CruxKind::Ambiguity,
+        vec![option("a"), option("b")],
+    );
+    for o in &mut two.options {
+        o.recommended = Some(RecommendationInput {
+            reason: None,
+            confidence: None,
+        });
+    }
+    let err = app.raise_crux(&two).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.crux-recommended-twice"]);
+    assert_eq!(revision(&app).await, at);
 
     app.reopen_change_request("Round halves", "it came back", &alice())
         .await
@@ -345,17 +373,41 @@ async fn the_targets_of_an_option_are_read_against_what_the_change_request_asks(
     clash.options[0].targets = vec![clause("C1")];
     let err = app.raise_crux(&clash).await.unwrap_err();
     assert!(
-        matches!(&err, AppError::Input(m) if m.contains("target and kept")),
+        matches!(
+            &err,
+            AppError::ChangeRequestOf {
+                error: ChangeRequestError::ExpectationConflict { .. },
+                ..
+            }
+        ),
         "{err:?}"
     );
+    assert_eq!(codes(&app, &err).await, ["cr.crux-expect-conflict"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["option"], "reword");
+    assert!(
+        d.values["target"].as_str().unwrap().contains("C1"),
+        "{d:#?}"
+    );
+    assert_eq!(d.subjects[0].name, "Keeps C1");
     // a target given twice by one option
     let mut twice = ask("Keeps C1", CruxKind::Ambiguity, vec![option("reword")]);
     twice.options[0].targets = vec![clause("C2")];
     twice.options[0].keep = vec![clause("C2")];
-    assert!(matches!(
-        app.raise_crux(&twice).await,
-        Err(AppError::Input(_))
-    ));
+    let err = app.raise_crux(&twice).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.target-twice"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["option"], "reword");
+    assert!(
+        d.values["target"].as_str().unwrap().contains("C2"),
+        "{d:#?}"
+    );
+    assert_eq!(d.subjects[0].name, "Keeps C1");
+    // ... or twice in one list
+    twice.options[0].keep = vec![];
+    twice.options[0].targets = vec![clause("C2"), clause("C2")];
+    let err = app.raise_crux(&twice).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.target-twice"]);
     assert_eq!(revision(&app).await, at);
 
     // the same kind is no clash, and another Clause is none
@@ -373,6 +425,29 @@ async fn the_targets_of_an_option_are_read_against_what_the_change_request_asks(
         stored.options()[1].expects().values().next(),
         Some(&ExpectKind::Target)
     );
+}
+
+#[tokio::test]
+async fn a_target_a_change_request_names_twice_is_refused_by_the_rule_an_option_gets() {
+    let mut app = project().await;
+    let at = revision(&app).await;
+    let mut twice = request("Twice");
+    twice.targets = vec![clause("C1")];
+    twice.keep = vec![clause("C1")];
+    let err = app.open_change_request(&twice).await.unwrap_err();
+    assert_eq!(codes(&app, &err).await, ["cr.target-twice"]);
+    let d = only(&app, &err).await;
+    assert!(
+        d.values["target"].as_str().unwrap().contains("C1"),
+        "{d:#?}"
+    );
+    assert!(!d.values.contains_key("option"), "{d:#?}");
+    // the request is not stored, and the diagnostic names it by the title it was opened with
+    assert_eq!(d.subjects[0].name, "Twice");
+    assert_eq!(revision(&app).await, at);
+    // once, in one list, it is opened
+    twice.keep = vec![];
+    app.open_change_request(&twice).await.unwrap();
 }
 
 #[tokio::test]
@@ -491,10 +566,23 @@ async fn an_option_chosen_that_clashes_with_what_an_earlier_decision_asked_is_re
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, AppError::Input(m) if m.contains("target and kept")),
+        matches!(
+            &err,
+            AppError::ChangeRequestOf {
+                error: ChangeRequestError::ExpectationConflict { .. },
+                ..
+            }
+        ),
         "{err:?}"
     );
-    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert_eq!(codes(&app, &err).await, ["cr.crux-expect-conflict"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["option"], "leave");
+    assert!(
+        d.values["target"].as_str().unwrap().contains("C1"),
+        "{d:#?}"
+    );
+    assert_eq!(d.subjects[0].name, "Round halves");
     assert_eq!(revision(&app).await, at);
     assert!(
         app.store()
@@ -546,12 +634,22 @@ async fn a_question_about_the_words_of_the_model_cannot_be_left_unspecified() {
         matches!(
             err,
             AppError::ChangeRequestOf {
-                error: ChangeRequestError::UnspecifiedNotAllowed("model"),
+                error: ChangeRequestError::UnspecifiedNotAllowed {
+                    kind: CruxKind::Model,
+                    ..
+                },
                 ..
             }
         ),
         "{err:?}"
     );
+    assert_eq!(codes(&app, &err).await, ["cr.crux-unspecified-not-allowed"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["crux"], raised.id.to_string());
+    assert_eq!(d.values["kind"], "model");
+    assert_eq!(d.subjects[0].name, "Round halves");
+    assert_eq!(d.suggestions[0].op["op"], "cr_crux_decide");
+    assert_eq!(d.suggestions[0].op["crux"], raised.id.to_string());
     assert_eq!(revision(&app).await, at);
     // it can be worded or withdrawn
     decide(&mut app, &raised.id.to_string(), &DecisionInput::Withdrawn)
@@ -602,10 +700,25 @@ async fn a_decision_names_an_option_the_crux_has_and_a_crux_that_exists() {
     ));
     // a Crux that does not exist, and an id that is not one
     let ghost = Uuid::from_u128(8_888).to_string();
-    assert!(matches!(
-        decide(&mut app, &ghost, &chosen(&raised, 0)).await,
-        Err(AppError::Input(m)) if m.contains("no crux")
-    ));
+    let err = decide(&mut app, &ghost, &chosen(&raised, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(err, AppError::UnknownCrux(ghost.clone()));
+    assert_eq!(codes(&app, &err).await, ["input.unknown-name"]);
+    let d = only(&app, &err).await;
+    assert_eq!(d.values["kind"], "crux");
+    assert_eq!(d.values["name"], ghost.as_str());
+    // a near id names the Crux that exists
+    let mut near = id.clone();
+    near.pop();
+    near.push(if id.ends_with('f') { 'e' } else { 'f' });
+    let err = decide(&mut app, &near, &chosen(&raised, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        only(&app, &err).await.did_you_mean,
+        std::slice::from_ref(&id)
+    );
     assert!(matches!(
         decide(&mut app, "the first one", &chosen(&raised, 0)).await,
         Err(AppError::Input(_))
@@ -923,11 +1036,7 @@ async fn a_crux_that_supersedes_a_decision_in_the_same_request_takes_back_what_t
     let at = revision(&app).await;
     let clash = asking_of("Round halves", "leave C1", "C1", ExpectKind::Keep);
     let err = app.raise_crux(&clash).await.unwrap_err();
-    assert!(
-        matches!(&err, AppError::Input(m) if m.contains("target and kept")),
-        "{err:?}"
-    );
-    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert_eq!(codes(&app, &err).await, ["cr.crux-expect-conflict"]);
     // Nor can one that supersedes another decision than the one that asked.
     let other = raise(
         &mut app,
@@ -940,7 +1049,7 @@ async fn a_crux_that_supersedes_a_decision_in_the_same_request_takes_back_what_t
     let mut wrong = clash.clone();
     wrong.supersedes = Some(other.id.to_string());
     let err = app.raise_crux(&wrong).await.unwrap_err();
-    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert_eq!(codes(&app, &err).await, ["cr.crux-expect-conflict"]);
     assert!(
         revision(&app).await > at,
         "the Crux `up` was raised and decided"
@@ -1130,7 +1239,7 @@ async fn a_decision_that_supersedes_one_and_is_refused_takes_nothing_back() {
     let mut clash = asking_of("Asks C2", "leave C2", "C2", ExpectKind::Keep);
     clash.supersedes = Some(first.id.to_string());
     let err = app.raise_crux(&clash).await.unwrap_err();
-    assert_eq!(codes(&app, &err).await, ["input.invalid"]);
+    assert_eq!(codes(&app, &err).await, ["cr.crux-expect-conflict"]);
     assert_eq!(
         request_titled(&app, "Asks C2")
             .await

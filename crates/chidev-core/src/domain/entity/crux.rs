@@ -205,15 +205,21 @@ impl Crux {
         self.answer_given().map(Answer::decision)
     }
 
+    /// The option the decision chose; none while it is open, and when the decision chose no option (the decision
+    /// maker's own wording, leaving it unspecified, or withdrawing it).
+    pub fn chosen_option(&self) -> Option<&CruxOption> {
+        match self.decision() {
+            Some(Decision::Chosen { option, .. }) => self.option(*option),
+            _ => None,
+        }
+    }
+
     /// What the decision asks of targets besides what the change request asks: those of the option chosen. The
     /// decision maker's own wording names nothing more, leaving it unspecified or withdrawing it names nothing, and
     /// no decision yet names nothing.
     pub fn decided_expects(&self) -> BTreeMap<Target, ExpectKind> {
-        let chosen = match self.decision() {
-            Some(Decision::Chosen { option, .. }) => self.option(*option),
-            _ => None,
-        };
-        chosen.map_or_else(BTreeMap::new, |o| o.expects().clone())
+        self.chosen_option()
+            .map_or_else(BTreeMap::new, |o| o.expects().clone())
     }
 
     /// Takes the answer, once. It is read against the options and the kind: a chosen option is one of the options,
@@ -229,7 +235,10 @@ impl Crux {
                 return Err(ChangeRequestError::NotAnOption(*option));
             }
             Decision::Unspecified { .. } if !self.kind.allows_unspecified() => {
-                return Err(ChangeRequestError::UnspecifiedNotAllowed(self.kind.word()));
+                return Err(ChangeRequestError::UnspecifiedNotAllowed {
+                    crux: self.id,
+                    kind: self.kind,
+                });
             }
             _ => {}
         }
@@ -446,7 +455,10 @@ mod tests {
         let mut c = raised(CruxKind::Model);
         assert_eq!(
             c.answer(free.clone()),
-            Err(ChangeRequestError::UnspecifiedNotAllowed("model"))
+            Err(ChangeRequestError::UnspecifiedNotAllowed {
+                crux: c.id(),
+                kind: CruxKind::Model
+            })
         );
         // Refused, it did not take the answer.
         assert!(c.is_open());
@@ -494,6 +506,27 @@ mod tests {
     }
 
     #[test]
+    fn the_option_chosen_is_the_one_the_decision_names_and_none_otherwise() {
+        let mut c = raised(CruxKind::Ambiguity);
+        assert_eq!(c.chosen_option(), None);
+        c.answer(chosen(2)).unwrap();
+        assert_eq!(c.chosen_option(), c.option(option_id(2)));
+        assert!(c.chosen_option().is_some());
+        for decision in [
+            Decision::Worded {
+                wording: prose("w"),
+                reason: None,
+            },
+            Decision::Unspecified { keep: Vec::new() },
+            Decision::Withdrawn,
+        ] {
+            let mut c = raised(CruxKind::Ambiguity);
+            c.answer(answer_of(decision)).unwrap();
+            assert_eq!(c.chosen_option(), None);
+        }
+    }
+
+    #[test]
     fn a_stored_crux_is_checked_like_a_new_one() {
         let id = CruxId::from_uuid(test_uuid(500));
         let state = |a: Answer| CruxState::Answered(a);
@@ -511,7 +544,10 @@ mod tests {
                 draft(CruxKind::Model),
                 state(answer_of(Decision::Unspecified { keep: Vec::new() }))
             ),
-            Err(ChangeRequestError::UnspecifiedNotAllowed("model"))
+            Err(ChangeRequestError::UnspecifiedNotAllowed {
+                crux: id,
+                kind: CruxKind::Model
+            })
         );
         // a recommendation outside the options, and no option at all
         // The same id for two options with other choices: the id names one option, so it is refused on its own.
