@@ -2228,18 +2228,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
-    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read.
-    async fn checked(
-        &self,
-    ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
-        let at = self.store.revision().await?;
-        let p = self.project().await?;
-        let (crs, cruxes) = self.requests_and_cruxes().await?;
-        self.checked_on(at, &p, &crs, &cruxes).await
-    }
-
-    /// [`App::checked`] on the Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at
-    /// `at`.
+    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read, on the
+    /// Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at `at`.
     async fn checked_on(
         &self,
         at: StoreRevision,
@@ -2301,10 +2291,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok((crs, cruxes))
     }
 
-    /// Where the Project stands.
+    /// Where the Project stands. It answers from one read of the store: the revision, the Project, the change requests
+    /// and the Cruxes are read once, at the top, and the check runs on them. The Pins are read per Interface by their
+    /// own calls.
     pub async fn status(&self) -> Result<Status, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
+        let (crs, cruxes) = self.requests_and_cruxes().await?;
         let mut pins = Vec::new();
         let mut seen = BTreeSet::new();
         for c in p.contexts() {
@@ -2358,8 +2351,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 now: s.now.number(),
             });
         }
-        let (crs, cruxes) = self.requests_and_cruxes().await?;
-        let (findings, judged, measured) = self.checked().await?;
+        let (findings, judged, measured) = self.checked_on(at, &p, &crs, &cruxes).await?;
         let measurements = self.measurement_standings(&p, &measured).await?;
         let title_of = |id: ChangeRequestId| {
             crs.iter()
