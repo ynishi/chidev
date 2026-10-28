@@ -273,6 +273,13 @@ and this project adheres to
 
 ### Fixed
 
+- A `change_set` with a `contract` entry that makes a Contract and a `clauses`
+  entry for the same Contract is refused with `change-set.named-twice` ("the
+  change set names the contract ... twice"), as it is when the Contract exists
+  before the set, in whichever order the two entries are listed. It was refused
+  as an unknown Contract (`input.unknown-name`), which pointed at the entry
+  already sent. A `clauses` entry for a Contract that exists nowhere is still
+  `input.unknown-name`.
 - A `change_set` `for` a request that moves nothing (the same puts applied again)
   no longer adds an empty footprint to the request's `work`: it is applied and
   answers `ok`, and the work holds only footprints that moved something. A
