@@ -42,9 +42,11 @@ the decision maker declared it and checks nothing against it (see
 
 The Harness writer is blind so that the tests check what the Contracts promise,
 not what the code happens to do. A role that has read the implementation does
-not put a Harness. What the Harness writer needs from the requirements, an
-acceptance example included, the designer has put into a Contract: an example
-that shows a promise becomes a Clause (or the wording of one), and an example
+not put a Harness. What the Harness writer needs from the requirements, the
+promise of an acceptance example included, the designer has put into a Contract
+(the example's files themselves are given as they are, for the Harness of
+`examples`): an example that shows a promise becomes a Clause (or the wording
+of one), and an example
 that shows something no Clause promises is a question for step 2 (an
 Assumption or a Crux) before it is a Case: once the answer gives it a Clause,
 a Case checks it like any other. A Harness writer that finds it cannot write a
@@ -181,22 +183,20 @@ Crux names there waits on that question. `view` does not give a request's
    the implementer finds wrong against its Clause goes back to the Harness
    writer with that Clause,
    and the writer puts the corrected Harness `for` the same part. The acceptance examples the
-   requirements give are run by Cases too. The designer puts each one into a
-   Clause that names its files (for example, "the input `acceptance/a1.stdin`
-   gives the output `acceptance/a1.expected` and exit code 0"); the Case reads
-   those files from the repository and checks that Clause, so the tests the
-   implementer runs before `pin` check the examples as well, and the Harness
-   writer learns of them from the Contract alone. The examples can also be run
-   by `chidev accept`, registered as an external check that gates `pin` and
-   `resolve` (see [Acceptance
-   examples](../../README.md#acceptance-examples-chidev-accept)). It reports each
-   failing example about the Clause that names its files, so the Clause names
-   them by their paths from the project's root. chidev keeps the Clause, not the
-   files it names: when a request changes what such a file holds (a new line of the
-   expected output), reword the Clause as well, saying in it what changed, so
-   that its revision moves, the Cases that cite it are checked again, and the
-   request that names it as a target has touched it. A change to the file alone
-   is not seen.
+   requirements give are a Harness of their own, of `kind` `examples` (see
+   [Acceptance examples as a
+   Harness](../../README.md#acceptance-examples-as-a-harness)). The designer puts
+   the promise each example shows into a Clause (in words of the promise; the
+   Clause does not need to name the files), and the Harness writer puts the
+   examples as they are given, with `examples_dir`, each Case citing the Clause
+   its example shows. The model holds the examples, so a request that changes
+   one (a new line of an expected output) is a put of that Harness `for` the
+   request: the example's Case and the Harness go to their next revision and the
+   request has touched them; reword the Clause only when the promise itself
+   changes. The examples are run by `chidev accept --external`, registered as an
+   external check that gates `pin` and `resolve` (see [Acceptance
+   examples](../../README.md#acceptance-examples-chidev-accept)); it reports
+   each failing example about the Clauses its Case cites.
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. chidev does not run the tests
    itself; to have it refuse a `pin` while they fail, register a program that

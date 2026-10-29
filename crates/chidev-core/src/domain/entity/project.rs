@@ -9,11 +9,11 @@ mod apply;
 
 use super::context::{Context, ContextError};
 use super::contract::{Clause, Contract};
-use super::harness::{Case, CaseFound, Harness, SimShapeProblem};
+use super::harness::{Case, CaseFound, ExampleFound, Harness, HarnessStated, SimShapeProblem};
 use super::interface::{Interface, Item, ItemFound};
 use crate::domain::vo::clause::ClauseContent;
 use crate::domain::vo::finding::Subject;
-use crate::domain::vo::harness_kind::HarnessKind;
+use crate::domain::vo::harness_kind::CodeKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId, ProjectId,
 };
@@ -100,9 +100,10 @@ pub enum ProjectError {
         /// The Clause cited.
         clause: ClauseId,
     },
-    /// A sim Harness builds an Interface that is neither in its Context nor in a Context it uses.
+    /// A Harness that builds Interfaces (a sim or one of examples) builds one that is neither in its Context nor in
+    /// a Context it uses.
     #[error(
-        "the sim harness {harness} of the context {context} builds the interface {interface}, which it cannot reach; put the harness again without it, or keep the interface"
+        "the harness {harness} of the context {context} builds the interface {interface}, which it cannot reach; put the harness again without it, or keep the interface"
     )]
     BuildNotReached {
         /// The Context that owns the Harness.
@@ -480,20 +481,43 @@ impl Project {
         self.put_harness_as(context, id, None, BTreeSet::new(), source, cases)
     }
 
-    /// Makes or revises a Harness of a Context as one of `kind` (none: the kind it has, or tests for a new one),
+    /// Makes or revises a Harness of a Context as code of `kind` (none: the kind it has, or tests for a new one),
     /// which builds `builds` (a sim Harness; the Interfaces must be ones the Context owns or uses). A sim Harness
-    /// put is held to the shape the protocol runs ([`ProjectError::SimShape`]).
+    /// put is held to the shape the protocol runs ([`ProjectError::SimShape`]). Code put to a Harness of examples
+    /// without a kind is refused ([`HarnessError::KindContent`](super::harness::HarnessError::KindContent)).
     pub fn put_harness_as(
         &mut self,
         context: ContextId,
         id: HarnessId,
-        kind: Option<HarnessKind>,
+        kind: Option<CodeKind>,
         builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), ProjectError> {
         self.change(context, &BTreeSet::from([id]), |c| {
-            c.put_harness(id, kind, builds, source, cases)
+            c.put_harness(
+                id,
+                builds,
+                HarnessStated::Code {
+                    kind,
+                    source,
+                    cases,
+                },
+            )
+        })
+    }
+
+    /// Makes or revises a Harness of a Context as one of examples, which builds `builds` (the Interfaces must be
+    /// ones the Context owns or uses). A Harness of code put so becomes a Harness of examples.
+    pub fn put_examples_harness(
+        &mut self,
+        context: ContextId,
+        id: HarnessId,
+        builds: BTreeSet<InterfaceId>,
+        cases: Vec<ExampleFound>,
+    ) -> Result<(), ProjectError> {
+        self.change(context, &BTreeSet::from([id]), |c| {
+            c.put_harness(id, builds, HarnessStated::Examples(cases))
         })
     }
 
@@ -959,6 +983,7 @@ mod tests {
     use crate::domain::entity::context::Basis;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseLabel, ClauseText};
+    use crate::domain::vo::harness_kind::HarnessKind;
     use crate::domain::vo::id::test_uuid;
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
@@ -1760,7 +1785,7 @@ mod tests {
         p.put_harness_as(
             ctx_id(1),
             sim_id(id),
-            Some(HarnessKind::Sim),
+            Some(CodeKind::Sim),
             BTreeSet::from([InterfaceId::from_uuid(test_uuid(101))]),
             Source::new("script\n".to_string()),
             cases,
@@ -1805,7 +1830,7 @@ mod tests {
             .put_harness_as(
                 ctx_id(1),
                 id,
-                Some(HarnessKind::Sim),
+                Some(CodeKind::Sim),
                 BTreeSet::new(),
                 Source::new("script\n".to_string()),
                 vec![sim_case(50, "sweep", &[11])],
@@ -1848,7 +1873,7 @@ mod tests {
     #[test]
     fn a_shape_a_store_kept_is_read_and_stops_only_a_put_of_that_harness() {
         let stray = Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             sim_id(500),
             BTreeSet::new(),
             Source::new("script\n".to_string()),

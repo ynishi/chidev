@@ -727,7 +727,7 @@ mod tests {
 
         use crate::domain::vo::case::CaseCites;
         use crate::domain::vo::case::CaseName;
-        use crate::domain::vo::harness_kind::HarnessKind;
+        use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
         use crate::domain::vo::id::{HarnessId, InterfaceId};
         use crate::domain::vo::source::Source;
         let mut p = project();
@@ -749,7 +749,7 @@ mod tests {
                     (
                         k.id(),
                         CaseName::try_from("sweep").unwrap(),
-                        k.lines(),
+                        k.lines().unwrap(),
                         CaseCites::of(BTreeMap::new(), k.cites().clauses().clone()),
                     )
                 })
@@ -760,7 +760,7 @@ mod tests {
         p.put_harness_as(
             top,
             harness,
-            Some(HarnessKind::Sim),
+            Some(CodeKind::Sim),
             BTreeSet::from([iface]),
             Source::new("#[test]\nfn push_then_pop() {}\n".to_string()),
             cases,
@@ -781,6 +781,183 @@ mod tests {
         // a kind nobody knows is corrupt, not quietly tests
         let odd = text.replace("\"kind\":\"sim\"", "\"kind\":\"fuzz\"");
         assert!(decode_project(CURRENT, &odd).is_err());
+    }
+
+    /// The fixture, and a Harness of examples `acceptance` (id 50) in its Context `top`, building the Interface and
+    /// holding one example, which cites the Clause C1 and states the errors `warn`.
+    fn with_examples() -> Project {
+        with_example_errors(Some("warn\n"))
+    }
+
+    /// As [`with_examples`], the example not stating errors.
+    fn with_examples_without_errors() -> Project {
+        with_example_errors(None)
+    }
+
+    fn with_example_errors(errors: Option<&str>) -> Project {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use crate::domain::vo::case::{CaseCites, CaseName};
+        use crate::domain::vo::example::Example;
+        use crate::domain::vo::id::{CaseId, ClauseId, ContextId, HarnessId, InterfaceId};
+        use crate::domain::vo::revision::Revision;
+        let mut p = project();
+        p.put_examples_harness(
+            ContextId::from_uuid(id(11)),
+            HarnessId::from_uuid(id(50)),
+            BTreeSet::from([InterfaceId::from_uuid(id(IFACE))]),
+            vec![(
+                CaseId::from_uuid(id(51)),
+                CaseName::try_from("a1").unwrap(),
+                Example::new(
+                    "-n 1".to_string(),
+                    "in\n".to_string(),
+                    "out\n#exit 0\n".to_string(),
+                    errors.map(str::to_string),
+                )
+                .unwrap(),
+                CaseCites::of(
+                    BTreeMap::new(),
+                    BTreeMap::from([(ClauseId::from_uuid(id(21)), Revision::first())]),
+                ),
+            )],
+        )
+        .unwrap();
+        p
+    }
+
+    /// The document of the Harness with this id, in the Context `top`.
+    fn harness_doc(doc: &mut serde_json::Value, n: u128) -> &mut serde_json::Value {
+        doc["contexts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|c| c["name"] == "top")
+            .unwrap()["harnesses"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|h| h["id"] == id(n).to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_harness_of_examples_comes_back_as_it_was_written_with_its_texts_and_no_code() {
+        let p = with_examples();
+        let text = encode_project(&p).unwrap();
+        assert_eq!(decode_project(CURRENT, &text).unwrap(), p);
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let h = harness_doc(&mut doc, 50);
+        assert_eq!(h["kind"], "examples");
+        // no code, and a Case on no lines
+        assert!(h.get("source").is_none(), "{h:#}");
+        let case = &h["cases"][0];
+        assert!(
+            case.get("first").is_none() && case.get("last").is_none(),
+            "{case:#}"
+        );
+        assert_eq!(
+            case["example"],
+            serde_json::json!({"args":"-n 1","stdin":"in\n","expected":"out\n#exit 0\n","stderr":"warn\n"})
+        );
+        // the error text is the one text that may be left out
+        let p = with_examples_without_errors();
+        let text = encode_project(&p).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let case = &harness_doc(&mut doc, 50)["cases"][0];
+        assert!(case["example"].get("stderr").is_none(), "{case:#}");
+        assert_eq!(decode_project(CURRENT, &text).unwrap(), p);
+    }
+
+    #[test]
+    fn a_document_of_tests_or_of_a_sim_has_none_of_the_keys_of_examples() {
+        let text = encode_project(&project()).unwrap();
+        assert!(!text.contains("\"example\""), "{text}");
+        assert!(!text.contains("examples"), "{text}");
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let h = harness_doc(&mut doc, 40);
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        // the keys a Harness and its Cases always had, written in the order they always were
+        let mut want = vec!["cases", "id", "revision", "source"];
+        want.sort_unstable();
+        assert_eq!(keys(h), want);
+        let mut want = vec![
+            "clauses", "first", "id", "items", "last", "name", "revision",
+        ];
+        want.sort_unstable();
+        assert_eq!(keys(&h["cases"][0]), want);
+        assert!(text.contains(r#""source":"#));
+        assert!(text.contains(r#""first":1,"last":2,"items""#), "{text}");
+    }
+
+    #[test]
+    fn a_document_that_is_not_the_shape_of_its_kind_is_corrupt() {
+        let text = encode_project(&with_examples()).unwrap();
+        let corrupt = |doc: &serde_json::Value| {
+            matches!(
+                decode_project(CURRENT, &doc.to_string()),
+                Err(StoreError::Corrupt(_))
+            )
+        };
+        let original: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(!corrupt(&original));
+        // a Harness of examples with code
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["source"] = serde_json::json!("x\n");
+        assert!(corrupt(&doc));
+        // an example Case that is on lines, or holds no example, or whose expected output has no exit line
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["cases"][0]["first"] = serde_json::json!(1);
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["cases"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("example");
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["cases"][0]["example"]["expected"] = serde_json::json!("out\n");
+        assert!(corrupt(&doc));
+        // an example that cites an Item, or no Clause, and one in a Harness that builds nothing
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["cases"][0]["items"] =
+            serde_json::json!([{"id": id(31).to_string(), "revision": 1}]);
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["cases"][0]["clauses"] = serde_json::json!([]);
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 50)["builds"] = serde_json::json!([]);
+        assert!(corrupt(&doc));
+        // a Case of code that holds an example, or is on no lines; code with no source
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 40)["cases"][0]["example"] =
+            serde_json::json!({"args":"","stdin":"","expected":"#exit 0\n"});
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 40)["cases"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("first");
+        assert!(corrupt(&doc));
+        let mut doc = original.clone();
+        harness_doc(&mut doc, 40)
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        assert!(corrupt(&doc));
+    }
+
+    #[test]
+    fn a_text_past_the_limit_of_a_put_is_read_from_the_store() {
+        let text = encode_project(&with_examples()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        harness_doc(&mut doc, 50)["cases"][0]["example"]["stdin"] =
+            serde_json::json!("x".repeat(crate::domain::vo::example::TEXT_LIMIT + 1));
+        let read = decode_project(CURRENT, &doc.to_string()).unwrap();
+        assert_eq!(read.contexts().count(), 2);
     }
 
     #[test]

@@ -310,7 +310,7 @@ fn a_view_gives_the_sections_of_the_contexts_asked_for_and_the_revision_it_was_r
     assert_eq!(v["ok"], true, "{v:#?}");
     assert_eq!(v["op"], "view");
     assert!(v["store_revision"].is_u64());
-    assert_eq!(v["view"]["version"], 4);
+    assert_eq!(v["view"]["version"], 5);
     assert_eq!(context_names(v), ["core"]);
     let core = &v["view"]["contexts"][0];
     for key in ["id", "name", "basis", "uses"] {
@@ -537,8 +537,8 @@ fn the_schema_of_the_view_describes_the_view_an_operation_gives() {
         schema["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
     );
-    assert_eq!(schema["title"], "chidev-view 4");
-    assert_eq!(schema["$id"], "urn:chidev:schema:view:4");
+    assert_eq!(schema["title"], "chidev-view 5");
+    assert_eq!(schema["$id"], "urn:chidev:schema:view:5");
 
     let r = after_setup(
         "view-schema",

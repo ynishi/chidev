@@ -5,7 +5,7 @@
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ClausesPut, ContractPut,
-    HarnessPut, ItemInput, ItemRef, PutInput,
+    HarnessPut, HarnessPutContent, ItemInput, ItemRef, PutInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -446,10 +446,12 @@ fn put_tests(cases: Vec<CaseInput>) -> PutInput {
     PutInput::Harness(HarnessPut {
         context: "core".to_string(),
         name: "tests".to_string(),
-        kind: None,
         builds: Vec::new(),
-        source: "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n".to_string(),
-        cases,
+        content: HarnessPutContent::Code {
+            kind: None,
+            source: "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n".to_string(),
+            cases,
+        },
     })
 }
 

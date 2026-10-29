@@ -10,11 +10,13 @@ use super::{
     harness_records, interface_records, refuse_cited, refused, sim_shape_problems,
 };
 use crate::domain::entity::context::{Context, ContextError};
-use crate::domain::entity::harness::{CaseFound, Harness};
+use crate::domain::entity::harness::{CaseFound, ExampleFound, Harness, HarnessStated};
 use crate::domain::vo::case::CaseCites;
-use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
+use crate::domain::vo::change_set::{
+    AssetPut, AssetRetire, CaseDraft, ChangeSet, ExampleDraft, HarnessDraft,
+};
 use crate::domain::vo::frame::Frame;
-use crate::domain::vo::id::{ClauseId, ContextId, HarnessId, ItemId};
+use crate::domain::vo::id::{CaseId, ClauseId, ContextId, HarnessId, ItemId};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -218,19 +220,31 @@ fn put_one(
         AssetPut::Harness {
             context,
             id,
-            kind,
             builds,
-            source,
-            cases,
+            content,
         } => {
             let before = next.get(&context).and_then(|c| c.harness(id));
-            let found: Vec<CaseFound> = cases
-                .into_iter()
-                .map(|d| found_of(next, frame, (context, id), before, d))
-                .collect();
-            let done = edit(next, context, |c| {
-                c.put_harness(id, kind, builds, source, found)
-            });
+            let stated = match content {
+                HarnessDraft::Code {
+                    kind,
+                    source,
+                    cases,
+                } => HarnessStated::Code {
+                    kind,
+                    source,
+                    cases: cases
+                        .into_iter()
+                        .map(|d| found_of(next, frame, (context, id), before, d))
+                        .collect(),
+                },
+                HarnessDraft::Examples(cases) => HarnessStated::Examples(
+                    cases
+                        .into_iter()
+                        .map(|d| example_found_of(next, frame, (context, id), before, d))
+                        .collect(),
+                ),
+            };
+            let done = edit(next, context, |c| c.put_harness(id, builds, stated));
             (context, done)
         }
     }
@@ -267,10 +281,58 @@ fn found_of(
     before: Option<&Harness>,
     draft: CaseDraft,
 ) -> CaseFound {
-    let old = before.and_then(|h| h.case(draft.id()));
+    let cites = cites_of(
+        contexts,
+        frame,
+        at,
+        before,
+        draft.id(),
+        draft.items(),
+        draft.clauses(),
+    );
+    (draft.id(), draft.name().clone(), draft.lines(), cites)
+}
+
+/// The Case of examples as the Harness takes it, its citations recorded as [`found_of`] records those of a Case of
+/// code.
+fn example_found_of(
+    contexts: &BTreeMap<ContextId, Context>,
+    frame: Option<&Frame>,
+    at: (ContextId, HarnessId),
+    before: Option<&Harness>,
+    draft: ExampleDraft,
+) -> ExampleFound {
+    let cites = cites_of(
+        contexts,
+        frame,
+        at,
+        before,
+        draft.id(),
+        &BTreeSet::new(),
+        draft.clauses(),
+    );
+    (
+        draft.id(),
+        draft.name().clone(),
+        draft.example().clone(),
+        cites,
+    )
+}
+
+/// What the Case `case` cites, `items` and `clauses`, each at the revision [`found_of`] records it at.
+fn cites_of(
+    contexts: &BTreeMap<ContextId, Context>,
+    frame: Option<&Frame>,
+    at: (ContextId, HarnessId),
+    before: Option<&Harness>,
+    case: CaseId,
+    items: &BTreeSet<ItemId>,
+    clauses: &BTreeSet<ClauseId>,
+) -> CaseCites {
+    let old = before.and_then(|h| h.case(case));
     let case_inside = frame.is_some_and(|f| {
         f.contains(
-            Target::Case(draft.id()),
+            Target::Case(case),
             &[
                 Target::Project,
                 Target::Context(at.0),
@@ -319,11 +381,10 @@ fn found_of(
         let was = old.and_then(|c| c.cites().clauses().get(id).copied());
         recorded(Target::Clause(*id), now, was, &within)
     };
-    let cites = CaseCites::of(
-        draft.items().iter().map(|i| (*i, item(i))).collect(),
-        draft.clauses().iter().map(|k| (*k, clause(k))).collect(),
-    );
-    (draft.id(), draft.name().clone(), draft.lines(), cites)
+    CaseCites::of(
+        items.iter().map(|i| (*i, item(i))).collect(),
+        clauses.iter().map(|k| (*k, clause(k))).collect(),
+    )
 }
 
 /// Retires one thing out of `next`: the records of it and of its parts, and the Context when it is one. A Context
@@ -458,7 +519,8 @@ mod tests {
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
     use crate::domain::vo::clause_edit::{ClauseEdit, ClauseNameProblem, NameField};
-    use crate::domain::vo::harness_kind::HarnessKind;
+    use crate::domain::vo::example::Example;
+    use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, InterfaceId, ProjectId, test_uuid};
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
@@ -549,10 +611,12 @@ mod tests {
         AssetPut::Harness {
             context: ctx(),
             id: harness_id(),
-            kind: None,
             builds: BTreeSet::new(),
-            source: Source::new("fn t() {}\n".to_string()),
-            cases,
+            content: HarnessDraft::Code {
+                kind: None,
+                source: Source::new("fn t() {}\n".to_string()),
+                cases,
+            },
         }
     }
 
@@ -561,10 +625,12 @@ mod tests {
         AssetPut::Harness {
             context: ctx(),
             id: HarnessId::from_uuid(test_uuid(106)),
-            kind: Some(HarnessKind::Sim),
             builds: builds.iter().copied().collect(),
-            source: Source::new("fn s() {}\n".to_string()),
-            cases: vec![sweep(70, clauses)],
+            content: HarnessDraft::Code {
+                kind: Some(CodeKind::Sim),
+                source: Source::new("fn s() {}\n".to_string()),
+                cases: vec![sweep(70, clauses)],
+            },
         }
     }
 
@@ -621,6 +687,163 @@ mod tests {
             interface(&[(10, "fn a()")]),
             harness(vec![draft(50, &[10], &[20])]),
         ]
+    }
+
+    fn example(expected: &str) -> Example {
+        Example::new(
+            "-n 1".to_string(),
+            "in\n".to_string(),
+            expected.to_string(),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A Harness of examples `harness_id()` that builds the Interface and has one example Case (50) citing `clauses`.
+    fn examples_put(expected: &str, clauses: &[u128]) -> AssetPut {
+        AssetPut::Harness {
+            context: ctx(),
+            id: harness_id(),
+            builds: BTreeSet::from([interface_id()]),
+            content: HarnessDraft::Examples(vec![ExampleDraft::new(
+                CaseId::from_uuid(test_uuid(50)),
+                CaseName::try_from("a1").unwrap(),
+                example(expected),
+                clauses.iter().map(|k| clause(*k)).collect(),
+            )]),
+        }
+    }
+
+    fn with_context() -> Project {
+        let mut p = Project::new(ProjectId::from_uuid(test_uuid(1000)));
+        p.add_context(
+            Context::new(
+                ctx(),
+                ContextName::try_from("core").unwrap(),
+                BTreeSet::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        p
+    }
+
+    #[test]
+    fn a_harness_of_examples_cites_a_clause_the_same_set_makes_and_follows_it() {
+        let mut p = with_context();
+        p.apply(ChangeSet::new(
+            vec![
+                examples_put("1\n#exit 0\n", &[20]),
+                contract(&[(20, "C1")]),
+                interface(&[(10, "fn a()")]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let h = p.context(ctx()).unwrap().harness(harness_id()).unwrap();
+        assert_eq!(h.kind(), HarnessKind::Examples);
+        assert!(h.source().is_none());
+        let case = h.case(CaseId::from_uuid(test_uuid(50))).unwrap();
+        assert_eq!(case.example(), Some(&example("1\n#exit 0\n")));
+        // the citation is recorded at the revision the Clause has in the end
+        assert_eq!(
+            case.cites().clauses().get(&clause(20)),
+            Some(&Revision::first())
+        );
+        assert!(case.cites().items().is_empty());
+        // an example that is not there is a Case that cites what is not: refused, as for any Case
+        let err = p
+            .apply(ChangeSet::new(
+                vec![examples_put("1\n#exit 0\n", &[99])],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProjectError::ClauseNotReached { clause: c, .. } if c == clause(99)),
+            "{err:?}"
+        );
+        // the Clause is reworded: the Case is stale against it, and the example is as it was
+        p.apply(ChangeSet::new(
+            vec![AssetPut::Contract {
+                context: ctx(),
+                id: contract_id(),
+                title: Title::try_from("T").unwrap(),
+                clauses: vec![(
+                    clause(20),
+                    ClauseContent::new(
+                        ClauseLabel::try_from("C1").unwrap(),
+                        ClauseText::try_from("b").unwrap(),
+                    ),
+                )],
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+        let h = p.context(ctx()).unwrap().harness(harness_id()).unwrap();
+        assert_eq!(h.revision(), Revision::first());
+        assert_eq!(
+            h.cases()[0].cites().clauses().get(&clause(20)),
+            Some(&Revision::first())
+        );
+    }
+
+    #[test]
+    fn code_put_to_a_harness_of_examples_must_say_its_kind_and_then_it_is_a_revision() {
+        use crate::domain::entity::context::ContextError;
+        use crate::domain::entity::harness::HarnessError;
+
+        let mut p = with_context();
+        p.apply(ChangeSet::new(
+            vec![
+                examples_put("1\n#exit 0\n", &[20]),
+                contract(&[(20, "C1")]),
+                interface(&[(10, "fn a()")]),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let before = p.clone();
+        let err = p
+            .apply(ChangeSet::new(
+                vec![harness(vec![draft(50, &[10], &[20])])],
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ProjectError::Context(ContextError::Harness(HarnessError::KindContent {
+                harness: harness_id()
+            }))
+        );
+        assert_eq!(p, before);
+        // said, it makes the Harness one of tests
+        p.apply(ChangeSet::new(
+            vec![AssetPut::Harness {
+                context: ctx(),
+                id: harness_id(),
+                builds: BTreeSet::new(),
+                content: HarnessDraft::Code {
+                    kind: Some(CodeKind::Tests),
+                    source: Source::new("fn t() {}\n".to_string()),
+                    cases: vec![draft(50, &[10], &[20])],
+                },
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+        let h = p.context(ctx()).unwrap().harness(harness_id()).unwrap();
+        assert_eq!(h.kind(), HarnessKind::Tests);
+        assert_eq!(h.revision().number(), 2);
+        assert_eq!(h.cases()[0].revision().number(), 2);
+        // and examples put to it again make it one of examples
+        p.apply(ChangeSet::new(
+            vec![examples_put("1\n#exit 0\n", &[20])],
+            Vec::new(),
+        ))
+        .unwrap();
+        let h = p.context(ctx()).unwrap().harness(harness_id()).unwrap();
+        assert_eq!(h.kind(), HarnessKind::Examples);
+        assert_eq!(h.revision().number(), 3);
     }
 
     #[test]
@@ -797,10 +1020,12 @@ mod tests {
         let extra_harness = AssetPut::Harness {
             context: ctx(),
             id: HarnessId::from_uuid(test_uuid(105)),
-            kind: None,
             builds: BTreeSet::new(),
-            source: Source::new("fn n() {}\n".to_string()),
-            cases: vec![draft(60, &[10], &[40])],
+            content: HarnessDraft::Code {
+                kind: None,
+                source: Source::new("fn n() {}\n".to_string()),
+                cases: vec![draft(60, &[10], &[40])],
+            },
         };
         p.apply(ChangeSet::new(
             vec![extra_harness, extra_contract],
@@ -1155,10 +1380,12 @@ mod tests {
         AssetPut::Harness {
             context: ctx(),
             id: sim_id(id),
-            kind: Some(HarnessKind::Sim),
             builds: builds.iter().copied().collect(),
-            source: Source::new("fn s() {}\n".to_string()),
-            cases,
+            content: HarnessDraft::Code {
+                kind: Some(CodeKind::Sim),
+                source: Source::new("fn s() {}\n".to_string()),
+                cases,
+            },
         }
     }
 
@@ -1187,7 +1414,7 @@ mod tests {
     /// `(id, name, Clauses cited)`.
     fn kept_sim(id: u128, cases: &[(u128, &str, &[u128])]) -> Harness {
         Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             sim_id(id),
             BTreeSet::from([interface_id()]),
             Source::new("fn s() {}\n".to_string()),

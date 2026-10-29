@@ -216,7 +216,7 @@ mod tests {
         p.put_harness_as(
             ctx(),
             HarnessId::from_uuid(test_uuid(id)),
-            Some(HarnessKind::Sim),
+            Some(crate::domain::vo::harness_kind::CodeKind::Sim),
             BTreeSet::from([iface()]),
             Source::new("script\n".to_string()),
             cases,

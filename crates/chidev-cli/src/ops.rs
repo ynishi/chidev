@@ -12,12 +12,13 @@ use chidev_core::app::{
     BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef,
     ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
     DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
-    FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput,
-    ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
-    Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput,
-    RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
-    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge,
-    SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
+    ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
+    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView,
+    OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput, PutDone, PutInput,
+    RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining, RenameInput,
+    ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus,
+    Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef,
+    TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
@@ -26,6 +27,7 @@ use chidev_core::domain::entity::measurement::MeasurementField;
 use chidev_core::domain::vo::id::{ChangeRequestId, CruxId, CruxOptionId, MeasurementId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::infra::accept;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
@@ -95,10 +97,21 @@ enum Op {
     /// the citations do; `revised` lists the Items whose new lines declare something else, which go to their next
     /// revision. Not a change set: nothing else is put, and a store that moved meanwhile refuses it.
     ItemsRekey { context: String, interface: String },
-    /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness) or `sim`; an existing Harness
-    /// keeps its kind when none is given. `builds` (a sim only) names the Interfaces of the Context whose pinned
-    /// code the program is built from; a put states all of it. A Case of tests cites an Item at least, a Case of a
-    /// sim cites Clauses only. The source is `source`, or the text of the file `source_file`; exactly one is given.
+    /// Makes or revises a Harness. `kind` is `tests` (the default for a new Harness), `sim` or `examples`; an
+    /// existing Harness keeps its kind when none is given, except one of examples, which must be told (a put of code
+    /// to it without a kind is refused). `builds` (a sim, or a Harness of examples) names the Interfaces of the
+    /// Context whose pinned code the program is built from; a put states all of it.
+    ///
+    /// Code (`tests` or `sim`): the source is `source`, or the text of the file `source_file`; exactly one is given.
+    /// Every Case has `lines`, and no Case has `example`; there is no `examples_dir`. A Case of tests cites an Item
+    /// at least, a Case of a sim cites Clauses only.
+    ///
+    /// Examples: there is no source and no Case has `lines` or `items`. The examples are in `examples_dir`, a
+    /// directory relative to the project's root with `<name>.args`, `<name>.stdin`, `<name>.expected` (the output,
+    /// then a last line `#exit <code>`) and optionally `<name>.stderr` for each example, and every Case is named
+    /// for one of them; or every Case has an `example` `{args, stdin, expected, stderr?}` with the same texts. Exactly
+    /// one of the two is used. The texts are read here and kept in the model, never the directory, so a change of one
+    /// is a new revision of its Case and of the Harness. A Case cites Clauses only, one at least.
     HarnessPut {
         context: String,
         name: String,
@@ -110,6 +123,8 @@ enum Op {
         source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        examples_dir: Option<String>,
         cases: Vec<CaseDto>,
     },
     /// Puts and retires several assets as one change: the rules of the project are checked once, on the state it
@@ -335,6 +350,8 @@ enum PutDto {
         source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        examples_dir: Option<String>,
         cases: Vec<CaseDto>,
     },
 }
@@ -430,26 +447,234 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             builds,
             source,
             source_file,
+            examples_dir,
             cases,
         } => {
             let label = format!("the put of the harness `{name}`");
-            let source = text_of(
+            let content = harness_content(
                 root,
                 &label,
-                ("source", source),
-                ("source_file", source_file),
+                HarnessText {
+                    kind,
+                    source,
+                    source_file,
+                    examples_dir,
+                },
+                cases,
             )
             .await?;
             PutInput::Harness(HarnessPut {
                 context,
                 name,
-                kind: harness_kind(kind.as_deref())?,
                 builds,
-                source,
-                cases: case_inputs(cases),
+                content,
             })
         }
     })
+}
+
+/// What a put of a Harness says of its content outside its Cases: the kind, and where the code or the examples are.
+struct HarnessText {
+    kind: Option<String>,
+    source: Option<String>,
+    source_file: Option<String>,
+    examples_dir: Option<String>,
+}
+
+/// What a put of a Harness holds, from the fields that say it. The kind decides which fields belong: a Harness of
+/// examples has no source and no Case on lines or citing an Item, and takes its texts from `examples_dir` or from
+/// each Case's `example`, one of the two; any other has code, every Case on lines, and no `examples_dir` or `example`.
+/// Every field that does not belong, and every example that has no Case or Case that has no example, is named in
+/// the error. A directory is read here, at the boundary, so the use case receives text and never a path.
+async fn harness_content(
+    root: &Path,
+    label: &str,
+    text: HarnessText,
+    cases: Vec<CaseDto>,
+) -> Result<HarnessPutContent, AppError> {
+    let HarnessText {
+        kind,
+        source,
+        source_file,
+        examples_dir,
+    } = text;
+    let kind = harness_kind(kind.as_deref())?;
+    let mut problems = Vec::new();
+    if kind == Some(HarnessKind::Examples) {
+        if source.is_some() || source_file.is_some() {
+            problems.push(
+                "a harness of examples has no source: leave out `source` and `source_file`"
+                    .to_string(),
+            );
+        }
+        for c in &cases {
+            if c.lines.is_some() {
+                problems.push(format!(
+                    "the case `{}` has `lines`, but an example is on no lines",
+                    c.name
+                ));
+            }
+            if !c.items.is_empty() {
+                problems.push(format!(
+                    "the case `{}` cites items, but an example cites clauses only",
+                    c.name
+                ));
+            }
+        }
+        let loaded = match &examples_dir {
+            Some(dir) => {
+                for c in cases.iter().filter(|c| c.example.is_some()) {
+                    problems.push(format!(
+                        "the case `{}` has an `example` and `examples_dir` is given: use one of the two",
+                        c.name
+                    ));
+                }
+                load_examples(root, dir, &cases, &mut problems).await
+            }
+            None => {
+                for c in cases.iter().filter(|c| c.example.is_none()) {
+                    problems.push(format!(
+                        "the case `{}` has no `example`: give each case an `example`, or `examples_dir`",
+                        c.name
+                    ));
+                }
+                Vec::new()
+            }
+        };
+        if !problems.is_empty() {
+            return Err(refusal(label, problems));
+        }
+        let mut examples = Vec::with_capacity(cases.len());
+        for c in cases {
+            let example = match c.example {
+                Some(e) => ExampleTexts {
+                    args: e.args,
+                    stdin: e.stdin,
+                    expected: e.expected,
+                    stderr: e.stderr,
+                },
+                None => match loaded.iter().find(|(name, _)| name == c.name.trim()) {
+                    Some((_, texts)) => texts.clone(),
+                    // found above, with the rest of the problems; not reachable once there are none
+                    None => {
+                        return Err(AppError::Input(format!(
+                            "{label}: the case `{}` has no example",
+                            c.name
+                        )));
+                    }
+                },
+            };
+            examples.push(ExampleInput {
+                name: c.name,
+                clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+                example,
+            });
+        }
+        return Ok(HarnessPutContent::Examples(examples));
+    }
+    if examples_dir.is_some() {
+        problems.push(format!(
+            "`examples_dir` is for a harness of examples, and this one is of {}: give `kind` `examples`",
+            kind.unwrap_or_default().word()
+        ));
+    }
+    for c in &cases {
+        if c.example.is_some() {
+            problems.push(format!(
+                "the case `{}` has an `example`, which only a harness of examples has: give `kind` `examples`",
+                c.name
+            ));
+        }
+        if c.lines.is_none() {
+            problems.push(format!(
+                "the case `{}` has no `lines`: a case of code is on the lines of its code",
+                c.name
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        return Err(refusal(label, problems));
+    }
+    let source = text_of(
+        root,
+        label,
+        ("source", source),
+        ("source_file", source_file),
+    )
+    .await?;
+    Ok(HarnessPutContent::Code {
+        kind: kind.and_then(HarnessKind::code),
+        source,
+        cases: case_inputs(cases)?,
+    })
+}
+
+/// One refusal for the problems of an input: the only one as it is, several as one that names every problem.
+fn refusal(label: &str, problems: Vec<String>) -> AppError {
+    let mut all: Vec<AppError> = problems
+        .into_iter()
+        .map(|p| AppError::Input(format!("{label}: {p}")))
+        .collect();
+    if all.len() == 1 {
+        all.remove(0)
+    } else {
+        AppError::Many(all)
+    }
+}
+
+/// The texts of the examples in the directory `dir` (relative to `root`), by name, for the Cases `cases`. The
+/// problems found are added to `problems`: a directory that cannot be read, an example that is not whole, an example
+/// with no Case and a Case with no example in the directory.
+async fn load_examples(
+    root: &Path,
+    dir: &str,
+    cases: &[CaseDto],
+    problems: &mut Vec<String>,
+) -> Vec<(String, ExampleTexts)> {
+    let relative = match relative_path(dir) {
+        Ok(relative) => relative,
+        Err(why) => {
+            problems.push(format!("`examples_dir` `{dir}` {why}"));
+            return Vec::new();
+        }
+    };
+    let loaded = match accept::load(&root.join(relative)).await {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            problems.push(format!("`examples_dir` `{dir}`: {e}"));
+            return Vec::new();
+        }
+    };
+    let named: Vec<&str> = cases.iter().map(|c| c.name.trim()).collect();
+    for l in &loaded {
+        if !named.contains(&l.name.as_str()) {
+            problems.push(format!(
+                "the example `{}` in `{dir}` has no case: add a case named `{}`, or take its files out",
+                l.name, l.name
+            ));
+        }
+    }
+    for name in &named {
+        if !loaded.iter().any(|l| l.name.as_str() == *name) {
+            problems.push(format!(
+                "the case `{name}` has no example in `{dir}`: its files are {name}.args, {name}.stdin and {name}.expected"
+            ));
+        }
+    }
+    loaded
+        .into_iter()
+        .map(|l| {
+            (
+                l.name.to_string(),
+                ExampleTexts {
+                    args: l.args,
+                    stdin: l.stdin,
+                    expected: l.expected,
+                    stderr: l.stderr,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The text an operation takes either inline (the first field, `(name, value)`) or from a file (the second): exactly
@@ -574,14 +799,21 @@ fn rename_inputs(renames: Vec<RenameDto>) -> Vec<RenameInput> {
         .collect()
 }
 
-fn case_inputs(cases: Vec<CaseDto>) -> Vec<CaseInput> {
+/// The Cases of code. A Case with no `lines` is not one, and is refused (see [`harness_content`], which names every
+/// such Case before this is asked).
+fn case_inputs(cases: Vec<CaseDto>) -> Result<Vec<CaseInput>, AppError> {
     cases
         .into_iter()
-        .map(|c| CaseInput {
-            name: c.name,
-            lines: (c.lines[0], c.lines[1]),
-            items: c.items.into_iter().map(ItemRef::from).collect(),
-            clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+        .map(|c| {
+            let [first, last] = c
+                .lines
+                .ok_or_else(|| AppError::Input(format!("the case `{}` has no `lines`", c.name)))?;
+            Ok(CaseInput {
+                name: c.name,
+                lines: (first, last),
+                items: c.items.into_iter().map(ItemRef::from).collect(),
+                clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+            })
         })
         .collect()
 }
@@ -589,9 +821,12 @@ fn case_inputs(cases: Vec<CaseDto>) -> Vec<CaseInput> {
 fn harness_kind(kind: Option<&str>) -> Result<Option<HarnessKind>, AppError> {
     kind.map(|w| {
         HarnessKind::from_word(w).ok_or_else(|| {
-            AppError::Input(format!(
-                "the harness kind `{w}` is not one; it is tests or sim"
-            ))
+            let words: Vec<&str> = HarnessKind::ALL.iter().map(|k| k.word()).collect();
+            let listed = match words.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+                _ => words.join(""),
+            };
+            AppError::Input(format!("the harness kind `{w}` is not one; it is {listed}"))
         })
     })
     .transpose()
@@ -1419,13 +1654,21 @@ where
 }
 
 /// `lines` that may be left out, read as [`two_lines`] reads them.
-fn maybe_two_lines<'de, D>(deserializer: D) -> Result<Option<(usize, usize)>, D::Error>
+fn optional_lines<'de, D>(deserializer: D) -> Result<Option<[usize; 2]>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     #[derive(Deserialize)]
     struct Lines(#[serde(deserialize_with = "two_lines")] [usize; 2]);
-    Ok(Option::<Lines>::deserialize(deserializer)?.map(|Lines([first, last])| (first, last)))
+    Ok(Option::<Lines>::deserialize(deserializer)?.map(|Lines(lines)| lines))
+}
+
+/// `lines` that may be left out, as the first and last line.
+fn maybe_two_lines<'de, D>(deserializer: D) -> Result<Option<(usize, usize)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(optional_lines(deserializer)?.map(|[first, last]| (first, last)))
 }
 
 impl TryFrom<AddressWire> for AddressDto {
@@ -2655,15 +2898,37 @@ struct ClauseRefDto {
     label: String,
 }
 
+/// A Case of a Harness. A Case of code is on `lines` (required for it) and, for a test, cites `items`; a Case of a
+/// Harness of examples has no `lines` or `items`, and holds an `example` unless the Harness takes them from
+/// `examples_dir`, in which case its name is the name of the example. Which fields belong to which kind is named when
+/// a put breaks it.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct CaseDto {
     name: String,
-    #[serde(deserialize_with = "two_lines")]
-    lines: [usize; 2],
+    #[serde(
+        default,
+        deserialize_with = "optional_lines",
+        skip_serializing_if = "Option::is_none"
+    )]
+    lines: Option<[usize; 2]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     items: Vec<ItemRefDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     clauses: Vec<ClauseRefDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    example: Option<ExampleDto>,
+}
+
+/// An example, in the words of its files: `args` (the arguments, split on white space), `stdin`, `expected` (the
+/// standard output, then a last line `#exit <code>`) and, to have the standard error compared, `stderr`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExampleDto {
+    args: String,
+    stdin: String,
+    expected: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
 }
 
 impl From<ItemRefDto> for ItemRef {
@@ -3065,21 +3330,43 @@ where
             builds,
             source,
             source_file,
+            examples_dir,
             cases,
         } => {
             let label = format!("harness `{name}`");
-            let source = text_of(
+            let content = harness_content(
                 root,
                 &label,
-                ("source", source),
-                ("source_file", source_file),
+                HarnessText {
+                    kind,
+                    source,
+                    source_file,
+                    examples_dir,
+                },
+                cases,
             )
             .await?;
-            let kind = harness_kind(kind.as_deref())?;
-            let cases = case_inputs(cases);
-            let done = app
-                .put_harness_of(&context, &name, kind, &builds, &source, &cases)
-                .await?;
+            let done = match content {
+                HarnessPutContent::Code {
+                    kind,
+                    source,
+                    cases,
+                } => {
+                    app.put_harness_of(
+                        &context,
+                        &name,
+                        kind.map(HarnessKind::from),
+                        &builds,
+                        &source,
+                        &cases,
+                    )
+                    .await?
+                }
+                HarnessPutContent::Examples(examples) => {
+                    app.put_examples_harness(&context, &name, &builds, &examples)
+                        .await?
+                }
+            };
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),

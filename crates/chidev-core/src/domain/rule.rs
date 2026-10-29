@@ -138,6 +138,20 @@ pub const SIM_BUILDS_NONE: RuleId = RuleId::from_static("sim.builds-none");
 pub const SIM_CASE_CITES_ITEM: RuleId = RuleId::from_static("sim.case-cites-item");
 /// A Harness of tests names Interfaces to build.
 pub const SIM_BUILDS_OF_TESTS: RuleId = RuleId::from_static("sim.builds-of-tests");
+/// Code is put to a Harness that holds examples without saying it is to become a Harness of code.
+pub const EXAMPLES_KIND_CONTENT: RuleId = RuleId::from_static("examples.kind-content");
+/// An example Case cites an Item.
+pub const EXAMPLES_CITES_ITEM: RuleId = RuleId::from_static("examples.cites-item");
+/// An example Case cites no Clause.
+pub const EXAMPLES_CITES_NONE: RuleId = RuleId::from_static("examples.cites-none");
+/// The name of an example Case is not one an example has, or another Case has it.
+pub const EXAMPLES_CASE_NAME: RuleId = RuleId::from_static("examples.case-name");
+/// A Harness of examples builds no Interface.
+pub const EXAMPLES_BUILDS_NONE: RuleId = RuleId::from_static("examples.builds-none");
+/// A text of an example, or the texts of a Harness together, are larger than a put takes.
+pub const EXAMPLES_TOO_LARGE: RuleId = RuleId::from_static("examples.too-large");
+/// The expected output of an example has no last line `#exit <code>`.
+pub const EXAMPLES_EXPECTED_EXIT: RuleId = RuleId::from_static("examples.expected-exit");
 /// A retirement would take away what Cases that stay cite.
 pub const PROJECT_RETIRE_CITED: RuleId = RuleId::from_static("project.retire-cited");
 /// A retirement would take away a Context that others use.
@@ -428,9 +442,9 @@ static RULES: &[Rule] = &[
     Rule {
         id: PROJECT_BUILD_UNREACHABLE,
         kind: RuleKind::Invariant,
-        summary: "A sim Harness builds only Interfaces its Context owns or uses.",
-        help: "Put the sim Harness again without that Interface in `builds`, keep the Interface, or make the Context use the one that owns it.",
-        message: "the sim {s0} builds {s1}, which it cannot reach from {s2}",
+        summary: "A Harness builds only Interfaces its Context owns or uses.",
+        help: "Put the Harness (a sim or one of examples) again without that Interface in `builds`, keep the Interface, or make the Context use the one that owns it.",
+        message: "the harness {s0} builds {s1}, which it cannot reach from {s2}",
         values: &[],
         example: r#"{"op":"harness_put","context":"core","name":"sim","kind":"sim","builds":["gone"],"source":"","cases":[]}"#,
     },
@@ -500,11 +514,74 @@ static RULES: &[Rule] = &[
     Rule {
         id: SIM_BUILDS_OF_TESTS,
         kind: RuleKind::Invariant,
-        summary: "Only a sim Harness names Interfaces to build.",
-        help: "A Harness of tests checks the code of the Interfaces its Cases cite. Only a sim Harness builds the program it drives. Remove `builds`, or put the Harness with `kind` `sim`.",
+        summary: "Only a sim Harness or a Harness of examples names Interfaces to build.",
+        help: "A Harness of tests checks the code of the Interfaces its Cases cite. Only a sim Harness, or a Harness of examples, builds the program it runs. Remove `builds`, or put the Harness with `kind` `sim` or `examples`.",
         message: "{s0} is a harness of tests and names interfaces to build",
         values: &[],
         example: r#"{"op":"harness_put","context":"core","name":"tests","builds":["api"],"source":"fn t() {}\n","cases":[{"name":"t","lines":[1,1],"items":[{"interface":"api","key":"price"}]}]}"#,
+    },
+    Rule {
+        id: EXAMPLES_KIND_CONTENT,
+        kind: RuleKind::Invariant,
+        summary: "A Harness of examples does not become a Harness of code unasked.",
+        help: "The Harness holds examples and has no code, so a put of `source` and Cases on lines would quietly change what it is. Put its examples with `kind` `examples` (and `examples_dir` or each Case's `example`), or say `kind` `tests` or `sim` to make it a Harness of code.",
+        message: "{s0} holds examples, and code is put to it without saying it is to become a harness of code",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"acceptance","source":"fn t() {}\n","cases":[{"name":"t","lines":[1,1],"items":[{"interface":"api","key":"price"}]}]}"#,
+    },
+    Rule {
+        id: EXAMPLES_CITES_ITEM,
+        kind: RuleKind::Invariant,
+        summary: "An example Case cites Clauses only, never an Item.",
+        help: "An example shows what a Clause promises. The Interfaces whose pinned code the program is built from are the ones the Harness names in `builds`; naming one is not citing it, and puts the Harness on no Pin's basis. Cite Clauses only, and name the Interfaces in `builds`. A put that gives an example Case `items` is refused as input before this rule (the example below); the rule is what a Harness the store keeps is held to.",
+        message: "{s0} of a harness of examples cites an item; an example case cites clauses only",
+        values: &[],
+        example: r##"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"cases":[{"name":"a1","example":{"args":"","stdin":"","expected":"#exit 0\n"},"items":[{"interface":"api","key":"price"}]}]}"##,
+    },
+    Rule {
+        id: EXAMPLES_CITES_NONE,
+        kind: RuleKind::Invariant,
+        summary: "An example Case cites the Clauses it shows, at least one.",
+        help: "An example is an example of what a Clause promises, and the citation is the link between them: a Clause that is reworded keeps it, and `cite.stale` says when the Clause moved past the example. Cite the Clauses the example shows (`clauses`), and put the Harness again.",
+        message: "{s0} of a harness of examples cites no clause; an example case cites the clauses it shows",
+        values: &[],
+        example: r##"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"cases":[{"name":"a1","example":{"args":"","stdin":"","expected":"#exit 0\n"}}]}"##,
+    },
+    Rule {
+        id: EXAMPLES_CASE_NAME,
+        kind: RuleKind::Invariant,
+        summary: "An example Case has a name an example can have, each name once.",
+        help: "The name of an example is how a run and a report call it: it is not empty and has no `/`, NUL or line feed, and no other Case of the Harness has it. `reason` says which: `not-a-name`, or `named-twice`. Rename the Case, and put the Harness again.",
+        message: "the name of {s0} is not one an example of the harness can have: {reason}",
+        values: &["reason"],
+        example: r##"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"cases":[{"name":"a/1","example":{"args":"","stdin":"","expected":"#exit 0\n"},"clauses":[{"contract":"rounding","label":"C1"}]}]}"##,
+    },
+    Rule {
+        id: EXAMPLES_BUILDS_NONE,
+        kind: RuleKind::Invariant,
+        summary: "A Harness of examples builds at least one Interface, the program its examples run.",
+        help: "An example is run against a program built from the pinned code of the Interfaces the Harness names in `builds`. Name the Interfaces to build, and put the Harness again.",
+        message: "the harness of examples {s0} builds no interface, so it has no program to run",
+        values: &[],
+        example: r##"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":[],"cases":[{"name":"a1","example":{"args":"","stdin":"","expected":"#exit 0\n"},"clauses":[{"contract":"rounding","label":"C1"}]}]}"##,
+    },
+    Rule {
+        id: EXAMPLES_TOO_LARGE,
+        kind: RuleKind::Invariant,
+        summary: "The texts of an example, and of the examples of a Harness, are no larger than a put takes.",
+        help: "The whole model is kept as one document and sent to external checks, so a put takes at most 1 MiB for one text of an example and 4 MiB for all the texts of a Harness (an output past the second could not be got from a run either). `values.part` is `arguments`, `input`, `expected` or `errors` for one text, and `all` for the Harness; `size` is how many bytes there are and `limit` how many a put takes. Shorten the example, or split the Harness. A Harness kept before a limit was lowered is still read.",
+        message: "{s0} is too large to put: {part}, {size} bytes, where a put takes at most {limit}",
+        values: &["part", "size", "limit"],
+        example: r#"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"examples_dir":"acceptance-too-large","cases":[{"name":"a1","clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
+    },
+    Rule {
+        id: EXAMPLES_EXPECTED_EXIT,
+        kind: RuleKind::Invariant,
+        summary: "The expected output of an example ends with a line `#exit <code>`.",
+        help: "The expected output is the standard output the program is to give, and its last line says the exit code: `#exit 0`, or `#exit` and a whole number (a minus sign is the only sign). Add the line, and put the Harness again.",
+        message: "the expected output of {s0} does not end with a line `#exit <code>`",
+        values: &[],
+        example: r#"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"cases":[{"name":"a1","example":{"args":"","stdin":"","expected":"1\n"},"clauses":[{"contract":"rounding","label":"C1"}]}]}"#,
     },
     Rule {
         id: PROJECT_RETIRE_CITED,

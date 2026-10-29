@@ -321,13 +321,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             else {
                 continue;
             };
-            // A simulation does not test the code against the Interface; it is run by `simulate`.
+            // A simulation does not test the code against the Interface; it is run by `simulate`. Examples are
+            // data, not tests, and have no code to read.
             if h.kind() != HarnessKind::Tests {
                 continue;
             }
+            let Some(source) = h.source() else {
+                continue;
+            };
             harnesses.push(HarnessText {
                 name: self.name_of(id.as_uuid()).await?,
-                source: h.source().as_str().to_string(),
+                source: source.as_str().to_string(),
             });
         }
         let settings = self.runner.settings(context, interface).await?;
@@ -385,12 +389,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let h = owner
             .harness(id)
             .ok_or_else(|| AppError::Input(format!("the harness `{harness}` is gone")))?;
-        if h.kind() != HarnessKind::Sim {
-            return Err(AppError::Input(format!(
+        let not_sim = || {
+            AppError::Input(format!(
                 "the harness `{harness}` is of {}; only a sim harness is simulated (put it with kind `sim`)",
                 h.kind().word()
-            )));
+            ))
+        };
+        if h.kind() != HarnessKind::Sim {
+            return Err(not_sim());
         }
+        let Some(script) = h.source() else {
+            return Err(not_sim());
+        };
         // A sim Harness kept in a shape the protocol does not run is refused for the rules a put of it breaks.
         let problems: Vec<ProjectError> = owner
             .sim_problems(h)
@@ -446,7 +456,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             run: run_id.to_string(),
             context: context.to_string(),
             harness: harness.to_string(),
-            script: h.source().as_str().to_string(),
+            script: script.as_str().to_string(),
             interfaces,
             clauses,
             regress: regress_names(h),

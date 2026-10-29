@@ -8,7 +8,7 @@ use super::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::ContextError;
 use crate::domain::entity::contract::ContractError;
-use crate::domain::entity::harness::{HarnessError, SimShapeProblem};
+use crate::domain::entity::harness::{ExampleNameFault, HarnessError, SimShapeProblem};
 use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
@@ -19,17 +19,20 @@ use crate::domain::rule::{
     CR_CRUX_BEYOND_WITHDRAWN, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION, CR_CRUX_OPTION_TWICE,
     CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION, CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN,
     CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_SUPERSEDED,
-    CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INPUT_RENAME_CONFLICT,
-    INPUT_REPLACES_KEPT, INPUT_UNKNOWN_NAME, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
-    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
-    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
-    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
-    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, EXAMPLES_BUILDS_NONE, EXAMPLES_CASE_NAME,
+    EXAMPLES_CITES_ITEM, EXAMPLES_CITES_NONE, EXAMPLES_EXPECTED_EXIT, EXAMPLES_KIND_CONTENT,
+    EXAMPLES_TOO_LARGE, HARNESS_LINES_OUTSIDE, INPUT_RENAME_CONFLICT, INPUT_REPLACES_KEPT,
+    INPUT_UNKNOWN_NAME, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE,
+    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
+    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
+    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
+    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::clause_edit::ClauseNameProblem;
 use crate::domain::vo::correction::CorrectionError;
+use crate::domain::vo::example::ExampleError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
 use crate::domain::vo::policy::PolicyError;
 use crate::domain::vo::target::Target;
@@ -408,7 +411,55 @@ impl HarnessError {
                 .with_value("first", Value::Count(*first))
                 .with_value("last", Value::Count(*last))
                 .with_value("total", Value::Count(*total)),
+            HarnessError::ExampleCitesItem(case) => {
+                Violation::of(EXAMPLES_CITES_ITEM).about(Party::Target(Target::Case(*case)))
+            }
+            HarnessError::ExampleCitesNone(case) => {
+                Violation::of(EXAMPLES_CITES_NONE).about(Party::Target(Target::Case(*case)))
+            }
+            HarnessError::ExampleName { case, fault } => Violation::of(EXAMPLES_CASE_NAME)
+                .about(Party::Target(Target::Case(*case)))
+                .with_value("reason", Value::Word(fault.word())),
+            HarnessError::ExamplesBuildNone(harness) => {
+                Violation::of(EXAMPLES_BUILDS_NONE).about(Party::Target(Target::Harness(*harness)))
+            }
+            HarnessError::ExampleTooLarge {
+                case,
+                part,
+                size,
+                limit,
+            } => Violation::of(EXAMPLES_TOO_LARGE)
+                .about(Party::Target(Target::Case(*case)))
+                .with_value("part", Value::Word(part.word()))
+                .with_value("size", Value::Count(*size))
+                .with_value("limit", Value::Count(*limit)),
+            HarnessError::ExamplesTooLarge {
+                harness,
+                size,
+                limit,
+            } => Violation::of(EXAMPLES_TOO_LARGE)
+                .about(Party::Target(Target::Harness(*harness)))
+                .with_value("part", Value::Word("all"))
+                .with_value("size", Value::Count(*size))
+                .with_value("limit", Value::Count(*limit)),
+            HarnessError::KindContent { harness } => {
+                Violation::of(EXAMPLES_KIND_CONTENT).about(Party::Target(Target::Harness(*harness)))
+            }
             HarnessError::DuplicateId(_) | HarnessError::NoItem(_) => Violation::unmapped(self),
+        }
+    }
+}
+
+impl ExampleError {
+    /// The violation this refusal is, for the example of the Case `case`: the value is refused where the example is
+    /// built, before the Harness that would hold it sees it.
+    pub fn violation(&self, case: CaseId) -> Violation {
+        let about = Party::Target(Target::Case(case));
+        match self {
+            ExampleError::NoExitLine => Violation::of(EXAMPLES_EXPECTED_EXIT).about(about),
+            ExampleError::BadName(_) => Violation::of(EXAMPLES_CASE_NAME)
+                .about(about)
+                .with_value("reason", Value::Word(ExampleNameFault::NotAName.word())),
         }
     }
 }
@@ -526,6 +577,7 @@ mod tests {
     use crate::domain::vo::choice::Choice;
     use crate::domain::vo::clause_edit::{NameField, NameSide};
     use crate::domain::vo::crux::CruxKind;
+    use crate::domain::vo::example::ExamplePart;
     use crate::domain::vo::id::{
         ClauseId, ContextId, ContractId, CruxId, CruxOptionId, InterfaceId, ItemId, test_uuid,
     };
@@ -745,6 +797,21 @@ mod tests {
             ContextError::Harness(HarnessError::BuildsOfTests(HarnessId::from_uuid(
                 test_uuid(400),
             ))),
+            ContextError::Harness(HarnessError::ExampleName {
+                case: CaseId::from_uuid(test_uuid(41)),
+                fault: ExampleNameFault::NamedTwice,
+            }),
+            ContextError::Harness(HarnessError::ExampleTooLarge {
+                case: CaseId::from_uuid(test_uuid(41)),
+                part: ExamplePart::Input,
+                size: 5,
+                limit: 4,
+            }),
+            ContextError::Harness(HarnessError::ExamplesTooLarge {
+                harness: HarnessId::from_uuid(test_uuid(400)),
+                size: 5,
+                limit: 4,
+            }),
         ]
     }
 
@@ -883,6 +950,60 @@ mod tests {
                 HarnessError::BuildsOfTests(HarnessId::from_uuid(test_uuid(1))).violation(),
             ),
             (
+                "HarnessError::ExampleCitesItem",
+                HarnessError::ExampleCitesItem(CaseId::from_uuid(test_uuid(1))).violation(),
+            ),
+            (
+                "HarnessError::ExampleCitesNone",
+                HarnessError::ExampleCitesNone(CaseId::from_uuid(test_uuid(1))).violation(),
+            ),
+            (
+                "HarnessError::ExampleName",
+                HarnessError::ExampleName {
+                    case: CaseId::from_uuid(test_uuid(1)),
+                    fault: ExampleNameFault::NotAName,
+                }
+                .violation(),
+            ),
+            (
+                "HarnessError::ExamplesBuildNone",
+                HarnessError::ExamplesBuildNone(HarnessId::from_uuid(test_uuid(1))).violation(),
+            ),
+            (
+                "HarnessError::ExampleTooLarge",
+                HarnessError::ExampleTooLarge {
+                    case: CaseId::from_uuid(test_uuid(1)),
+                    part: ExamplePart::Expected,
+                    size: 2,
+                    limit: 1,
+                }
+                .violation(),
+            ),
+            (
+                "HarnessError::ExamplesTooLarge",
+                HarnessError::ExamplesTooLarge {
+                    harness: HarnessId::from_uuid(test_uuid(1)),
+                    size: 2,
+                    limit: 1,
+                }
+                .violation(),
+            ),
+            (
+                "HarnessError::KindContent",
+                HarnessError::KindContent {
+                    harness: HarnessId::from_uuid(test_uuid(1)),
+                }
+                .violation(),
+            ),
+            (
+                "ExampleError::NoExitLine",
+                ExampleError::NoExitLine.violation(CaseId::from_uuid(test_uuid(1))),
+            ),
+            (
+                "ExampleError::BadName",
+                ExampleError::BadName("a/b".into()).violation(CaseId::from_uuid(test_uuid(1))),
+            ),
+            (
                 "PolicyError::BadLineId",
                 PolicyError::BadLineId("x".into()).violation(),
             ),
@@ -941,7 +1062,10 @@ mod tests {
         // The count only goes down: 18 + 16 + 8 + 2 + 2 + 5 + 4 variants of the enums with a mapping, of which
         // the wrappers (`Many`, `Context`, `Policy`, `Contract`, `Interface`, `Harness`) give their wrapped
         // error's.
-        assert_eq!(gives().len(), 26 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2 + 1);
+        assert_eq!(
+            gives().len(),
+            26 + 13 + 5 + 2 + 2 + 5 + 4 + 2 + 2 + 1 + 7 + 2
+        );
         assert_eq!(STILL_UNMAPPED.len(), 23);
     }
 
@@ -1491,6 +1615,76 @@ mod tests {
         assert_eq!(
             v.parties(),
             vec![Party::ChangeRequest(cr(1)), Party::ChangeRequest(cr(2))]
+        );
+    }
+
+    #[test]
+    fn each_refusal_of_examples_is_a_violation_of_its_rule_about_what_it_names_with_the_values_that_say_how()
+     {
+        let h = HarnessId::from_uuid(test_uuid(400));
+        let c = CaseId::from_uuid(test_uuid(41));
+        let case = Party::Target(Target::Case(c));
+        let harness = Party::Target(Target::Harness(h));
+        let seen = |v: Violation| (v.rule().to_string(), v.subjects().to_vec());
+        let want = |rule: &str, subjects: Vec<Party>| (rule.to_string(), subjects);
+        assert_eq!(
+            seen(HarnessError::ExampleCitesItem(c).violation()),
+            want("examples.cites-item", vec![case])
+        );
+        assert_eq!(
+            seen(HarnessError::ExampleCitesNone(c).violation()),
+            want("examples.cites-none", vec![case])
+        );
+        assert_eq!(
+            seen(HarnessError::ExamplesBuildNone(h).violation()),
+            want("examples.builds-none", vec![harness])
+        );
+        assert_eq!(
+            seen(HarnessError::KindContent { harness: h }.violation()),
+            want("examples.kind-content", vec![harness])
+        );
+        let named = HarnessError::ExampleName {
+            case: c,
+            fault: ExampleNameFault::NamedTwice,
+        }
+        .violation();
+        assert_eq!(named.rule().as_str(), "examples.case-name");
+        assert_eq!(
+            named.values().get("reason"),
+            Some(&Value::Word("named-twice"))
+        );
+        let one = HarnessError::ExampleTooLarge {
+            case: c,
+            part: ExamplePart::Errors,
+            size: 9,
+            limit: 4,
+        }
+        .violation();
+        assert_eq!(one.rule().as_str(), "examples.too-large");
+        assert_eq!(one.subjects(), &[case]);
+        assert_eq!(one.values().get("part"), Some(&Value::Word("errors")));
+        assert_eq!(one.values().get("size"), Some(&Value::Count(9)));
+        assert_eq!(one.values().get("limit"), Some(&Value::Count(4)));
+        let all = HarnessError::ExamplesTooLarge {
+            harness: h,
+            size: 9,
+            limit: 4,
+        }
+        .violation();
+        assert_eq!(all.rule().as_str(), "examples.too-large");
+        assert_eq!(all.subjects(), &[harness]);
+        assert_eq!(all.values().get("part"), Some(&Value::Word("all")));
+        // an example refused when it is built is about the Case it is for
+        assert_eq!(
+            seen(ExampleError::NoExitLine.violation(c)),
+            want("examples.expected-exit", vec![case])
+        );
+        assert_eq!(
+            ExampleError::BadName(String::new())
+                .violation(c)
+                .values()
+                .get("reason"),
+            Some(&Value::Word("not-a-name"))
         );
     }
 }

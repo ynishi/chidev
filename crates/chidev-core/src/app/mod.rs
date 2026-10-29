@@ -12,8 +12,9 @@
 
 mod change_set;
 pub use self::change_set::{
-    AssetPutKind, ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, HarnessPut, InterfacePut,
-    ItemsInput, PutDone, PutInput, RetireInput, SettingKind,
+    AssetPutKind, ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, ExampleInput,
+    ExampleTexts, HarnessPut, HarnessPutContent, InterfacePut, ItemsInput, PutDone, PutInput,
+    RetireInput, SettingKind,
 };
 use self::change_set::{only_put, only_setting};
 mod check;
@@ -91,7 +92,7 @@ use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Move, Rename};
-pub use crate::domain::vo::harness_kind::HarnessKind;
+pub use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
 use crate::domain::vo::id::{
     AnswerId, CaseId, ChangeRequestId, ClauseId, ContextId, ContractId, CruxId, CruxOptionId,
     HarnessId, InterfaceId, ItemId, PinId, ProjectId,
@@ -1639,9 +1640,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// As [`App::put_harness`], and the Harness is of `kind`: `tests`, or `sim` for a simulation script run by
-    /// `simulate`. Without a kind a new Harness is of tests and an existing one keeps its kind. `builds` names the
-    /// Interfaces of the Context whose pinned code a sim Harness builds into the program (none for tests); a name
-    /// the Context has no Interface of is refused.
+    /// `simulate`. Without a kind a new Harness is of tests and an existing one keeps its kind (a Harness that
+    /// holds examples must be told). `builds` names the Interfaces of the Context whose pinned code a sim Harness
+    /// builds into the program (none for tests); a name the Context has no Interface of is refused.
+    ///
+    /// This door takes code: the kind `examples` is refused ([`AppError::Input`]), since a Harness of examples has
+    /// no source; it is put with [`App::put_examples_harness`].
     pub async fn put_harness_of(
         &mut self,
         context: &str,
@@ -1651,13 +1655,46 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         source: &str,
         cases: &[CaseInput],
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
+        let kind = match kind {
+            None => None,
+            Some(kind) => Some(kind.code().ok_or_else(|| {
+                AppError::Input(format!(
+                    "a harness of {} is put with its examples: it has no source",
+                    kind.word()
+                ))
+            })?),
+        };
         let put = PutInput::Harness(HarnessPut {
             context: context.to_string(),
             name: name.to_string(),
-            kind,
             builds: builds.to_vec(),
-            source: source.to_string(),
-            cases: cases.to_vec(),
+            content: HarnessPutContent::Code {
+                kind,
+                source: source.to_string(),
+                cases: cases.to_vec(),
+            },
+        });
+        let done = self.apply_one(EditTrigger::PutHarness, put).await?;
+        only_put(done, HarnessId::from_uuid)
+    }
+
+    /// Makes or revises the Harness of examples named `name` of the Context `context`: each of `examples` is a
+    /// Case, and a Case keeps its id when its name is one the Harness has. An example cites the Clauses it shows
+    /// (one at least) and no Item, and is kept in the model, so a change of one of its texts is a new revision of
+    /// its Case and of the Harness. `builds` names the Interfaces of the Context whose pinned code the program is
+    /// built from (one at least). A Harness that was of code becomes one of examples.
+    pub async fn put_examples_harness(
+        &mut self,
+        context: &str,
+        name: &str,
+        builds: &[String],
+        examples: &[ExampleInput],
+    ) -> Result<Checked<Put<HarnessId>>, AppError> {
+        let put = PutInput::Harness(HarnessPut {
+            context: context.to_string(),
+            name: name.to_string(),
+            builds: builds.to_vec(),
+            content: HarnessPutContent::Examples(examples.to_vec()),
         });
         let done = self.apply_one(EditTrigger::PutHarness, put).await?;
         only_put(done, HarnessId::from_uuid)

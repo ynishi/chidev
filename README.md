@@ -256,14 +256,16 @@ belong):
     it began: a store that has moved since refuses it. It is an edit, so the answer
     has `findings`: a citation it makes stale (`cite.stale`) is one.
 - `harness_put` is the same for a Harness, and `kind` is `tests` (the default for
-  a new Harness) or `sim`. Each Case has its `name` and the first and last `lines`
-  it is on in `source` (from 1): its test, an attribute above it included, or its
-  case of a simulation; lines past the end of `source` are refused
-  (`harness.lines-outside`). A Case of tests cites one Item at least and any Clauses;
-  a Case of a sim cites Clauses only, and a sim Harness has `builds`, the Interfaces
-  whose pinned code it runs (see "Simulation"). `context` in a citation (default:
-  the Case's own) reaches a Context that one uses. A citation records the revision
-  its target has when the Harness is put.
+  a new Harness), `sim` or `examples`. Each Case of tests or of a sim has its `name`
+  and the first and last `lines` it is on in `source` (from 1): its test, an
+  attribute above it included, or its case of a simulation; lines past the end of
+  `source` are refused (`harness.lines-outside`). A Case of tests cites one Item at
+  least and any Clauses; a Case of a sim cites Clauses only, and a sim Harness has
+  `builds`, the Interfaces whose pinned code it runs (see "Simulation"). A Harness of
+  `examples` has no `source`: each Case holds one acceptance example (see
+  "Acceptance examples as a Harness"). `context` in a citation (default: the Case's
+  own) reaches a Context that one uses. A citation records the revision its target
+  has when the Harness is put.
 - `pin` records that the code was accepted: it needs a Case that cites an Item of the
   Interface, and it goes stale when what it stands on changes.
 - The text of an Interface, a Harness or a Pin can be read from a file instead of
@@ -317,11 +319,19 @@ belong):
     says.
   - The result is the envelope of an operation (`ok`, `line`, `op`) with the
     `store_revision` the model was read at and the `view`. `view` is
-    `{"version":4,"contexts":[..],"change_requests":[..],"cruxes":[..]}`: a Context
+    `{"version":5,"contexts":[..],"change_requests":[..],"cruxes":[..]}`: a Context
     always comes with its `id`, `name`, `basis` and `uses`, and with the sections
     asked for only. A section that was not asked for has no key; one that was and is
     empty is `[]`.
     `chidev schema view` describes this value of `view` (see "Protocol `chidev-exec 1`").
+  - A Harness in `harnesses` comes with its `kind` (`tests`, `sim` or `examples`).
+    A Harness of tests or of a sim has its `source` and each Case its `lines`; a
+    Harness of `examples` has no `source`, and each Case has no `lines` and has its
+    `example` instead: `{"args":..,"stdin":..,"expected":..}`, with `"stderr"` when
+    the example states the standard error. `source` and `lines` that can be absent are
+    a change of shape, so the view became version 5 with this, and the result of an
+    external check saved before is `stale` once, as the model it was sent carries the
+    version.
   - It is the part of the model that `check_rules` gives a judged rule and that an
     external check is sent, entry for entry, so a reader of a view sees what a rule
     is judged on. Asking for fewer sections is how a role is kept from the rest: an
@@ -423,7 +433,7 @@ read and write them, so a schema and the reading cannot differ:
 ```text
 chidev schema          # lists the schemas, with the title and the id of each
 chidev schema ops      # one line of exec: an operation. title "chidev-exec 1", $id urn:chidev:schema:ops:1
-chidev schema view     # the `view` of the operation `view`. title "chidev-view 4", $id urn:chidev:schema:view:4
+chidev schema view     # the `view` of the operation `view`. title "chidev-view 5", $id urn:chidev:schema:view:5
 chidev schema external-call   # what an external check is sent (see "External checks"). title "chidev-external-call 2"
 chidev schema external-reply  # what an external check answers. title "chidev-external-reply 2"
 ```
@@ -434,7 +444,7 @@ chidev schema external-reply  # what an external check answers. title "chidev-ex
   `unspecified` and `withdrawn`, a subject, an item or a clause. An operation that breaks one is
   read, and refused when it runs, by a rule with a name (see "Diagnostics").
 - The schema of the results of the other operations is not printed.
-- The version of the view (`chidev-view 4`, `version` in the view, `VIEW_VERSION` in
+- The version of the view (`chidev-view 5`, `version` in the view, `VIEW_VERSION` in
   Rust) has its own promise: a field added does not change it, and only a change of
   meaning or shape (a field removed or renamed) does. A reader ignores a field it does
   not know and refuses a version it does not know.
@@ -627,7 +637,7 @@ tree. Re-run a check after changing inputs outside that model.
 
 ### Acceptance examples: `chidev accept`
 
-`chidev accept [--timeout <seconds>] [--external] <dir> -- <command> [<arg>...]` runs the acceptance examples of a
+`chidev accept [--timeout <seconds>] <dir> -- <command> [<arg>...]` runs the acceptance examples of a
 directory against a program. An example is a name `<name>` for which `<dir>` holds a regular file `<name>.args`,
 `<name>.stdin`, `<name>.expected` or `<name>.stderr`; other files and subdirectories are ignored, and the examples are
 taken in the byte order of their names.
@@ -666,34 +676,74 @@ Plain mode prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for ea
 run (a usage error, a directory that cannot be read or has no example), with `chidev accept: <what>` on standard error
 and nothing on standard output.
 
-With `--external` the command is an external check. It reads the request (protocol 2) on standard input, runs the
-examples, and writes one reply, `{"protocol":2,"findings":[...]}`, on standard output; it exits 0 whether or not an
-example failed. A request that is not JSON, is not protocol 2 or asks for other than one rule is a usage error, found
-before any example runs (exit 2, nothing on standard output), which `chidev` records as a failed run. Register it like any external check:
+`chidev accept [--timeout <seconds>] --external --context <context> --harness <harness> -- <command> [<arg>...]` is
+an external check of the examples the model holds: those of a Harness of `examples` (see "Acceptance examples as a
+Harness"). It takes no `<dir>`. It reads the request (protocol 2) on standard input, finds the Harness `<harness>` of
+the Context `<context>` in the model sent, runs the example of each of its Cases as the plain mode runs a file of a
+directory, and writes one reply, `{"protocol":2,"findings":[...]}`, on standard output; it exits 0 whether or not an
+example failed. Register it like any external check, reading the Contracts and the Harnesses:
 
 ```toml
 [external."ext.accept"]
 command = "chidev"
-args = ["accept", "--external", "acceptance", "--", "./target/release/prog"]
+args = ["accept", "--external", "--context", "tally", "--harness", "acceptance", "--", "./prog"]
 moments = ["pin", "resolve", "check"]
 timeout = 120
-reads = ["contracts"]
+reads = ["contracts", "harnesses"]
 gate = true
 ```
 
 The registration's `timeout` bounds the whole run, and `--timeout` one example. A failing example gives one finding,
-`<name>: <reasons>`, for each Clause of the model sent whose text names one of the example's four files by its path
-from the project's root, `<dir>/<name>.<ext>`, with `<dir>` as given on the command line less any leading `./` and
-trailing `/` (a `<dir>` of `.` gives `<name>.<ext>`). The path must stand as a whole: the character before it is not a
-letter, a digit, `_`, `-`, `.` or `/`, and the one after it is not a letter, a digit, `_` or `-`, so
-`acceptance/a1.expected` is found in "`acceptance/a1.expected` gives" and in a sentence that ends with it, and not in
-`acceptance/a10.expected` or `./acceptance/a1.expected`. A Clause that names the file in another way (a different
-relative path, a glob) is not found. An example no Clause names gives one finding about the project, ending
-`(no clause names <dir>/<name>.expected)`. A Clause is found only when the registration's `reads` has `contracts`;
-without it every finding is about the project. Passing examples give nothing.
+`<name>: <reasons>`, about each Clause its Case cites; passing examples give nothing. A Clause is named by the
+citation, so its words do not have to name the example. These are usage errors, found before any example runs (exit
+2, nothing on standard output), which `chidev` records as a failed run: a request that is not JSON, is not protocol 2
+or asks for other than one rule; a model sent without `harnesses`; no Harness `<harness>` in the Context `<context>`;
+a Harness that is not of `examples`; and a cited Clause that is not in the model sent (`reads` without `contracts`).
 
-The files of the examples are not part of the model sent, so a change to them alone leaves `status.external`
-`current`: re-run the check, as the paragraph on the recorded SHA-256 says.
+The examples are part of the model sent, so a change of one example (put again) makes the saved result `stale` in
+`status.external`, and the check runs again where it is registered. The program is still outside the model: re-run
+the check after changing it, as the paragraph on the recorded SHA-256 says.
+
+### Acceptance examples as a Harness
+
+A Harness of `kind` `examples` holds the acceptance examples of a program in the model. It has no `source`; each of
+its Cases is one example, named as its files are (`a1` for `a1.expected`), holding the example's four texts, and
+citing the Clauses that state what the example shows. A change of one text alone is a change of that Case: the Case
+goes to its next revision and so does the Harness, so what stands on the Harness sees it (a saved external result
+that reads `harnesses`, the work of the change request a `change_set` is `for`). A Clause that moves past the
+revision a Case recorded makes the citation `cite.stale`, as for any Case, and an example Case's citation counts for
+`cite.uncited-clause`. A Harness of examples puts no Interface on a Pin's basis: its Cases cite no Item, and `builds`
+names the Interfaces whose pinned code the program is built from, as for a sim.
+
+```json
+{"op":"harness_put","context":"tally","name":"acceptance","kind":"examples","builds":["tally"],
+ "examples_dir":"acceptance",
+ "cases":[{"name":"a1","clauses":[{"contract":"lines","label":"C1"}]},
+          {"name":"a2","clauses":[{"contract":"lines","label":"C2"}]}]}
+```
+
+- The texts come from exactly one place: `examples_dir`, a directory relative to the project's root (the rules of a
+  `source_file`), from which each Case's `<name>.args`, `<name>.stdin`, `<name>.expected` and, when it is there,
+  `<name>.stderr` are read; or each Case's own `example`,
+  `{"args":"","stdin":"+ a\n","expected":"1\n#exit 0\n"}` (`"stderr"` optional). The files are read when the
+  operation runs and the model keeps the texts, never the directory: changing a file changes nothing until the
+  Harness is put again. With `examples_dir`, every example in the directory has a Case and every Case has its three
+  files; a missing file, a file that cannot be read and a file that is not UTF-8 text are refused with the file named.
+- The texts are what `chidev accept` reads from the files (see above), as text: an example whose input or output is
+  not UTF-8 cannot be held. A text is at most 1 MiB and the texts of one Harness at most 4 MiB together
+  (`examples.too-large`); an expected output past the runner's 4 MiB cap could not pass anyway.
+- A put of an examples Harness is refused unless it has this shape: a Case of `examples` names no `lines` and cites
+  no Item (both refused as input; `examples.cites-item` is the rule a kept Harness is held to), cites at least one
+  Clause (`examples.cites-none`), has a name that is a file name
+  of an example (not empty, no `/`, NUL or line feed) and that no other Case of the Harness has
+  (`examples.case-name`), and has an expected text whose last line is `#exit <code>` (`examples.expected-exit`); the
+  Harness builds at least one Interface (`examples.builds-none`) and has no `source` or `source_file`. A Harness of
+  tests or of a sim takes neither `examples_dir` nor an `example`.
+- A put of an existing examples Harness says `kind` `examples`; a put of it with code and no `kind` is refused
+  (`examples.kind-content`), so it does not become a Harness of tests unsaid. A put with `kind` `tests` or `sim` and
+  code makes it one, and a put with `kind` `examples` makes a Harness of code one of examples: a change of kind is a
+  new revision.
+- chidev does not run the examples itself at any moment; `chidev accept --external` runs them as an external check.
 
 ## Measurements
 
@@ -979,7 +1029,8 @@ new revision. A Context has at most one sim Harness.
 from. It is not a citation: it asks no Item of the Interface, a name the Context has
 no Interface of is refused (also in a `change_set`, where the Interface may be one
 the same change set makes), and an Interface cannot be retired while a sim Harness
-builds it. Only a sim Harness has `builds` (a Harness of tests with it is refused),
+(or a Harness of `examples`) builds it. A sim Harness and a Harness of `examples` have
+`builds` (a Harness of tests with it is refused),
 a sim Harness builds at least one Interface (a put without one is refused; the rule
 is found with `{"op":"explain","rule":"sim.builds-none"}`), and a
 put states the whole list, as it states the code. Because a sim cites no Item, it is

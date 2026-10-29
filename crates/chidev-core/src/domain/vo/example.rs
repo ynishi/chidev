@@ -104,6 +104,135 @@ pub fn args(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_string).collect()
 }
 
+/// The most bytes one text of an example may have when it is put. It is a rule of a put, not of the record: a limit
+/// lowered later never makes a document the store holds unreadable.
+pub const TEXT_LIMIT: usize = 1024 * 1024;
+
+/// The most bytes all the texts of the examples of one Harness may have when it is put. One Project is kept as one
+/// document and the whole model is sent to external checks, so a Harness of examples cannot be as large as a
+/// program's output may be; this is also the most a run keeps of one output (see `infra::accept`), so an expected
+/// output past it could never be got.
+pub const HARNESS_LIMIT: usize = 4 * 1024 * 1024;
+
+/// A part of an example, named in the domain's words. How an operation or a file calls it is an edge's concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExamplePart {
+    /// What the program is started with.
+    Arguments,
+    /// What the program is given to read.
+    Input,
+    /// What the program is expected to give, ending with the line `#exit <code>`.
+    Expected,
+    /// What the program is expected to write as errors, when the example says so.
+    Errors,
+}
+
+impl ExamplePart {
+    /// Every part, in the order an example is told.
+    pub const ALL: [ExamplePart; 4] = [
+        ExamplePart::Arguments,
+        ExamplePart::Input,
+        ExamplePart::Expected,
+        ExamplePart::Errors,
+    ];
+
+    /// The word for it, as a violation carries it.
+    pub fn word(self) -> &'static str {
+        match self {
+            ExamplePart::Arguments => "arguments",
+            ExamplePart::Input => "input",
+            ExamplePart::Expected => "expected",
+            ExamplePart::Errors => "errors",
+        }
+    }
+}
+
+/// An example as the model holds it: what a program is started with and given, and what it is expected to answer.
+/// The texts are kept as written, so that a change of one is a change of the example; the expectation read from
+/// the expected text is kept beside them, so that it is read once and never fails afterwards.
+///
+/// It is text, not bytes: the model, the view and the store are text. An example whose input or output is not text
+/// cannot be held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Example {
+    arguments: String,
+    input: String,
+    expected: String,
+    errors: Option<String>,
+    expectation: Expected,
+}
+
+impl Example {
+    /// The example of these texts: the arguments (words split on white space), the input, the expected output
+    /// ending with a line `#exit <code>`, and the expected errors when it states them.
+    pub fn new(
+        arguments: String,
+        input: String,
+        expected: String,
+        errors: Option<String>,
+    ) -> Result<Example, ExampleError> {
+        let expectation = Expected::parse(
+            expected.as_bytes(),
+            errors.as_ref().map(|text| text.as_bytes().to_vec()),
+        )?;
+        Ok(Example {
+            arguments,
+            input,
+            expected,
+            errors,
+            expectation,
+        })
+    }
+
+    /// What the program is started with, as written.
+    pub fn arguments(&self) -> &str {
+        &self.arguments
+    }
+
+    /// The arguments as the words the program is started with.
+    pub fn args(&self) -> Vec<String> {
+        args(&self.arguments)
+    }
+
+    /// What the program is given to read.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// What the program is expected to give, as written, the `#exit` line included.
+    pub fn expected(&self) -> &str {
+        &self.expected
+    }
+
+    /// What the program is expected to write as errors; none when the example does not compare them.
+    pub fn errors(&self) -> Option<&str> {
+        self.errors.as_deref()
+    }
+
+    /// What the program is expected to give, read from the expected text.
+    pub fn expectation(&self) -> &Expected {
+        &self.expectation
+    }
+
+    /// How many bytes the text of `part` has; none (0) for errors the example does not state.
+    pub fn part_size(&self, part: ExamplePart) -> usize {
+        match part {
+            ExamplePart::Arguments => self.arguments.len(),
+            ExamplePart::Input => self.input.len(),
+            ExamplePart::Expected => self.expected.len(),
+            ExamplePart::Errors => self.errors.as_ref().map_or(0, String::len),
+        }
+    }
+
+    /// How many bytes its texts have together.
+    pub fn size(&self) -> usize {
+        ExamplePart::ALL
+            .into_iter()
+            .map(|p| self.part_size(p))
+            .sum()
+    }
+}
+
 /// What a program that ended with an exit code gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
@@ -615,5 +744,70 @@ mod tests {
             "did not end within 1 s; x"
         );
         assert!(!Verdict::fail(Why::Abnormal("x".into())).is_ok());
+    }
+
+    fn example(expected: &str, errors: Option<&str>) -> Result<Example, ExampleError> {
+        Example::new(
+            "-n 3".to_string(),
+            "in\n".to_string(),
+            expected.to_string(),
+            errors.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn an_example_keeps_its_texts_as_written_and_what_its_expected_text_expects() {
+        let e = example("one\n#exit 3\n", Some("warn\n")).unwrap();
+        assert_eq!(e.arguments(), "-n 3");
+        assert_eq!(e.args(), ["-n", "3"]);
+        assert_eq!(e.input(), "in\n");
+        assert_eq!(e.expected(), "one\n#exit 3\n");
+        assert_eq!(e.errors(), Some("warn\n"));
+        assert_eq!(e.expectation().output(), b"one\n");
+        assert_eq!(e.expectation().exit(), 3);
+        assert_eq!(e.expectation().errors(), Some(&b"warn\n"[..]));
+        assert_eq!(example("#exit 0", None).unwrap().errors(), None);
+    }
+
+    #[test]
+    fn an_example_whose_expected_text_has_no_exit_line_is_refused() {
+        assert_eq!(
+            example("just output\n", None),
+            Err(ExampleError::NoExitLine)
+        );
+        assert_eq!(example("", None), Err(ExampleError::NoExitLine));
+    }
+
+    #[test]
+    fn examples_are_equal_when_every_text_is() {
+        let a = example("x\n#exit 0\n", None).unwrap();
+        assert_eq!(a, example("x\n#exit 0\n", None).unwrap());
+        assert_ne!(a, example("x\n#exit 1\n", None).unwrap());
+        assert_ne!(a, example("x\n#exit 0\n", Some("")).unwrap());
+    }
+
+    #[test]
+    fn the_size_of_an_example_is_the_bytes_of_its_texts() {
+        let e = example("x\n#exit 0\n", Some("ee")).unwrap();
+        assert_eq!(e.part_size(ExamplePart::Arguments), 4);
+        assert_eq!(e.part_size(ExamplePart::Input), 3);
+        assert_eq!(e.part_size(ExamplePart::Expected), 10);
+        assert_eq!(e.part_size(ExamplePart::Errors), 2);
+        assert_eq!(e.size(), 19);
+        assert_eq!(
+            example("#exit 0", None)
+                .unwrap()
+                .part_size(ExamplePart::Errors),
+            0
+        );
+    }
+
+    #[test]
+    fn the_parts_are_named_in_the_words_of_the_domain() {
+        let words: Vec<&str> = ExamplePart::ALL
+            .into_iter()
+            .map(ExamplePart::word)
+            .collect();
+        assert_eq!(words, ["arguments", "input", "expected", "errors"]);
     }
 }

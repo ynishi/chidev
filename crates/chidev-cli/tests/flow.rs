@@ -2122,7 +2122,7 @@ fn an_agent_gets_a_judged_rule_and_the_model_reports_and_sees_the_finding_come_a
     assert_eq!(rule["when"], serde_json::json!(["should"]));
     assert_eq!(rule["moments"], serde_json::json!(["edit", "check"]));
     let model = &rules["model"];
-    assert_eq!(model["version"], 4);
+    assert_eq!(model["version"], 5);
     assert_eq!(model["store_revision"], 3);
     let contract = &model["contexts"][0]["contracts"][0];
     assert_eq!(contract["name"], "rounding");

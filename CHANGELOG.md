@@ -14,13 +14,30 @@ and this project adheres to
   `<name>.expected` ending with `#exit <code>`, and an optional `<name>.stderr`):
   it runs a command for each example under a time limit, compares the standard
   output, the exit code and the standard error, and prints `ok <name>` or
-  `fail <name>: <why>`. With `--external` it answers the external-check protocol
-  2, one finding per failing example about each Clause whose text names the
-  example's files, so it can be registered as a gate at `pin` and `resolve`.
+  `fail <name>: <why>`. With `--external --context <c> --harness <h>` it
+  answers the external-check protocol 2 for the examples of a Harness of
+  `examples` in the model sent, one finding per failing example about each
+  Clause its Case cites, so it can be registered as a gate at `pin` and
+  `resolve` (with `reads = ["contracts", "harnesses"]`).
   In Rust, `chidev_core::domain::vo::example` and `chidev_core::infra::accept`
   (see #45). [ADR 0009](docs/adr/0009-environments-are-assets-and-examples-are-a-kind-of-harness.md)
   records how verification environments and acceptance examples enter the model
   in the next steps (see #42).
+- A Harness of `kind` `examples`: each Case holds one acceptance example (its
+  arguments, standard input, expected output with `#exit <code>`, and optional
+  standard error) and cites the Clauses it shows, so a change of one example
+  alone is a new revision of its Case and the Harness. `harness_put` and a
+  `change_set` take the texts from `examples_dir` or inline per Case; a put is
+  refused unless it has that shape (the `examples.*` rules). The store keeps
+  schema 2 and needs no migration. The view is version 5: a Harness has its
+  `kind`, and an examples Harness has no `source` and its Cases an `example`
+  in place of `lines`, so a saved external result is stale once. In Rust,
+  `HarnessKind::Examples`, `CodeKind`, `domain::vo::example::Example`,
+  `CaseBody`, `HarnessContent`, `HarnessDraft`, `ExampleDraft`,
+  `HarnessPutContent`, `ExampleInput`, `ExampleTexts` and
+  `App::put_examples_harness`; `HarnessPut` holds its kind in its `content`,
+  `Harness::source` and `Case::lines` are `Option`s, and
+  `Harness::of_kind`/`revise_as` take a `CodeKind` (#45).
 
 ### Changed
 

@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, BasisInput, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CruxKind,
-    DecisionInput, DecisionMakerInput, Importance, Intent, ItemInput, ItemRef, OptionInput,
-    RaiseCruxInput, RecommendationInput, TargetInput, ViewInput,
+    DecisionInput, DecisionMakerInput, ExampleInput, ExampleTexts, Importance, Intent, ItemInput,
+    ItemRef, OptionInput, RaiseCruxInput, RecommendationInput, TargetInput, ViewInput,
 };
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -172,7 +172,7 @@ async fn only_the_sections_asked_for_are_in_the_view_and_the_contexts_always_nam
         },
     )
     .await;
-    assert_eq!(view["version"], 4);
+    assert_eq!(view["version"], 5);
     assert!(view.get("change_requests").is_none());
     assert!(view.get("cruxes").is_none());
     assert_eq!(context_names(&view), ["base", "core"]);
@@ -239,6 +239,81 @@ async fn the_contexts_named_are_the_only_ones_in_the_view_and_none_named_is_all_
     let none = read(&app, &of(Some(vec![]))).await;
     assert_eq!(none["contexts"], json!([]));
     assert_eq!(none["change_requests"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_view_is_version_5_and_shows_the_kind_of_a_harness_and_the_examples_of_its_cases() {
+    let mut app = project("examples").await;
+    app.put_examples_harness(
+        "core",
+        "acceptance",
+        &["api".to_string()],
+        &[
+            ExampleInput {
+                name: "a1".into(),
+                clauses: vec![ClauseRef {
+                    context: None,
+                    contract: "stock".into(),
+                    label: "C1".into(),
+                }],
+                example: ExampleTexts {
+                    args: "-n 1".into(),
+                    stdin: "in\n".into(),
+                    expected: "out\n#exit 0\n".into(),
+                    stderr: Some("warn\n".into()),
+                },
+            },
+            ExampleInput {
+                name: "a2".into(),
+                clauses: vec![ClauseRef {
+                    context: None,
+                    contract: "stock".into(),
+                    label: "C1".into(),
+                }],
+                example: ExampleTexts {
+                    args: String::new(),
+                    stdin: String::new(),
+                    expected: "#exit 2\n".into(),
+                    stderr: None,
+                },
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let view = read(
+        &app,
+        &ViewInput {
+            contexts: Some(vec!["core".to_string()]),
+            sections: sections(&[ModelSection::Harnesses]),
+        },
+    )
+    .await;
+    assert_eq!(view["version"], 5);
+    let harnesses = view["contexts"][0]["harnesses"].as_array().unwrap();
+    let by = |name: &str| harnesses.iter().find(|h| h["name"] == name).unwrap();
+    // a Harness of code says its kind, and has its source and its Cases on lines
+    let tests = by("tests");
+    assert_eq!(tests["kind"], "tests");
+    assert_eq!(tests["source"], "fn t() {}\n");
+    assert_eq!(tests["cases"][0]["lines"], json!([1, 1]));
+    assert!(tests["cases"][0].get("example").is_none());
+    // one of examples has no source, and its Cases are on no lines but hold their examples
+    let acceptance = by("acceptance");
+    assert_eq!(acceptance["kind"], "examples");
+    assert!(acceptance.get("source").is_none(), "{acceptance:#}");
+    let cases = acceptance["cases"].as_array().unwrap();
+    assert!(cases.iter().all(|c| c.get("lines").is_none()));
+    assert_eq!(
+        cases[0]["example"],
+        json!({"args":"-n 1","stdin":"in\n","expected":"out\n#exit 0\n","stderr":"warn\n"})
+    );
+    assert_eq!(
+        cases[1]["example"],
+        json!({"args":"","stdin":"","expected":"#exit 2\n"})
+    );
+    assert_eq!(cases[0]["cites"]["items"], json!([]));
+    assert_eq!(cases[0]["cites"]["clauses"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
