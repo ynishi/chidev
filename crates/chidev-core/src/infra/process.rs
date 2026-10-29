@@ -1,8 +1,10 @@
 //! Running a program: the machinery the external checks and the measurement runner share. A program is spawned
 //! without a shell, in a process group of its own, under one deadline, with a cap on what it may write to each pipe.
-//! A timeout or a cancellation kills the whole group and reaps the direct child; so does a normal exit, because a
-//! program must not leave a descendant holding a pipe or consuming resources. Only Unix process groups are
-//! implemented; other platforms answer with an explicit unsupported-platform failure.
+//! A timeout or a cancellation kills the whole group and reaps the direct child; so does a normal exit, as soon as
+//! the direct child has exited, because a program must not leave a descendant holding a pipe or consuming resources:
+//! what a descendant writes after that is not read. A program that exits without reading all of its standard input
+//! is not a failure for that alone; whether its answer is acceptable is the caller's to judge, as for every answer.
+//! Only Unix process groups are implemented; other platforms answer with an explicit unsupported-platform failure.
 //!
 //! What is run, and what to do with its output, is the caller's: this module knows no protocol. A caller hands in
 //! a [`Spec`] and a [`Capture`] that fills in as the program runs, so what the program wrote and how it exited are
@@ -360,14 +362,20 @@ pub async fn run(spec: &Spec<'_>, capture: &mut Capture) -> Result<ExitStatus, F
     let operation = async {
         let write = async {
             if let (Some(mut stdin), Some(input)) = (stdin, spec.stdin) {
-                stdin
-                    .write_all(input)
-                    .await
-                    .map_err(|e| failure(FailureKind::Transport, e.to_string()))?;
-                stdin
-                    .shutdown()
-                    .await
-                    .map_err(|e| failure(FailureKind::Transport, e.to_string()))?;
+                // A program may stop reading its input and still answer (it read one line, or refused the call):
+                // the pipe closing under the write is its choice, not a failure of the transport, and what it wrote
+                // and how it exited are still read and judged by the caller.
+                let unread = |e: std::io::Error| {
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        Ok(())
+                    } else {
+                        Err(failure(FailureKind::Transport, e.to_string()))
+                    }
+                };
+                match stdin.write_all(input).await {
+                    Ok(()) => stdin.shutdown().await.or_else(unread)?,
+                    Err(e) => unread(e)?,
+                }
             }
             Ok::<_, Failure>(())
         };
@@ -380,6 +388,9 @@ pub async fn run(spec: &Spec<'_>, capture: &mut Capture) -> Result<ExitStatus, F
                 .await
                 .map_err(|e| failure(FailureKind::Transport, e.to_string()))?;
             *exit_code = status.code();
+            // The run ends when the program does: a descendant still holding a pipe is stopped now, so the pipes
+            // reach their end, instead of keeping the run open until the deadline and reading as a timeout.
+            group.stop();
             Ok::<_, Failure>(status)
         };
         tokio::try_join!(
@@ -494,5 +505,48 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(capture.stderr, b"partial\n");
         let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    /// Runs `script` with `stdin` on its standard input and a deadline of 5 s.
+    async fn sh_with_input(script: &str, stdin: &[u8]) -> (Capture, Result<ExitStatus, Failure>) {
+        let cwd = dir();
+        let shell = resolve(&cwd, "sh").await.unwrap();
+        let args = ["-c".to_string(), script.to_string()];
+        let pipe = Pipe {
+            limit: 1024,
+            over: Over::Fail,
+        };
+        let spec = Spec {
+            executable: &shell,
+            args: &args,
+            cwd: &cwd,
+            env: &[],
+            stdin: Some(stdin),
+            deadline: deadline_in(Duration::from_secs(5)).unwrap(),
+            stdout: pipe,
+            stderr: pipe,
+        };
+        let mut capture = Capture::default();
+        let result = run(&spec, &mut capture).await;
+        let _ = std::fs::remove_dir_all(cwd);
+        (capture, result)
+    }
+
+    #[tokio::test]
+    async fn a_program_that_does_not_read_all_of_its_input_still_answers() {
+        // far more than a pipe holds, so the write is still going when the program exits
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        let (capture, result) = sh_with_input("echo answered; exit 4", &input).await;
+        assert_eq!(result.unwrap().code(), Some(4));
+        assert_eq!(capture.stdout, b"answered\n");
+    }
+
+    #[tokio::test]
+    async fn the_run_ends_when_the_program_does_though_a_descendant_holds_a_pipe() {
+        let started = std::time::Instant::now();
+        let (capture, result) = sh_with_input("sleep 30 & echo done", b"").await;
+        assert!(result.unwrap().success());
+        assert_eq!(capture.stdout, b"done\n");
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 }
