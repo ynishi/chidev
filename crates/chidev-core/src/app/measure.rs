@@ -10,7 +10,7 @@ use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
-use super::{App, AppError, context_id};
+use super::{App, AppError, CorrectionStatus, context_id, correction_status};
 use crate::domain::entity::measurement::{Counts, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
@@ -200,6 +200,8 @@ pub struct MeasurementStanding {
     pub sim: Option<SimSummary>,
     /// When the run began, in milliseconds since the epoch.
     pub at: u64,
+    /// The corrections made of its texts, in the order they were made.
+    pub corrections: Vec<CorrectionStatus>,
 }
 
 /// How much of the code a mutation run looked at; none for a simulation.
@@ -648,6 +650,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         coverage: coverage_of(m),
                         sim: None,
                         at: m.at().millis(),
+                        corrections: m.corrections().iter().map(correction_status).collect(),
                     });
                 }
             }
@@ -681,6 +684,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         coverage: None,
                         sim: m.sim().map(summary_of),
                         at: m.at().millis(),
+                        corrections: m.corrections().iter().map(correction_status).collect(),
                     });
                 }
             }
@@ -715,6 +719,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 coverage: coverage_of(m),
                 sim: m.sim().map(summary_of),
                 at: m.at().millis(),
+                corrections: m.corrections().iter().map(correction_status).collect(),
             });
         }
         Ok(out)

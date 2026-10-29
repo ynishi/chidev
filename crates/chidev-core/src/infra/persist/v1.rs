@@ -1,4 +1,4 @@
-//! Schemas 1 and 2 of the Project and Pin documents, and schema 3 of the change request document. These types are a versioned storage format, not a copy of the domain: they
+//! Schemas 1 and 2 of the Project and Pin documents, and schemas 3 and 4 of the change request document. These types are a versioned storage format, not a copy of the domain: they
 //! must stay readable as the domain changes, and they reach the domain only through its `restore` functions, which
 //! re-check every rule.
 //!
@@ -10,6 +10,10 @@
 //! The change request document is schema 3 since the Crux became a record of its own (see [`super::crux`]): it no
 //! longer holds one. A change request document of an earlier schema is read only by the migration to layout 2 of the
 //! store (see [`super::layout2`]), which moves its Crux out of it; this module never reads one.
+//!
+//! Schema 4 differs from schema 3 in the history alone: a step may be a correction of the texts of the request, which
+//! keeps the fields corrected, why, by whom and when, and no text. A document of schema 3 has no such step and is read
+//! as it is.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::entity::change_request::{
-    ChangeRequest, ChangeRequestDraft, DecidedExpectation,
+    ChangeRequest, ChangeRequestDraft, ChangeRequestField, DecidedExpectation,
 };
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
@@ -29,6 +33,7 @@ use crate::domain::vo::answer::DecisionMaker;
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
+use crate::domain::vo::correction::Correction;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Citations, Footprint, Move, Rename};
@@ -56,7 +61,11 @@ use crate::domain::vo::title::Title;
 pub(crate) const SCHEMA: u32 = 2;
 
 /// The schema number the change request documents are written with.
-pub(crate) const CR_SCHEMA: u32 = 3;
+pub(crate) const CR_SCHEMA: u32 = 4;
+
+/// The schema before a correction was a step of the history. A document of it has no corrected step and is read
+/// as it is; the migration to layout 2 writes it.
+pub(crate) const CR_SCHEMA_3: u32 = 3;
 
 /// The schema before an Item was kept by its key.
 const SCHEMA_1: u32 = 1;
@@ -736,7 +745,8 @@ pub(crate) struct ChangeRequestDoc {
     addresses: Vec<AddressDoc>,
     /// What the change sets applied for it moved, in the order they were kept.
     work: Vec<FootprintDoc>,
-    /// Every resolution and reopening, in the order they happened; resolved when the last is a resolution.
+    /// Every resolution, reopening and correction, in the order they happened; resolved when the last resolution or
+    /// reopening is a resolution. A document of schema 3 has no correction.
     history: Vec<TransitionDoc>,
 }
 
@@ -746,6 +756,108 @@ pub(crate) struct ChangeRequestDoc {
 enum TransitionDoc {
     Resolved(ResolutionDoc),
     Reopened(ReopeningDoc),
+    Corrected(CorrectionDoc<CrFieldDoc>),
+}
+
+/// A correction as it is kept, for any kind of record: the fields by a document of the kind (the words of the
+/// record's own enum, not the text), why, by whom and when (milliseconds since the epoch). The text that was
+/// replaced is in none of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CorrectionDoc<F> {
+    pub(super) fields: Vec<F>,
+    pub(super) reason: String,
+    pub(super) by: MakerDoc,
+    pub(super) at: u64,
+}
+
+impl<F> CorrectionDoc<F> {
+    /// The document of `c`, with each of its fields written by `field`.
+    pub(super) fn of<D>(c: &Correction<D>, field: impl Fn(&D) -> F) -> CorrectionDoc<F> {
+        CorrectionDoc {
+            fields: c.fields().iter().map(field).collect(),
+            reason: c.reason().to_string(),
+            by: maker_doc(c.by()),
+            at: c.at().millis(),
+        }
+    }
+
+    /// The correction the document keeps, with each field read by `field`. The domain reads it again: no field
+    /// twice, and at least one.
+    pub(super) fn read<D: PartialEq + std::fmt::Display>(
+        &self,
+        field: impl Fn(&F) -> Result<D, Bad>,
+    ) -> Result<Correction<D>, Bad> {
+        Correction::new(
+            self.fields.iter().map(field).collect::<Result<_, _>>()?,
+            Prose::try_from(self.reason.as_str()).map_err(bad)?,
+            maker_of(&self.by)?,
+            Timestamp::from_millis(self.at),
+        )
+        .map_err(bad)
+    }
+}
+
+/// A field of a change request, as a correction keeps it: `"title"`, `{"assumption_reason":0}`,
+/// `{"assumption_evidence":[0,1]}`, `{"step_by":2}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CrFieldDoc {
+    Title,
+    Situation,
+    Issuer,
+    AssumptionStatement(usize),
+    AssumptionReason(usize),
+    AssumptionEvidence(usize, usize),
+    StepReason(usize),
+    StepBy(usize),
+}
+
+impl CrFieldDoc {
+    /// The document of a field. A function of a reference, not a `From`, so that it can be handed on as one
+    /// function for any lifetime.
+    fn of(f: &ChangeRequestField) -> CrFieldDoc {
+        match *f {
+            ChangeRequestField::Title => CrFieldDoc::Title,
+            ChangeRequestField::Situation => CrFieldDoc::Situation,
+            ChangeRequestField::Issuer => CrFieldDoc::Issuer,
+            ChangeRequestField::AssumptionStatement { assumption } => {
+                CrFieldDoc::AssumptionStatement(assumption)
+            }
+            ChangeRequestField::AssumptionReason { assumption } => {
+                CrFieldDoc::AssumptionReason(assumption)
+            }
+            ChangeRequestField::AssumptionEvidence {
+                assumption,
+                evidence,
+            } => CrFieldDoc::AssumptionEvidence(assumption, evidence),
+            ChangeRequestField::StepReason { step } => CrFieldDoc::StepReason(step),
+            ChangeRequestField::StepBy { step } => CrFieldDoc::StepBy(step),
+        }
+    }
+
+    /// The field the document names.
+    fn field(&self) -> Result<ChangeRequestField, Bad> {
+        Ok(match *self {
+            CrFieldDoc::Title => ChangeRequestField::Title,
+            CrFieldDoc::Situation => ChangeRequestField::Situation,
+            CrFieldDoc::Issuer => ChangeRequestField::Issuer,
+            CrFieldDoc::AssumptionStatement(assumption) => {
+                ChangeRequestField::AssumptionStatement { assumption }
+            }
+            CrFieldDoc::AssumptionReason(assumption) => {
+                ChangeRequestField::AssumptionReason { assumption }
+            }
+            CrFieldDoc::AssumptionEvidence(assumption, evidence) => {
+                ChangeRequestField::AssumptionEvidence {
+                    assumption,
+                    evidence,
+                }
+            }
+            CrFieldDoc::StepReason(step) => ChangeRequestField::StepReason { step },
+            CrFieldDoc::StepBy(step) => ChangeRequestField::StepBy { step },
+        })
+    }
 }
 
 /// How a change request ended, and why, by whom and when (milliseconds since the epoch).
@@ -816,6 +928,9 @@ impl From<&Transition> for TransitionDoc {
                 by: maker_doc(r.by()),
                 at: r.at().millis(),
             }),
+            Transition::Corrected(c) => {
+                TransitionDoc::Corrected(CorrectionDoc::of(c, CrFieldDoc::of))
+            }
         }
     }
 }
@@ -847,6 +962,7 @@ impl TryFrom<&TransitionDoc> for Transition {
                 maker_of(&r.by)?,
                 Timestamp::from_millis(r.at),
             )),
+            TransitionDoc::Corrected(c) => Transition::Corrected(c.read(CrFieldDoc::field)?),
         })
     }
 }

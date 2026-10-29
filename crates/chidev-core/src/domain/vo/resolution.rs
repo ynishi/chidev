@@ -1,13 +1,15 @@
 //! How a change request ended, and the transitions it went through. A resolution is a decision somebody made, with
 //! the reason and the time; it is never inferred from what the definitions did. Reopening is a transition of its
-//! own, so the history of a request only grows.
+//! own, so the history of a request only grows, and so is a correction of a text in it.
 
 use std::fmt;
 
 use super::answer::DecisionMaker;
+use super::correction::Correction;
 use super::id::ChangeRequestId;
 use super::prose::Prose;
 use super::timestamp::Timestamp;
+use crate::domain::entity::change_request::ChangeRequestField;
 
 /// The conclusion of a resolution: how the request ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,14 +136,25 @@ impl Reopening {
     }
 }
 
-/// One step in the history of a change request: it was resolved, or it was reopened. The history is a log that is
-/// only appended to; the request is resolved when the last step is a resolution.
+/// One step in the history of a change request: it was resolved, it was reopened, or a text in it was corrected. The
+/// history is a log that is only appended to. Resolutions and reopenings alternate, starting with a resolution, and
+/// the request is resolved when the last of them is a resolution; a correction may stand anywhere among them and
+/// changes no state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transition {
     /// The request was resolved.
     Resolved(Resolution),
     /// The request was opened again.
     Reopened(Reopening),
+    /// A text in the request was replaced by a mark. The step keeps the fields, why, who and when, and no text.
+    Corrected(Correction<ChangeRequestField>),
+}
+
+impl Transition {
+    /// Whether the step is a resolution or a reopening, the steps that decide the state.
+    pub fn is_state(&self) -> bool {
+        !matches!(self, Transition::Corrected(_))
+    }
 }
 
 impl fmt::Display for ResolutionKind {

@@ -8,6 +8,7 @@ pub mod choice;
 pub mod clause;
 pub mod clause_edit;
 pub mod confidence;
+pub mod correction;
 pub mod crux;
 pub mod digest;
 pub mod finding;

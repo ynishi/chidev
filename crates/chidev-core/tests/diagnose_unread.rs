@@ -136,6 +136,26 @@ impl Store for FlakyStore {
         self.inner.latest_measurements().await
     }
 
+    async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        self.inner.measurements().await
+    }
+
+    async fn invocations(
+        &self,
+    ) -> Result<
+        Vec<(
+            chidev_core::app::ports::InvocationSeq,
+            chidev_core::app::ports::Invocation,
+        )>,
+        StoreError,
+    > {
+        self.inner.invocations().await
+    }
+
+    async fn clear_freed(&self) -> Result<(), StoreError> {
+        self.inner.clear_freed().await
+    }
+
     async fn pin_code(&self, pin: PinId) -> Result<Option<String>, StoreError> {
         self.inner.pin_code(pin).await
     }

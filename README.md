@@ -100,7 +100,8 @@ SQLite leaves in the file.
 operation, and prints one result line per operation (`"ok"`, the `line` it came
 from, and its fields). A line that fails gets `"ok":false` and `diagnostics` (see
 "Diagnostics"), and the run goes on; the exit status is 1 if any line failed. Things are named, never
-given by id: a Context by its name, an asset by its name within its Context, a
+given by id (except by a correction, which names records by id, because a name can
+hold the text it corrects; see "Correcting a record"): a Context by its name, an asset by its name within its Context, a
 Clause by its label (`C1`), an Item by its key, a Case by its name. These are
 the operations that build the model (the others are described below, where they
 belong):
@@ -364,7 +365,7 @@ several assets and holds only as a whole is one `change_set` (next section).
 ### Triggers and moments
 
 Every operation that changes what the store keeps is the trigger of one use case, and
-the checks it is held to follow from the kind of use case it is. There are four
+the checks it is held to follow from the kind of use case it is. There are five
 kinds, and a use case belongs to one of them for good:
 
 - An **edit** changes what the model says: a put or a retire, a Context added or
@@ -382,6 +383,10 @@ kinds, and a use case belongs to one of them for good:
   nothing, since it changes no asset.
 - A **record** keeps a fact and runs no check: `init`, `measure`, `simulate` and
   `finding_report`.
+- A **correction** replaces a text that must not stay with a mark, in the records
+  nothing else changes: `record_correct` (see "Correcting a record"). It is forced:
+  it runs no check and nothing refuses it for what a check would find
+  ([ADR 0008](docs/adr/0008-a-forced-correction-is-a-trigger-of-its-own-kind.md)).
 
 The moments are `edit`, `pin`, `resolve` and `check`. They are what a check says it
 runs at (`moments` in `check_list`, in a judged rule's file and in an external
@@ -649,6 +654,9 @@ outcome, the evidence of the commands (command, executable digest, exit code,
 time), and the failure if there was one. Measurements are appended; the newest per
 kind and Interface is current, the older stay as history
 (`measure_runs`, `measure_items`). A result is kept in one commit with nothing else.
+Only a correction changes a measurement after it is kept: it replaces a text of its
+evidence with a mark and leaves its place, its stamp and its counts (see "Correcting
+a record").
 
 The checks read the record and run nothing (they are builtin, at the `check` moment):
 
@@ -1189,6 +1197,8 @@ The checks then say where the record and the work disagree (below).
 The resolution it had stays: a request keeps a **history**, a log of
 `resolved` and `reopened` steps (each with the reason, who and when) that is only
 appended to, and `status` shows it as `history` beside the current `resolution`.
+A `corrected` step (see "Correcting a record") can stand anywhere in it and changes
+no state: the resolutions and reopenings alternate among themselves.
 A reopened request takes work (`change_set` `for` it), Cruxes and assumptions
 again, and can be resolved anew. Reopening does not touch its parts or its
 parent: a parent resolved while this request was closed stays resolved.
@@ -1524,6 +1534,35 @@ Interfaces, Harness implementation, code), not only to the specification.
   `{"op":"cr_assume","title":..,"statement":..,"reason":..,"evidence":[..]}`.
   Assumptions only grow, and a resolved request takes none. `status` lists them
   with each request.
+
+### Correcting a record
+
+A change request, a Crux, a measurement and the record of a check's run only grow,
+with one exception: a text that must not stay (a token, a password) is replaced with
+a mark by a correction.
+
+```json
+{"op":"text_find","text":"<the text>"}
+{"op":"record_correct","text":"<the text>","reason":"a token got into the record",
+ "by":{"person":"alice"},"places":[{"change_request":{"id":"…","field":"situation"}}]}
+```
+
+- `text_find` answers the `places` (a record, by its id, and a field) where the text
+  occurs, never the text.
+- `record_correct` replaces the text with `[redacted]` in each place named. A title
+  or a choice that would become equal to another takes `[redacted 2]` (or the next
+  number).
+- Each record keeps the correction (the fields, why, who, when; never the text): a
+  change request as a step `corrected` of its history in `status`, a Crux and the
+  latest measurement of each subject as their `corrections` in `status`. `view` shows
+  the `corrections` of a change request and of a Crux. An older measurement and the
+  record of a check's run keep them too, in the store; no operation shows them.
+- It is a trigger of its own kind (see "Triggers and moments"). It answers
+  `corrected`, `remaining` (where the text still is) and `cleared`, which says
+  whether the file was written again without the old bytes.
+- The fields, the refusals (`correct.*`) and what the store file keeps afterwards are
+  in the guide's
+  [Troubleshooting](docs/guide/TROUBLESHOOTING.md#4-the-records-only-a-correction-changes).
 
 ## Retiring
 

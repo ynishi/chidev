@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::domain::rule::UNMAPPED;
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::finding::RuleId;
-use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, MeasurementId};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;
@@ -54,6 +54,8 @@ pub enum Party {
     ChangeRequest(ChangeRequestId),
     /// A Crux, named by its id: the id is how an operation addresses it.
     Crux(CruxId),
+    /// A measurement, which has no name: it is shown by its id.
+    Measurement(MeasurementId),
     /// A line of the decision Policy.
     PolicyLine(PolicyLineId),
     /// An asset or Context by the uuid alone, when the error holds no more (the application finds its name).
@@ -82,7 +84,8 @@ pub enum Value {
     Party(Party),
     /// Things, by id.
     Parties(Vec<Party>),
-    /// The debug text of an error that has no rule yet. Only [`UNMAPPED`] carries it.
+    /// A text the rule's value is: the debug text of an error that has no rule yet ([`UNMAPPED`] carries it), or a
+    /// word of a record that a rule names (the field a correction was refused for), never a text of a record.
     Text(String),
 }
 

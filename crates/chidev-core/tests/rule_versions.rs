@@ -144,7 +144,14 @@ async fn the_supplied_rule_version_is_saved_with_the_judgment_and_invocation() {
         app.store().judged_reports().await.unwrap()[0].rule_digest,
         Some(digest)
     );
-    let invocations = app.store().invocations().await.unwrap();
+    let invocations: Vec<_> = app
+        .store()
+        .invocations()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect();
     let judged = invocations
         .iter()
         .filter(|r| r.executor == Executor::Judged)

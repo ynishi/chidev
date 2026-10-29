@@ -515,14 +515,16 @@ fn the_schema_of_the_operations_is_json_schema_2020_12_named_by_its_protocol() {
     for field in ["rule", "subject", "item", "clause"] {
         assert!(address[field].is_object(), "{field}: {address}");
     }
-    // every operation the setup writes has its alternative
+    // every operation the setup writes has its alternative, and the two that correct records, which no setup uses
     let alternatives = schema["oneOf"].as_array().unwrap();
-    for op in setup() {
-        let name = op["op"].as_str().unwrap();
+    let written = setup()
+        .into_iter()
+        .map(|op| op["op"].as_str().unwrap().to_string());
+    for name in written.chain(["text_find".to_string(), "record_correct".to_string()]) {
         assert!(
             alternatives
                 .iter()
-                .any(|a| a["properties"]["op"]["const"] == name),
+                .any(|a| a["properties"]["op"]["const"] == name.as_str()),
             "{name}"
         );
     }

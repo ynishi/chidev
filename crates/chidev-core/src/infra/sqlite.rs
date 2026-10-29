@@ -31,8 +31,8 @@ use super::persist::{self, CURRENT, CURRENT_CHANGE_REQUEST, CURRENT_CRUX};
 use crate::app::commit::{Gated, Trigger};
 use crate::app::ports::external::{ExecutionEvidence, ExternalReport};
 use crate::app::ports::{
-    AssetKind, AssetNames, Changes, Invocation, JudgedFinding, JudgedReport, JudgedRepository,
-    Outcome, Store, StoreRevision,
+    AssetKind, AssetNames, Changes, Invocation, InvocationSeq, JudgedFinding, JudgedReport,
+    JudgedRepository, Outcome, Store, StoreRevision,
 };
 use crate::domain::check::level::MomentWordError;
 use crate::domain::check::{Executor, Level, Moment};
@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS check_invocations (
     outcome TEXT NOT NULL,
     executor TEXT NOT NULL DEFAULT 'builtin',
     judge TEXT,
-    rule_digest TEXT
+    rule_digest TEXT,
+    corrections TEXT
 );
 ";
 
@@ -148,9 +149,11 @@ CREATE TABLE IF NOT EXISTS external_reports (
 );
 ";
 
-/// The code each Pin accepted (the latest per Interface), and the measurements: `measure_runs` (appended, never
-/// changed: the newest per kind and subject is current, the older ones are history) with its `measure_items` (the
-/// mutants of a run), written in the commit of the use case that made the run.
+/// The code each Pin accepted (the latest per Interface), and the measurements: `measure_runs` (appended: the newest
+/// per kind and subject is current, the older ones are history) with its `measure_items` (the mutants of a run),
+/// written in the commit of the use case that made the run. A run is changed only by a correction of its texts,
+/// which replaces its failure, evidence, summary and items and appends to its `corrections` (a JSON array, NULL
+/// for none), and keeps its `seq`, its stamp and what it stood on.
 const CREATE_MEASURE: &str = "
 CREATE TABLE IF NOT EXISTS pin_codes (
     interface TEXT PRIMARY KEY,
@@ -170,7 +173,8 @@ CREATE TABLE IF NOT EXISTS measure_runs (
     outcome TEXT NOT NULL,
     failure TEXT,
     evidence TEXT NOT NULL,
-    summary TEXT NOT NULL
+    summary TEXT NOT NULL,
+    corrections TEXT
 );
 CREATE INDEX IF NOT EXISTS measure_runs_by_subject ON measure_runs (kind, subject_id, seq);
 CREATE TABLE IF NOT EXISTS measure_items (
@@ -213,6 +217,9 @@ fn failed(e: IsleError) -> StoreError {
 /// other alone (a file of layout 1 is moved by [`SqliteStore::open`], which then brings its tables up to date, and
 /// the layout of any other is checked after opening).
 fn prepare(conn: &mut Connection) -> Result<(), rusqlite::Error> {
+    // A page or a cell that a commit frees is overwritten with zeros, so a text a row held is not left in the free
+    // space of the file after the row is replaced. It is a setting of the connection, so it is made for each one.
+    conn.pragma_update(None, "secure_delete", 1)?;
     let layout: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if layout == 0 {
         conn.execute_batch(CREATE)?;
@@ -238,10 +245,12 @@ fn ensure_tables(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     add_column(conn, "check_invocations", "external", "TEXT")?;
     add_column(conn, "check_invocations", "rule_digest", "TEXT")?;
     add_column(conn, "check_invocations", "trigger", "TEXT")?;
+    add_column(conn, "check_invocations", "corrections", "TEXT")?;
     conn.execute_batch(CREATE_JUDGED)?;
     add_column(conn, "judged_reports", "rule_digest", "TEXT")?;
     conn.execute_batch(CREATE_EXTERNAL)?;
     conn.execute_batch(CREATE_MEASURE)?;
+    add_column(conn, "measure_runs", "corrections", "TEXT")?;
     Ok(())
 }
 
@@ -250,10 +259,11 @@ fn revision_of(n: i64) -> Option<StoreRevision> {
     u64::try_from(n).ok().map(StoreRevision)
 }
 
-/// An invocation as stored: revision, check, moment, counts, outcome, executor, judge, external evidence, rule
-/// digest, trigger.
+/// An invocation as stored: seq, revision, check, moment, counts, outcome, executor, judge, external evidence, rule
+/// digest, trigger, corrections.
 type InvocationRow = (
     i64,
+    i64,
     String,
     String,
     i64,
@@ -261,6 +271,7 @@ type InvocationRow = (
     i64,
     String,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -346,14 +357,13 @@ impl SqliteStore {
         driver.shutdown().await.map_err(failed)
     }
 
-    /// The checks the use cases have run, in the order they were kept. Not part of the [`Store`] port: nothing in a
-    /// use case reads them back; they are for the person (or a test) who asks what ran.
-    pub async fn invocations(&self) -> Result<Vec<Invocation>, StoreError> {
+    /// The checks the use cases have run, in the order they were kept, each with the `seq` of its row.
+    async fn read_invocations(&self) -> Result<Vec<(InvocationSeq, Invocation)>, StoreError> {
         let rows: Vec<InvocationRow> = self
             .isle
             .call(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\"
+                    "SELECT seq, store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\", corrections
                      FROM check_invocations ORDER BY seq",
                 )?;
                 stmt.query_map([], |r| {
@@ -370,6 +380,8 @@ impl SqliteStore {
                         r.get(9)?,
                         r.get(10)?,
                         r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
                     ))
                 })?
                 .collect()
@@ -380,6 +392,7 @@ impl SqliteStore {
         rows.into_iter()
             .map(
                 |(
+                    seq,
                     at,
                     check,
                     hook,
@@ -392,41 +405,108 @@ impl SqliteStore {
                     external,
                     rule_digest,
                     trigger,
+                    corrections,
                 )| {
-                    Ok(Invocation {
-                        check: RuleId::try_from(check.as_str())
-                            .map_err(|e| corrupt(&e.to_string()))?,
-                        moment: match Moment::parse(&hook) {
-                            Ok(m) => m,
-                            // A row made when the word was `put` is an edit still.
-                            Err(MomentWordError::Renamed { to, .. }) => to,
-                            Err(_) => return Err(corrupt(&hook)),
+                    let seq = InvocationSeq(u64::try_from(seq).map_err(|_| corrupt("a seq"))?);
+                    Ok((
+                        seq,
+                        Invocation {
+                            check: RuleId::try_from(check.as_str())
+                                .map_err(|e| corrupt(&e.to_string()))?,
+                            moment: match Moment::parse(&hook) {
+                                Ok(m) => m,
+                                // A row made when the word was `put` is an edit still.
+                                Err(MomentWordError::Renamed { to, .. }) => to,
+                                Err(_) => return Err(corrupt(&hook)),
+                            },
+                            read_at: StoreRevision(
+                                u64::try_from(at).map_err(|_| corrupt("a revision"))?,
+                            ),
+                            notes: u32::try_from(notes).map_err(|_| corrupt("a count"))?,
+                            warnings: u32::try_from(warnings).map_err(|_| corrupt("a count"))?,
+                            errors: u32::try_from(errors).map_err(|_| corrupt("a count"))?,
+                            outcome: Outcome::from_word(&outcome)
+                                .ok_or_else(|| corrupt(&outcome))?,
+                            executor: Executor::from_word(&executor)
+                                .ok_or_else(|| corrupt(&executor))?,
+                            judge,
+                            trigger: trigger
+                                .map(|w| Trigger::from_word(&w).ok_or_else(|| corrupt(&w)))
+                                .transpose()?,
+                            rule_digest: rule_digest
+                                .map(|d| {
+                                    Digest::restore(&d).ok_or_else(|| corrupt("a rule digest"))
+                                })
+                                .transpose()?,
+                            external: external
+                                .map(|doc| {
+                                    serde_json::from_str::<ExecutionEvidence>(&doc)
+                                        .map_err(|e| corrupt(&format!("external evidence: {e}")))
+                                })
+                                .transpose()?,
+                            corrections: persist::measure::decode_invocation_corrections(
+                                corrections.as_deref(),
+                            )?,
                         },
-                        read_at: StoreRevision(
-                            u64::try_from(at).map_err(|_| corrupt("a revision"))?,
-                        ),
-                        notes: u32::try_from(notes).map_err(|_| corrupt("a count"))?,
-                        warnings: u32::try_from(warnings).map_err(|_| corrupt("a count"))?,
-                        errors: u32::try_from(errors).map_err(|_| corrupt("a count"))?,
-                        outcome: Outcome::from_word(&outcome).ok_or_else(|| corrupt(&outcome))?,
-                        executor: Executor::from_word(&executor)
-                            .ok_or_else(|| corrupt(&executor))?,
-                        judge,
-                        trigger: trigger
-                            .map(|w| Trigger::from_word(&w).ok_or_else(|| corrupt(&w)))
-                            .transpose()?,
-                        rule_digest: rule_digest
-                            .map(|d| Digest::restore(&d).ok_or_else(|| corrupt("a rule digest")))
-                            .transpose()?,
-                        external: external
-                            .map(|doc| {
-                                serde_json::from_str::<ExecutionEvidence>(&doc)
-                                    .map_err(|e| corrupt(&format!("external evidence: {e}")))
-                            })
-                            .transpose()?,
-                    })
+                    ))
                 },
             )
+            .collect()
+    }
+
+    /// The measurements of the runs `filter` selects (a `WHERE` clause, or nothing for every run), in the order the runs
+    /// were made, each with its items.
+    async fn runs_where(&self, filter: &'static str) -> Result<Vec<Measurement>, StoreError> {
+        let sql = format!(
+            "SELECT id, kind, subject_kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary, corrections
+             FROM measure_runs {filter} ORDER BY seq"
+        );
+        let runs: Vec<(RunRow, Vec<ItemRow>)> = self
+            .isle
+            .call(move |c| {
+                let mut runs = c.prepare(&sql)?;
+                let rows: Vec<RunRow> = runs
+                    .query_map([], |r| {
+                        Ok(RunRow {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            subject_kind: r.get(2)?,
+                            subject: r.get(3)?,
+                            stamp: r.get(4)?,
+                            inputs: r.get(5)?,
+                            started_at: r.get(6)?,
+                            outcome: r.get(7)?,
+                            failure: r.get(8)?,
+                            evidence: r.get(9)?,
+                            summary: r.get(10)?,
+                            corrections: r.get(11)?,
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
+                let mut items = c.prepare(
+                    "SELECT key, site, operator, outcome, detail FROM measure_items WHERE run = ?1 ORDER BY seq",
+                )?;
+                let mut out = Vec::with_capacity(rows.len());
+                for run in rows {
+                    let found: Vec<ItemRow> = items
+                        .query_map(params![run.id], |r| {
+                            Ok(ItemRow {
+                                key: r.get(0)?,
+                                site: r.get(1)?,
+                                operator: r.get(2)?,
+                                outcome: r.get(3)?,
+                                detail: r.get(4)?,
+                            })
+                        })?
+                        .collect::<Result<_, _>>()?;
+                    out.push((run, found));
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(failed)?;
+        runs.iter()
+            .map(|(run, items)| persist::measure::decode(run, items))
             .collect()
     }
 
@@ -693,57 +773,51 @@ impl Store for SqliteStore {
     }
 
     async fn latest_measurements(&self) -> Result<Vec<Measurement>, StoreError> {
-        let runs: Vec<(RunRow, Vec<ItemRow>)> = self
+        self.runs_where(
+            "WHERE seq IN (SELECT MAX(seq) FROM measure_runs GROUP BY kind, subject_id)",
+        )
+        .await
+    }
+
+    async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        self.runs_where("").await
+    }
+
+    async fn invocations(&self) -> Result<Vec<(InvocationSeq, Invocation)>, StoreError> {
+        self.read_invocations().await
+    }
+
+    async fn clear_freed(&self) -> Result<(), StoreError> {
+        // Outside any transaction: `VACUUM` cannot run inside one, and `call` opens none.
+        self.isle
+            .call(|c| c.execute_batch("VACUUM"))
+            .await
+            .map_err(|e| StoreError::Failed(format!("vacuum: {e}")))?;
+        let wal = self
             .isle
             .call(|c| {
-                let mut runs = c.prepare(
-                    "SELECT id, kind, subject_kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary
-                     FROM measure_runs
-                     WHERE seq IN (SELECT MAX(seq) FROM measure_runs GROUP BY kind, subject_id)
-                     ORDER BY seq",
-                )?;
-                let rows: Vec<RunRow> = runs
-                    .query_map([], |r| {
-                        Ok(RunRow {
-                            id: r.get(0)?,
-                            kind: r.get(1)?,
-                            subject_kind: r.get(2)?,
-                            subject: r.get(3)?,
-                            stamp: r.get(4)?,
-                            inputs: r.get(5)?,
-                            started_at: r.get(6)?,
-                            outcome: r.get(7)?,
-                            failure: r.get(8)?,
-                            evidence: r.get(9)?,
-                            summary: r.get(10)?,
-                        })
-                    })?
-                    .collect::<Result<_, _>>()?;
-                let mut items = c.prepare(
-                    "SELECT key, site, operator, outcome, detail FROM measure_items WHERE run = ?1 ORDER BY seq",
-                )?;
-                let mut out = Vec::with_capacity(rows.len());
-                for run in rows {
-                    let found: Vec<ItemRow> = items
-                        .query_map(params![run.id], |r| {
-                            Ok(ItemRow {
-                                key: r.get(0)?,
-                                site: r.get(1)?,
-                                operator: r.get(2)?,
-                                outcome: r.get(3)?,
-                                detail: r.get(4)?,
-                            })
-                        })?
-                        .collect::<Result<_, _>>()?;
-                    out.push((run, found));
+                let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+                if !mode.eq_ignore_ascii_case("wal") {
+                    return Ok(None);
                 }
-                Ok(out)
+                // The checkpoint answers a row (busy, log, checkpointed) and does not fail when a reader blocks
+                // it: `busy` is 1 then, and the log still holds what was freed.
+                c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                    Ok(Some((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    )))
+                })
             })
             .await
-            .map_err(failed)?;
-        runs.iter()
-            .map(|(run, items)| persist::measure::decode(run, items))
-            .collect()
+            .map_err(|e| StoreError::Failed(format!("wal checkpoint: {e}")))?;
+        match wal {
+            Some((busy, log, checkpointed)) if busy != 0 => Err(StoreError::Failed(format!(
+                "wal checkpoint: busy, a reader holds the log ({checkpointed} of {log} frames written back)"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     async fn pin_code(&self, pin: PinId) -> Result<Option<String>, StoreError> {
@@ -853,6 +927,31 @@ impl SqliteStore {
             .iter()
             .map(persist::measure::encode)
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let corrected_runs = changes
+            .corrected_measurements
+            .iter()
+            .map(persist::measure::encode)
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let external_text = |i: &Invocation| {
+            i.external
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| StoreError::Failed(format!("external evidence: {e}")))
+        };
+        let corrected_rows = changes
+            .corrected_invocations
+            .iter()
+            .map(|(seq, i)| {
+                Ok((
+                    i64::try_from(seq.0)
+                        .map_err(|_| StoreError::Failed("a seq too large to keep".to_string()))?,
+                    i.judge.clone(),
+                    external_text(i)?,
+                    persist::measure::encode_invocation_corrections(&i.corrections)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let invocations = changes
             .invocations
             .iter()
@@ -871,13 +970,10 @@ impl SqliteStore {
                     i.outcome.word(),
                     i.executor.word(),
                     i.judge.clone(),
-                    i.external
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()
-                        .map_err(|e| StoreError::Failed(format!("external evidence: {e}")))?,
+                    external_text(i)?,
                     i.rule_digest.map(|d| d.to_string()),
                     i.trigger.map(|t| t.word()),
+                    persist::measure::encode_invocation_corrections(&i.corrections)?,
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -960,17 +1056,7 @@ impl SqliteStore {
                         params![interface, pin, code],
                     )?;
                 }
-                for (run, items) in &measures {
-                    tx.execute(
-                        "INSERT INTO measure_runs
-                         (id, kind, subject_kind, subject_id, stamp, inputs, store_revision, started_at, outcome, failure, evidence, summary)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        params![
-                            run.id, run.kind, run.subject_kind, run.subject, run.stamp, run.inputs,
-                            read_at, run.started_at, run.outcome, run.failure, run.evidence,
-                            run.summary
-                        ],
-                    )?;
+                let insert_items = |run: &RunRow, items: &[ItemRow]| -> Result<(), rusqlite::Error> {
                     for (n, item) in items.iter().enumerate() {
                         tx.execute(
                             "INSERT INTO measure_items (run, seq, key, site, operator, outcome, detail)
@@ -980,6 +1066,43 @@ impl SqliteStore {
                                 item.detail
                             ],
                         )?;
+                    }
+                    Ok(())
+                };
+                for (run, items) in &measures {
+                    tx.execute(
+                        "INSERT INTO measure_runs
+                         (id, kind, subject_kind, subject_id, stamp, inputs, store_revision, started_at, outcome, failure, evidence, summary, corrections)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        params![
+                            run.id, run.kind, run.subject_kind, run.subject, run.stamp, run.inputs,
+                            read_at, run.started_at, run.outcome, run.failure, run.evidence,
+                            run.summary, run.corrections
+                        ],
+                    )?;
+                    insert_items(run, items)?;
+                }
+                // A correction replaces what a run says in text, and keeps the place of the run among the runs
+                // (`seq`) and everything its stamp is read from.
+                for (run, items) in &corrected_runs {
+                    let changed = tx.execute(
+                        "UPDATE measure_runs SET failure = ?2, evidence = ?3, summary = ?4, corrections = ?5
+                         WHERE id = ?1",
+                        params![run.id, run.failure, run.evidence, run.summary, run.corrections],
+                    )?;
+                    if changed == 0 {
+                        return Err(rusqlite::Error::StatementChangedRows(0));
+                    }
+                    tx.execute("DELETE FROM measure_items WHERE run = ?1", params![run.id])?;
+                    insert_items(run, items)?;
+                }
+                for (seq, judge, external, corrections) in &corrected_rows {
+                    let changed = tx.execute(
+                        "UPDATE check_invocations SET judge = ?2, external = ?3, corrections = ?4 WHERE seq = ?1",
+                        params![seq, judge, external, corrections],
+                    )?;
+                    if changed == 0 {
+                        return Err(rusqlite::Error::StatementChangedRows(0));
                     }
                 }
                 for (id, doc) in &crs {
@@ -1009,14 +1132,14 @@ impl SqliteStore {
                         ],
                     )?;
                 }
-                for (at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger) in
+                for (at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger, corrections) in
                     &invocations
                 {
                     tx.execute(
                         "INSERT INTO check_invocations
-                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\")
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger],
+                         (store_revision, check_id, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, \"trigger\", corrections)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        params![at, check, hook, notes, warnings, errors, outcome, executor, judge, external, rule_digest, trigger, corrections],
                     )?;
                 }
                 for (rule, doc) in &external {
@@ -1059,7 +1182,13 @@ impl SqliteStore {
                 Ok(true)
             })
             .await
-            .map_err(failed)?;
+            .map_err(|e| match e {
+                // A correction names a run or a row that the store does not have: nothing was kept.
+                IsleError::Sqlite(rusqlite::Error::StatementChangedRows(0)) => StoreError::Corrupt(
+                    "a correction names a record the store does not have".to_string(),
+                ),
+                other => failed(other),
+            })?;
         if kept {
             Ok(())
         } else {
@@ -1080,6 +1209,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chidev-sqlite-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("nested").join("chidev.db")
+    }
+
+    /// The runs kept, without the identity of their rows.
+    async fn ran(store: &SqliteStore) -> Vec<Invocation> {
+        store
+            .invocations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, run)| run)
+            .collect()
     }
 
     fn changes() -> Changes {
@@ -1108,11 +1248,14 @@ mod tests {
                 judge: None,
                 external: None,
                 rule_digest: None,
+                corrections: Vec::new(),
             }],
             judged: Vec::new(),
             external: Vec::new(),
             pin_codes: Vec::new(),
             measurements: Vec::new(),
+            corrected_measurements: Vec::new(),
+            corrected_invocations: Vec::new(),
         }
     }
 
@@ -1152,7 +1295,7 @@ mod tests {
             Some(n.id)
         );
         assert_eq!(store.asset_name(n.id).await.unwrap(), Some(n.name.clone()));
-        assert_eq!(store.invocations().await.unwrap(), c.invocations);
+        assert_eq!(ran(&store).await, c.invocations);
         store.close().await.unwrap();
     }
 
@@ -1287,7 +1430,7 @@ mod tests {
         store.close().await.unwrap();
         let store = SqliteStore::open(&path).await.unwrap();
         assert_eq!(store.judged_reports().await.unwrap(), vec![second, unknown]);
-        let invocations = store.invocations().await.unwrap();
+        let invocations = ran(&store).await;
         assert_eq!(invocations[0].rule_digest, None);
         assert_eq!(invocations[1..], [first_run, second_run]);
         store.close().await.unwrap();
@@ -1324,7 +1467,7 @@ mod tests {
         old_run.rule_digest = None;
         let store = SqliteStore::open(&path).await.unwrap();
         assert_eq!(store.judged_reports().await.unwrap(), vec![old_report]);
-        assert_eq!(store.invocations().await.unwrap(), vec![old_run]);
+        assert_eq!(ran(&store).await, vec![old_run]);
         assert_eq!(store.revision().await.unwrap(), StoreRevision(1));
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
         store.close().await.unwrap();
@@ -1403,7 +1546,7 @@ mod tests {
             Err(StoreError::Conflict)
         );
         assert_eq!(store.judged_reports().await.unwrap(), vec![first]);
-        assert_eq!(store.invocations().await.unwrap(), vec![first_run]);
+        assert_eq!(ran(&store).await, vec![first_run]);
         assert_eq!(store.revision().await.unwrap(), StoreRevision(1));
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(0));
         store.close().await.unwrap();
@@ -1450,10 +1593,10 @@ mod tests {
         assert!(store.judged_reports().await.unwrap().is_empty());
         // the model is taken to have last changed at the store's revision, the safe side
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(1));
-        let ran = store.invocations().await.unwrap();
-        assert_eq!(ran.len(), 1);
+        let kept = ran(&store).await;
+        assert_eq!(kept.len(), 1);
         assert_eq!(
-            (ran[0].executor, ran[0].judge.clone()),
+            (kept[0].executor, kept[0].judge.clone()),
             (Executor::Builtin, None)
         );
         store.close().await.unwrap();
@@ -1477,7 +1620,7 @@ mod tests {
         assert_eq!(store.revision().await.unwrap(), StoreRevision(1));
         assert_eq!(store.model_revision().await.unwrap(), StoreRevision(1));
         assert!(store.external_reports().await.unwrap().is_empty());
-        let invocations = store.invocations().await.unwrap();
+        let invocations = ran(&store).await;
         assert_eq!(invocations, changes().invocations);
         store.close().await.unwrap();
     }
@@ -1567,10 +1710,7 @@ mod tests {
             store.external_reports().await.unwrap(),
             vec![replacement, second]
         );
-        assert_eq!(
-            store.invocations().await.unwrap(),
-            first_changes.invocations
-        );
+        assert_eq!(ran(&store).await, first_changes.invocations);
         store.close().await.unwrap();
     }
 
@@ -1676,6 +1816,496 @@ mod tests {
         let store = SqliteStore::open(&path).await.unwrap();
         assert!(matches!(store.project().await, Err(StoreError::Corrupt(_))));
         store.close().await.unwrap();
+    }
+
+    /// The correction of texts: what the store keeps of it, and what it leaves in the files.
+    mod corrections {
+        use std::collections::BTreeMap;
+        use std::path::Path;
+
+        use super::*;
+        use crate::app::ports::InvocationField;
+        use crate::domain::entity::change_request::{ChangeRequestDraft, ChangeRequestField};
+        use crate::domain::entity::measurement::MeasurementField;
+        use crate::domain::vo::answer::DecisionMaker;
+        use crate::domain::vo::correction::{Correctable, Correction, SoughtText};
+        use crate::domain::vo::intent::Intent;
+        use crate::domain::vo::measure::StepEvidence;
+        use crate::domain::vo::prose::Prose;
+        use crate::domain::vo::timestamp::Timestamp;
+        use crate::domain::vo::title::Title;
+
+        const TOKEN: &str = "tok-SECRET-123";
+
+        fn sought() -> SoughtText {
+            SoughtText::try_from(TOKEN).unwrap()
+        }
+
+        fn correction<F: PartialEq + std::fmt::Display>(fields: Vec<F>) -> Correction<F> {
+            Correction::new(
+                fields,
+                Prose::try_from("a token was pasted").unwrap(),
+                DecisionMaker::person("carol").unwrap(),
+                Timestamp::from_millis(50),
+            )
+            .unwrap()
+        }
+
+        /// A change request with the token in its situation.
+        fn leaky_cr() -> ChangeRequest {
+            ChangeRequest::open(
+                ChangeRequestId::from_uuid(fixture::id(900)),
+                ChangeRequestDraft {
+                    title: Title::try_from("a request").unwrap(),
+                    situation: Some(Prose::try_from(format!("it holds {TOKEN}").as_str()).unwrap()),
+                    intent: Intent::KeepBehavior,
+                    parent: None,
+                    issuer: None,
+                    expects: BTreeMap::new(),
+                    assumptions: Vec::new(),
+                    addresses: Vec::new(),
+                },
+            )
+        }
+
+        /// A run of a measure with the token on the standard error of its step.
+        fn leaky_run(n: u128, subject: u128) -> Measurement {
+            use crate::domain::entity::measurement::fixture::{draft, empty_basis};
+            let mut d = draft(
+                n,
+                InterfaceId::from_uuid(fixture::id(subject)),
+                Digest::of(b"code"),
+                empty_basis(),
+                Vec::new(),
+            );
+            d.evidence = vec![StepEvidence {
+                step: "baseline-test".into(),
+                command: "cargo test".into(),
+                command_digest: None,
+                exit_code: Some(1),
+                duration_ms: 3,
+                stderr: format!("error: bad {TOKEN}"),
+            }];
+            Measurement::new(d).unwrap()
+        }
+
+        /// A record of a run of an external check with the token in its command, its stderr and its judge.
+        fn leaky_invocation() -> Invocation {
+            let mut run = changes().invocations.remove(0);
+            run.executor = Executor::External;
+            run.judge = Some(format!("judge {TOKEN}"));
+            run.external = Some(ExecutionEvidence {
+                command: Some(format!("/bin/check {TOKEN}")),
+                stderr: format!("error {TOKEN}"),
+                ..ExecutionEvidence::default()
+            });
+            run
+        }
+
+        /// The same record with the token replaced in all three places, as a correction does.
+        fn corrected_invocation(run: &Invocation) -> Invocation {
+            let mut fixed = run.clone();
+            fixed
+                .correct(
+                    &sought(),
+                    correction(vec![
+                        InvocationField::Command,
+                        InvocationField::Stderr,
+                        InvocationField::Judge,
+                    ]),
+                    &|_, _| false,
+                )
+                .unwrap();
+            fixed
+        }
+
+        /// The files the store keeps: the database and, when they exist, its journal and its write-ahead log.
+        fn files_of(path: &Path) -> Vec<(String, Vec<u8>)> {
+            ["", "-journal", "-wal"]
+                .iter()
+                .filter_map(|suffix| {
+                    let mut name = path.as_os_str().to_os_string();
+                    name.push(suffix);
+                    std::fs::read(&name)
+                        .ok()
+                        .map(|bytes| (format!("the database{suffix}"), bytes))
+                })
+                .collect()
+        }
+
+        fn holds_token(bytes: &[u8]) -> bool {
+            bytes.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes())
+        }
+
+        /// What a correction of the change request, the run of a measure and the record of a check's run puts in
+        /// `Changes`.
+        fn correcting(
+            cr: &ChangeRequest,
+            run: &Measurement,
+            seq: InvocationSeq,
+            check: &Invocation,
+        ) -> Changes {
+            let mut fixed_cr = cr.clone();
+            fixed_cr
+                .correct(
+                    &sought(),
+                    correction(vec![ChangeRequestField::Situation]),
+                    &|_, _| false,
+                )
+                .unwrap();
+            let mut fixed_run = run.clone();
+            fixed_run
+                .correct(
+                    &sought(),
+                    correction(vec![MeasurementField::StepStderr { step: 0 }]),
+                    &|_, _| false,
+                )
+                .unwrap();
+            Changes {
+                change_requests: vec![fixed_cr],
+                corrected_measurements: vec![fixed_run],
+                corrected_invocations: vec![(seq, corrected_invocation(check))],
+                ..Changes::default()
+            }
+        }
+
+        #[tokio::test]
+        async fn secure_delete_is_on_for_the_connection() {
+            let path = temp_db("secure-delete");
+            let store = SqliteStore::open(&path).await.unwrap();
+            let on: i64 = store
+                .isle
+                .call(|c| c.query_row("PRAGMA secure_delete", [], |r| r.get(0)))
+                .await
+                .unwrap();
+            assert_eq!(on, 1);
+            store.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_correction_replaces_the_texts_of_a_run_and_of_a_check_and_keeps_their_place() {
+            let path = temp_db("correct-rows");
+            let store = SqliteStore::open(&path).await.unwrap();
+            let first = leaky_run(1, 30);
+            let second = leaky_run(2, 30);
+            let other = leaky_run(3, 31);
+            let check = leaky_invocation();
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        measurements: vec![first.clone(), second.clone(), other.clone()],
+                        invocations: vec![check.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let rows = store.invocations().await.unwrap();
+            assert_eq!(rows.len(), 1);
+            let seq = rows[0].0;
+            let model = store.model_revision().await.unwrap();
+
+            let mut fixed_first = first.clone();
+            fixed_first
+                .correct(
+                    &sought(),
+                    correction(vec![MeasurementField::StepStderr { step: 0 }]),
+                    &|_, _| false,
+                )
+                .unwrap();
+            let fixed_check = corrected_invocation(&check);
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        corrected_measurements: vec![fixed_first.clone()],
+                        corrected_invocations: vec![(seq, fixed_check.clone())],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+
+            // the corrected run keeps its place among the runs, and the newest of a subject is still the newest
+            let kept = [fixed_first.clone(), second.clone(), other.clone()];
+            assert_eq!(store.measurements().await.unwrap(), kept);
+            assert_eq!(
+                store.latest_measurements().await.unwrap(),
+                [second.clone(), other.clone()]
+            );
+            assert_eq!(
+                store.invocations().await.unwrap(),
+                [(seq, fixed_check.clone())]
+            );
+            assert_eq!(fixed_check.corrections.len(), 1);
+            // a correction of a run or a check is not a change of the model
+            assert_eq!(store.model_revision().await.unwrap(), model);
+            assert_eq!(store.revision().await.unwrap(), StoreRevision(at.0 + 1));
+            store.close().await.unwrap();
+
+            // and it is what a store opened again reads
+            let store = SqliteStore::open(&path).await.unwrap();
+            assert_eq!(store.measurements().await.unwrap(), kept);
+            assert_eq!(store.invocations().await.unwrap(), [(seq, fixed_check)]);
+            store.close().await.unwrap();
+        }
+
+        /// A simulation whose one case could not start the program, with the token in the reason it gave.
+        fn leaky_exit_run(n: u128) -> Measurement {
+            use crate::domain::entity::measurement::fixture::sim_draft;
+            use crate::domain::vo::id::HarnessId;
+            use crate::domain::vo::revision::Revision;
+            use crate::domain::vo::sim::{CaseExit, CaseRun, SimBasis, SimCase, SimOutcome};
+            let basis = SimBasis {
+                harness: Revision::first(),
+                contracts: Default::default(),
+                interfaces: Default::default(),
+            };
+            let outcome = SimOutcome {
+                cases: vec![CaseRun {
+                    case: SimCase::Seed(0),
+                    exit: CaseExit::CannotStart(format!("python3 {TOKEN}: No such file")),
+                    findings: Vec::new(),
+                    unreached: Vec::new(),
+                    undecided: Vec::new(),
+                    schedule: None,
+                    trace: None,
+                }],
+                reruns: Vec::new(),
+            };
+            Measurement::new(sim_draft(
+                n,
+                HarnessId::from_uuid(fixture::id(400)),
+                basis,
+                outcome,
+            ))
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_corrected_exit_of_a_case_is_the_outcome_the_store_keeps_and_leaves_no_text_behind()
+         {
+            let path = temp_db("correct-exit");
+            let store = SqliteStore::open(&path).await.unwrap();
+            let run = leaky_exit_run(1);
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        measurements: vec![run.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(files_of(&path).iter().any(|(_, bytes)| holds_token(bytes)));
+            let mut fixed = run.clone();
+            fixed
+                .correct(
+                    &sought(),
+                    correction(vec![MeasurementField::CaseExit { case: 0 }]),
+                    &|_, _| false,
+                )
+                .unwrap();
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        corrected_measurements: vec![fixed.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            store.clear_freed().await.unwrap();
+            assert_eq!(store.measurements().await.unwrap(), [fixed]);
+            for (name, bytes) in files_of(&path) {
+                assert!(!holds_token(&bytes), "{name} holds the text");
+            }
+            store.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_correction_of_a_record_the_store_does_not_have_keeps_nothing() {
+            let path = temp_db("correct-missing");
+            let store = SqliteStore::open(&path).await.unwrap();
+            let at = store.revision().await.unwrap();
+            let run = Changes {
+                corrected_measurements: vec![leaky_run(5, 30)],
+                ..Changes::default()
+            };
+            assert!(matches!(
+                store.write(at, run).await,
+                Err(StoreError::Corrupt(_))
+            ));
+            let row = Changes {
+                corrected_invocations: vec![(InvocationSeq(9), leaky_invocation())],
+                ..Changes::default()
+            };
+            assert!(matches!(
+                store.write(at, row).await,
+                Err(StoreError::Corrupt(_))
+            ));
+            assert_eq!(store.revision().await.unwrap(), at);
+            store.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn clearing_leaves_nothing_of_a_replaced_text_in_the_files() {
+            let path = temp_db("clear-freed");
+            let store = SqliteStore::open(&path).await.unwrap();
+            let (cr, run, check) = (leaky_cr(), leaky_run(1, 30), leaky_invocation());
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        change_requests: vec![cr.clone()],
+                        measurements: vec![run.clone()],
+                        invocations: vec![check.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            // the database holds the text before it is replaced
+            assert!(files_of(&path).iter().any(|(_, bytes)| holds_token(bytes)));
+            let seq = store.invocations().await.unwrap()[0].0;
+            let at = store.revision().await.unwrap();
+            store
+                .write(at, correcting(&cr, &run, seq, &check))
+                .await
+                .unwrap();
+            store.clear_freed().await.unwrap();
+            for (name, bytes) in files_of(&path) {
+                assert!(!holds_token(&bytes), "{name} holds the text");
+            }
+            // what is read back is the corrected record
+            let read = store.change_requests().await.unwrap();
+            assert_eq!(read[0].situation().unwrap().as_str(), "it holds [redacted]");
+            assert_eq!(read[0].history().len(), 1);
+            store.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn clearing_empties_the_write_ahead_log_of_a_file_in_that_mode() {
+            let path = temp_db("clear-freed-wal");
+            SqliteStore::open(&path)
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            drop(conn);
+            let store = SqliteStore::open(&path).await.unwrap();
+            let (cr, run, check) = (leaky_cr(), leaky_run(1, 30), leaky_invocation());
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        change_requests: vec![cr.clone()],
+                        measurements: vec![run.clone()],
+                        invocations: vec![check.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            // the log holds the text now, and keeps it when the rows are replaced
+            let log = files_of(&path)
+                .into_iter()
+                .find(|(name, _)| name.ends_with("-wal"))
+                .expect("a file in that mode has a write-ahead log while it is open");
+            assert!(holds_token(&log.1));
+            let seq = store.invocations().await.unwrap()[0].0;
+            let at = store.revision().await.unwrap();
+            store
+                .write(at, correcting(&cr, &run, seq, &check))
+                .await
+                .unwrap();
+            store.clear_freed().await.unwrap();
+            for (name, bytes) in files_of(&path) {
+                assert!(!holds_token(&bytes), "{name} holds the text");
+            }
+            let wal = files_of(&path)
+                .into_iter()
+                .find(|(name, _)| name.ends_with("-wal"));
+            assert!(wal.is_none_or(|(_, bytes)| bytes.is_empty()));
+            store.close().await.unwrap();
+        }
+
+        /// A reader of the log stops the checkpoint from writing it back; the checkpoint answers `busy` and does not
+        /// fail, so clearing must say that it did not finish. (The checkpoint waits out the store's busy timeout
+        /// first, once.)
+        #[tokio::test]
+        async fn clearing_says_so_when_a_reader_holds_the_write_ahead_log() {
+            let path = temp_db("clear-freed-busy");
+            SqliteStore::open(&path)
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            drop(conn);
+            let store = SqliteStore::open(&path).await.unwrap();
+            let (cr, run, check) = (leaky_cr(), leaky_run(1, 30), leaky_invocation());
+            let at = store.revision().await.unwrap();
+            store
+                .write(
+                    at,
+                    Changes {
+                        change_requests: vec![cr.clone()],
+                        measurements: vec![run.clone()],
+                        invocations: vec![check.clone()],
+                        ..Changes::default()
+                    },
+                )
+                .await
+                .unwrap();
+            // a reader begins, and reads, before the correction is written
+            let reader = Connection::open(&path).unwrap();
+            reader.execute_batch("BEGIN").unwrap();
+            let _: i64 = reader
+                .query_row("SELECT count(*) FROM change_requests", [], |r| r.get(0))
+                .unwrap();
+            let seq = store.invocations().await.unwrap()[0].0;
+            let at = store.revision().await.unwrap();
+            store
+                .write(at, correcting(&cr, &run, seq, &check))
+                .await
+                .unwrap();
+            match store.clear_freed().await {
+                Err(StoreError::Failed(why)) => {
+                    assert!(why.starts_with("wal checkpoint: busy"), "{why}");
+                    assert!(!why.contains(TOKEN));
+                }
+                other => panic!("expected the checkpoint to be busy, got {other:?}"),
+            }
+            // once the reader is gone, the same clearing finishes
+            reader.execute_batch("COMMIT").unwrap();
+            drop(reader);
+            store.clear_freed().await.unwrap();
+            for (name, bytes) in files_of(&path) {
+                assert!(!holds_token(&bytes), "{name} holds the text");
+            }
+            store.close().await.unwrap();
+        }
     }
 
     fn run_of(
@@ -1906,7 +2536,7 @@ mod tests {
             .write(StoreRevision(1), invocation_with(Some(second)))
             .await
             .unwrap();
-        let read = store.invocations().await.unwrap();
+        let read = ran(&store).await;
         assert_eq!(read[0].trigger, Some(first));
         assert_eq!(read[1].trigger, Some(second));
         store.close().await.unwrap();
@@ -1929,7 +2559,7 @@ mod tests {
         .unwrap();
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
-        let read = store.invocations().await.unwrap();
+        let read = ran(&store).await;
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].trigger, None);
         // The word `put` was the moment of an edit, and still reads as one.
@@ -1975,14 +2605,14 @@ mod tests {
         assert_eq!(written, "put");
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
-        assert_eq!(store.invocations().await.unwrap()[0].moment, Moment::Edit);
+        assert_eq!(ran(&store).await[0].moment, Moment::Edit);
         store.close().await.unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute("UPDATE check_invocations SET hook = 'edit'", [])
             .unwrap();
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
-        assert_eq!(store.invocations().await.unwrap()[0].moment, Moment::Edit);
+        assert_eq!(ran(&store).await[0].moment, Moment::Edit);
         store.close().await.unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute("UPDATE check_invocations SET hook = 'save'", [])
@@ -2517,7 +3147,7 @@ mod tests {
         .unwrap();
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
-        let read = store.invocations().await.unwrap();
+        let read = ran(&store).await;
         assert_eq!(read.len(), 1);
         assert_eq!(
             read[0].trigger,

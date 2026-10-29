@@ -1,30 +1,36 @@
 //! The operations `chidev exec` reads, one JSON object per line, and the results it prints. This is where the JSON
 //! form is turned into the inputs of the use cases and back; nothing past it sees JSON.
 
+use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path};
 
 use chidev_core::app::ports::external::ExternalExecutor;
-use chidev_core::app::ports::{IdSource, Store};
+use chidev_core::app::ports::{IdSource, InvocationField, InvocationSeq, Store};
 use chidev_core::app::{
     App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, BeyondInput,
     BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef,
-    ClausesPut, ContractPut, CruxKind, CruxStatus, DecisionInput, DecisionMakerInput,
-    DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus, FindingInput, Found, HarnessKind,
-    HarnessPut, Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice,
-    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, PolicyLineInput, PutDone, PutInput,
-    RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, RenameInput, ReportInput,
-    ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement,
-    RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus,
-    ViewInput,
+    ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
+    DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
+    FindingInput, Found, HarnessKind, HarnessPut, Importance, Intent, InterfacePut, ItemInput,
+    ItemRef, ItemsInput, ModelSlice, ModelView, OpenedExpect, OptionInput, ParamValue, PinState,
+    Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput,
+    RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding, ResolutionInput,
+    ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge,
+    SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
+use chidev_core::domain::entity::change_request::ChangeRequestField;
+use chidev_core::domain::entity::crux::CruxField;
+use chidev_core::domain::entity::measurement::MeasurementField;
+use chidev_core::domain::vo::id::{ChangeRequestId, CruxId, CruxOptionId, MeasurementId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 mod diagnostic;
 use diagnostic::DiagnosticOut;
@@ -245,6 +251,23 @@ enum Op {
     /// to the Project, so they come when `change_requests` and `cruxes` are sections, whatever `contexts` says. The
     /// result is the `view`, and the `store_revision` it was read at.
     View(ViewDto),
+    /// Lists where a text is kept in the records only a correction can change: (record, field) for each place,
+    /// never the text. A record is named by its id, and every field that holds the text is listed, so each place
+    /// is one `record_correct` can replace it in. Nothing is kept.
+    TextFind { text: SoughtDto },
+    /// Replaces a text with a mark in each place named, keeps the correction as a step of each record's history,
+    /// and clears what the store file kept of it. `places` are those `text_find` lists for the text (at least
+    /// one, none twice); `reason` and `by` are kept in each record and do not hold the text. It is forced: no
+    /// check runs and none refuses it. The result lists the places `corrected`, the places that `remaining` hold
+    /// the text (`{"unknown":"<why>"}` when they could not be searched for), and whether the file was `cleared`
+    /// (`"done"`, or `{"not_finished":"<why>"}` when the correction is kept and the file could not be cleared).
+    /// Once the correction is kept, the result is never a refusal.
+    RecordCorrect {
+        text: SoughtDto,
+        reason: String,
+        by: MakerDto,
+        places: Vec<PlaceDto>,
+    },
 }
 
 /// The fields of `view`. A field it does not know is refused: a misspelled `contexts` would otherwise read every
@@ -756,6 +779,9 @@ struct MeasurementOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     sim: Option<SimSummaryOut>,
     at: u64,
+    /// The corrections made of its texts, in the order they were made; left out when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<CorrectionOut<'a>>,
 }
 
 /// The fields of `finding_report`.
@@ -991,6 +1017,341 @@ impl From<MakerDto> for DecisionMakerInput {
             MakerDto::Person(name) => DecisionMakerInput::Person(name),
         }
     }
+}
+
+/// The text a correction seeks. It is a secret: `Debug` hides it, so that a print of an operation does not carry
+/// it, and nothing here writes it into a result.
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(transparent)]
+struct SoughtDto(String);
+
+impl fmt::Debug for SoughtDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SoughtDto(..)")
+    }
+}
+
+/// A place where a text is kept, as `text_find` answers it and `record_correct` takes it: a record by its id, and a
+/// field of it. `{"change_request":{"id":"<uuid>","field":"situation"}}`, `{"crux":{"id":"<uuid>","field":{"option_choice":"<option uuid>"}}}`,
+/// `{"measurement":{"id":"<uuid>","field":{"case_finding":{"case":0,"finding":1}}}}`,
+/// `{"invocation":{"seq":3,"field":"stderr"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum PlaceDto {
+    /// A field of a change request (`id` is its id, not its title).
+    ChangeRequest { id: String, field: CrFieldDto },
+    /// A field of a Crux.
+    Crux { id: String, field: CruxFieldDto },
+    /// A field of a measurement (`id` is the id `measure` and `simulate` answer).
+    Measurement {
+        id: String,
+        field: MeasurementFieldDto,
+    },
+    /// A field of a row of the record of check runs (`seq` is the order the rows were kept in).
+    Invocation { seq: u64, field: InvocationFieldDto },
+}
+
+/// A field of a change request. An index counts from 0 in the list it is of; a step is an index into the history
+/// (`status` lists it, corrections included).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum CrFieldDto {
+    Title,
+    Situation,
+    Issuer,
+    AssumptionStatement(usize),
+    AssumptionReason(usize),
+    AssumptionEvidence { assumption: usize, evidence: usize },
+    StepReason(usize),
+    StepBy(usize),
+}
+
+/// A field of a Crux. An option is named by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum CruxFieldDto {
+    Question,
+    OptionChoice(String),
+    OptionChange(String),
+    OptionConsequence(String),
+    RecommendationReason,
+    DecisionReason,
+    DecisionWording,
+    DecisionKeep(usize),
+    BasisReason,
+    BeyondReason,
+    AnswerBy,
+}
+
+/// A field of a measurement. An index counts from 0 in the list it is of; a case is an index into the cases of a
+/// simulation, in the order they were run. `case_exit` is the reason a case could not start the program.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum MeasurementFieldDto {
+    StepCommand(usize),
+    StepStderr(usize),
+    Failure,
+    MutantFrom(usize),
+    MutantTo(usize),
+    CaseFinding { case: usize, finding: usize },
+    CaseUnreached { case: usize, unreached: usize },
+    CaseUndecided { case: usize, undecided: usize },
+    CaseExit(usize),
+}
+
+/// A field of a row of the record of check runs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum InvocationFieldDto {
+    Command,
+    Stderr,
+    Judge,
+}
+
+/// The uuid an id is written as. What is not one names nothing, which is a mistake of the input.
+fn uuid_of(what: &str, text: &str) -> Result<Uuid, AppError> {
+    Uuid::parse_str(text.trim())
+        .map_err(|_| AppError::Input(format!("`{text}` is not the id of {what}")))
+}
+
+impl TryFrom<PlaceDto> for Place {
+    type Error = AppError;
+
+    fn try_from(place: PlaceDto) -> Result<Place, AppError> {
+        Ok(match place {
+            PlaceDto::ChangeRequest { id, field } => Place::ChangeRequest {
+                id: ChangeRequestId::from_uuid(uuid_of("a change request", &id)?),
+                field: field.into(),
+            },
+            PlaceDto::Crux { id, field } => Place::Crux {
+                id: CruxId::from_uuid(uuid_of("a crux", &id)?),
+                field: field.try_into()?,
+            },
+            PlaceDto::Measurement { id, field } => Place::Measurement {
+                id: MeasurementId::from_uuid(uuid_of("a measurement", &id)?),
+                field: field.into(),
+            },
+            PlaceDto::Invocation { seq, field } => Place::Invocation {
+                seq: InvocationSeq(seq),
+                field: field.into(),
+            },
+        })
+    }
+}
+
+impl From<CrFieldDto> for ChangeRequestField {
+    fn from(f: CrFieldDto) -> ChangeRequestField {
+        match f {
+            CrFieldDto::Title => ChangeRequestField::Title,
+            CrFieldDto::Situation => ChangeRequestField::Situation,
+            CrFieldDto::Issuer => ChangeRequestField::Issuer,
+            CrFieldDto::AssumptionStatement(assumption) => {
+                ChangeRequestField::AssumptionStatement { assumption }
+            }
+            CrFieldDto::AssumptionReason(assumption) => {
+                ChangeRequestField::AssumptionReason { assumption }
+            }
+            CrFieldDto::AssumptionEvidence {
+                assumption,
+                evidence,
+            } => ChangeRequestField::AssumptionEvidence {
+                assumption,
+                evidence,
+            },
+            CrFieldDto::StepReason(step) => ChangeRequestField::StepReason { step },
+            CrFieldDto::StepBy(step) => ChangeRequestField::StepBy { step },
+        }
+    }
+}
+
+impl TryFrom<CruxFieldDto> for CruxField {
+    type Error = AppError;
+
+    fn try_from(f: CruxFieldDto) -> Result<CruxField, AppError> {
+        let option = |id: &str| uuid_of("a crux option", id).map(CruxOptionId::from_uuid);
+        Ok(match f {
+            CruxFieldDto::Question => CruxField::Question,
+            CruxFieldDto::OptionChoice(id) => CruxField::OptionChoice {
+                option: option(&id)?,
+            },
+            CruxFieldDto::OptionChange(id) => CruxField::OptionChange {
+                option: option(&id)?,
+            },
+            CruxFieldDto::OptionConsequence(id) => CruxField::OptionConsequence {
+                option: option(&id)?,
+            },
+            CruxFieldDto::RecommendationReason => CruxField::RecommendationReason,
+            CruxFieldDto::DecisionReason => CruxField::DecisionReason,
+            CruxFieldDto::DecisionWording => CruxField::DecisionWording,
+            CruxFieldDto::DecisionKeep(keep) => CruxField::DecisionKeep { keep },
+            CruxFieldDto::BasisReason => CruxField::BasisReason,
+            CruxFieldDto::BeyondReason => CruxField::BeyondReason,
+            CruxFieldDto::AnswerBy => CruxField::AnswerBy,
+        })
+    }
+}
+
+impl From<MeasurementFieldDto> for MeasurementField {
+    fn from(f: MeasurementFieldDto) -> MeasurementField {
+        match f {
+            MeasurementFieldDto::StepCommand(step) => MeasurementField::StepCommand { step },
+            MeasurementFieldDto::StepStderr(step) => MeasurementField::StepStderr { step },
+            MeasurementFieldDto::Failure => MeasurementField::Failure,
+            MeasurementFieldDto::MutantFrom(mutant) => MeasurementField::MutantFrom { mutant },
+            MeasurementFieldDto::MutantTo(mutant) => MeasurementField::MutantTo { mutant },
+            MeasurementFieldDto::CaseFinding { case, finding } => {
+                MeasurementField::CaseFinding { case, finding }
+            }
+            MeasurementFieldDto::CaseUnreached { case, unreached } => {
+                MeasurementField::CaseUnreached { case, unreached }
+            }
+            MeasurementFieldDto::CaseUndecided { case, undecided } => {
+                MeasurementField::CaseUndecided { case, undecided }
+            }
+            MeasurementFieldDto::CaseExit(case) => MeasurementField::CaseExit { case },
+        }
+    }
+}
+
+impl From<InvocationFieldDto> for InvocationField {
+    fn from(f: InvocationFieldDto) -> InvocationField {
+        match f {
+            InvocationFieldDto::Command => InvocationField::Command,
+            InvocationFieldDto::Stderr => InvocationField::Stderr,
+            InvocationFieldDto::Judge => InvocationField::Judge,
+        }
+    }
+}
+
+impl From<&Place> for PlaceDto {
+    fn from(place: &Place) -> PlaceDto {
+        match place {
+            Place::ChangeRequest { id, field } => PlaceDto::ChangeRequest {
+                id: id.to_string(),
+                field: field.into(),
+            },
+            Place::Crux { id, field } => PlaceDto::Crux {
+                id: id.to_string(),
+                field: field.into(),
+            },
+            Place::Measurement { id, field } => PlaceDto::Measurement {
+                id: id.to_string(),
+                field: field.into(),
+            },
+            Place::Invocation { seq, field } => PlaceDto::Invocation {
+                seq: seq.0,
+                field: field.into(),
+            },
+        }
+    }
+}
+
+impl From<&ChangeRequestField> for CrFieldDto {
+    fn from(f: &ChangeRequestField) -> CrFieldDto {
+        match *f {
+            ChangeRequestField::Title => CrFieldDto::Title,
+            ChangeRequestField::Situation => CrFieldDto::Situation,
+            ChangeRequestField::Issuer => CrFieldDto::Issuer,
+            ChangeRequestField::AssumptionStatement { assumption } => {
+                CrFieldDto::AssumptionStatement(assumption)
+            }
+            ChangeRequestField::AssumptionReason { assumption } => {
+                CrFieldDto::AssumptionReason(assumption)
+            }
+            ChangeRequestField::AssumptionEvidence {
+                assumption,
+                evidence,
+            } => CrFieldDto::AssumptionEvidence {
+                assumption,
+                evidence,
+            },
+            ChangeRequestField::StepReason { step } => CrFieldDto::StepReason(step),
+            ChangeRequestField::StepBy { step } => CrFieldDto::StepBy(step),
+        }
+    }
+}
+
+impl From<&CruxField> for CruxFieldDto {
+    fn from(f: &CruxField) -> CruxFieldDto {
+        match *f {
+            CruxField::Question => CruxFieldDto::Question,
+            CruxField::OptionChoice { option } => CruxFieldDto::OptionChoice(option.to_string()),
+            CruxField::OptionChange { option } => CruxFieldDto::OptionChange(option.to_string()),
+            CruxField::OptionConsequence { option } => {
+                CruxFieldDto::OptionConsequence(option.to_string())
+            }
+            CruxField::RecommendationReason => CruxFieldDto::RecommendationReason,
+            CruxField::DecisionReason => CruxFieldDto::DecisionReason,
+            CruxField::DecisionWording => CruxFieldDto::DecisionWording,
+            CruxField::DecisionKeep { keep } => CruxFieldDto::DecisionKeep(keep),
+            CruxField::BasisReason => CruxFieldDto::BasisReason,
+            CruxField::BeyondReason => CruxFieldDto::BeyondReason,
+            CruxField::AnswerBy => CruxFieldDto::AnswerBy,
+        }
+    }
+}
+
+impl From<&MeasurementField> for MeasurementFieldDto {
+    fn from(f: &MeasurementField) -> MeasurementFieldDto {
+        match *f {
+            MeasurementField::StepCommand { step } => MeasurementFieldDto::StepCommand(step),
+            MeasurementField::StepStderr { step } => MeasurementFieldDto::StepStderr(step),
+            MeasurementField::Failure => MeasurementFieldDto::Failure,
+            MeasurementField::MutantFrom { mutant } => MeasurementFieldDto::MutantFrom(mutant),
+            MeasurementField::MutantTo { mutant } => MeasurementFieldDto::MutantTo(mutant),
+            MeasurementField::CaseFinding { case, finding } => {
+                MeasurementFieldDto::CaseFinding { case, finding }
+            }
+            MeasurementField::CaseUnreached { case, unreached } => {
+                MeasurementFieldDto::CaseUnreached { case, unreached }
+            }
+            MeasurementField::CaseUndecided { case, undecided } => {
+                MeasurementFieldDto::CaseUndecided { case, undecided }
+            }
+            MeasurementField::CaseExit { case } => MeasurementFieldDto::CaseExit(case),
+        }
+    }
+}
+
+impl From<&InvocationField> for InvocationFieldDto {
+    fn from(f: &InvocationField) -> InvocationFieldDto {
+        match f {
+            InvocationField::Command => InvocationFieldDto::Command,
+            InvocationField::Stderr => InvocationFieldDto::Stderr,
+            InvocationField::Judge => InvocationFieldDto::Judge,
+        }
+    }
+}
+
+/// The result of `text_find`: the places that hold the text, never the text.
+#[derive(Debug, Serialize)]
+struct PlacesOut {
+    places: Vec<PlaceDto>,
+}
+
+/// Whether the store's file was cleared: `"done"`, or `{"not_finished":"<why>"}`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClearedOut<'a> {
+    Done,
+    NotFinished(&'a str),
+}
+
+/// The places that still hold the text: the list when the search was made, `{"unknown":"<why>"}` when it could not
+/// be (the correction is kept either way).
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum RemainingOut<'a> {
+    Found(Vec<PlaceDto>),
+    Unknown { unknown: &'a str },
+}
+
+/// The result of `record_correct`: the places corrected, the places that still hold the text, and the clearing.
+#[derive(Debug, Serialize)]
+struct CorrectOut<'a> {
+    corrected: Vec<PlaceDto>,
+    remaining: RemainingOut<'a>,
+    cleared: ClearedOut<'a>,
 }
 
 /// One line of the decision Policy.
@@ -1337,24 +1698,38 @@ impl<'a> From<&'a ResolutionStatus> for ResolutionOut<'a> {
     }
 }
 
-/// One step of the history of a change request, in the result of `status`: `step` is `resolved` or `reopened`,
-/// and a resolved step has the `resolution` (and the `of` it points at).
+/// One step of the history of a change request, in the result of `status`: `step` is `resolved`, `reopened` or
+/// `corrected`. A resolved step has the `resolution` (and the `of` it points at, when it points at one), a reopened
+/// step has neither, and a corrected step has the `fields` it replaced a text in (by their words) and no text.
 #[derive(Debug, Serialize)]
-struct HistoryOut<'a> {
-    step: &'static str,
-    resolution: Option<&'static str>,
-    of: Option<&'a str>,
-    reason: &'a str,
-    by: MakerOut<'a>,
-    at: u64,
+#[serde(tag = "step", rename_all = "snake_case")]
+enum HistoryOut<'a> {
+    Resolved {
+        resolution: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        of: Option<&'a str>,
+        reason: &'a str,
+        by: MakerOut<'a>,
+        at: u64,
+    },
+    Reopened {
+        reason: &'a str,
+        by: MakerOut<'a>,
+        at: u64,
+    },
+    Corrected {
+        fields: &'a [String],
+        reason: &'a str,
+        by: MakerOut<'a>,
+        at: u64,
+    },
 }
 
 impl<'a> From<&'a TransitionStatus> for HistoryOut<'a> {
     fn from(t: &'a TransitionStatus) -> HistoryOut<'a> {
         match t {
-            TransitionStatus::Resolved(r) => HistoryOut {
-                step: "resolved",
-                resolution: Some(r.kind),
+            TransitionStatus::Resolved(r) => HistoryOut::Resolved {
+                resolution: r.kind,
                 of: r.reference.as_deref(),
                 reason: &r.reason,
                 by: MakerOut {
@@ -1363,10 +1738,7 @@ impl<'a> From<&'a TransitionStatus> for HistoryOut<'a> {
                 },
                 at: r.at,
             },
-            TransitionStatus::Reopened(r) => HistoryOut {
-                step: "reopened",
-                resolution: None,
-                of: None,
+            TransitionStatus::Reopened(r) => HistoryOut::Reopened {
                 reason: &r.reason,
                 by: MakerOut {
                     kind: r.by_kind,
@@ -1374,6 +1746,39 @@ impl<'a> From<&'a TransitionStatus> for HistoryOut<'a> {
                 },
                 at: r.at,
             },
+            TransitionStatus::Corrected(c) => HistoryOut::Corrected {
+                fields: &c.fields,
+                reason: &c.reason,
+                by: MakerOut {
+                    kind: c.by_kind,
+                    name: &c.by,
+                },
+                at: c.at,
+            },
+        }
+    }
+}
+
+/// A correction of the texts of a record, in the result of `status`: the fields by their words, why, who and when.
+/// The text replaced is in none of it.
+#[derive(Debug, Serialize)]
+struct CorrectionOut<'a> {
+    fields: &'a [String],
+    reason: &'a str,
+    by: MakerOut<'a>,
+    at: u64,
+}
+
+impl<'a> From<&'a CorrectionStatus> for CorrectionOut<'a> {
+    fn from(c: &'a CorrectionStatus) -> CorrectionOut<'a> {
+        CorrectionOut {
+            fields: &c.fields,
+            reason: &c.reason,
+            by: MakerOut {
+                kind: c.by_kind,
+                name: &c.by,
+            },
+            at: c.at,
         }
     }
 }
@@ -1511,6 +1916,9 @@ struct CruxOut<'a> {
     supersedes: Option<&'a str>,
     state: &'static str,
     answer: Option<AnswerOut<'a>>,
+    /// The corrections made of its texts, in the order they were made; left out when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<CorrectionOut<'a>>,
 }
 
 impl<'a> From<&'a CruxStatus> for CruxOut<'a> {
@@ -1553,6 +1961,7 @@ impl<'a> From<&'a CruxStatus> for CruxOut<'a> {
                 },
                 at: a.at,
             }),
+            corrections: q.corrections.iter().map(CorrectionOut::from).collect(),
         }
     }
 }
@@ -3028,6 +3437,7 @@ where
                             differing: x.differing,
                         }),
                         at: m.at,
+                        corrections: m.corrections.iter().map(CorrectionOut::from).collect(),
                     })
                     .collect(),
             })?
@@ -3066,6 +3476,44 @@ where
             to_value(&ViewOut {
                 store_revision: read.store_revision.0,
                 view: &read.view,
+            })?
+        }
+        Op::TextFind { text } => {
+            let places = app.find_text(&text.0).await?;
+            to_value(&PlacesOut {
+                places: places.iter().map(PlaceDto::from).collect(),
+            })?
+        }
+        Op::RecordCorrect {
+            text,
+            reason,
+            by,
+            places,
+        } => {
+            let places = places
+                .into_iter()
+                .map(Place::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+            let answer = app
+                .correct_records(&CorrectInput {
+                    text: text.0,
+                    reason,
+                    by: by.into(),
+                    places,
+                })
+                .await?;
+            to_value(&CorrectOut {
+                corrected: answer.corrected.iter().map(PlaceDto::from).collect(),
+                remaining: match &answer.remaining {
+                    Remaining::Found(places) => {
+                        RemainingOut::Found(places.iter().map(PlaceDto::from).collect())
+                    }
+                    Remaining::Unknown { reason } => RemainingOut::Unknown { unknown: reason },
+                },
+                cleared: match &answer.cleared {
+                    Cleared::Done => ClearedOut::Done,
+                    Cleared::NotFinished { reason } => ClearedOut::NotFinished(reason),
+                },
             })?
         }
         Op::FindingReport(report) => {
@@ -3114,4 +3562,54 @@ where
             })?
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chidev_core::app::RecordKind;
+
+    use super::*;
+
+    /// The kind of record a place of the wire form is in. It matches without a wildcard, so a variant added to
+    /// [`PlaceDto`] does not compile until it is given its kind here.
+    fn kind_of(place: &PlaceDto) -> RecordKind {
+        match place {
+            PlaceDto::ChangeRequest { .. } => RecordKind::ChangeRequest,
+            PlaceDto::Crux { .. } => RecordKind::Crux,
+            PlaceDto::Measurement { .. } => RecordKind::Measurement,
+            PlaceDto::Invocation { .. } => RecordKind::Invocation,
+        }
+    }
+
+    #[test]
+    fn the_tag_of_each_place_on_the_wire_is_the_word_of_its_kind_of_record() {
+        let id = Uuid::nil().to_string();
+        let places = [
+            PlaceDto::ChangeRequest {
+                id: id.clone(),
+                field: CrFieldDto::Title,
+            },
+            PlaceDto::Crux {
+                id: id.clone(),
+                field: CruxFieldDto::Question,
+            },
+            PlaceDto::Measurement {
+                id,
+                field: MeasurementFieldDto::Failure,
+            },
+            PlaceDto::Invocation {
+                seq: 1,
+                field: InvocationFieldDto::Stderr,
+            },
+        ];
+        for place in places {
+            let kind = kind_of(&place);
+            let written = serde_json::to_value(&place).unwrap();
+            let tags: Vec<&String> = written.as_object().unwrap().keys().collect();
+            assert_eq!(tags, [kind.word()], "{written}");
+            // and the place it is read as is in the same kind of record
+            let read = Place::try_from(place).unwrap();
+            assert_eq!(read.kind(), kind);
+        }
+    }
 }

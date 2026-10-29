@@ -5,13 +5,17 @@
 //! and the older ones stay as history.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
+use crate::domain::vo::correction::{
+    Correctable, Correction, CorrectionError, SoughtText, check_places, masked,
+};
 use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
-    MeasureError, MeasureFailure, MeasureKind, MeasureSubject, MutantOutcome, MutantResult, Stamp,
-    StepEvidence,
+    MeasureError, MeasureFailure, MeasureKind, MeasureSubject, Mutant, MutantOutcome, MutantResult,
+    Stamp, StepEvidence,
 };
-use crate::domain::vo::sim::SimOutcome;
+use crate::domain::vo::sim::{CaseExit, CaseRun, SimOutcome};
 use crate::domain::vo::timestamp::Timestamp;
 
 /// How many mutants ended each way.
@@ -70,6 +74,8 @@ pub struct Measurement {
     sim: Option<SimOutcome>,
     failure: Option<MeasureFailure>,
     evidence: Vec<StepEvidence>,
+    /// The corrections of its texts, in the order they were made. Empty from [`Measurement::new`].
+    corrections: Vec<Correction<MeasurementField>>,
 }
 
 impl Measurement {
@@ -143,7 +149,23 @@ impl Measurement {
             sim: draft.sim,
             failure: draft.failure,
             evidence: draft.evidence,
+            corrections: Vec::new(),
         })
+    }
+
+    /// The run with the `corrections` a store kept for it.
+    pub(crate) fn with_corrections(
+        mut self,
+        corrections: Vec<Correction<MeasurementField>>,
+    ) -> Measurement {
+        self.corrections = corrections;
+        self
+    }
+
+    /// The corrections made of its texts, in the order they were made: each keeps the fields, why, who and when,
+    /// and no text.
+    pub fn corrections(&self) -> &[Correction<MeasurementField>] {
+        &self.corrections
     }
 
     /// Its id.
@@ -249,6 +271,235 @@ impl Measurement {
         self.mutants
             .iter()
             .filter(|m| m.outcome == MutantOutcome::Survived)
+    }
+}
+
+/// A place of text in a measurement, for a correction. An index counts from 0 in the list it is of. The settings and
+/// the names that key a row (a mutant's key, the name of a case) are not fields: they are part of what the run
+/// stands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MeasurementField {
+    /// The command of a step.
+    StepCommand {
+        /// The step, in the order of the evidence.
+        step: usize,
+    },
+    /// What a step wrote on standard error.
+    StepStderr {
+        /// The step, in the order of the evidence.
+        step: usize,
+    },
+    /// Why the run failed.
+    Failure,
+    /// The text a mutant replaces.
+    MutantFrom {
+        /// The mutant, in the order the provider gave them.
+        mutant: usize,
+    },
+    /// The text a mutant puts in.
+    MutantTo {
+        /// The mutant, in the order the provider gave them.
+        mutant: usize,
+    },
+    /// What a case of a simulation found, in the script's words.
+    CaseFinding {
+        /// The case, in the order they were run.
+        case: usize,
+        /// The finding of the case.
+        finding: usize,
+    },
+    /// The situation a case did not reach, in the script's words.
+    CaseUnreached {
+        /// The case, in the order they were run.
+        case: usize,
+        /// The Clause it did not reach, in the order the case reported them.
+        unreached: usize,
+    },
+    /// Why the script of a case could not decide something.
+    CaseUndecided {
+        /// The case, in the order they were run.
+        case: usize,
+        /// The line, in the order the case reported them.
+        undecided: usize,
+    },
+    /// Why the script of a case said it could not start the program (`CANNOT_START <text>`), in the script's words.
+    /// Only a case that ended so has it; the other ways a case ends hold no text.
+    CaseExit {
+        /// The case, in the order they were run.
+        case: usize,
+    },
+}
+
+impl MeasurementField {
+    /// The words for the field, which a message and an answer name it by: `step[1].stderr`, `failure`,
+    /// `case[0].finding[1]`.
+    pub fn word(&self) -> String {
+        match self {
+            MeasurementField::StepCommand { step } => format!("step[{step}].command"),
+            MeasurementField::StepStderr { step } => format!("step[{step}].stderr"),
+            MeasurementField::Failure => "failure".to_string(),
+            MeasurementField::MutantFrom { mutant } => format!("mutant[{mutant}].from"),
+            MeasurementField::MutantTo { mutant } => format!("mutant[{mutant}].to"),
+            MeasurementField::CaseFinding { case, finding } => {
+                format!("case[{case}].finding[{finding}]")
+            }
+            MeasurementField::CaseUnreached { case, unreached } => {
+                format!("case[{case}].unreached[{unreached}]")
+            }
+            MeasurementField::CaseUndecided { case, undecided } => {
+                format!("case[{case}].undecided[{undecided}]")
+            }
+            MeasurementField::CaseExit { case } => format!("case[{case}].exit"),
+        }
+    }
+}
+
+impl fmt::Display for MeasurementField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.word())
+    }
+}
+
+impl Correctable for Measurement {
+    type Field = MeasurementField;
+
+    fn texts(&self) -> Vec<(MeasurementField, &str)> {
+        let mut out = Vec::new();
+        for (step, e) in self.evidence.iter().enumerate() {
+            if !e.command.is_empty() {
+                out.push((MeasurementField::StepCommand { step }, e.command.as_str()));
+            }
+            if !e.stderr.is_empty() {
+                out.push((MeasurementField::StepStderr { step }, e.stderr.as_str()));
+            }
+        }
+        if let Some(failure) = &self.failure {
+            out.push((MeasurementField::Failure, failure.message()));
+        }
+        for (mutant, m) in self.mutants.iter().enumerate() {
+            out.push((MeasurementField::MutantFrom { mutant }, m.mutant.from()));
+            out.push((MeasurementField::MutantTo { mutant }, m.mutant.to()));
+        }
+        if let Some(sim) = &self.sim {
+            for (case, run) in sim.cases.iter().enumerate() {
+                for (finding, f) in run.findings.iter().enumerate() {
+                    out.push((
+                        MeasurementField::CaseFinding { case, finding },
+                        f.text.as_str(),
+                    ));
+                }
+                for (unreached, u) in run.unreached.iter().enumerate() {
+                    out.push((
+                        MeasurementField::CaseUnreached { case, unreached },
+                        u.text.as_str(),
+                    ));
+                }
+                for (undecided, text) in run.undecided.iter().enumerate() {
+                    out.push((
+                        MeasurementField::CaseUndecided { case, undecided },
+                        text.as_str(),
+                    ));
+                }
+                if let CaseExit::CannotStart(why) = &run.exit {
+                    out.push((MeasurementField::CaseExit { case }, why.as_str()));
+                }
+            }
+        }
+        out
+    }
+
+    fn correct(
+        &mut self,
+        sought: &SoughtText,
+        correction: Correction<MeasurementField>,
+        _taken: &dyn Fn(&MeasurementField, &str) -> bool,
+    ) -> Result<(), CorrectionError> {
+        check_places(self, sought, correction.fields())?;
+        let mut next = self.clone();
+        for field in correction.fields() {
+            next.replace_text(*field, sought)?;
+        }
+        next.corrections.push(correction);
+        *self = next;
+        Ok(())
+    }
+}
+
+impl Measurement {
+    /// Replaces the text sought in one field, and builds the value again with its own constructor. Called on a
+    /// copy: an error leaves it half done, and the copy is dropped.
+    fn replace_text(
+        &mut self,
+        field: MeasurementField,
+        sought: &SoughtText,
+    ) -> Result<(), CorrectionError> {
+        let word = field.word();
+        let text = self
+            .texts()
+            .into_iter()
+            .find(|(f, _)| *f == field)
+            .map(|(_, t)| t.to_string())
+            .ok_or_else(|| CorrectionError::NoSuchField(word.clone()))?;
+        let new = masked(sought, &word, &text)?;
+        let invalid = || CorrectionError::Invalid(word.clone());
+        let no_such = || CorrectionError::NoSuchField(word.clone());
+        match field {
+            MeasurementField::StepCommand { step } => {
+                self.evidence.get_mut(step).ok_or_else(no_such)?.command = new;
+            }
+            MeasurementField::StepStderr { step } => {
+                self.evidence.get_mut(step).ok_or_else(no_such)?.stderr = new;
+            }
+            MeasurementField::Failure => {
+                let kind = self.failure.as_ref().ok_or_else(no_such)?.kind();
+                self.failure = Some(MeasureFailure::new(kind, new).map_err(|_| invalid())?);
+            }
+            MeasurementField::MutantFrom { mutant } | MeasurementField::MutantTo { mutant } => {
+                let m = self.mutants.get_mut(mutant).ok_or_else(no_such)?;
+                let (from, to) = if matches!(field, MeasurementField::MutantFrom { .. }) {
+                    (new, m.mutant.to().to_string())
+                } else {
+                    (m.mutant.from().to_string(), new)
+                };
+                m.mutant = Mutant::new(
+                    m.mutant.key().clone(),
+                    m.mutant.site(),
+                    m.mutant.operator().clone(),
+                    from,
+                    to,
+                )
+                .map_err(|_| invalid())?;
+            }
+            MeasurementField::CaseFinding { case, finding } => {
+                let run = self.case_mut(case).ok_or_else(no_such)?;
+                run.findings.get_mut(finding).ok_or_else(no_such)?.text = new;
+            }
+            MeasurementField::CaseUnreached { case, unreached } => {
+                let run = self.case_mut(case).ok_or_else(no_such)?;
+                run.unreached.get_mut(unreached).ok_or_else(no_such)?.text = new;
+            }
+            MeasurementField::CaseUndecided { case, undecided } => {
+                let run = self.case_mut(case).ok_or_else(no_such)?;
+                *run.undecided.get_mut(undecided).ok_or_else(no_such)? = new;
+            }
+            MeasurementField::CaseExit { case } => {
+                // The exit keeps its rule: one line that says something.
+                if new.trim().is_empty() || new.contains('\n') {
+                    return Err(invalid());
+                }
+                let run = self.case_mut(case).ok_or_else(no_such)?;
+                if !run.exit.cannot_start() {
+                    return Err(no_such());
+                }
+                run.exit = CaseExit::CannotStart(new);
+            }
+        }
+        Ok(())
+    }
+
+    /// The run of a case of the simulation, to change.
+    fn case_mut(&mut self, case: usize) -> Option<&mut CaseRun> {
+        self.sim.as_mut()?.cases.get_mut(case)
     }
 }
 
@@ -526,5 +777,343 @@ mod tests {
             Measurement::new(mutate_with_sim_stamp),
             Err(MeasureError::NotOfKind { .. })
         ));
+    }
+
+    // --- correction
+
+    use MeasurementField as Field;
+
+    const TOKEN: &str = "tok-SECRET-123";
+
+    fn sought() -> SoughtText {
+        SoughtText::try_from(TOKEN).unwrap()
+    }
+
+    fn correction(fields: Vec<Field>) -> Correction<Field> {
+        Correction::new(
+            fields,
+            crate::domain::vo::prose::Prose::try_from("a token was pasted").unwrap(),
+            crate::domain::vo::answer::DecisionMaker::person("carol").unwrap(),
+            Timestamp::from_millis(88),
+        )
+        .unwrap()
+    }
+
+    fn free(_: &Field, _: &str) -> bool {
+        false
+    }
+
+    fn step(command: &str, stderr: &str) -> StepEvidence {
+        StepEvidence {
+            step: "baseline-test".into(),
+            command: command.into(),
+            command_digest: None,
+            exit_code: Some(1),
+            duration_ms: 3,
+            stderr: stderr.into(),
+        }
+    }
+
+    fn mutant_with(from: &str, to: &str) -> MutantResult {
+        use crate::domain::vo::measure::{MutantKey, Operator, Site};
+        MutantResult {
+            mutant: Mutant::new(
+                MutantKey::try_from("k1").unwrap(),
+                Site::new(1, 1).unwrap(),
+                Operator::try_from("rel").unwrap(),
+                from.into(),
+                to.into(),
+            )
+            .unwrap(),
+            outcome: MutantOutcome::Survived,
+        }
+    }
+
+    /// A mutation run that failed, with the token in a command, a stderr, the failure and a mutant.
+    fn leaky_run() -> Measurement {
+        let mut d = draft(
+            1,
+            iface(),
+            Digest::of(b"c"),
+            empty_basis(),
+            vec![mutant_with(&format!("a {TOKEN}"), &format!("b {TOKEN}"))],
+        );
+        d.evidence = vec![
+            step(&format!("run --token {TOKEN}"), &format!("bad {TOKEN}")),
+            step("cargo test", ""),
+        ];
+        d.planned = 2;
+        d.sites = 2;
+        d.failure = Some(MeasureFailure::of(
+            FailureKind::Baseline,
+            format!("failed with {TOKEN}"),
+        ));
+        Measurement::new(d).unwrap()
+    }
+
+    /// A simulation with the token in a finding, a situation not reached and a line not decided.
+    fn leaky_sim() -> Measurement {
+        use crate::domain::vo::id::ClauseId;
+        use crate::domain::vo::sim::{CaseExit, CaseFinding, CaseUnreached, SimCase};
+        let clause = ClauseId::from_uuid(test_uuid(7));
+        let run = CaseRun {
+            case: SimCase::Seed(0),
+            exit: CaseExit::Normal,
+            findings: vec![
+                CaseFinding {
+                    step: 1,
+                    clause,
+                    text: "plain".into(),
+                },
+                CaseFinding {
+                    step: 2,
+                    clause,
+                    text: format!("lost {TOKEN}"),
+                },
+            ],
+            unreached: vec![CaseUnreached {
+                clause,
+                text: format!("needs {TOKEN}"),
+            }],
+            undecided: vec![format!("cannot tell {TOKEN}")],
+            schedule: None,
+            trace: None,
+        };
+        let outcome = SimOutcome {
+            cases: vec![run],
+            reruns: Vec::new(),
+        };
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        Measurement::new(sim_draft(2, harness, sim_basis(), outcome)).unwrap()
+    }
+
+    fn every_field(m: &Measurement) -> Vec<Field> {
+        m.texts().into_iter().map(|(f, _)| f).collect()
+    }
+
+    #[test]
+    fn a_measurement_lists_every_text_it_holds_in_a_fixed_order() {
+        let words =
+            |m: &Measurement| -> Vec<String> { every_field(m).iter().map(Field::word).collect() };
+        // an empty stderr is not a text that is set
+        assert_eq!(
+            words(&leaky_run()),
+            [
+                "step[0].command",
+                "step[0].stderr",
+                "step[1].command",
+                "failure",
+                "mutant[0].from",
+                "mutant[0].to",
+            ]
+        );
+        assert_eq!(
+            words(&leaky_sim()),
+            [
+                "step[0].command",
+                "case[0].finding[0]",
+                "case[0].finding[1]",
+                "case[0].unreached[0]",
+                "case[0].undecided[0]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_correction_replaces_the_text_and_keeps_what_the_run_stands_on() {
+        for before in [leaky_run(), leaky_sim()] {
+            let mut m = before.clone();
+            let fields: Vec<Field> = m
+                .texts()
+                .into_iter()
+                .filter(|(_, t)| t.contains(TOKEN))
+                .map(|(f, _)| f)
+                .collect();
+            m.correct(&sought(), correction(fields), &free).unwrap();
+            assert!(m.texts().iter().all(|(_, t)| !t.contains(TOKEN)));
+            assert_eq!(m.id(), before.id());
+            assert_eq!(m.stamp(), before.stamp());
+            assert_eq!(m.at(), before.at());
+            assert_eq!(m.counts(), before.counts());
+            assert_eq!(m.sites(), before.sites());
+            assert_eq!(m.planned(), before.planned());
+            assert_eq!(m.corrections().len(), 1);
+            assert_eq!(m.corrections()[0].at().millis(), 88);
+            assert!(!format!("{:?}", m.corrections()).contains("SECRET"));
+            assert!(before.corrections().is_empty());
+        }
+        let mut m = leaky_run();
+        m.correct(
+            &sought(),
+            correction(vec![Field::StepStderr { step: 0 }, Field::Failure]),
+            &free,
+        )
+        .unwrap();
+        assert_eq!(m.evidence()[0].stderr, "bad [redacted]");
+        assert_eq!(m.failure().unwrap().message(), "failed with [redacted]");
+        assert_eq!(m.failure().unwrap().kind(), FailureKind::Baseline);
+        // what was not named still holds it
+        assert!(m.evidence()[0].command.contains(TOKEN));
+        assert!(m.mutants()[0].mutant.from().contains(TOKEN));
+        let mut s = leaky_sim();
+        s.correct(
+            &sought(),
+            correction(vec![Field::CaseFinding {
+                case: 0,
+                finding: 1,
+            }]),
+            &free,
+        )
+        .unwrap();
+        let run = &s.sim().unwrap().cases[0];
+        assert_eq!(run.findings[1].text, "lost [redacted]");
+        assert_eq!(run.findings[1].step, 2);
+        assert!(run.unreached[0].text.contains(TOKEN));
+    }
+
+    #[test]
+    fn a_correction_is_all_or_nothing_and_names_only_texts_that_are_there() {
+        let mut m = leaky_run();
+        let before = m.clone();
+        for (field, refusal) in [
+            // an empty stderr is not a field
+            (
+                Field::StepStderr { step: 1 },
+                CorrectionError::NoSuchField("step[1].stderr".into()),
+            ),
+            (
+                Field::MutantTo { mutant: 4 },
+                CorrectionError::NoSuchField("mutant[4].to".into()),
+            ),
+            // a mutation run has no cases
+            (
+                Field::CaseFinding {
+                    case: 0,
+                    finding: 0,
+                },
+                CorrectionError::NoSuchField("case[0].finding[0]".into()),
+            ),
+        ] {
+            assert_eq!(
+                m.correct(&sought(), correction(vec![Field::Failure, field]), &free),
+                Err(refusal)
+            );
+            assert_eq!(m, before);
+        }
+        // a field without the text
+        assert_eq!(
+            m.correct(
+                &sought(),
+                correction(vec![Field::StepCommand { step: 1 }]),
+                &free
+            ),
+            Err(CorrectionError::TextAbsent("step[1].command".into()))
+        );
+        assert_eq!(m, before);
+    }
+
+    #[test]
+    fn a_mutant_the_correction_would_make_a_no_change_is_refused_by_its_own_constructor() {
+        // `a tok` -> `a [redacted]` is the mutant that was already `a [redacted]` (it changes nothing)
+        let d = draft(
+            1,
+            iface(),
+            Digest::of(b"c"),
+            empty_basis(),
+            vec![mutant_with(&format!("a {TOKEN}"), "a [redacted]")],
+        );
+        let mut m = Measurement::new(d).unwrap();
+        let before = m.clone();
+        assert_eq!(
+            m.correct(
+                &sought(),
+                correction(vec![Field::MutantFrom { mutant: 0 }]),
+                &free
+            ),
+            Err(CorrectionError::Invalid("mutant[0].from".into()))
+        );
+        assert_eq!(m, before);
+    }
+
+    /// A simulation whose one case could not start the program, and said why with the token.
+    fn cannot_start_sim(why: &str) -> Measurement {
+        use crate::domain::vo::sim::SimCase;
+        let run = CaseRun {
+            case: SimCase::Seed(0),
+            exit: CaseExit::CannotStart(why.to_string()),
+            findings: Vec::new(),
+            unreached: Vec::new(),
+            undecided: Vec::new(),
+            schedule: None,
+            trace: None,
+        };
+        let outcome = SimOutcome {
+            cases: vec![run],
+            reruns: Vec::new(),
+        };
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        Measurement::new(sim_draft(3, harness, sim_basis(), outcome)).unwrap()
+    }
+
+    #[test]
+    fn the_text_of_a_case_that_could_not_start_is_a_place_and_is_corrected_like_the_others() {
+        let mut m = cannot_start_sim(&format!("python3 {TOKEN}: No such file"));
+        assert_eq!(
+            m.texts()
+                .iter()
+                .map(|(f, _)| f.word())
+                .collect::<Vec<_>>()
+                .last()
+                .map(String::as_str),
+            Some("case[0].exit")
+        );
+        m.correct(
+            &sought(),
+            correction(vec![Field::CaseExit { case: 0 }]),
+            &free,
+        )
+        .unwrap();
+        assert_eq!(
+            m.sim().unwrap().cases[0].exit,
+            CaseExit::CannotStart("python3 [redacted]: No such file".to_string())
+        );
+        assert!(m.texts().iter().all(|(_, t)| !t.contains(TOKEN)));
+        assert_eq!(m.corrections().len(), 1);
+
+        // the other ends of a case hold no text, so there is no such place; and a case that did not end so is none
+        let mut normal = leaky_sim();
+        let before = normal.clone();
+        assert_eq!(
+            normal.correct(
+                &sought(),
+                correction(vec![Field::CaseExit { case: 0 }]),
+                &free
+            ),
+            Err(CorrectionError::NoSuchField("case[0].exit".into()))
+        );
+        assert_eq!(normal, before);
+
+        // a text that is the whole of the reason is replaced whole, and the exit keeps saying something
+        let mut whole = cannot_start_sim(TOKEN);
+        whole
+            .correct(
+                &sought(),
+                correction(vec![Field::CaseExit { case: 0 }]),
+                &free,
+            )
+            .unwrap();
+        assert_eq!(
+            whole.sim().unwrap().cases[0].exit,
+            CaseExit::CannotStart("[redacted]".to_string())
+        );
+    }
+
+    #[test]
+    fn a_stored_measurement_keeps_its_corrections() {
+        let mut m = leaky_run();
+        m.correct(&sought(), correction(vec![Field::Failure]), &free)
+            .unwrap();
+        let kept = leaky_run().with_corrections(m.corrections().to_vec());
+        assert_eq!(kept.corrections(), m.corrections());
     }
 }

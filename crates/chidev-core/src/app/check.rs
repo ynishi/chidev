@@ -250,6 +250,7 @@ impl Registry {
                 judge: None,
                 external: None,
                 rule_digest: None,
+                corrections: Vec::new(),
             };
             for f in &found {
                 match f.level() {

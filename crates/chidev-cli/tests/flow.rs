@@ -536,6 +536,8 @@ fn a_settled_change_and_a_question_in_one_change_request_both_have_to_be_applied
     );
     assert_eq!(history[0]["reason"], "nothing to change after all");
     assert_eq!(history[1]["reason"], "the clause did need to change");
+    // a reopened step has no resolution to name
+    assert!(history[1].get("resolution").is_none() && history[1].get("of").is_none());
     assert_eq!(
         history[1]["by"],
         serde_json::json!({ "kind": "person", "name": "bob" })

@@ -366,6 +366,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     judge: None,
                     external: Some(r.evidence.clone()),
                     rule_digest: None,
+                    corrections: Vec::new(),
                 })
             })
             .collect()

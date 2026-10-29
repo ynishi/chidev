@@ -8,11 +8,15 @@
 //! both is only appended to. Neither the targets nor the revisions of the definitions decide whether it may end.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use thiserror::Error;
 
-use crate::domain::vo::assumption::Assumption;
+use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
 use crate::domain::vo::choice::Choice;
+use crate::domain::vo::correction::{
+    Correctable, Correction, CorrectionError, SoughtText, check_places, masked, masked_distinct,
+};
 use crate::domain::vo::crux::{CruxKind, CruxOption};
 use crate::domain::vo::finding::FindingRef;
 use crate::domain::vo::footprint::Footprint;
@@ -263,7 +267,8 @@ pub struct ChangeRequest {
     addresses: Vec<FindingRef>,
     /// What the change sets applied for it moved, in the order they were kept.
     work: Vec<Footprint>,
-    /// Resolutions and reopenings, in the order they happened; resolved when the last is a resolution.
+    /// Resolutions, reopenings and corrections, in the order they happened; resolved when the last resolution or
+    /// reopening is a resolution.
     history: Vec<Transition>,
 }
 
@@ -287,7 +292,8 @@ impl ChangeRequest {
     }
 
     /// A change request as a store kept it: the expectations the decisions asked, with the revisions recorded, and
-    /// its history. A history alternates between a resolution and a reopening, starting with a resolution. Whether
+    /// its history. The resolutions and reopenings in a history alternate, starting with a resolution; a correction
+    /// may stand anywhere among them. Whether
     /// the expectations recorded are ones a decision asks, and whether a request resolved as done has its Cruxes
     /// decided, are read with the Cruxes, which are other records
     /// (`service::change_request::check_requests_and_cruxes`). Whether the parts of a resolved one are resolved is
@@ -301,6 +307,7 @@ impl ChangeRequest {
     ) -> Result<ChangeRequest, ChangeRequestError> {
         let in_order = history
             .iter()
+            .filter(|step| step.is_state())
             .enumerate()
             .all(|(k, step)| matches!(step, Transition::Resolved(_)) == (k % 2 == 0));
         if !in_order {
@@ -427,21 +434,26 @@ impl ChangeRequest {
         Ok(())
     }
 
-    /// Whether the last step of its history is a resolution.
+    /// The last resolution or reopening: a correction between them changes no state, so it is passed over.
+    fn last_state(&self) -> Option<&Transition> {
+        self.history.iter().rev().find(|step| step.is_state())
+    }
+
+    /// Whether the last resolution or reopening in its history is a resolution.
     pub fn is_resolved(&self) -> bool {
-        matches!(self.history.last(), Some(Transition::Resolved(_)))
+        matches!(self.last_state(), Some(Transition::Resolved(_)))
     }
 
     /// The resolution it stands under, when it is resolved.
     pub fn resolution(&self) -> Option<&Resolution> {
-        match self.history.last() {
+        match self.last_state() {
             Some(Transition::Resolved(r)) => Some(r),
             _ => None,
         }
     }
 
-    /// Every resolution and reopening, in the order they happened. It only grows: a reopening does not take the
-    /// resolution it follows out of it.
+    /// Every resolution, reopening and correction, in the order they happened. It only grows: a reopening does not
+    /// take the resolution it follows out of it, and a correction keeps the fields it replaced a text in and no text.
     pub fn history(&self) -> &[Transition] {
         &self.history
     }
@@ -559,6 +571,241 @@ impl ChangeRequest {
             return Err(ChangeRequestError::NotResolved);
         }
         self.history.push(Transition::Reopened(reopening));
+        Ok(())
+    }
+}
+
+/// A place of text in a change request, for a correction. An index counts from 0 in the list it is of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ChangeRequestField {
+    /// The title.
+    Title,
+    /// The situation.
+    Situation,
+    /// The issuer.
+    Issuer,
+    /// What an Assumption states.
+    AssumptionStatement {
+        /// The Assumption, in the order they were made.
+        assumption: usize,
+    },
+    /// Why an Assumption holds.
+    AssumptionReason {
+        /// The Assumption.
+        assumption: usize,
+    },
+    /// What an Assumption stands on: the path of a repository evidence, or the reference of a knowledge one.
+    AssumptionEvidence {
+        /// The Assumption.
+        assumption: usize,
+        /// The evidence, in the order given.
+        evidence: usize,
+    },
+    /// The reason of a resolution or a reopening.
+    StepReason {
+        /// The step, as an index into the history (corrections included).
+        step: usize,
+    },
+    /// The name of who resolved or reopened it. The kind of the maker (role or person) is kept.
+    StepBy {
+        /// The step, as an index into the history (corrections included).
+        step: usize,
+    },
+}
+
+impl ChangeRequestField {
+    /// The words for the field, which a message and an answer name it by: `title`, `assumption[0].reason`,
+    /// `step[2].by`.
+    pub fn word(&self) -> String {
+        match self {
+            ChangeRequestField::Title => "title".to_string(),
+            ChangeRequestField::Situation => "situation".to_string(),
+            ChangeRequestField::Issuer => "issuer".to_string(),
+            ChangeRequestField::AssumptionStatement { assumption } => {
+                format!("assumption[{assumption}].statement")
+            }
+            ChangeRequestField::AssumptionReason { assumption } => {
+                format!("assumption[{assumption}].reason")
+            }
+            ChangeRequestField::AssumptionEvidence {
+                assumption,
+                evidence,
+            } => format!("assumption[{assumption}].evidence[{evidence}]"),
+            ChangeRequestField::StepReason { step } => format!("step[{step}].reason"),
+            ChangeRequestField::StepBy { step } => format!("step[{step}].by"),
+        }
+    }
+}
+
+impl fmt::Display for ChangeRequestField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.word())
+    }
+}
+
+impl Correctable for ChangeRequest {
+    type Field = ChangeRequestField;
+
+    fn texts(&self) -> Vec<(ChangeRequestField, &str)> {
+        let mut out = vec![(ChangeRequestField::Title, self.title.as_str())];
+        if let Some(situation) = &self.situation {
+            out.push((ChangeRequestField::Situation, situation.as_str()));
+        }
+        if let Some(issuer) = &self.issuer {
+            out.push((ChangeRequestField::Issuer, issuer.as_str()));
+        }
+        for (a, assumption) in self.assumptions.iter().enumerate() {
+            out.push((
+                ChangeRequestField::AssumptionStatement { assumption: a },
+                assumption.statement().as_str(),
+            ));
+            out.push((
+                ChangeRequestField::AssumptionReason { assumption: a },
+                assumption.reason().as_str(),
+            ));
+            for (e, evidence) in assumption.evidence().iter().enumerate() {
+                let text = match evidence {
+                    Evidence::Repo { path, .. } => path.as_str(),
+                    Evidence::Knowledge { reference } => reference.as_str(),
+                };
+                out.push((
+                    ChangeRequestField::AssumptionEvidence {
+                        assumption: a,
+                        evidence: e,
+                    },
+                    text,
+                ));
+            }
+        }
+        for (k, step) in self.history.iter().enumerate() {
+            match step {
+                Transition::Resolved(r) => {
+                    out.push((
+                        ChangeRequestField::StepReason { step: k },
+                        r.reason().as_str(),
+                    ));
+                    out.push((
+                        ChangeRequestField::StepBy { step: k },
+                        r.by().name().as_str(),
+                    ));
+                }
+                Transition::Reopened(r) => {
+                    out.push((
+                        ChangeRequestField::StepReason { step: k },
+                        r.reason().as_str(),
+                    ));
+                    out.push((
+                        ChangeRequestField::StepBy { step: k },
+                        r.by().name().as_str(),
+                    ));
+                }
+                Transition::Corrected(_) => {}
+            }
+        }
+        out
+    }
+
+    fn correct(
+        &mut self,
+        sought: &SoughtText,
+        correction: Correction<ChangeRequestField>,
+        taken: &dyn Fn(&ChangeRequestField, &str) -> bool,
+    ) -> Result<(), CorrectionError> {
+        check_places(self, sought, correction.fields())?;
+        let mut next = self.clone();
+        for field in correction.fields() {
+            next.replace_text(*field, sought, taken)?;
+        }
+        next.history.push(Transition::Corrected(correction));
+        *self = next;
+        Ok(())
+    }
+}
+
+impl ChangeRequest {
+    /// Replaces the text sought in one field, and builds the value again with its own constructor. Called on a
+    /// copy: an error leaves it half done, and the copy is dropped.
+    fn replace_text(
+        &mut self,
+        field: ChangeRequestField,
+        sought: &SoughtText,
+        taken: &dyn Fn(&ChangeRequestField, &str) -> bool,
+    ) -> Result<(), CorrectionError> {
+        let word = field.word();
+        let text = self
+            .texts()
+            .into_iter()
+            .find(|(f, _)| *f == field)
+            .map(|(_, t)| t.to_string())
+            .ok_or_else(|| CorrectionError::NoSuchField(word.clone()))?;
+        let new = if field == ChangeRequestField::Title {
+            masked_distinct(sought, &word, &text, |candidate| taken(&field, candidate))?
+        } else {
+            masked(sought, &word, &text)?
+        };
+        let invalid = || CorrectionError::Invalid(word.clone());
+        let prose = |s: &str| Prose::try_from(s).map_err(|_| invalid());
+        let no_such = || CorrectionError::NoSuchField(word.clone());
+        match field {
+            ChangeRequestField::Title => {
+                self.title = Title::try_from(new.as_str()).map_err(|_| invalid())?;
+            }
+            ChangeRequestField::Situation => self.situation = Some(prose(&new)?),
+            ChangeRequestField::Issuer => {
+                self.issuer = Some(Issuer::try_from(new.as_str()).map_err(|_| invalid())?);
+            }
+            ChangeRequestField::AssumptionStatement { assumption } => {
+                let a = self.assumptions.get_mut(assumption).ok_or_else(no_such)?;
+                *a = Assumption::new(prose(&new)?, a.reason().clone(), a.evidence().to_vec());
+            }
+            ChangeRequestField::AssumptionReason { assumption } => {
+                let a = self.assumptions.get_mut(assumption).ok_or_else(no_such)?;
+                *a = Assumption::new(a.statement().clone(), prose(&new)?, a.evidence().to_vec());
+            }
+            ChangeRequestField::AssumptionEvidence {
+                assumption,
+                evidence,
+            } => {
+                let a = self.assumptions.get_mut(assumption).ok_or_else(no_such)?;
+                let mut all = a.evidence().to_vec();
+                let slot = all.get_mut(evidence).ok_or_else(no_such)?;
+                *slot = match slot {
+                    Evidence::Repo { lines, .. } => Evidence::Repo {
+                        path: RepoPath::try_from(new.as_str()).map_err(|_| invalid())?,
+                        lines: *lines,
+                    },
+                    Evidence::Knowledge { .. } => Evidence::Knowledge {
+                        reference: KnowledgeRef::try_from(new.as_str()).map_err(|_| invalid())?,
+                    },
+                };
+                *a = Assumption::new(a.statement().clone(), a.reason().clone(), all);
+            }
+            ChangeRequestField::StepReason { step } => {
+                let reason = prose(&new)?;
+                match self.history.get_mut(step).ok_or_else(no_such)? {
+                    Transition::Resolved(r) => {
+                        *r = Resolution::new(r.kind(), reason, r.by().clone(), r.at());
+                    }
+                    Transition::Reopened(r) => {
+                        *r = Reopening::new(reason, r.by().clone(), r.at());
+                    }
+                    Transition::Corrected(_) => return Err(no_such()),
+                }
+            }
+            ChangeRequestField::StepBy { step } => {
+                match self.history.get_mut(step).ok_or_else(no_such)? {
+                    Transition::Resolved(r) => {
+                        let by = r.by().renamed(&new).map_err(|_| invalid())?;
+                        *r = Resolution::new(r.kind(), r.reason().clone(), by, r.at());
+                    }
+                    Transition::Reopened(r) => {
+                        let by = r.by().renamed(&new).map_err(|_| invalid())?;
+                        *r = Reopening::new(r.reason().clone(), by, r.at());
+                    }
+                    Transition::Corrected(_) => return Err(no_such()),
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1159,5 +1406,271 @@ mod tests {
         d.assumptions = vec![assumption("a half is a tie")];
         let c = ChangeRequest::open(id(1), d);
         assert_eq!(c.assumptions().len(), 1);
+    }
+
+    // --- correction
+
+    use ChangeRequestField as Field;
+
+    const TOKEN: &str = "tok-SECRET-123";
+
+    fn sought() -> SoughtText {
+        SoughtText::try_from(TOKEN).unwrap()
+    }
+
+    fn correction(fields: Vec<Field>) -> Correction<Field> {
+        Correction::new(
+            fields,
+            prose("a token was pasted"),
+            DecisionMaker::person("carol").unwrap(),
+            Timestamp::from_millis(50),
+        )
+        .unwrap()
+    }
+
+    fn free(_: &Field, _: &str) -> bool {
+        false
+    }
+
+    /// A change request that holds the token in every field a correction reaches, resolved, reopened, resolved.
+    fn leaky() -> ChangeRequest {
+        let leak = |s: &str| format!("{s} {TOKEN}");
+        let mut d = draft();
+        d.title = Title::try_from(leak("title").as_str()).unwrap();
+        d.situation = Some(prose(&leak("situation")));
+        d.issuer = Some(Issuer::try_from(leak("issuer").as_str()).unwrap());
+        d.assumptions = vec![Assumption::new(
+            prose(&leak("statement")),
+            prose(&leak("reason")),
+            vec![
+                Evidence::Repo {
+                    path: RepoPath::try_from(leak("src/p").replace(' ', "/").as_str()).unwrap(),
+                    lines: None,
+                },
+                Evidence::Knowledge {
+                    reference: KnowledgeRef::try_from(leak("rfc").as_str()).unwrap(),
+                },
+            ],
+        )];
+        let mut c = ChangeRequest::open(id(1), d);
+        c.resolve(Resolution::new(
+            ResolutionKind::Done,
+            prose(&leak("shipped")),
+            DecisionMaker::role(&leak("lead")).unwrap(),
+            Timestamp::from_millis(9),
+        ))
+        .unwrap();
+        c.reopen(Reopening::new(
+            prose(&leak("again")),
+            DecisionMaker::person(&leak("bob")).unwrap(),
+            Timestamp::from_millis(10),
+        ))
+        .unwrap();
+        c
+    }
+
+    fn every_field() -> Vec<Field> {
+        leaky().texts().into_iter().map(|(f, _)| f).collect()
+    }
+
+    #[test]
+    fn a_change_request_lists_every_text_it_holds_in_a_fixed_order() {
+        let words: Vec<String> = every_field().iter().map(Field::word).collect();
+        assert_eq!(
+            words,
+            [
+                "title",
+                "situation",
+                "issuer",
+                "assumption[0].statement",
+                "assumption[0].reason",
+                "assumption[0].evidence[0]",
+                "assumption[0].evidence[1]",
+                "step[0].reason",
+                "step[0].by",
+                "step[1].reason",
+                "step[1].by",
+            ]
+        );
+        // a field that is not set is not listed
+        let mut d = draft();
+        d.situation = None;
+        d.issuer = None;
+        let plain = ChangeRequest::open(id(1), d);
+        assert_eq!(plain.texts().len(), 1);
+    }
+
+    #[test]
+    fn a_correction_replaces_the_text_in_each_field_it_names_and_only_there() {
+        let mut c = leaky();
+        let before = c.clone();
+        c.correct(
+            &sought(),
+            correction(vec![Field::Situation, Field::StepReason { step: 0 }]),
+            &free,
+        )
+        .unwrap();
+        assert_eq!(c.situation().unwrap().as_str(), "situation [redacted]");
+        let Transition::Resolved(r) = &c.history()[0] else {
+            panic!("the first step stays a resolution")
+        };
+        assert_eq!(r.reason().as_str(), "shipped [redacted]");
+        assert_eq!(r.kind(), ResolutionKind::Done);
+        assert_eq!(r.at().millis(), 9);
+        // the others still hold it
+        assert!(c.title().as_str().contains(TOKEN));
+        assert!(c.issuer().unwrap().as_str().contains(TOKEN));
+        assert!(c.assumptions()[0].statement().as_str().contains(TOKEN));
+        assert_eq!(c.history().len(), before.history().len() + 1);
+        // the step keeps the fields, why, who and when, and not the text
+        let Some(Transition::Corrected(step)) = c.history().last() else {
+            panic!("the correction is the last step")
+        };
+        assert_eq!(
+            step.fields(),
+            [Field::Situation, Field::StepReason { step: 0 }]
+        );
+        assert_eq!(step.reason().as_str(), "a token was pasted");
+        assert_eq!(step.by().to_string(), "person carol");
+        assert_eq!(step.at().millis(), 50);
+        assert!(!format!("{step:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn a_correction_reaches_every_field_and_rebuilds_the_values_it_replaced() {
+        let mut c = leaky();
+        c.correct(&sought(), correction(every_field()), &free)
+            .unwrap();
+        assert_eq!(c.title().as_str(), "title [redacted]");
+        assert_eq!(c.issuer().unwrap().as_str(), "issuer [redacted]");
+        let a = &c.assumptions()[0];
+        assert_eq!(a.statement().as_str(), "statement [redacted]");
+        assert_eq!(a.reason().as_str(), "reason [redacted]");
+        assert!(
+            matches!(&a.evidence()[0], Evidence::Repo { path, .. } if path.as_str() == "src/p/[redacted]")
+        );
+        assert!(
+            matches!(&a.evidence()[1], Evidence::Knowledge { reference } if reference.as_str() == "rfc [redacted]")
+        );
+        // the kind of a maker is kept; only the name is corrected
+        assert!(
+            matches!(&c.history()[0], Transition::Resolved(r) if r.by().to_string() == "role lead [redacted]")
+        );
+        assert!(
+            matches!(&c.history()[1], Transition::Reopened(r) if r.by().to_string() == "person bob [redacted]")
+        );
+        // nothing of the request is left to find
+        assert!(c.texts().iter().all(|(_, t)| !t.contains(TOKEN)));
+        // the state is not changed by a correction
+        assert!(!c.is_resolved());
+    }
+
+    #[test]
+    fn a_correction_is_all_or_nothing() {
+        let mut c = leaky();
+        let before = c.clone();
+        // a field that does not hold the text
+        let mut d = draft();
+        d.situation = Some(prose("plain"));
+        let mut plain = ChangeRequest::open(id(1), d);
+        let plain_before = plain.clone();
+        assert_eq!(
+            plain.correct(&sought(), correction(vec![Field::Situation]), &free),
+            Err(CorrectionError::TextAbsent("situation".into()))
+        );
+        assert_eq!(plain, plain_before);
+        // a field that is not there
+        assert_eq!(
+            c.correct(
+                &sought(),
+                correction(vec![
+                    Field::Title,
+                    Field::AssumptionReason { assumption: 9 }
+                ]),
+                &free
+            ),
+            Err(CorrectionError::NoSuchField("assumption[9].reason".into()))
+        );
+        assert_eq!(
+            c.correct(
+                &sought(),
+                correction(vec![Field::AssumptionEvidence {
+                    assumption: 0,
+                    evidence: 2
+                }]),
+                &free
+            ),
+            Err(CorrectionError::NoSuchField(
+                "assumption[0].evidence[2]".into()
+            ))
+        );
+        assert_eq!(c, before);
+    }
+
+    #[test]
+    fn a_correction_step_has_no_reason_or_maker_to_correct() {
+        let mut c = leaky();
+        c.correct(&sought(), correction(vec![Field::Title]), &free)
+            .unwrap();
+        // the step is the third (index 2) and holds no text a correction reaches
+        let before = c.clone();
+        for field in [Field::StepReason { step: 2 }, Field::StepBy { step: 2 }] {
+            assert_eq!(
+                c.correct(&sought(), correction(vec![field]), &free),
+                Err(CorrectionError::NoSuchField(field.word()))
+            );
+        }
+        assert_eq!(c, before);
+    }
+
+    #[test]
+    fn a_title_that_would_equal_another_takes_a_numbered_mark() {
+        let mut c = leaky();
+        let others = ["title [redacted]", "title [redacted 2]"];
+        let taken =
+            |field: &Field, candidate: &str| *field == Field::Title && others.contains(&candidate);
+        c.correct(&sought(), correction(vec![Field::Title]), &taken)
+            .unwrap();
+        assert_eq!(c.title().as_str(), "title [redacted 3]");
+        // another field uses the plain mark, whatever `taken` says
+        let mut c = leaky();
+        c.correct(&sought(), correction(vec![Field::Situation]), &|_, _| true)
+            .unwrap();
+        assert_eq!(c.situation().unwrap().as_str(), "situation [redacted]");
+    }
+
+    #[test]
+    fn a_correction_stands_between_a_resolution_and_a_reopening_without_changing_the_state() {
+        let resolved = || Transition::Resolved(done());
+        let reopened = || Transition::Reopened(reopening());
+        let corrected = || Transition::Corrected(correction(vec![Field::Title]));
+        let restore =
+            |history| ChangeRequest::restore(id(1), draft(), Vec::new(), Vec::new(), history);
+        let c = restore(vec![resolved(), corrected(), reopened(), corrected()]).unwrap();
+        assert!(!c.is_resolved());
+        assert!(c.resolution().is_none());
+        // a correction after a resolution: still resolved, and the resolution is the one before it
+        let c = restore(vec![resolved(), corrected()]).unwrap();
+        assert!(c.is_resolved());
+        assert_eq!(c.resolution().map(|r| r.kind()), Some(ResolutionKind::Done));
+        // a correction first: nothing resolved yet, and a resolution may follow
+        let mut c = restore(vec![corrected()]).unwrap();
+        assert!(!c.is_resolved());
+        c.resolve(done()).unwrap();
+        assert!(c.is_resolved());
+        // corrections do not hide an order that is wrong
+        for out_of_order in [
+            vec![corrected(), reopened()],
+            vec![resolved(), corrected(), resolved()],
+        ] {
+            assert_eq!(
+                restore(out_of_order),
+                Err(ChangeRequestError::HistoryOutOfOrder)
+            );
+        }
+        // a resolved request that was corrected can be reopened
+        let mut c = restore(vec![resolved(), corrected()]).unwrap();
+        assert_eq!(c.reopen(reopening()), Ok(()));
+        assert_eq!(c.history().len(), 3);
     }
 }
