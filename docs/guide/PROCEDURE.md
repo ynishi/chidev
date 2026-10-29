@@ -186,9 +186,13 @@ Crux names there waits on that question. `view` does not give a request's
    gives the output `acceptance/a1.expected` and exit code 0"); the Case reads
    those files from the repository and checks that Clause, so the tests the
    implementer runs before `pin` check the examples as well, and the Harness
-   writer learns of them from the Contract alone. A runner outside the Harness
-   checks nothing chidev records. chidev keeps the Clause, not the files it
-   names: when a request changes what such a file holds (a new line of the
+   writer learns of them from the Contract alone. The examples can also be run
+   by `chidev accept`, registered as an external check that gates `pin` and
+   `resolve` (see [Acceptance
+   examples](../../README.md#acceptance-examples-chidev-accept)). It reports each
+   failing example about the Clause that names its files, so the Clause names
+   them by their paths from the project's root. chidev keeps the Clause, not the
+   files it names: when a request changes what such a file holds (a new line of the
    expected output), reword the Clause as well, saying in it what changed, so
    that its revision moves, the Cases that cite it are checked again, and the
    request that names it as a target has touched it. A change to the file alone
