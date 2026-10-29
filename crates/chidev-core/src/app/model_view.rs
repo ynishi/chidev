@@ -35,8 +35,9 @@ use crate::domain::vo::resolution::Transition;
 /// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
 /// request's `lines` became `expects`, each with a kind. Version 3: the kinds of an expectation are `target` and
 /// `keep`; `change` and `remove` are gone. Version 4: the Crux is a record of its own, in the section `cruxes`, and a
-/// change request no longer has a `crux`.)
-pub const VIEW_VERSION: u32 = 4;
+/// change request no longer has a `crux`. Version 5: a Harness has a `kind`, and one of examples has no `source`; a
+/// Case of examples has no `lines` but an `example`, so a reader of 4 would read it as a malformed Case of code.)
+pub const VIEW_VERSION: u32 = 5;
 
 /// The whole model as an agent is shown it, read when the store stood at `store_revision`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -105,24 +106,45 @@ pub struct ItemView {
     revision: u64,
 }
 
-/// A Harness, its source and its Cases.
+/// A Harness, its kind, its source and its Cases.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct HarnessView {
     id: String,
     name: String,
     revision: u64,
-    source: String,
+    /// `tests`, `sim` or `examples`.
+    kind: &'static str,
+    /// Its code; absent for a Harness of examples, which has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     cases: Vec<CaseView>,
 }
 
-/// A Case.
+/// A Case: the lines of the code it is on, or the example it holds.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CaseView {
     id: String,
     name: String,
-    lines: [usize; 2],
+    /// The first and last line of the Case in the code; absent for an example.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lines: Option<[usize; 2]>,
     revision: u64,
     cites: CitesView,
+    /// The example the Case holds; absent for a Case of code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    example: Option<ExampleView>,
+}
+
+/// An example as the model holds it, with the words of an operation.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExampleView {
+    args: String,
+    stdin: String,
+    /// The expected standard output, ending with the line `#exit <code>`.
+    expected: String,
+    /// The expected standard error; absent when the example does not compare it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
 }
 
 /// What a Case cites, each with the revision it recorded.
@@ -617,14 +639,21 @@ impl ModelView {
                         id: h.id().to_string(),
                         name: name(h.id().as_uuid()),
                         revision: h.revision().number(),
-                        source: h.source().as_str().to_string(),
+                        kind: h.kind().word(),
+                        source: h.source().map(|s| s.as_str().to_string()),
                         cases: h
                             .cases()
                             .iter()
                             .map(|k| CaseView {
                                 id: k.id().to_string(),
                                 name: k.name().to_string(),
-                                lines: [k.lines().first(), k.lines().last()],
+                                lines: k.lines().map(|l| [l.first(), l.last()]),
+                                example: k.example().map(|e| ExampleView {
+                                    args: e.arguments().to_string(),
+                                    stdin: e.input().to_string(),
+                                    expected: e.expected().to_string(),
+                                    stderr: e.errors().map(str::to_string),
+                                }),
                                 revision: k.revision().number(),
                                 cites: CitesView {
                                     items: k

@@ -5,8 +5,9 @@ use std::collections::BTreeSet;
 use super::case::CaseName;
 use super::clause::{ClauseContent, ClauseLabel};
 use super::clause_edit::ClauseEdit;
+use super::example::Example;
 use super::frame::Frame;
-use super::harness_kind::HarnessKind;
+use super::harness_kind::CodeKind;
 use super::id::{CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId};
 use super::line_range::LineRange;
 use super::source::Source;
@@ -71,6 +72,73 @@ impl CaseDraft {
     }
 }
 
+/// An example Case to put, as a Harness of examples is written: its example, and the Clauses it cites by id alone
+/// (an example cites no Item, so it cannot even be drafted with one). The revision a citation is recorded at is
+/// the one its target has once the Contracts of the same change set are in, as for a [`CaseDraft`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExampleDraft {
+    id: CaseId,
+    name: CaseName,
+    example: Example,
+    clauses: BTreeSet<ClauseId>,
+}
+
+impl ExampleDraft {
+    /// A Case that holds `example` and cites `clauses`. Whether the Harness takes the Case (it cites a Clause, its
+    /// name is one an example has) is the Harness's rule, found when the change set is applied.
+    pub fn new(
+        id: CaseId,
+        name: CaseName,
+        example: Example,
+        clauses: BTreeSet<ClauseId>,
+    ) -> ExampleDraft {
+        ExampleDraft {
+            id,
+            name,
+            example,
+            clauses,
+        }
+    }
+
+    /// Its id.
+    pub fn id(&self) -> CaseId {
+        self.id
+    }
+
+    /// Its name.
+    pub fn name(&self) -> &CaseName {
+        &self.name
+    }
+
+    /// The example it holds.
+    pub fn example(&self) -> &Example {
+        &self.example
+    }
+
+    /// The Clauses it cites.
+    pub fn clauses(&self) -> &BTreeSet<ClauseId> {
+        &self.clauses
+    }
+}
+
+/// What a put of a Harness says it holds. The kind is inside the content, so the input cannot say examples and
+/// give code, or the other way round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessDraft {
+    /// Code, and the Cases in it.
+    Code {
+        /// The kind of the code; none: the kind the Harness has, or tests for a new one. A Harness that holds
+        /// examples must be told.
+        kind: Option<CodeKind>,
+        /// Its code.
+        source: Source,
+        /// Its Cases.
+        cases: Vec<CaseDraft>,
+    },
+    /// Examples, one for each Case.
+    Examples(Vec<ExampleDraft>),
+}
+
 /// Something a change set puts: a setting of a Context, or the whole new state of an asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetPut {
@@ -133,14 +201,10 @@ pub enum AssetPut {
         context: ContextId,
         /// The Harness.
         id: HarnessId,
-        /// Its kind; none: the kind it has, or tests for a new one.
-        kind: Option<HarnessKind>,
-        /// The Interfaces whose pinned code a sim Harness builds (none for tests).
+        /// The Interfaces whose pinned code a sim Harness or a Harness of examples builds (none for tests).
         builds: BTreeSet<InterfaceId>,
-        /// Its code.
-        source: Source,
-        /// Its Cases.
-        cases: Vec<CaseDraft>,
+        /// What it holds: code or examples, and its Cases.
+        content: HarnessDraft,
     },
 }
 

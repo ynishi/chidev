@@ -202,15 +202,17 @@ pub fn op_of(op: &SuggestedOp) -> Op {
             builds: Vec::new(),
             source: Some("<code>".to_string()),
             source_file: None,
+            examples_dir: None,
             cases: vec![CaseDto {
                 name: "<case>".to_string(),
-                lines: [1, 1],
+                lines: Some([1, 1]),
                 items: vec![ItemRefDto {
                     context: None,
                     interface: "<interface>".to_string(),
                     key: "<key>".to_string(),
                 }],
                 clauses: Vec::new(),
+                example: None,
             }],
         },
         SuggestedOp::PutHarnessWithoutCitation { context, harness } => Op::HarnessPut {
@@ -220,11 +222,13 @@ pub fn op_of(op: &SuggestedOp) -> Op {
             builds: Vec::new(),
             source: Some("<its code>".to_string()),
             source_file: None,
+            examples_dir: None,
             cases: vec![CaseDto {
                 name: "<its cases, without the citation>".to_string(),
-                lines: [1, 1],
+                lines: Some([1, 1]),
                 items: Vec::new(),
                 clauses: Vec::new(),
+                example: None,
             }],
         },
         SuggestedOp::CheckInterface { context, interface } => Op::HarnessPut {
@@ -234,15 +238,17 @@ pub fn op_of(op: &SuggestedOp) -> Op {
             builds: Vec::new(),
             source: Some("<tests>".to_string()),
             source_file: None,
+            examples_dir: None,
             cases: vec![CaseDto {
                 name: "<case>".to_string(),
-                lines: [1, 1],
+                lines: Some([1, 1]),
                 items: vec![ItemRefDto {
                     context: None,
                     interface: interface.clone(),
                     key: "<key>".to_string(),
                 }],
                 clauses: Vec::new(),
+                example: None,
             }],
         },
         SuggestedOp::RetireHarness { context, harness } => Op::HarnessRetire {

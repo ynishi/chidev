@@ -4,8 +4,8 @@
 use chidev_core::app::ports::{AssetKind, AssetNames, IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeSetInput, ClauseInput, ClauseRef, ContractPut, Diagnostic,
-    HarnessKind, HarnessPut, InterfacePut, ItemInput, ItemRef, ItemsInput, PutDone, PutInput,
-    RetireInput,
+    ExampleInput, ExampleTexts, HarnessKind, HarnessPut, HarnessPutContent, InterfacePut,
+    ItemInput, ItemRef, ItemsInput, PutDone, PutInput, RetireInput,
 };
 use chidev_core::domain::entity::contract::Clause;
 use chidev_core::domain::repository::ProjectRepository;
@@ -345,10 +345,12 @@ fn removal() -> ChangeSetInput {
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
                 name: "stock-tests".to_string(),
-                kind: None,
                 builds: Vec::new(),
-                source: "fn reserve_refuses() {}\n".to_string(),
-                cases: cases(&["reserve"]),
+                content: HarnessPutContent::Code {
+                    kind: None,
+                    source: "fn reserve_refuses() {}\n".to_string(),
+                    cases: cases(&["reserve"]),
+                },
             }),
         ],
         retires: Vec::new(),
@@ -1408,7 +1410,7 @@ mod judged {
         assert_eq!(view.store_revision.0, now(&app).await);
         assert_eq!(view.model.store_revision(), view.store_revision.0);
         let json = serde_json::to_value(&view.model).unwrap();
-        assert_eq!(json["version"], 4);
+        assert_eq!(json["version"], 5);
         let clauses = &json["contexts"][0]["contracts"][0]["clauses"];
         assert_eq!(json["contexts"][0]["contracts"][0]["name"], "stack");
         assert_eq!(clauses[0]["label"], "C1");
@@ -2063,4 +2065,282 @@ mod diagnostics {
         let d = app.diagnose(&err).await;
         assert_eq!(d[0].did_you_mean, ["cr.parent-open"]);
     }
+}
+
+/// An example Case named `name`, whose expected output is `expected`, citing the Clause `label` of `stock`.
+fn example_case(name: &str, expected: &str, label: &str) -> ExampleInput {
+    ExampleInput {
+        name: name.to_string(),
+        clauses: vec![ClauseRef {
+            context: None,
+            contract: "stock".to_string(),
+            label: label.to_string(),
+        }],
+        example: ExampleTexts {
+            args: "-n 2".to_string(),
+            stdin: "in\n".to_string(),
+            expected: expected.to_string(),
+            stderr: None,
+        },
+    }
+}
+
+/// The revisions of the Harness `name` of `core` and of its Cases, and its kind.
+async fn harness_state(
+    app: &App<SqliteStore, Counter>,
+    name: &str,
+) -> (&'static str, u64, Vec<u64>) {
+    let p = app.store().project().await.unwrap().unwrap();
+    let ctx = p
+        .contexts()
+        .find(|c| c.name().to_string() == "core")
+        .unwrap();
+    let id = app
+        .store()
+        .asset_id(ctx.id(), AssetKind::Harness, name)
+        .await
+        .unwrap()
+        .unwrap();
+    let h = ctx
+        .harnesses()
+        .find(|h| h.id().as_uuid() == id)
+        .expect("the harness");
+    (
+        h.kind().word(),
+        h.revision().number(),
+        h.cases().iter().map(|c| c.revision().number()).collect(),
+    )
+}
+
+#[tokio::test]
+async fn a_harness_of_examples_is_put_and_one_changed_text_moves_its_case_and_the_harness() {
+    let mut app = stock("examples").await;
+    let builds = ["stock".to_string()];
+    let first = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &builds,
+            &[
+                example_case("a1", "1\n#exit 0\n", "C1"),
+                example_case("a2", "2\n#exit 0\n", "C7"),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.value.revision.number(), 1);
+    assert_eq!(
+        harness_state(&app, "acceptance").await,
+        ("examples", 1, vec![1, 1])
+    );
+
+    // the same examples again move nothing
+    let again = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &builds,
+            &[
+                example_case("a1", "1\n#exit 0\n", "C1"),
+                example_case("a2", "2\n#exit 0\n", "C7"),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.value.id, first.value.id);
+    assert_eq!(again.value.revision.number(), 1);
+
+    // one text of one example is a new revision of its Case and of the Harness, and not of the other Case
+    let changed = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &builds,
+            &[
+                example_case("a1", "1\n#exit 0\n", "C1"),
+                example_case("a2", "2\n#exit 1\n", "C7"),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.value.revision.number(), 2);
+    assert_eq!(
+        harness_state(&app, "acceptance").await,
+        ("examples", 2, vec![1, 2])
+    );
+    // the tests Harness beside it did not move
+    assert_eq!(
+        harness_state(&app, "stock-tests").await,
+        ("tests", 1, vec![1, 1])
+    );
+}
+
+#[tokio::test]
+async fn a_put_of_examples_that_is_not_their_shape_is_refused_by_the_rule_that_names_it() {
+    let mut app = stock("examples-refused").await;
+    let builds = ["stock".to_string()];
+    let code = |d: &[Diagnostic]| d.iter().map(|d| d.code.clone()).collect::<Vec<_>>();
+
+    // no Interface to build
+    let err = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &[],
+            &[example_case("a1", "#exit 0\n", "C1")],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&app.diagnose(&err).await), ["examples.builds-none"]);
+
+    // an expected output with no `#exit` line, said of the Case by name
+    let err = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &builds,
+            &[example_case("a1", "1\n", "C1")],
+        )
+        .await
+        .unwrap_err();
+    let d = app.diagnose(&err).await;
+    assert_eq!(code(&d), ["examples.expected-exit"]);
+    assert_eq!(d[0].subjects[0].name, "case acceptance a1");
+
+    // a Case that cites no Clause, and a name no example has
+    let mut uncited = example_case("a1", "#exit 0\n", "C1");
+    uncited.clauses.clear();
+    let err = app
+        .put_examples_harness("core", "acceptance", &builds, &[uncited])
+        .await
+        .unwrap_err();
+    assert_eq!(code(&app.diagnose(&err).await), ["examples.cites-none"]);
+    let err = app
+        .put_examples_harness(
+            "core",
+            "acceptance",
+            &builds,
+            &[example_case("a/1", "#exit 0\n", "C1")],
+        )
+        .await
+        .unwrap_err();
+    let d = app.diagnose(&err).await;
+    assert_eq!(code(&d), ["examples.case-name"]);
+
+    // a text past the limit of a put
+    let mut big = example_case("a1", "#exit 0\n", "C1");
+    big.example.stdin = "x".repeat(1024 * 1024 + 1);
+    let err = app
+        .put_examples_harness("core", "acceptance", &builds, &[big])
+        .await
+        .unwrap_err();
+    let d = app.diagnose(&err).await;
+    assert_eq!(code(&d), ["examples.too-large"]);
+
+    // the door for code does not take the kind of examples
+    let err = app
+        .put_harness_of(
+            "core",
+            "acceptance",
+            Some(HarnessKind::Examples),
+            &builds,
+            "",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Input(_)), "{err:?}");
+
+    // nothing was made by all of that
+    let p = app.store().project().await.unwrap().unwrap();
+    let core = p
+        .contexts()
+        .find(|c| c.name().to_string() == "core")
+        .unwrap();
+    assert_eq!(core.harnesses().count(), 1);
+
+    // and code put to a Harness of examples must say it is code
+    app.put_examples_harness(
+        "core",
+        "acceptance",
+        &builds,
+        &[example_case("a1", "#exit 0\n", "C1")],
+    )
+    .await
+    .unwrap();
+    let err = app
+        .put_harness(
+            "core",
+            "acceptance",
+            "fn reserve_refuses() {}\n",
+            &cases(&["reserve"]),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&app.diagnose(&err).await), ["examples.kind-content"]);
+    app.put_harness_of(
+        "core",
+        "acceptance",
+        Some(HarnessKind::Tests),
+        &[],
+        "fn reserve_refuses() {}\n",
+        &cases(&["reserve"]),
+    )
+    .await
+    .unwrap();
+    // the Harness moves with its kind; `reserve` is a Case it did not have (it held `a1`), so it starts at 1
+    assert_eq!(
+        harness_state(&app, "acceptance").await,
+        ("tests", 2, vec![1])
+    );
+}
+
+#[tokio::test]
+async fn a_change_set_makes_a_contract_and_a_harness_of_examples_that_cites_its_clause() {
+    let mut app = app("examples-set").await;
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    app.put_interface("core", "stock", "fn reserve()\n", &[item("reserve", 1)])
+        .await
+        .unwrap();
+    let set = ChangeSetInput {
+        change_request: None,
+        puts: vec![
+            PutInput::Contract(ContractPut {
+                context: "core".to_string(),
+                name: "stock".to_string(),
+                title: "Stock".to_string(),
+                clauses: clauses(&["C1"]),
+            }),
+            PutInput::Harness(HarnessPut {
+                context: "core".to_string(),
+                name: "acceptance".to_string(),
+                builds: vec!["stock".to_string()],
+                content: HarnessPutContent::Examples(vec![example_case(
+                    "a1",
+                    "1\n#exit 0\n",
+                    "C1",
+                )]),
+            }),
+        ],
+        retires: Vec::new(),
+    };
+    let done = app.apply_change_set(&set).await.unwrap();
+    let kinds: Vec<&str> = done.value.puts.iter().map(|p| p.kind()).collect();
+    assert_eq!(kinds, ["contract", "harness"]);
+    let clause = clause_of(&app, "C1").await;
+    let p = app.store().project().await.unwrap().unwrap();
+    let harness = p
+        .contexts()
+        .flat_map(|c| c.harnesses())
+        .find(|h| h.kind().word() == "examples")
+        .expect("the harness of examples");
+    let case = &harness.cases()[0];
+    assert_eq!(
+        case.cites().clauses().keys().copied().collect::<Vec<_>>(),
+        [clause.id()]
+    );
+    assert!(case.cites().items().is_empty());
+    assert_eq!(case.example().unwrap().expected(), "1\n#exit 0\n");
+    assert_eq!(harness.builds().len(), 1);
 }

@@ -14,7 +14,7 @@ use super::ports::external::ExternalExecutor;
 use super::ports::items::{FoundItem, ItemsError};
 use super::ports::{AssetKind, AssetName, IdSource, Store};
 use super::{
-    App, AppError, CaseInput, Checked, ClauseInput, ItemInput, Names, Put, RenameInput,
+    App, AppError, CaseInput, Checked, ClauseInput, ClauseRef, ItemInput, Names, Put, RenameInput,
     RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired,
 };
 use crate::domain::entity::change_request::ChangeRequestError;
@@ -24,12 +24,15 @@ use crate::domain::entity::harness::Harness;
 use crate::domain::entity::project::{Project, ProjectError};
 use crate::domain::service::change_request::frame;
 use crate::domain::service::footprint::footprint_between;
-use crate::domain::violation::Violation;
+use crate::domain::violation::{Party, Violation};
 use crate::domain::vo::case::CaseName;
-use crate::domain::vo::change_set::{AssetPut, AssetRetire, CaseDraft, ChangeSet};
+use crate::domain::vo::change_set::{
+    AssetPut, AssetRetire, CaseDraft, ChangeSet, ExampleDraft, HarnessDraft,
+};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::clause_edit::{ClauseEdit, ClauseNameProblem};
-use crate::domain::vo::harness_kind::HarnessKind;
+use crate::domain::vo::example::Example;
+use crate::domain::vo::harness_kind::CodeKind;
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
@@ -106,17 +109,57 @@ pub struct HarnessPut {
     pub context: String,
     /// The Harness's name.
     pub name: String,
-    /// Its kind; none: the kind it has, or tests for a new one.
-    pub kind: Option<HarnessKind>,
-    /// The Interfaces of its Context, by name, whose pinned code a sim Harness builds into the program it drives
-    /// (one that the same change set makes is fine). It is not a citation: it asks no Item of them and puts the
-    /// Harness on no Pin's basis. A Harness of tests builds none. A put states all of it, as it states the code.
+    /// The Interfaces of its Context, by name, whose pinned code a sim Harness, or a Harness of examples, builds
+    /// into the program it runs (one that the same change set makes is fine). It is not a citation: it asks no
+    /// Item of them and puts the Harness on no Pin's basis. A Harness of tests builds none. A put states all of
+    /// it, as it states the code.
     pub builds: Vec<String>,
-    /// Its code.
-    pub source: String,
-    /// Its Cases. What they cite is named as in a put of the Harness alone, and may be a Clause or an Item that
-    /// the same change set makes. A Case of tests cites an Item at least; a Case of a sim cites Clauses only.
-    pub cases: Vec<CaseInput>,
+    /// What it holds: code and the Cases in it, or examples. The kind is inside it, so a put cannot say examples
+    /// and give code.
+    pub content: HarnessPutContent,
+}
+
+/// What a put of a Harness says it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessPutContent {
+    /// Code, and the Cases found in it.
+    Code {
+        /// Its kind; none: the kind it has, or tests for a new one. A Harness that holds examples must be told.
+        kind: Option<CodeKind>,
+        /// Its code.
+        source: String,
+        /// Its Cases. What they cite is named as in a put of the Harness alone, and may be a Clause or an Item
+        /// that the same change set makes. A Case of tests cites an Item at least; a Case of a sim cites Clauses
+        /// only.
+        cases: Vec<CaseInput>,
+    },
+    /// Examples, one for each Case.
+    Examples(Vec<ExampleInput>),
+}
+
+/// An example Case of a Harness of examples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExampleInput {
+    /// Its name; an existing Case of the same name keeps its id.
+    pub name: String,
+    /// The Clauses it shows (one at least). An example cites no Item.
+    pub clauses: Vec<ClauseRef>,
+    /// The example.
+    pub example: ExampleTexts,
+}
+
+/// The texts of an example, as an operation words them. This is the application's own type; the domain has the same
+/// four texts in its own words ([`Example`]), and each is made from the other once, at its edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExampleTexts {
+    /// What the program is started with: words split on white space.
+    pub args: String,
+    /// What the program is given to read.
+    pub stdin: String,
+    /// What the program is expected to give, ending with a line `#exit <code>`.
+    pub expected: String,
+    /// What the program is expected to write as errors; none: not compared.
+    pub stderr: Option<String>,
 }
 
 /// One thing a change set puts.
@@ -917,11 +960,34 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         plan.words
             .insert(Target::Harness(id), format!("harness {}", h.name));
         let old = p.context(ctx).and_then(|x| x.harness(id));
-        let mut cases = Vec::with_capacity(h.cases.len());
-        for c in &h.cases {
-            let draft = self.case_draft(p, plan, (ctx, old), h, c, problems).await;
-            cases.extend(draft);
-        }
+        let content = match &h.content {
+            HarnessPutContent::Code {
+                kind,
+                source,
+                cases: inputs,
+            } => {
+                let mut cases = Vec::with_capacity(inputs.len());
+                for c in inputs {
+                    let draft = self.case_draft(p, plan, (ctx, old), h, c, problems).await;
+                    cases.extend(draft);
+                }
+                HarnessDraft::Code {
+                    kind: *kind,
+                    source: Source::new(source.clone()),
+                    cases,
+                }
+            }
+            HarnessPutContent::Examples(inputs) => {
+                let mut cases = Vec::with_capacity(inputs.len());
+                for e in inputs {
+                    let draft = self
+                        .example_draft(p, plan, (ctx, old), h, e, problems)
+                        .await;
+                    cases.extend(draft);
+                }
+                HarnessDraft::Examples(cases)
+            }
+        };
         let mut builds = BTreeSet::new();
         for name in &h.builds {
             match self.build_interface(plan, ctx, &h.context, name).await {
@@ -937,10 +1003,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Some(AssetPut::Harness {
             context: ctx,
             id,
-            kind: h.kind,
             builds,
-            source: Source::new(h.source.clone()),
-            cases,
+            content,
         })
     }
 
@@ -1010,6 +1074,62 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         plan.words
             .insert(Target::Case(id), format!("case {} {}", h.name, c.name));
         Some(CaseDraft::new(id, name, lines, items, clauses))
+    }
+
+    /// An example Case to put in the Harness `h`, which is in the Context `scope.0` and is `scope.1` there now. Its
+    /// texts become the domain's example here; one whose expected output has no `#exit` line is a refusal of the
+    /// rule `examples.expected-exit`, about the Case, as every other problem of the input is collected.
+    async fn example_draft(
+        &mut self,
+        p: &Project,
+        plan: &mut Plan,
+        scope: (ContextId, Option<&Harness>),
+        h: &HarnessPut,
+        e: &ExampleInput,
+        problems: &mut Vec<AppError>,
+    ) -> Option<ExampleDraft> {
+        let (ctx, old) = scope;
+        let name = match CaseName::try_from(e.name.as_str()) {
+            Ok(n) => n,
+            Err(err) => {
+                problems.push(input(err));
+                return None;
+            }
+        };
+        let mut clauses = BTreeSet::new();
+        for r in &e.clauses {
+            match self.cite_clause(p, plan, ctx, r).await {
+                Ok(clause) => {
+                    clauses.insert(clause);
+                }
+                Err(err) => problems.push(err),
+            }
+        }
+        let id = match old.and_then(|x| x.cases().iter().find(|k| *k.name() == name)) {
+            Some(k) => k.id(),
+            None => CaseId::from_uuid(self.ids.next_uuid()),
+        };
+        let words = format!("case {} {}", h.name, e.name);
+        plan.words.insert(Target::Case(id), words.clone());
+        let t = &e.example;
+        let example = match Example::new(
+            t.args.clone(),
+            t.stdin.clone(),
+            t.expected.clone(),
+            t.stderr.clone(),
+        ) {
+            Ok(example) => example,
+            Err(err) => {
+                let mut names = Names::default();
+                names.insert(Party::Target(Target::Case(id)), words);
+                problems.push(AppError::Violated {
+                    violations: vec![err.violation(id)],
+                    names,
+                });
+                return None;
+            }
+        };
+        Some(ExampleDraft::new(id, name, example, clauses))
     }
 
     /// The id of the Item `r` cites, among the Interfaces the change set puts and the Project's.

@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use super::contract::{Contract, ContractError};
-use super::harness::{CaseFound, Harness, HarnessError, SimShapeProblem};
+use super::harness::{Harness, HarnessContent, HarnessError, HarnessStated, SimShapeProblem};
 use super::interface::{Interface, InterfaceError, ItemFound};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel};
 use crate::domain::vo::clause_edit::ClauseEdit;
-use crate::domain::vo::harness_kind::HarnessKind;
+use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
 use crate::domain::vo::id::{
     CaseId, ClauseId, ContextId, ContractId, HarnessId, InterfaceId, ItemId,
 };
@@ -435,26 +435,64 @@ impl Context {
         Ok(())
     }
 
-    /// Makes the Harness with this id, or revises it when the Context has it. `kind` is the kind it is to have;
-    /// without one a new Harness is of tests and an existing one keeps its kind. `builds` is the whole set of
-    /// Interfaces it builds (a put states the Harness as a whole, as it states its code and its Cases).
+    /// Makes the Harness with this id, or revises it when the Context has it. `stated` is what the put says it
+    /// holds. Code that says no kind is of the kind of code the Harness has (tests for a new one); code put to a
+    /// Harness that holds examples must say its kind, or it is refused ([`HarnessError::KindContent`]) rather than
+    /// quietly change what the Harness is. Examples put to a Harness of code make it a Harness of examples.
+    /// `builds` is the whole set of Interfaces it builds (a put states the Harness as a whole, as it states its
+    /// code and its Cases).
     pub(super) fn put_harness(
         &mut self,
         id: HarnessId,
-        kind: Option<HarnessKind>,
         builds: BTreeSet<InterfaceId>,
-        source: Source,
-        cases: Vec<CaseFound>,
+        stated: HarnessStated,
     ) -> Result<(), ContextError> {
+        let content = match (stated, self.harnesses.get(&id)) {
+            (
+                HarnessStated::Code {
+                    kind: Some(kind),
+                    source,
+                    cases,
+                },
+                _,
+            ) => HarnessContent::Code {
+                kind,
+                source,
+                cases,
+            },
+            (
+                HarnessStated::Code {
+                    kind: None,
+                    source,
+                    cases,
+                },
+                None,
+            ) => HarnessContent::Code {
+                kind: CodeKind::default(),
+                source,
+                cases,
+            },
+            (
+                HarnessStated::Code {
+                    kind: None,
+                    source,
+                    cases,
+                },
+                Some(h),
+            ) => HarnessContent::Code {
+                kind: h
+                    .code_kind()
+                    .ok_or(HarnessError::KindContent { harness: id })?,
+                source,
+                cases,
+            },
+            (HarnessStated::Examples(cases), _) => HarnessContent::Examples(cases),
+        };
         match self.harnesses.get_mut(&id) {
-            Some(h) => {
-                let kind = kind.unwrap_or(h.kind());
-                h.revise_as(kind, builds, source, cases)?
-            }
+            Some(h) => h.put(builds, content)?,
             None => {
-                let kind = kind.unwrap_or_default();
                 self.harnesses
-                    .insert(id, Harness::of_kind(kind, id, builds, source, cases)?);
+                    .insert(id, Harness::make(id, builds, content)?);
                 self.revision = self.revision.next();
             }
         }

@@ -532,7 +532,7 @@ mod tests {
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseText};
     use crate::domain::vo::digest::Digest;
-    use crate::domain::vo::harness_kind::HarnessKind;
+    use crate::domain::vo::harness_kind::CodeKind;
     use crate::domain::vo::id::{CaseId, ContractId, HarnessId, test_uuid};
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::measure::{FailureKind, MeasureFailure};
@@ -573,7 +573,7 @@ mod tests {
         p.put_harness_as(
             ctx(),
             hid(),
-            Some(HarnessKind::Sim),
+            Some(CodeKind::Sim),
             BTreeSet::from([iface()]),
             Source::new(format!("{script}\nx\n")),
             vec![
@@ -679,7 +679,7 @@ mod tests {
     /// it: whatever its shape, for it was not put.
     fn kept_sim(id: u128, cases: &[(u128, &str, &[u128])]) -> Harness {
         Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             HarnessId::from_uuid(test_uuid(id)),
             BTreeSet::from([iface()]),
             Source::new("x\n".into()),
@@ -814,7 +814,7 @@ mod tests {
         p.put_harness_as(
             ctx(),
             hid(),
-            Some(HarnessKind::Sim),
+            Some(CodeKind::Sim),
             BTreeSet::from([iface()]),
             Source::new(format!("{script}\n")),
             vec![(
@@ -949,7 +949,7 @@ mod tests {
         p.put_harness_as(
             ctx(),
             hid(),
-            Some(HarnessKind::Sim),
+            Some(CodeKind::Sim),
             BTreeSet::from([iface()]),
             Source::new("x\n".into()),
             vec![(

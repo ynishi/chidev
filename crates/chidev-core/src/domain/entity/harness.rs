@@ -1,27 +1,39 @@
-//! The Harness: the cases that check a Context, as code, each citing what it checks.
+//! The Harness: the cases that check a Context, as code or as examples, each citing what it checks.
 
 use std::collections::BTreeSet;
 
 use thiserror::Error;
 
 use crate::domain::vo::case::{CaseCites, CaseName};
-use crate::domain::vo::harness_kind::HarnessKind;
+use crate::domain::vo::example::{Example, ExampleName, ExamplePart, HARNESS_LIMIT, TEXT_LIMIT};
+use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
 use crate::domain::vo::id::{CaseId, ClauseId, ContextId, HarnessId, InterfaceId};
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::sim::{CaseRole, RegressName, role_of};
 use crate::domain::vo::source::Source;
 
-/// One case of a Harness (a test). It is known by its id, so a record of it survives a rename; its revision says
-/// whether its code or what it cites changed. Where it is in the code (its lines) is shown but is not its content:
-/// moving it changes no revision.
+/// What a Case holds, by the kind of Harness it is in: the lines of the code it is on (a test, a case of a
+/// simulation), or an example, which is data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseBody {
+    /// The lines of the Harness's code the Case is on.
+    Lines(LineRange),
+    /// An example of what a program answers.
+    Example(Example),
+}
+
+/// One case of a Harness (a test, or an example). It is known by its id, so a record of it survives a rename; its
+/// revision says whether its body or what it cites changed. Where a test is in the code (its lines) is shown but is
+/// not its content: moving it changes no revision. An example is nothing but its content: a change of one of its
+/// texts is a new revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Case {
     id: CaseId,
     revision: Revision,
     name: CaseName,
-    lines: LineRange,
     cites: CaseCites,
+    body: CaseBody,
 }
 
 impl Case {
@@ -30,7 +42,7 @@ impl Case {
         self.id
     }
 
-    /// How many times its code or its citations have changed, from 1.
+    /// How many times its body or its citations have changed, from 1.
     pub fn revision(&self) -> Revision {
         self.revision
     }
@@ -40,14 +52,30 @@ impl Case {
         &self.name
     }
 
-    /// The lines of the code it is on.
-    pub fn lines(&self) -> LineRange {
-        self.lines
-    }
-
     /// What it cites.
     pub fn cites(&self) -> &CaseCites {
         &self.cites
+    }
+
+    /// What it holds.
+    pub fn body(&self) -> &CaseBody {
+        &self.body
+    }
+
+    /// The lines of the code it is on; none for an example.
+    pub fn lines(&self) -> Option<LineRange> {
+        match &self.body {
+            CaseBody::Lines(lines) => Some(*lines),
+            CaseBody::Example(_) => None,
+        }
+    }
+
+    /// The example it holds; none for a Case of code.
+    pub fn example(&self) -> Option<&Example> {
+        match &self.body {
+            CaseBody::Lines(_) => None,
+            CaseBody::Example(example) => Some(example),
+        }
     }
 }
 
@@ -80,9 +108,83 @@ pub enum HarnessError {
     SimCitesItem(CaseId),
     /// A Harness of tests names Interfaces to build; only a sim Harness builds the program it drives.
     #[error(
-        "the harness {0} of tests has no `builds`; only a sim harness builds the interfaces it drives"
+        "the harness {0} of tests has no `builds`; only a sim harness or a harness of examples builds the interfaces it runs"
     )]
     BuildsOfTests(HarnessId),
+    /// A Case of a Harness of examples cites an Item. An example shows what a Clause promises; the Interfaces whose
+    /// pinned code the program is built from are the ones the Harness names in `builds`.
+    #[error(
+        "the case {0} of a harness of examples cites an item; an example case cites clauses only (name the interfaces to build in `builds`)"
+    )]
+    ExampleCitesItem(CaseId),
+    /// A Case of a Harness of examples cites no Clause, so nothing says what the example is an example of.
+    #[error(
+        "the case {0} of a harness of examples cites no clause; an example case cites the clauses it shows"
+    )]
+    ExampleCitesNone(CaseId),
+    /// The name of a Case of a Harness of examples is not one an example can have, or another Case has it.
+    #[error("the case {case} of a harness of examples is named wrongly: {}", .fault.word())]
+    ExampleName {
+        /// The Case.
+        case: CaseId,
+        /// What is wrong with the name.
+        fault: ExampleNameFault,
+    },
+    /// A Harness of examples builds no Interface, so it has no program to run.
+    #[error("the harness {0} of examples builds no interface, so it has no program to run")]
+    ExamplesBuildNone(HarnessId),
+    /// One text of an example is longer than a put takes.
+    #[error("the {} of the example case {case} is {size} bytes; a text is at most {limit}", .part.word())]
+    ExampleTooLarge {
+        /// The Case.
+        case: CaseId,
+        /// The text that is too long.
+        part: ExamplePart,
+        /// How many bytes it has.
+        size: usize,
+        /// How many a put takes.
+        limit: usize,
+    },
+    /// The texts of the examples of a Harness together are longer than a put takes.
+    #[error(
+        "the examples of the harness {harness} are {size} bytes together; a harness takes at most {limit}"
+    )]
+    ExamplesTooLarge {
+        /// The Harness.
+        harness: HarnessId,
+        /// How many bytes the texts have together.
+        size: usize,
+        /// How many a put takes.
+        limit: usize,
+    },
+    /// Code is put to a Harness that holds examples, without saying it is to become a Harness of code. A Harness
+    /// does not change its kind unasked.
+    #[error(
+        "the harness {harness} holds examples; put its examples with kind `examples`, or say kind `tests` or `sim` to make it a harness of code"
+    )]
+    KindContent {
+        /// The Harness.
+        harness: HarnessId,
+    },
+}
+
+/// What is wrong with the name of a Case of a Harness of examples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExampleNameFault {
+    /// The name is not one an example has: it is empty, or holds `/`, NUL or a line feed.
+    NotAName,
+    /// Another Case of the Harness has the name.
+    NamedTwice,
+}
+
+impl ExampleNameFault {
+    /// The word for it, as a violation carries it.
+    pub fn word(self) -> &'static str {
+        match self {
+            ExampleNameFault::NotAName => "not-a-name",
+            ExampleNameFault::NamedTwice => "named-twice",
+        }
+    }
 }
 
 /// What is wrong with the name of a Case of a sim Harness.
@@ -164,38 +266,227 @@ pub enum SimShapeProblem {
     },
 }
 
-/// The cases that check a Context. The code is the content (it is what runs); the Cases are the tests in it,
-/// found by the caller, who knows the language, with what each cites. Whether what a Case cites exists is a rule
-/// of the Context that owns the Harness, not of the Harness.
+/// The cases that check a Context. A Harness is code or examples, and holds the one it is, never both.
+///
+/// The code is the content (it is what runs); the Cases are the tests in it, found by the caller, who knows the
+/// language, with what each cites. Whether what a Case cites exists is a rule of the Context that owns the Harness,
+/// not of the Harness.
 ///
 /// A Harness of tests cites Items (every Case at least one) and Clauses, and the Pin of an Interface stands on the
 /// Harnesses whose Cases cite its Items. A sim Harness is a script that drives a program: its Cases cite Clauses
 /// only (they are the names the protocol runs the script under, and the Clauses the script checks), and the
 /// program is built from the pinned code of the Interfaces in `builds`. Naming an Interface to build is not citing
-/// it: it puts the Harness on no Pin's basis and asks no Item of it. Only a sim Harness has `builds`.
+/// it: it puts the Harness on no Pin's basis and asks no Item of it. Only a sim Harness or a Harness of examples
+/// has `builds`.
+///
+/// A Harness of examples has no code: each Case is an example, data a program is judged by, named, citing the
+/// Clauses it shows (at least one) and no Item. What the examples say is the content, so a change of one text is a
+/// new revision of its Case and of the Harness, which every record that stands on the Harness sees.
+///
+/// The content is one private value and every Case is built from the variant's own input, so no Harness has Cases
+/// that disagree with what it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Harness {
     id: HarnessId,
     revision: Revision,
-    kind: HarnessKind,
     builds: BTreeSet<InterfaceId>,
-    source: Source,
+    content: Content,
     cases: Vec<Case>,
 }
 
-/// A Case as the caller found it: its id, its name, its lines and what it cites.
+/// What a Harness holds: code of a kind, or examples (which are in its Cases).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Content {
+    Code { kind: CodeKind, source: Source },
+    Examples,
+}
+
+impl Content {
+    fn kind(&self) -> HarnessKind {
+        match self {
+            Content::Code { kind, .. } => HarnessKind::from(*kind),
+            Content::Examples => HarnessKind::Examples,
+        }
+    }
+
+    fn source(&self) -> Option<&Source> {
+        match self {
+            Content::Code { source, .. } => Some(source),
+            Content::Examples => None,
+        }
+    }
+}
+
+/// A Case of code as the caller found it: its id, its name, its lines and what it cites.
 pub type CaseFound = (CaseId, CaseName, LineRange, CaseCites);
+
+/// A Case of examples as the caller states it: its id, its name, its example and what it cites.
+pub type ExampleFound = (CaseId, CaseName, Example, CaseCites);
+
+/// What a put states a Harness holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessContent {
+    /// Code of a kind, and the Cases in it.
+    Code {
+        /// The kind of the code.
+        kind: CodeKind,
+        /// The code.
+        source: Source,
+        /// The Cases in it.
+        cases: Vec<CaseFound>,
+    },
+    /// Examples, one for each Case.
+    Examples(Vec<ExampleFound>),
+}
+
+/// What a put states, before the kind of a Harness of code is settled against what the Harness is: a put of code
+/// without a kind takes the kind the Harness has (tests for a new one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HarnessStated {
+    /// Code, and the kind it is to have if the put says one.
+    Code {
+        kind: Option<CodeKind>,
+        source: Source,
+        cases: Vec<CaseFound>,
+    },
+    /// Examples.
+    Examples(Vec<ExampleFound>),
+}
+
+/// A Harness's content as a store kept it: as [`HarnessContent`], with the revision of each Case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredContent {
+    /// Code of a kind, and the Cases in it.
+    Code {
+        kind: CodeKind,
+        source: Source,
+        cases: Vec<(CaseId, Revision, CaseName, LineRange, CaseCites)>,
+    },
+    /// Examples, one for each Case.
+    Examples(Vec<(CaseId, Revision, CaseName, Example, CaseCites)>),
+}
+
+impl StoredContent {
+    /// The content, and the revision of each Case in the order of the Cases.
+    fn split(self) -> (HarnessContent, Vec<Revision>) {
+        match self {
+            StoredContent::Code {
+                kind,
+                source,
+                cases,
+            } => {
+                let (revisions, cases) = cases
+                    .into_iter()
+                    .map(|(id, revision, name, lines, cites)| (revision, (id, name, lines, cites)))
+                    .unzip();
+                (
+                    HarnessContent::Code {
+                        kind,
+                        source,
+                        cases,
+                    },
+                    revisions,
+                )
+            }
+            StoredContent::Examples(cases) => {
+                let (revisions, cases) = cases
+                    .into_iter()
+                    .map(|(id, revision, name, example, cites)| {
+                        (revision, (id, name, example, cites))
+                    })
+                    .unzip();
+                (HarnessContent::Examples(cases), revisions)
+            }
+        }
+    }
+}
+
+/// A Case before it has a revision: its id, its name, what it holds and what it cites.
+type Part = (CaseId, CaseName, CaseBody, CaseCites);
+
+impl HarnessContent {
+    /// The rules of the content, but for the size of the examples (a rule of a put, not of the record): the ids of
+    /// the Cases are each given once, and `builds` and the Cases are as the kind takes them.
+    ///
+    /// For code: every Case's lines are inside the code, a Case of tests cites an Item, a Case of a sim none, and
+    /// only a sim builds. For examples: a Case cites a Clause at least and no Item, its name is one an example has
+    /// and no other Case has it, and the Harness builds an Interface at least.
+    fn check(&self, id: HarnessId, builds: &BTreeSet<InterfaceId>) -> Result<(), HarnessError> {
+        match self {
+            HarnessContent::Code {
+                kind,
+                source,
+                cases,
+            } => check_code(id, *kind, builds, source, cases),
+            HarnessContent::Examples(cases) => check_examples(id, builds, cases),
+        }
+    }
+
+    /// The size limits of a put: one text, and all the texts of the Harness.
+    fn check_sizes(&self, id: HarnessId) -> Result<(), HarnessError> {
+        let HarnessContent::Examples(cases) = self else {
+            return Ok(());
+        };
+        let mut total = 0usize;
+        for (case, _, example, _) in cases {
+            for part in ExamplePart::ALL {
+                let size = example.part_size(part);
+                if size > TEXT_LIMIT {
+                    return Err(HarnessError::ExampleTooLarge {
+                        case: *case,
+                        part,
+                        size,
+                        limit: TEXT_LIMIT,
+                    });
+                }
+            }
+            total = total.saturating_add(example.size());
+        }
+        if total > HARNESS_LIMIT {
+            return Err(HarnessError::ExamplesTooLarge {
+                harness: id,
+                size: total,
+                limit: HARNESS_LIMIT,
+            });
+        }
+        Ok(())
+    }
+
+    /// What it holds, and its Cases in order.
+    fn into_parts(self) -> (Content, Vec<Part>) {
+        match self {
+            HarnessContent::Code {
+                kind,
+                source,
+                cases,
+            } => (
+                Content::Code { kind, source },
+                cases
+                    .into_iter()
+                    .map(|(id, name, lines, cites)| (id, name, CaseBody::Lines(lines), cites))
+                    .collect(),
+            ),
+            HarnessContent::Examples(cases) => (
+                Content::Examples,
+                cases
+                    .into_iter()
+                    .map(|(id, name, example, cites)| (id, name, CaseBody::Example(example), cites))
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// The ids of `cases` are each given once, every Case's lines are inside `source`, and `kind` takes the Cases and
 /// `builds` as given: a Case of tests cites an Item, a Case of a sim none, and only a sim builds.
-fn check(
+fn check_code(
     id: HarnessId,
-    kind: HarnessKind,
+    kind: CodeKind,
     builds: &BTreeSet<InterfaceId>,
     source: &Source,
     cases: &[CaseFound],
 ) -> Result<(), HarnessError> {
-    if kind == HarnessKind::Tests && !builds.is_empty() {
+    if kind == CodeKind::Tests && !builds.is_empty() {
         return Err(HarnessError::BuildsOfTests(id));
     }
     for (k, (id, _, lines, cites)) in cases.iter().enumerate() {
@@ -211,16 +502,64 @@ fn check(
             });
         }
         match kind {
-            HarnessKind::Tests if cites.items().is_empty() => {
+            CodeKind::Tests if cites.items().is_empty() => {
                 return Err(HarnessError::NoItem(*id));
             }
-            HarnessKind::Sim if !cites.items().is_empty() => {
+            CodeKind::Sim if !cites.items().is_empty() => {
                 return Err(HarnessError::SimCitesItem(*id));
             }
-            HarnessKind::Tests | HarnessKind::Sim => {}
+            CodeKind::Tests | CodeKind::Sim => {}
         }
     }
     Ok(())
+}
+
+/// The ids of `cases` are each given once, no Case cites an Item and each cites a Clause, each name is one an
+/// example has and is not another Case's, and `builds` names an Interface.
+fn check_examples(
+    id: HarnessId,
+    builds: &BTreeSet<InterfaceId>,
+    cases: &[ExampleFound],
+) -> Result<(), HarnessError> {
+    if builds.is_empty() {
+        return Err(HarnessError::ExamplesBuildNone(id));
+    }
+    for (k, (case, name, _, cites)) in cases.iter().enumerate() {
+        if cases[..k].iter().any(|(i, ..)| i == case) {
+            return Err(HarnessError::DuplicateId(*case));
+        }
+        if !cites.items().is_empty() {
+            return Err(HarnessError::ExampleCitesItem(*case));
+        }
+        if cites.clauses().is_empty() {
+            return Err(HarnessError::ExampleCitesNone(*case));
+        }
+        if ExampleName::new(name.as_str()).is_err() {
+            return Err(HarnessError::ExampleName {
+                case: *case,
+                fault: ExampleNameFault::NotAName,
+            });
+        }
+        if cases[..k].iter().any(|(_, n, ..)| n == name) {
+            return Err(HarnessError::ExampleName {
+                case: *case,
+                fault: ExampleNameFault::NamedTwice,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether two bodies are the same content of a Harness. Where a test is in the code is not content (the code is
+/// compared as a whole), so any two ranges are the same; an example is its texts.
+fn same_content(a: &CaseBody, b: &CaseBody) -> bool {
+    match (a, b) {
+        (CaseBody::Lines(_), CaseBody::Lines(_)) => true,
+        (CaseBody::Example(a), CaseBody::Example(b)) => a == b,
+        (CaseBody::Lines(_), CaseBody::Example(_)) | (CaseBody::Example(_), CaseBody::Lines(_)) => {
+            false
+        }
+    }
 }
 
 impl Harness {
@@ -231,65 +570,81 @@ impl Harness {
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
-        Harness::of_kind(HarnessKind::Tests, id, BTreeSet::new(), source, cases)
+        Harness::of_kind(CodeKind::Tests, id, BTreeSet::new(), source, cases)
     }
 
-    /// A new Harness of `kind` that builds `builds`, as [`Harness::new`] makes a Harness of tests.
+    /// A new Harness of code of `kind` that builds `builds`, as [`Harness::new`] makes a Harness of tests.
     pub fn of_kind(
-        kind: HarnessKind,
+        kind: CodeKind,
         id: HarnessId,
         builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<Harness, HarnessError> {
-        check(id, kind, &builds, &source, &cases)?;
+        Harness::make(
+            id,
+            builds,
+            HarnessContent::Code {
+                kind,
+                source,
+                cases,
+            },
+        )
+    }
+
+    /// A new Harness at its first revision that builds `builds` and holds `content`, each Case at its first
+    /// revision, in the order given. The rules of the content hold, and so do the size limits of a put.
+    pub fn make(
+        id: HarnessId,
+        builds: BTreeSet<InterfaceId>,
+        content: HarnessContent,
+    ) -> Result<Harness, HarnessError> {
+        content.check(id, &builds)?;
+        content.check_sizes(id)?;
+        let (content, parts) = content.into_parts();
         Ok(Harness {
             id,
             revision: Revision::first(),
-            kind,
             builds,
-            source,
-            cases: cases
+            content,
+            cases: parts
                 .into_iter()
-                .map(|(id, name, lines, cites)| Case {
+                .map(|(id, name, body, cites)| Case {
                     id,
                     revision: Revision::first(),
                     name,
-                    lines,
                     cites,
+                    body,
                 })
                 .collect(),
         })
     }
 
-    /// A Harness as a store kept it, revisions included. The rules of [`Harness::new`] hold on it.
+    /// A Harness as a store kept it, revisions included. The rules of [`Harness::make`] hold on it but for the
+    /// size limits, which are the rules of a put: a limit lowered later does not make what was kept unreadable.
     pub(crate) fn restore(
         id: HarnessId,
-        kind: HarnessKind,
         revision: Revision,
         builds: BTreeSet<InterfaceId>,
-        source: Source,
-        cases: Vec<(CaseId, Revision, CaseName, LineRange, CaseCites)>,
+        stored: StoredContent,
     ) -> Result<Harness, HarnessError> {
-        let found: Vec<CaseFound> = cases
-            .iter()
-            .map(|(i, _, n, l, c)| (*i, n.clone(), *l, c.clone()))
-            .collect();
-        check(id, kind, &builds, &source, &found)?;
+        let (content, revisions) = stored.split();
+        content.check(id, &builds)?;
+        let (content, parts) = content.into_parts();
         Ok(Harness {
             id,
             revision,
-            kind,
             builds,
-            source,
-            cases: cases
+            content,
+            cases: parts
                 .into_iter()
-                .map(|(id, revision, name, lines, cites)| Case {
+                .zip(revisions)
+                .map(|((id, name, body, cites), revision)| Case {
                     id,
                     revision,
                     name,
-                    lines,
                     cites,
+                    body,
                 })
                 .collect(),
         })
@@ -307,18 +662,26 @@ impl Harness {
 
     /// What it is for.
     pub fn kind(&self) -> HarnessKind {
-        self.kind
+        self.content.kind()
     }
 
-    /// The Interfaces whose pinned code a sim Harness builds into the program it drives, in the order of their
-    /// ids. A Harness of tests builds none.
+    /// The kind of its code; none for a Harness of examples, which has none.
+    pub fn code_kind(&self) -> Option<CodeKind> {
+        match &self.content {
+            Content::Code { kind, .. } => Some(*kind),
+            Content::Examples => None,
+        }
+    }
+
+    /// The Interfaces whose pinned code a sim Harness or a Harness of examples builds into the program it runs, in
+    /// the order of their ids. A Harness of tests builds none.
     pub fn builds(&self) -> &BTreeSet<InterfaceId> {
         &self.builds
     }
 
-    /// Its code.
-    pub fn source(&self) -> &Source {
-        &self.source
+    /// Its code; none for a Harness of examples.
+    pub fn source(&self) -> Option<&Source> {
+        self.content.source()
     }
 
     /// Its Cases, in order.
@@ -341,7 +704,7 @@ impl Harness {
     ///
     /// [`Context::sim_problems`]: crate::domain::entity::context::Context::sim_problems
     pub fn sim_problems(&self) -> Vec<SimShapeProblem> {
-        if self.kind != HarnessKind::Sim {
+        if self.kind() != HarnessKind::Sim {
             return Vec::new();
         }
         let harness = self.id;
@@ -397,34 +760,60 @@ impl Harness {
         out
     }
 
-    /// Gives the Harness new code and Cases. A Case whose id was there keeps its revision when its name, the text
-    /// of its lines and its citations are the same (wherever it now is) and goes to the next one when any differs;
-    /// a new id starts at the first; an id left out is gone. The Harness goes to its next revision when the code or
-    /// its Cases (which, in what order, named what, citing what) differ, and stays when nothing does. Content that
-    /// breaks a rule changes nothing. The kind and the Interfaces it builds stay.
+    /// Gives the Harness new code and Cases, and keeps the kind of code and the Interfaces it builds; as
+    /// [`Harness::put`] does. A Harness of examples is refused ([`HarnessError::KindContent`]): it does not become
+    /// code unasked.
     pub fn revise(&mut self, source: Source, cases: Vec<CaseFound>) -> Result<(), HarnessError> {
-        self.revise_as(self.kind, self.builds.clone(), source, cases)
+        let kind = self
+            .code_kind()
+            .ok_or(HarnessError::KindContent { harness: self.id })?;
+        self.revise_as(kind, self.builds.clone(), source, cases)
     }
 
-    /// As [`Harness::revise`], and the Harness becomes one of `kind` that builds `builds`. A change of kind or of
+    /// As [`Harness::revise`], and the Harness becomes code of `kind` that builds `builds`. A change of kind or of
     /// what it builds is a change of the Harness: its revision goes up.
     pub fn revise_as(
         &mut self,
-        kind: HarnessKind,
+        kind: CodeKind,
         builds: BTreeSet<InterfaceId>,
         source: Source,
         cases: Vec<CaseFound>,
     ) -> Result<(), HarnessError> {
-        check(self.id, kind, &builds, &source, &cases)?;
-        let revised: Vec<Case> = cases
+        self.put(
+            builds,
+            HarnessContent::Code {
+                kind,
+                source,
+                cases,
+            },
+        )
+    }
+
+    /// Gives the Harness the content and the Interfaces to build that a put states, whatever it held. A Case whose
+    /// id was there keeps its revision when its name, its citations and its body are the same (for a test, the
+    /// text of its lines, wherever it now is; for an example, its texts) and goes to the next one when any differs;
+    /// a new id starts at the first; an id left out is gone. The Harness goes to its next revision when its kind,
+    /// what it builds, its code or its Cases (which, in what order, named what, citing what, holding what) differ,
+    /// and stays when nothing does. A change of kind (examples for tests, say) is therefore a revision of the
+    /// Harness and of every Case that was there. Content that breaks a rule, or is larger than a put takes,
+    /// changes nothing.
+    pub fn put(
+        &mut self,
+        builds: BTreeSet<InterfaceId>,
+        content: HarnessContent,
+    ) -> Result<(), HarnessError> {
+        content.check(self.id, &builds)?;
+        content.check_sizes(self.id)?;
+        let (content, parts) = content.into_parts();
+        let revised: Vec<Case> = parts
             .into_iter()
-            .map(|(id, name, lines, cites)| {
+            .map(|(id, name, body, cites)| {
                 let revision = match self.case(id) {
                     None => Revision::first(),
                     Some(old)
                         if old.name == name
                             && old.cites == cites
-                            && self.source.lines(old.lines) == source.lines(lines) =>
+                            && self.same_body(old, &content, &body) =>
                     {
                         old.revision
                     }
@@ -434,26 +823,43 @@ impl Harness {
                     id,
                     revision,
                     name,
-                    lines,
                     cites,
+                    body,
                 }
             })
             .collect();
-        let same = source == self.source
-            && kind == self.kind
+        let same = content == self.content
             && builds == self.builds
             && revised.len() == self.cases.len()
             && revised.iter().zip(&self.cases).all(|(new, old)| {
-                new.id == old.id && new.name == old.name && new.cites == old.cites
+                new.id == old.id
+                    && new.name == old.name
+                    && new.cites == old.cites
+                    && same_content(&new.body, &old.body)
             });
         if !same {
             self.revision = self.revision.next();
         }
-        self.kind = kind;
+        self.content = content;
         self.builds = builds;
-        self.source = source;
         self.cases = revised;
         Ok(())
+    }
+
+    /// Whether `body`, in a Harness that will hold `content`, is what `old` holds in this one: a test is the text of
+    /// its lines, an example its texts.
+    fn same_body(&self, old: &Case, content: &Content, body: &CaseBody) -> bool {
+        match (&old.body, body) {
+            (CaseBody::Lines(then), CaseBody::Lines(now)) => {
+                match (self.content.source(), content.source()) {
+                    (Some(was), Some(is)) => was.lines(*then) == is.lines(*now),
+                    _ => false,
+                }
+            }
+            (CaseBody::Example(then), CaseBody::Example(now)) => then == now,
+            (CaseBody::Lines(_), CaseBody::Example(_))
+            | (CaseBody::Example(_), CaseBody::Lines(_)) => false,
+        }
     }
 }
 
@@ -677,7 +1083,14 @@ mod tests {
         let cases = |h: &Harness| -> Vec<CaseFound> {
             h.cases()
                 .iter()
-                .map(|c| (c.id(), c.name().clone(), c.lines(), c.cites().clone()))
+                .map(|c| {
+                    (
+                        c.id(),
+                        c.name().clone(),
+                        c.lines().unwrap(),
+                        c.cites().clone(),
+                    )
+                })
                 .collect()
         };
         // revising without a kind keeps the kind and, with nothing else changed, the revision
@@ -690,7 +1103,7 @@ mod tests {
                 .map(|(id, name, lines, _)| (id, name, lines, sim_cites()))
                 .collect()
         };
-        h.revise_as(HarnessKind::Sim, BTreeSet::new(), src(CODE), clauses(&h))
+        h.revise_as(CodeKind::Sim, BTreeSet::new(), src(CODE), clauses(&h))
             .unwrap();
         assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
         assert_eq!(revisions(&h), [2, 2]);
@@ -699,7 +1112,7 @@ mod tests {
         assert_eq!((h.kind(), h.revision().number()), (HarnessKind::Sim, 2));
         // a new Harness can be made a sim
         let sim = Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             HarnessId::from_uuid(test_uuid(101)),
             BTreeSet::new(),
             src(CODE),
@@ -741,7 +1154,7 @@ mod tests {
         let with_item = (cid(2), name("a"), at(1, 1), cites(50, Revision::first()));
         assert_eq!(
             Harness::of_kind(
-                HarnessKind::Sim,
+                CodeKind::Sim,
                 id,
                 BTreeSet::new(),
                 src(CODE),
@@ -750,7 +1163,7 @@ mod tests {
             Err(HarnessError::SimCitesItem(cid(2)))
         );
         let sim = Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             id,
             BTreeSet::new(),
             src(CODE),
@@ -766,7 +1179,7 @@ mod tests {
         let one = BTreeSet::from([iid(7)]);
         assert_eq!(
             Harness::of_kind(
-                HarnessKind::Tests,
+                CodeKind::Tests,
                 id,
                 one.clone(),
                 src(CODE),
@@ -774,22 +1187,16 @@ mod tests {
             ),
             Err(HarnessError::BuildsOfTests(id))
         );
-        let mut sim = Harness::of_kind(
-            HarnessKind::Sim,
-            id,
-            one.clone(),
-            src(CODE),
-            vec![sim_case(3)],
-        )
-        .unwrap();
+        let mut sim =
+            Harness::of_kind(CodeKind::Sim, id, one.clone(), src(CODE), vec![sim_case(3)]).unwrap();
         assert_eq!(sim.builds(), &one);
         // the same content again changes nothing; another set of Interfaces is a new revision of the Harness
         // and of no Case
-        sim.revise_as(HarnessKind::Sim, one.clone(), src(CODE), vec![sim_case(3)])
+        sim.revise_as(CodeKind::Sim, one.clone(), src(CODE), vec![sim_case(3)])
             .unwrap();
         assert_eq!(sim.revision().number(), 1);
         let two = BTreeSet::from([iid(7), iid(8)]);
-        sim.revise_as(HarnessKind::Sim, two.clone(), src(CODE), vec![sim_case(3)])
+        sim.revise_as(CodeKind::Sim, two.clone(), src(CODE), vec![sim_case(3)])
             .unwrap();
         assert_eq!((sim.revision().number(), sim.builds()), (2, &two));
         assert_eq!(revisions(&sim), [1]);
@@ -800,7 +1207,7 @@ mod tests {
         let before = sim.clone();
         assert_eq!(
             sim.revise_as(
-                HarnessKind::Tests,
+                CodeKind::Tests,
                 two,
                 src(CODE),
                 vec![(cid(3), name("a"), at(1, 1), cites(50, Revision::first()))]
@@ -813,7 +1220,7 @@ mod tests {
     /// A sim Harness that builds Interface 7, with these Cases.
     fn sim_of(cases: Vec<CaseFound>) -> Harness {
         Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             HarnessId::from_uuid(test_uuid(100)),
             BTreeSet::from([iid(7)]),
             src(CODE),
@@ -928,7 +1335,7 @@ mod tests {
     fn a_sim_that_builds_nothing_is_a_builds_none_problem() {
         let id = HarnessId::from_uuid(test_uuid(100));
         let h = Harness::of_kind(
-            HarnessKind::Sim,
+            CodeKind::Sim,
             id,
             BTreeSet::new(),
             src(CODE),
@@ -948,17 +1355,19 @@ mod tests {
         let id = HarnessId::from_uuid(test_uuid(100));
         let h = Harness::restore(
             id,
-            HarnessKind::Sim,
             Revision::first(),
             BTreeSet::new(),
-            src(CODE),
-            vec![(
-                cid(1),
-                Revision::first(),
-                name("stray"),
-                at(1, 1),
-                sim_cites(),
-            )],
+            StoredContent::Code {
+                kind: CodeKind::Sim,
+                source: src(CODE),
+                cases: vec![(
+                    cid(1),
+                    Revision::first(),
+                    name("stray"),
+                    at(1, 1),
+                    sim_cites(),
+                )],
+            },
         )
         .unwrap();
         assert_eq!(h.sim_problems().len(), 3);
@@ -976,5 +1385,442 @@ mod tests {
             .is_err()
         );
         assert_eq!(h, before);
+    }
+
+    fn hid() -> HarnessId {
+        HarnessId::from_uuid(test_uuid(100))
+    }
+
+    fn ex_with(input: &str, expected: &str) -> Example {
+        Example::new(String::new(), input.to_string(), expected.to_string(), None).unwrap()
+    }
+
+    fn ex(expected: &str) -> Example {
+        ex_with("", expected)
+    }
+
+    /// An example Case that cites one Clause and no Item.
+    fn example_case(n: u128, text: &str, expected: &str) -> ExampleFound {
+        (cid(n), name(text), ex(expected), sim_cites())
+    }
+
+    fn made(cases: Vec<ExampleFound>) -> Result<Harness, HarnessError> {
+        Harness::make(
+            hid(),
+            BTreeSet::from([iid(7)]),
+            HarnessContent::Examples(cases),
+        )
+    }
+
+    /// A Harness of two examples.
+    fn tally() -> Harness {
+        made(vec![
+            example_case(1, "a1", "1\n#exit 0\n"),
+            example_case(2, "a2", "2\n#exit 0\n"),
+        ])
+        .unwrap()
+    }
+
+    fn put_examples(h: &mut Harness, cases: Vec<ExampleFound>) -> Result<(), HarnessError> {
+        h.put(BTreeSet::from([iid(7)]), HarnessContent::Examples(cases))
+    }
+
+    #[test]
+    fn a_harness_of_examples_is_made_with_no_code_and_a_case_for_each_example() {
+        let h = tally();
+        assert_eq!(h.kind(), HarnessKind::Examples);
+        assert_eq!(h.code_kind(), None);
+        assert!(h.source().is_none());
+        assert_eq!(h.builds(), &BTreeSet::from([iid(7)]));
+        assert_eq!((h.revision().number(), revisions(&h)), (1, vec![1, 1]));
+        let c = h.case(cid(2)).unwrap();
+        assert_eq!(c.name().as_str(), "a2");
+        assert_eq!(c.lines(), None);
+        assert_eq!(c.example(), Some(&ex("2\n#exit 0\n")));
+        assert!(matches!(c.body(), CaseBody::Example(_)));
+        // and a Case of code has lines and no example
+        let tests = stack();
+        let t = tests.case(cid(1)).unwrap();
+        assert_eq!(t.lines(), Some(at(1, 1)));
+        assert_eq!(t.example(), None);
+        assert!(matches!(t.body(), CaseBody::Lines(_)));
+        assert!(tests.source().is_some());
+        assert_eq!(tests.code_kind(), Some(CodeKind::Tests));
+    }
+
+    #[test]
+    fn a_harness_of_examples_has_no_sim_problem() {
+        assert!(tally().sim_problems().is_empty());
+    }
+
+    #[test]
+    fn an_example_case_that_cites_an_item_or_no_clause_is_refused() {
+        let with_item = (
+            cid(1),
+            name("a1"),
+            ex("#exit 0"),
+            cites(50, Revision::first()),
+        );
+        assert_eq!(
+            made(vec![with_item]),
+            Err(HarnessError::ExampleCitesItem(cid(1)))
+        );
+        let bare = (
+            cid(1),
+            name("a1"),
+            ex("#exit 0"),
+            CaseCites::of(BTreeMap::new(), BTreeMap::new()),
+        );
+        assert_eq!(
+            made(vec![bare]),
+            Err(HarnessError::ExampleCitesNone(cid(1)))
+        );
+    }
+
+    #[test]
+    fn the_name_of_an_example_is_one_an_example_has_and_is_there_once() {
+        for bad in ["a/b", "a\nb", "a\0b"] {
+            assert_eq!(
+                made(vec![example_case(1, bad, "#exit 0")]),
+                Err(HarnessError::ExampleName {
+                    case: cid(1),
+                    fault: ExampleNameFault::NotAName
+                }),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            made(vec![
+                example_case(1, "a1", "#exit 0"),
+                example_case(2, "a1", "#exit 1"),
+            ]),
+            Err(HarnessError::ExampleName {
+                case: cid(2),
+                fault: ExampleNameFault::NamedTwice
+            })
+        );
+    }
+
+    #[test]
+    fn a_harness_of_examples_builds_an_interface_and_its_cases_have_one_id_each() {
+        assert_eq!(
+            Harness::make(
+                hid(),
+                BTreeSet::new(),
+                HarnessContent::Examples(vec![example_case(1, "a1", "#exit 0")])
+            ),
+            Err(HarnessError::ExamplesBuildNone(hid()))
+        );
+        assert_eq!(
+            made(vec![
+                example_case(1, "a1", "#exit 0"),
+                example_case(1, "a2", "#exit 0"),
+            ]),
+            Err(HarnessError::DuplicateId(cid(1)))
+        );
+        // no Case at all is a Harness of no examples, which the rules do not refuse
+        assert!(made(vec![]).unwrap().cases().is_empty());
+    }
+
+    #[test]
+    fn the_same_examples_again_change_no_revision() {
+        let mut h = tally();
+        let before = h.clone();
+        put_examples(
+            &mut h,
+            vec![
+                example_case(1, "a1", "1\n#exit 0\n"),
+                example_case(2, "a2", "2\n#exit 0\n"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(h, before);
+    }
+
+    #[test]
+    fn one_changed_text_moves_that_case_and_the_harness_and_no_other_case() {
+        let mut h = tally();
+        put_examples(
+            &mut h,
+            vec![
+                example_case(1, "a1", "1\n#exit 0\n"),
+                example_case(2, "a2", "2\n#exit 1\n"),
+            ],
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (2, vec![1, 2]));
+        // the input is as much its content as the expected output
+        put_examples(
+            &mut h,
+            vec![
+                (
+                    cid(1),
+                    name("a1"),
+                    ex_with("x", "1\n#exit 0\n"),
+                    sim_cites(),
+                ),
+                example_case(2, "a2", "2\n#exit 1\n"),
+            ],
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (3, vec![2, 2]));
+        // so are the errors an example states
+        let errors = Example::new(
+            String::new(),
+            String::new(),
+            "2\n#exit 1\n".to_string(),
+            Some("e\n".to_string()),
+        )
+        .unwrap();
+        put_examples(
+            &mut h,
+            vec![
+                (
+                    cid(1),
+                    name("a1"),
+                    ex_with("x", "1\n#exit 0\n"),
+                    sim_cites(),
+                ),
+                (cid(2), name("a2"), errors, sim_cites()),
+            ],
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (4, vec![2, 3]));
+    }
+
+    #[test]
+    fn a_renamed_or_recited_example_and_a_reorder_move_the_harness() {
+        let mut h = tally();
+        put_examples(
+            &mut h,
+            vec![
+                example_case(2, "a2", "2\n#exit 0\n"),
+                example_case(1, "a1", "1\n#exit 0\n"),
+            ],
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (2, vec![1, 1]));
+        put_examples(
+            &mut h,
+            vec![
+                example_case(2, "b2", "2\n#exit 0\n"),
+                example_case(1, "a1", "1\n#exit 0\n"),
+            ],
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (3, vec![2, 1]));
+    }
+
+    #[test]
+    fn what_a_harness_of_examples_builds_is_part_of_its_content() {
+        let mut h = tally();
+        let two = BTreeSet::from([iid(7), iid(8)]);
+        h.put(
+            two.clone(),
+            HarnessContent::Examples(vec![
+                example_case(1, "a1", "1\n#exit 0\n"),
+                example_case(2, "a2", "2\n#exit 0\n"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!((h.revision().number(), h.builds()), (2, &two));
+        assert_eq!(revisions(&h), [1, 1]);
+    }
+
+    #[test]
+    fn a_change_of_kind_between_examples_and_tests_is_a_revision_of_the_harness_and_its_cases() {
+        let mut h = tally();
+        // examples become a sim; the Case ids stay, and the bodies are others
+        h.revise_as(
+            CodeKind::Sim,
+            BTreeSet::from([iid(7)]),
+            src(CODE),
+            vec![(cid(1), name("sweep"), at(1, 1), sim_cites())],
+        )
+        .unwrap();
+        assert_eq!(h.kind(), HarnessKind::Sim);
+        assert!(h.source().is_some());
+        assert_eq!((h.revision().number(), revisions(&h)), (2, vec![2]));
+        assert!(h.case(cid(2)).is_none());
+        // and back
+        put_examples(&mut h, vec![example_case(1, "a1", "1\n#exit 0\n")]).unwrap();
+        assert_eq!(h.kind(), HarnessKind::Examples);
+        assert!(h.source().is_none());
+        assert_eq!((h.revision().number(), revisions(&h)), (3, vec![3]));
+        // tests too: a Case of tests that becomes an example is a new revision
+        let mut t = stack();
+        t.put(
+            BTreeSet::from([iid(7)]),
+            HarnessContent::Examples(vec![example_case(1, "a1", "#exit 0")]),
+        )
+        .unwrap();
+        assert_eq!(
+            (t.kind(), t.revision().number(), revisions(&t)),
+            (HarnessKind::Examples, 2, vec![2])
+        );
+    }
+
+    #[test]
+    fn code_put_to_a_harness_of_examples_by_revise_is_refused_and_changes_nothing() {
+        let mut h = tally();
+        let before = h.clone();
+        assert_eq!(
+            h.revise(src(CODE), vec![sim_case(1)]),
+            Err(HarnessError::KindContent { harness: hid() })
+        );
+        assert_eq!(h, before);
+    }
+
+    #[test]
+    fn examples_that_break_a_rule_change_nothing() {
+        let mut h = tally();
+        let before = h.clone();
+        assert!(put_examples(&mut h, vec![example_case(1, "a/b", "#exit 0")]).is_err());
+        assert_eq!(h, before);
+    }
+
+    /// An example whose input is `bytes` long.
+    fn big(n: u128, bytes: usize) -> ExampleFound {
+        (
+            cid(n),
+            name(&format!("big{n}")),
+            ex_with(&"x".repeat(bytes), "#exit 0\n"),
+            sim_cites(),
+        )
+    }
+
+    #[test]
+    fn a_put_takes_a_text_up_to_the_limit_and_refuses_one_byte_more() {
+        assert!(made(vec![big(1, TEXT_LIMIT)]).is_ok());
+        assert_eq!(
+            made(vec![big(1, TEXT_LIMIT + 1)]),
+            Err(HarnessError::ExampleTooLarge {
+                case: cid(1),
+                part: ExamplePart::Input,
+                size: TEXT_LIMIT + 1,
+                limit: TEXT_LIMIT
+            })
+        );
+        // a put to a Harness that is is held to it too, and changes nothing when refused
+        let mut h = tally();
+        let before = h.clone();
+        assert!(matches!(
+            put_examples(&mut h, vec![big(1, TEXT_LIMIT + 1)]),
+            Err(HarnessError::ExampleTooLarge { .. })
+        ));
+        assert_eq!(h, before);
+    }
+
+    #[test]
+    fn a_put_takes_the_texts_of_a_harness_up_to_the_limit_together() {
+        let each = TEXT_LIMIT - 16;
+        let n = HARNESS_LIMIT / each;
+        let within: Vec<ExampleFound> = (1..=n as u128).map(|k| big(k, each)).collect();
+        assert!(made(within.clone()).is_ok());
+        let mut over = within;
+        over.push(big(100, 64));
+        let Err(HarnessError::ExamplesTooLarge {
+            harness,
+            size,
+            limit,
+        }) = made(over)
+        else {
+            panic!("the examples are past the limit of a harness");
+        };
+        assert_eq!((harness, limit), (hid(), HARNESS_LIMIT));
+        assert!(size > HARNESS_LIMIT);
+    }
+
+    #[test]
+    fn the_size_limits_are_rules_of_a_put_and_not_of_a_kept_harness() {
+        let each = TEXT_LIMIT;
+        let cases: Vec<(CaseId, Revision, CaseName, Example, CaseCites)> = (1..=5u128)
+            .map(|k| {
+                (
+                    cid(k),
+                    Revision::first(),
+                    name(&format!("big{k}")),
+                    ex_with(&"x".repeat(each), "#exit 0\n"),
+                    sim_cites(),
+                )
+            })
+            .collect();
+        // five texts of the most one text may have are past the limit of a Harness, as a put sees it
+        assert!(matches!(
+            made(
+                cases
+                    .iter()
+                    .map(|(i, _, n, e, c)| (*i, n.clone(), e.clone(), c.clone()))
+                    .collect()
+            ),
+            Err(HarnessError::ExamplesTooLarge { .. })
+        ));
+        // and a store that kept them is read
+        let h = Harness::restore(
+            hid(),
+            Revision::first(),
+            BTreeSet::from([iid(7)]),
+            StoredContent::Examples(cases),
+        )
+        .unwrap();
+        assert_eq!(h.cases().len(), 5);
+        // one text of a kept Harness past the limit is read as well
+        let one = vec![(
+            cid(1),
+            Revision::first(),
+            name("big"),
+            ex_with(&"x".repeat(TEXT_LIMIT + 1), "#exit 0\n"),
+            sim_cites(),
+        )];
+        assert!(
+            Harness::restore(
+                hid(),
+                Revision::first(),
+                BTreeSet::from([iid(7)]),
+                StoredContent::Examples(one)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_kept_harness_of_examples_is_read_with_its_revisions_and_held_to_the_rules() {
+        let stored = |cases: Vec<(CaseId, Revision, CaseName, Example, CaseCites)>,
+                      builds: BTreeSet<InterfaceId>| {
+            Harness::restore(
+                hid(),
+                Revision::first().next(),
+                builds,
+                StoredContent::Examples(cases),
+            )
+        };
+        let case = |n: u128, text: &str, cites: CaseCites| {
+            (
+                cid(n),
+                Revision::first().next(),
+                name(text),
+                ex("#exit 0"),
+                cites,
+            )
+        };
+        let h = stored(vec![case(1, "a1", sim_cites())], BTreeSet::from([iid(7)])).unwrap();
+        assert_eq!((h.revision().number(), revisions(&h)), (2, vec![2]));
+        assert_eq!(h.kind(), HarnessKind::Examples);
+        let bare = CaseCites::of(BTreeMap::new(), BTreeMap::new());
+        assert_eq!(
+            stored(vec![case(1, "a1", bare)], BTreeSet::from([iid(7)])),
+            Err(HarnessError::ExampleCitesNone(cid(1)))
+        );
+        assert_eq!(
+            stored(vec![case(1, "a/1", sim_cites())], BTreeSet::from([iid(7)])),
+            Err(HarnessError::ExampleName {
+                case: cid(1),
+                fault: ExampleNameFault::NotAName
+            })
+        );
+        assert_eq!(
+            stored(vec![case(1, "a1", sim_cites())], BTreeSet::new()),
+            Err(HarnessError::ExamplesBuildNone(hid()))
+        );
     }
 }

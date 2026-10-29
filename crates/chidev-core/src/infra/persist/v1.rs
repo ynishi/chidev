@@ -25,7 +25,7 @@ use crate::domain::entity::change_request::{
 };
 use crate::domain::entity::context::{Basis, Context, ContextHead};
 use crate::domain::entity::contract::Contract;
-use crate::domain::entity::harness::Harness;
+use crate::domain::entity::harness::{Harness, StoredContent};
 use crate::domain::entity::interface::{Interface, InterfaceError};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
@@ -35,6 +35,7 @@ use crate::domain::vo::case::{CaseCites, CaseName};
 use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
 use crate::domain::vo::correction::Correction;
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::example::Example;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Citations, Footprint, Move, Rename};
 use crate::domain::vo::harness_kind::HarnessKind;
@@ -300,7 +301,9 @@ struct HarnessDoc {
     /// The ids of the Interfaces a sim Harness builds; left out for a Harness that builds none (tests).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     builds: Vec<String>,
-    source: String,
+    /// The code; left out for a Harness of examples, which has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     cases: Vec<CaseDoc>,
 }
 
@@ -309,10 +312,28 @@ struct CaseDoc {
     id: String,
     revision: u64,
     name: String,
-    first: usize,
-    last: usize,
+    /// The lines of the code a Case is on; left out for an example, which is not on any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first: Option<usize>,
+    /// See `first`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last: Option<usize>,
     items: Vec<Rev>,
     clauses: Vec<Rev>,
+    /// The example a Case holds; left out for a Case of code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    example: Option<ExampleDoc>,
+}
+
+/// An example as the store keeps it: the arguments, the standard input, the expected standard output ending with the
+/// `#exit` line, and the expected standard error when the example states it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExampleDoc {
+    args: String,
+    stdin: String,
+    expected: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
 }
 
 /// An old declaration or label as a key: each line without the white space at its ends, joined by one space (a
@@ -465,7 +486,7 @@ impl From<&Harness> for HarnessDoc {
                 other => Some(other.word().to_string()),
             },
             builds: h.builds().iter().map(|i| i.as_uuid().to_string()).collect(),
-            source: h.source().as_str().to_string(),
+            source: h.source().map(|s| s.as_str().to_string()),
             cases: h
                 .cases()
                 .iter()
@@ -473,10 +494,16 @@ impl From<&Harness> for HarnessDoc {
                     id: c.id().as_uuid().to_string(),
                     revision: c.revision().number(),
                     name: c.name().to_string(),
-                    first: c.lines().first(),
-                    last: c.lines().last(),
+                    first: c.lines().map(|l| l.first()),
+                    last: c.lines().map(|l| l.last()),
                     items: revs(c.cites().items(), |i: ItemId| i.as_uuid()),
                     clauses: revs(c.cites().clauses(), |i: ClauseId| i.as_uuid()),
+                    example: c.example().map(|e| ExampleDoc {
+                        args: e.arguments().to_string(),
+                        stdin: e.input().to_string(),
+                        expected: e.expected().to_string(),
+                        stderr: e.errors().map(str::to_string),
+                    }),
                 })
                 .collect(),
         }
@@ -628,6 +655,13 @@ impl TryFrom<HarnessDoc> for Harness {
     type Error = Bad;
 
     fn try_from(d: HarnessDoc) -> Result<Harness, Bad> {
+        let kind = match d.kind.as_deref() {
+            None => HarnessKind::Tests,
+            Some(word) => HarnessKind::from_word(word)
+                .ok_or_else(|| bad(format!("a harness of kind `{word}`")))?,
+        };
+        let id = d.id.clone();
+        let mismatch = |what: &str| bad(format!("the harness {id} of {} has {what}", kind.word()));
         let mut cases = Vec::with_capacity(d.cases.len());
         for c in &d.cases {
             let cites = CaseCites::of(
@@ -638,14 +672,51 @@ impl TryFrom<HarnessDoc> for Harness {
                 CaseId::from_uuid(uuid(&c.id)?),
                 revision(c.revision)?,
                 CaseName::try_from(c.name.as_str()).map_err(bad)?,
-                lines(c.first, c.last)?,
                 cites,
             ));
         }
-        let kind = match d.kind.as_deref() {
-            None => HarnessKind::Tests,
-            Some(word) => HarnessKind::from_word(word)
-                .ok_or_else(|| bad(format!("a harness of kind `{word}`")))?,
+        // The domain holds the rules of a Harness; here only the shape of the document is asked, so that what the
+        // store kept for one kind is not read as the other.
+        let content = match (kind.code(), d.source) {
+            (Some(code), Some(source)) => {
+                let mut found = Vec::with_capacity(cases.len());
+                for ((id, rev, name, cites), c) in cases.into_iter().zip(&d.cases) {
+                    if c.example.is_some() {
+                        return Err(mismatch("a case that holds an example"));
+                    }
+                    let (Some(first), Some(last)) = (c.first, c.last) else {
+                        return Err(mismatch("a case with no lines"));
+                    };
+                    found.push((id, rev, name, lines(first, last)?, cites));
+                }
+                StoredContent::Code {
+                    kind: code,
+                    source: Source::new(source),
+                    cases: found,
+                }
+            }
+            (Some(_), None) => return Err(mismatch("no code")),
+            (None, Some(_)) => return Err(mismatch("code")),
+            (None, None) => {
+                let mut found = Vec::with_capacity(cases.len());
+                for ((id, rev, name, cites), c) in cases.into_iter().zip(&d.cases) {
+                    if c.first.is_some() || c.last.is_some() {
+                        return Err(mismatch("a case on lines of code"));
+                    }
+                    let Some(e) = &c.example else {
+                        return Err(mismatch("a case that holds no example"));
+                    };
+                    let example = Example::new(
+                        e.args.clone(),
+                        e.stdin.clone(),
+                        e.expected.clone(),
+                        e.stderr.clone(),
+                    )
+                    .map_err(|err| bad(format!("the example case {id}: {err}")))?;
+                    found.push((id, rev, name, example, cites));
+                }
+                StoredContent::Examples(found)
+            }
         };
         let builds = d
             .builds
@@ -654,11 +725,9 @@ impl TryFrom<HarnessDoc> for Harness {
             .collect::<Result<BTreeSet<_>, Bad>>()?;
         Harness::restore(
             HarnessId::from_uuid(uuid(&d.id)?),
-            kind,
             revision(d.revision)?,
             builds,
-            Source::new(d.source),
-            cases,
+            content,
         )
         .map_err(bad)
     }
