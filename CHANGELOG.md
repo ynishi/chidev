@@ -10,6 +10,19 @@ and this project adheres to
 
 ### Changed
 
+- The store sets `secure_delete` on every connection, so a row any commit
+  replaces or deletes is overwritten in the file. Change requests are written
+  as documents of schema 4 and Cruxes of schema 3 (with their corrections), and
+  `measure_runs` and `check_invocations` have a `corrections` column; the
+  earlier documents are still read, and an older chidev refuses the newer ones.
+  In Rust, `Store` has `measurements`, `invocations` (with the `InvocationSeq`
+  of each row; the inherent `SqliteStore::invocations` is gone) and
+  `clear_freed`, `Invocation` has `corrections`, `Transition` has `Corrected`,
+  and `Trigger` has a fifth kind, `Correct` (#44).
+- A step of a change request's `history` in `status` has only the keys of its
+  kind: a `reopened` step no longer has `"resolution": null` and `"of": null`,
+  and a `resolved` step has `of` only when its resolution points at another
+  request (#44).
 - Diagnostic suggestions in `chidev-core` are typed values (`Diagnostic::suggestions`
   returns `&[Suggestion]`, with `Mend`, `SuggestedOp`, and `DiagValue`),
   round-tripped into the CLI's output schema with target and input references
@@ -387,6 +400,22 @@ and this project adheres to
 
 ### Added
 
+- A forced correction of the records only a correction changes (#44): the
+  change requests, the Cruxes, the measurements and the record of each check
+  run. `text_find` lists where a text is kept (a record, by its id, and a
+  field), never the text. `record_correct` names each place and replaces the
+  text there with `[redacted]` (`[redacted 2]` and on where a title or a choice
+  must stay distinct). It keeps the correction (the fields, why, who and when,
+  never the text) as a step of the record's own history: a `corrected` step of a
+  change request's `history`, and `corrections` of a Crux, a measurement and a
+  run. `status` shows those of a change request, a Crux and the latest
+  measurement of each subject, and `view` those of a change request and a Crux.
+  It answers `corrected`, `remaining` and `cleared`. The correction is a trigger of its own kind, which runs no check
+  and is refused by no gate (see
+  `docs/adr/0008-a-forced-correction-is-a-trigger-of-its-own-kind.md`).
+  Refusals have the rules `correct.*`. After a correction the store writes the
+  file again (`VACUUM`) and empties a WAL, and `cleared` says whether it
+  finished. The troubleshooting document's steps for the records use it.
 - The guide has a troubleshooting document (`docs/guide/TROUBLESHOOTING.md`)
   for text that must not stay in a project's store, such as a secret: rotate
   first, then, per table, what the operations correct (the live model, the Pins,
