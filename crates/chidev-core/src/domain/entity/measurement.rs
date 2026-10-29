@@ -1,8 +1,8 @@
 //! The Measurement: the record of one run of a measure. It is a fact, not a judgment: it says what was run and what
-//! became of it, tied by a stamp to what it measured. A mutation run is of one Interface's code and says what became
-//! of each mutant; a simulation is of one sim Harness and says what each case of the script found. The rules read
-//! it and say what is worth a person's attention; a newer run of the same measure replaces it as the current one,
-//! and the older ones stay as history.
+//! became of it, tied by a stamp to what it measured. What a run holds is its [`MeasureBody`], one shape for each
+//! kind: a mutation run is of one Interface's code and says what became of each mutant; a simulation is of one sim
+//! Harness and says what each case of the script found. The rules read it and say what is worth a person's
+//! attention; a newer run of the same measure replaces it as the current one, and the older ones stay as history.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -12,10 +12,10 @@ use crate::domain::vo::correction::{
 };
 use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
-    MeasureError, MeasureFailure, MeasureKind, MeasureSubject, Mutant, MutantOutcome, MutantResult,
-    Stamp, StepEvidence,
+    MeasureError, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantOutcome,
+    MutantResult, StampRef, StepEvidence,
 };
-use crate::domain::vo::sim::{CaseExit, CaseRun, SimOutcome};
+use crate::domain::vo::sim::{CaseExit, CaseRun, SimOutcome, SimStamp};
 use crate::domain::vo::timestamp::Timestamp;
 
 /// How many mutants ended each way.
@@ -31,28 +31,44 @@ pub struct Counts {
     pub timeout: u32,
 }
 
+/// What a run is, by its kind: what it measured, what it stood on, and what it observed. A kind holds only the
+/// pieces that belong to it, so a run cannot be of an Interface and stand on a simulation's stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeasureBody {
+    /// Single-site mutants of the code of an Interface.
+    Mutation {
+        /// The Interface whose code was measured.
+        interface: InterfaceId,
+        /// The code of the Pin the run stands on, and the settings.
+        stamp: MeasureStamp,
+        /// How many places the provider found to change, before it chose among them.
+        sites: u32,
+        /// How many mutants the provider gave to run: at most `max_mutants` of the sites. Fewer than the sites means
+        /// the run was capped; more than the mutants below means it stopped early, and then it failed.
+        planned: u32,
+        /// Each mutant that was run and what became of it.
+        mutants: Vec<MutantResult>,
+    },
+    /// A sim Harness run as a driver of the program built from the code of the Pins it cites.
+    Simulation {
+        /// The sim Harness that was run.
+        harness: HarnessId,
+        /// The Harness and what it cites, as the run stood on them, and the settings.
+        stamp: SimStamp,
+        /// What each case of the script found, and how the second runs compared.
+        outcome: SimOutcome,
+    },
+}
+
 /// What a run gave, before it is checked.
 #[derive(Debug, Clone)]
 pub struct MeasurementDraft {
     /// The id the caller made.
     pub id: MeasurementId,
-    /// What was measured.
-    pub kind: MeasureKind,
-    /// What was measured: an Interface for a mutation run, a Harness for a simulation.
-    pub subject: MeasureSubject,
-    /// What the run stands on.
-    pub stamp: Stamp,
     /// When the run began.
     pub at: Timestamp,
-    /// How many places the provider found to change, before it chose among them (a mutation run).
-    pub sites: u32,
-    /// How many mutants the provider gave to run: at most `max_mutants` of the sites. Fewer than the sites means the
-    /// run was capped; more than the mutants below means it stopped early, and then it failed (a mutation run).
-    pub planned: u32,
-    /// Each mutant that was run and what became of it (a mutation run).
-    pub mutants: Vec<MutantResult>,
-    /// What each case of the script found, and how the second runs compared (a simulation).
-    pub sim: Option<SimOutcome>,
+    /// What was measured, what the run stands on, and what it found.
+    pub body: MeasureBody,
     /// Why the run failed, when it did. A failed run keeps what it got through, as history; the rules do not
     /// judge it.
     pub failure: Option<MeasureFailure>,
@@ -64,14 +80,8 @@ pub struct MeasurementDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measurement {
     id: MeasurementId,
-    kind: MeasureKind,
-    subject: MeasureSubject,
-    stamp: Stamp,
     at: Timestamp,
-    sites: u32,
-    planned: u32,
-    mutants: Vec<MutantResult>,
-    sim: Option<SimOutcome>,
+    body: MeasureBody,
     failure: Option<MeasureFailure>,
     evidence: Vec<StepEvidence>,
     /// The corrections of its texts, in the order they were made. Empty from [`Measurement::new`].
@@ -79,74 +89,46 @@ pub struct Measurement {
 }
 
 impl Measurement {
-    /// The run `draft` describes. A mutation run is of an Interface, stands on a code stamp, has mutants with
-    /// different keys, no more than the provider gave, and the provider gave no more than there were sites; a run
-    /// that did not fail evaluated every mutant it was given. A simulation is of a Harness, stands on a sim stamp
-    /// and has no mutants.
+    /// The run `draft` describes. A mutation run has mutants with different keys, no more than the provider gave,
+    /// and the provider gave no more than there were sites; a run that did not fail evaluated every mutant it was
+    /// given. A simulation has no value to check here.
     pub fn new(draft: MeasurementDraft) -> Result<Measurement, MeasureError> {
-        let not = |expected: &'static str, what: &'static str| MeasureError::NotOfKind {
-            kind: draft.kind.word(),
-            expected,
-            what,
-        };
-        match draft.kind {
-            MeasureKind::Mutate => {
-                if !matches!(draft.subject, MeasureSubject::Interface(_)) {
-                    return Err(not("an interface", "a harness subject"));
-                }
-                if draft.stamp.code().is_none() {
-                    return Err(not("an interface", "a simulation's stamp"));
-                }
-                if draft.sim.is_some() {
-                    return Err(not("an interface", "a simulation's result"));
+        if let MeasureBody::Mutation {
+            sites,
+            planned,
+            mutants,
+            ..
+        } = &draft.body
+        {
+            let mut seen = BTreeSet::new();
+            for m in mutants {
+                if !seen.insert(m.mutant.key().clone()) {
+                    return Err(MeasureError::DuplicateKey(m.mutant.key().to_string()));
                 }
             }
-            MeasureKind::Simulate => {
-                if !matches!(draft.subject, MeasureSubject::Harness(_)) {
-                    return Err(not("a harness", "an interface subject"));
-                }
-                if draft.stamp.sim().is_none() {
-                    return Err(not("a harness", "a mutation run's stamp"));
-                }
-                if !draft.mutants.is_empty() || draft.sites != 0 || draft.planned != 0 {
-                    return Err(not("a harness", "mutants"));
-                }
+            if mutants.len() > *planned as usize {
+                return Err(MeasureError::MoreMutantsThanPlanned {
+                    mutants: mutants.len(),
+                    planned: *planned,
+                });
             }
-        }
-        let mut seen = BTreeSet::new();
-        for m in &draft.mutants {
-            if !seen.insert(m.mutant.key().clone()) {
-                return Err(MeasureError::DuplicateKey(m.mutant.key().to_string()));
+            if planned > sites {
+                return Err(MeasureError::MorePlannedThanSites {
+                    planned: *planned,
+                    sites: *sites,
+                });
             }
-        }
-        if draft.mutants.len() > draft.planned as usize {
-            return Err(MeasureError::MoreMutantsThanPlanned {
-                mutants: draft.mutants.len(),
-                planned: draft.planned,
-            });
-        }
-        if draft.planned > draft.sites {
-            return Err(MeasureError::MorePlannedThanSites {
-                planned: draft.planned,
-                sites: draft.sites,
-            });
-        }
-        if draft.failure.is_none() && draft.mutants.len() < draft.planned as usize {
-            return Err(MeasureError::UnfinishedWithoutFailure {
-                mutants: draft.mutants.len(),
-                planned: draft.planned,
-            });
+            if draft.failure.is_none() && mutants.len() < *planned as usize {
+                return Err(MeasureError::UnfinishedWithoutFailure {
+                    mutants: mutants.len(),
+                    planned: *planned,
+                });
+            }
         }
         Ok(Measurement {
             id: draft.id,
-            kind: draft.kind,
-            subject: draft.subject,
-            stamp: draft.stamp,
             at: draft.at,
-            sites: draft.sites,
-            planned: draft.planned,
-            mutants: draft.mutants,
-            sim: draft.sim,
+            body: draft.body,
             failure: draft.failure,
             evidence: draft.evidence,
             corrections: Vec::new(),
@@ -173,19 +155,30 @@ impl Measurement {
         self.id
     }
 
+    /// What it holds, by its kind.
+    pub fn body(&self) -> &MeasureBody {
+        &self.body
+    }
+
     /// What it measured.
     pub fn kind(&self) -> MeasureKind {
-        self.kind
+        match self.body {
+            MeasureBody::Mutation { .. } => MeasureKind::Mutate,
+            MeasureBody::Simulation { .. } => MeasureKind::Simulate,
+        }
     }
 
     /// What it is of.
     pub fn subject(&self) -> MeasureSubject {
-        self.subject
+        match &self.body {
+            MeasureBody::Mutation { interface, .. } => MeasureSubject::Interface(*interface),
+            MeasureBody::Simulation { harness, .. } => MeasureSubject::Harness(*harness),
+        }
     }
 
     /// The Interface whose code it measured; none for a simulation.
     pub fn interface(&self) -> Option<InterfaceId> {
-        match self.subject {
+        match self.subject() {
             MeasureSubject::Interface(i) => Some(i),
             MeasureSubject::Harness(_) => None,
         }
@@ -193,15 +186,18 @@ impl Measurement {
 
     /// The sim Harness it ran; none for a mutation run.
     pub fn harness(&self) -> Option<HarnessId> {
-        match self.subject {
+        match self.subject() {
             MeasureSubject::Harness(h) => Some(h),
             MeasureSubject::Interface(_) => None,
         }
     }
 
     /// What it stands on.
-    pub fn stamp(&self) -> &Stamp {
-        &self.stamp
+    pub fn stamp(&self) -> StampRef<'_> {
+        match &self.body {
+            MeasureBody::Mutation { stamp, .. } => StampRef::Code(stamp),
+            MeasureBody::Simulation { stamp, .. } => StampRef::Sim(stamp),
+        }
     }
 
     /// When it began.
@@ -209,36 +205,48 @@ impl Measurement {
         self.at
     }
 
-    /// How many places the provider found to change.
+    /// How many places the provider found to change; 0 for a simulation.
     pub fn sites(&self) -> u32 {
-        self.sites
+        match &self.body {
+            MeasureBody::Mutation { sites, .. } => *sites,
+            MeasureBody::Simulation { .. } => 0,
+        }
     }
 
-    /// How many mutants the provider gave to run (at most `max_mutants` of the sites).
+    /// How many mutants the provider gave to run (at most `max_mutants` of the sites); 0 for a simulation.
     pub fn planned(&self) -> u32 {
-        self.planned
+        match &self.body {
+            MeasureBody::Mutation { planned, .. } => *planned,
+            MeasureBody::Simulation { .. } => 0,
+        }
     }
 
     /// How many mutants were run and have an outcome.
     pub fn evaluated(&self) -> u32 {
-        u32::try_from(self.mutants.len()).unwrap_or(u32::MAX)
+        u32::try_from(self.mutants().len()).unwrap_or(u32::MAX)
     }
 
     /// Whether the run ended having evaluated fewer mutants than the code has sites, because the provider was
     /// asked for no more than `max_mutants`. A run that failed is not capped: it did not end, and says why. What
     /// the run left out is not measured, so an `ok` run that is capped does not show the whole code.
     pub fn capped(&self) -> bool {
-        self.failure.is_none() && self.kind == MeasureKind::Mutate && self.planned < self.sites
+        self.failure.is_none() && self.planned() < self.sites()
     }
 
-    /// The mutants it ran, in the order the provider gave them.
+    /// The mutants it ran, in the order the provider gave them; none for a simulation.
     pub fn mutants(&self) -> &[MutantResult] {
-        &self.mutants
+        match &self.body {
+            MeasureBody::Mutation { mutants, .. } => mutants,
+            MeasureBody::Simulation { .. } => &[],
+        }
     }
 
     /// What the cases of the script gave; none for a mutation run.
     pub fn sim(&self) -> Option<&SimOutcome> {
-        self.sim.as_ref()
+        match &self.body {
+            MeasureBody::Simulation { outcome, .. } => Some(outcome),
+            MeasureBody::Mutation { .. } => None,
+        }
     }
 
     /// Why it failed; none when it ran to its end.
@@ -254,7 +262,7 @@ impl Measurement {
     /// How many mutants ended each way.
     pub fn counts(&self) -> Counts {
         let mut counts = Counts::default();
-        for m in &self.mutants {
+        for m in self.mutants() {
             let slot = match m.outcome {
                 MutantOutcome::Stillborn => &mut counts.stillborn,
                 MutantOutcome::Killed => &mut counts.killed,
@@ -268,7 +276,7 @@ impl Measurement {
 
     /// The mutants no test noticed, in order.
     pub fn survivors(&self) -> impl Iterator<Item = &MutantResult> {
-        self.mutants
+        self.mutants()
             .iter()
             .filter(|m| m.outcome == MutantOutcome::Survived)
     }
@@ -376,11 +384,11 @@ impl Correctable for Measurement {
         if let Some(failure) = &self.failure {
             out.push((MeasurementField::Failure, failure.message()));
         }
-        for (mutant, m) in self.mutants.iter().enumerate() {
+        for (mutant, m) in self.mutants().iter().enumerate() {
             out.push((MeasurementField::MutantFrom { mutant }, m.mutant.from()));
             out.push((MeasurementField::MutantTo { mutant }, m.mutant.to()));
         }
-        if let Some(sim) = &self.sim {
+        if let Some(sim) = self.sim() {
             for (case, run) in sim.cases.iter().enumerate() {
                 for (finding, f) in run.findings.iter().enumerate() {
                     out.push((
@@ -455,7 +463,10 @@ impl Measurement {
                 self.failure = Some(MeasureFailure::new(kind, new).map_err(|_| invalid())?);
             }
             MeasurementField::MutantFrom { mutant } | MeasurementField::MutantTo { mutant } => {
-                let m = self.mutants.get_mut(mutant).ok_or_else(no_such)?;
+                let MeasureBody::Mutation { mutants, .. } = &mut self.body else {
+                    return Err(no_such());
+                };
+                let m = mutants.get_mut(mutant).ok_or_else(no_such)?;
                 let (from, to) = if matches!(field, MeasurementField::MutantFrom { .. }) {
                     (new, m.mutant.to().to_string())
                 } else {
@@ -499,7 +510,10 @@ impl Measurement {
 
     /// The run of a case of the simulation, to change.
     fn case_mut(&mut self, case: usize) -> Option<&mut CaseRun> {
-        self.sim.as_mut()?.cases.get_mut(case)
+        match &mut self.body {
+            MeasureBody::Simulation { outcome, .. } => outcome.cases.get_mut(case),
+            MeasureBody::Mutation { .. } => None,
+        }
     }
 }
 
@@ -550,16 +564,31 @@ pub(crate) mod fixture {
     ) -> MeasurementDraft {
         MeasurementDraft {
             id: MeasurementId::from_uuid(test_uuid(n)),
-            kind: MeasureKind::Mutate,
-            subject: MeasureSubject::Interface(subject),
-            stamp: MeasureStamp::new(code, basis, "settings").unwrap().into(),
             at: Timestamp::from_millis(n as u64),
-            sites: mutants.len() as u32 + 2,
-            planned: mutants.len() as u32,
-            mutants,
-            sim: None,
+            body: MeasureBody::Mutation {
+                interface: subject,
+                stamp: MeasureStamp::new(code, basis, "settings").unwrap(),
+                sites: mutants.len() as u32 + 2,
+                planned: mutants.len() as u32,
+                mutants,
+            },
             failure: None,
             evidence: evidence(),
+        }
+    }
+
+    /// Gives a mutation run `sites` found and `planned` given, whatever it had.
+    pub(crate) fn set_counts(d: &mut MeasurementDraft, sites: u32, planned: u32) {
+        match &mut d.body {
+            MeasureBody::Mutation {
+                sites: s,
+                planned: p,
+                ..
+            } => {
+                *s = sites;
+                *p = planned;
+            }
+            MeasureBody::Simulation { .. } => panic!("a simulation has no sites"),
         }
     }
 
@@ -572,14 +601,12 @@ pub(crate) mod fixture {
     ) -> MeasurementDraft {
         MeasurementDraft {
             id: MeasurementId::from_uuid(test_uuid(n)),
-            kind: MeasureKind::Simulate,
-            subject: MeasureSubject::Harness(harness),
-            stamp: SimStamp::new(basis, "settings").unwrap().into(),
             at: Timestamp::from_millis(n as u64),
-            sites: 0,
-            planned: 0,
-            mutants: Vec::new(),
-            sim: Some(outcome),
+            body: MeasureBody::Simulation {
+                harness,
+                stamp: SimStamp::new(basis, "settings").unwrap(),
+                outcome,
+            },
             failure: None,
             evidence: evidence(),
         }
@@ -647,8 +674,7 @@ mod tests {
                 .map(|n| result(&format!("k{n}"), n as u32 + 1, MutantOutcome::Killed))
                 .collect();
             let mut d = draft(1, iface(), Digest::of(b"c"), empty_basis(), results);
-            d.sites = sites;
-            d.planned = planned;
+            set_counts(&mut d, sites, planned);
             if failure {
                 d.failure = Some(MeasureFailure::of(FailureKind::Budget, "used up"));
             }
@@ -706,7 +732,7 @@ mod tests {
             empty_basis(),
             vec![result("a", 1, MutantOutcome::Killed)],
         );
-        many.planned = 0;
+        set_counts(&mut many, 3, 0);
         assert_eq!(
             Measurement::new(many).unwrap_err(),
             MeasureError::MoreMutantsThanPlanned {
@@ -721,7 +747,7 @@ mod tests {
             empty_basis(),
             vec![result("a", 1, MutantOutcome::Killed)],
         );
-        beyond.sites = 0;
+        set_counts(&mut beyond, 0, 1);
         assert_eq!(
             Measurement::new(beyond).unwrap_err(),
             MeasureError::MorePlannedThanSites {
@@ -740,43 +766,20 @@ mod tests {
     }
 
     #[test]
-    fn a_simulation_is_of_a_harness_and_a_mutation_run_of_an_interface() {
+    fn a_simulation_reads_its_body_and_has_no_mutants() {
         let harness = HarnessId::from_uuid(test_uuid(400));
         let sim =
             Measurement::new(sim_draft(1, harness, sim_basis(), SimOutcome::default())).unwrap();
+        assert_eq!(sim.kind(), MeasureKind::Simulate);
+        assert_eq!(sim.subject(), MeasureSubject::Harness(harness));
         assert_eq!(sim.harness(), Some(harness));
         assert_eq!(sim.interface(), None);
+        assert!(sim.mutants().is_empty());
+        assert_eq!((sim.sites(), sim.planned(), sim.evaluated()), (0, 0, 0));
         assert!(sim.sim().is_some());
+        assert!(sim.stamp().sim().is_some());
+        assert!(sim.stamp().code().is_none());
         assert_eq!(sim.counts(), Counts::default());
-
-        // the pieces of one kind do not go with the other
-        let mut wrong_subject = sim_draft(2, harness, sim_basis(), SimOutcome::default());
-        wrong_subject.subject = MeasureSubject::Interface(iface());
-        assert!(matches!(
-            Measurement::new(wrong_subject),
-            Err(MeasureError::NotOfKind { .. })
-        ));
-        let mut with_mutants = sim_draft(3, harness, sim_basis(), SimOutcome::default());
-        with_mutants.mutants = vec![result("a", 1, MutantOutcome::Killed)];
-        with_mutants.sites = 1;
-        with_mutants.planned = 1;
-        assert!(matches!(
-            Measurement::new(with_mutants),
-            Err(MeasureError::NotOfKind { .. })
-        ));
-        let mut mutate_with_sim = draft(4, iface(), Digest::of(b"c"), empty_basis(), vec![]);
-        mutate_with_sim.sim = Some(SimOutcome::default());
-        assert!(matches!(
-            Measurement::new(mutate_with_sim),
-            Err(MeasureError::NotOfKind { .. })
-        ));
-        let mut mutate_with_sim_stamp = sim_draft(5, harness, sim_basis(), SimOutcome::default());
-        mutate_with_sim_stamp.kind = MeasureKind::Mutate;
-        mutate_with_sim_stamp.subject = MeasureSubject::Interface(iface());
-        assert!(matches!(
-            Measurement::new(mutate_with_sim_stamp),
-            Err(MeasureError::NotOfKind { .. })
-        ));
     }
 
     // --- correction
@@ -842,8 +845,7 @@ mod tests {
             step(&format!("run --token {TOKEN}"), &format!("bad {TOKEN}")),
             step("cargo test", ""),
         ];
-        d.planned = 2;
-        d.sites = 2;
+        set_counts(&mut d, 2, 2);
         d.failure = Some(MeasureFailure::of(
             FailureKind::Baseline,
             format!("failed with {TOKEN}"),

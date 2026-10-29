@@ -60,16 +60,6 @@ pub enum MeasureError {
     /// A stamp has no settings.
     #[error("a stamp names the settings the run was made with")]
     BlankSettings,
-    /// A measurement's subject, stamp or result is not one of its kind.
-    #[error("a `{kind}` measurement is of {expected}, with {what}")]
-    NotOfKind {
-        /// The kind.
-        kind: &'static str,
-        /// What the kind measures.
-        expected: &'static str,
-        /// What is wrong.
-        what: &'static str,
-    },
 }
 
 /// What a measure measures: mutation testing and simulation.
@@ -521,59 +511,47 @@ impl MeasureSubject {
     }
 }
 
-/// What a measurement stands on, by its kind: the code of a Pin for a mutation run, the sim Harness and what it
-/// cites for a simulation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stamp {
+/// What a measurement stands on, seen without taking it from the measurement: the stamp its body holds, which is
+/// the code of a Pin for a mutation run and the sim Harness with what it cites for a simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampRef<'a> {
     /// Of a mutation run.
-    Code(MeasureStamp),
+    Code(&'a MeasureStamp),
     /// Of a simulation.
-    Sim(SimStamp),
+    Sim(&'a SimStamp),
 }
 
-impl Stamp {
+impl<'a> StampRef<'a> {
     /// One digest of the whole stamp.
     pub fn fingerprint(&self) -> Digest {
         match self {
-            Stamp::Code(s) => s.fingerprint(),
-            Stamp::Sim(s) => s.fingerprint(),
+            StampRef::Code(s) => s.fingerprint(),
+            StampRef::Sim(s) => s.fingerprint(),
         }
     }
 
     /// The settings digest.
-    pub fn settings(&self) -> &str {
+    pub fn settings(&self) -> &'a str {
         match self {
-            Stamp::Code(s) => s.settings(),
-            Stamp::Sim(s) => s.settings(),
+            StampRef::Code(s) => s.settings(),
+            StampRef::Sim(s) => s.settings(),
         }
     }
 
     /// The stamp of a mutation run, if it is one.
-    pub fn code(&self) -> Option<&MeasureStamp> {
+    pub fn code(&self) -> Option<&'a MeasureStamp> {
         match self {
-            Stamp::Code(s) => Some(s),
-            Stamp::Sim(_) => None,
+            StampRef::Code(s) => Some(s),
+            StampRef::Sim(_) => None,
         }
     }
 
     /// The stamp of a simulation, if it is one.
-    pub fn sim(&self) -> Option<&SimStamp> {
+    pub fn sim(&self) -> Option<&'a SimStamp> {
         match self {
-            Stamp::Sim(s) => Some(s),
-            Stamp::Code(_) => None,
+            StampRef::Sim(s) => Some(s),
+            StampRef::Code(_) => None,
         }
-    }
-}
-
-impl From<MeasureStamp> for Stamp {
-    fn from(s: MeasureStamp) -> Stamp {
-        Stamp::Code(s)
-    }
-}
-
-impl From<SimStamp> for Stamp {
-    fn from(s: SimStamp) -> Stamp {
-        Stamp::Sim(s)
     }
 }
 

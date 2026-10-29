@@ -262,7 +262,7 @@ mod tests {
 
     use super::super::fixture::*;
     use super::*;
-    use crate::domain::entity::measurement::fixture::{draft, result};
+    use crate::domain::entity::measurement::fixture::{draft, result, set_counts};
     use crate::domain::entity::measurement::{Measurement, MeasurementDraft};
     use crate::domain::service::pin::current_basis;
     use crate::domain::vo::digest::Digest;
@@ -459,7 +459,7 @@ mod tests {
                 result("f/rel/2/bbbb", 9, MutantOutcome::Survived),
             ],
         );
-        sampled.sites = 3;
+        set_counts(&mut sampled, 3, 2);
         let run = Measurement::new(sampled).unwrap();
         let all = found(&Capped, &p, &pins, std::slice::from_ref(&run), &none);
         assert_eq!(all.len(), 1);
@@ -473,7 +473,7 @@ mod tests {
             2,
             vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
         );
-        whole.sites = 1;
+        set_counts(&mut whole, 1, 1);
         let whole = Measurement::new(whole).unwrap();
         assert!(found(&Capped, &p, &pins, &[whole], &none).is_empty());
         // a run that stopped early failed; it is not also capped
@@ -483,8 +483,7 @@ mod tests {
             3,
             vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
         );
-        stopped.sites = 9;
-        stopped.planned = 5;
+        set_counts(&mut stopped, 9, 5);
         stopped.failure = Some(MeasureFailure::of(FailureKind::Budget, "used up"));
         let stopped = Measurement::new(stopped).unwrap();
         assert!(found(&Capped, &p, &pins, &[stopped], &none).is_empty());
