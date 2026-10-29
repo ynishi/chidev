@@ -11,7 +11,7 @@ use super::ports::external::ExternalExecutor;
 use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, CorrectionStatus, context_id, correction_status};
-use crate::domain::entity::measurement::{Counts, Measurement, MeasurementDraft};
+use crate::domain::entity::measurement::{Counts, MeasureBody, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
 use crate::domain::service::measure::{Standing, sim_standing, standing};
@@ -348,14 +348,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let report = self.runner.mutate(&request).await?;
         let measurement = Measurement::new(MeasurementDraft {
             id,
-            kind,
-            subject: MeasureSubject::Interface(iface),
-            stamp: stamp.into(),
             at,
-            sites: report.sites,
-            planned: report.planned,
-            mutants: report.mutants,
-            sim: None,
+            body: MeasureBody::Mutation {
+                interface: iface,
+                stamp,
+                sites: report.sites,
+                planned: report.planned,
+                mutants: report.mutants,
+            },
             failure: report.failure,
             evidence: report.evidence,
         })?;
@@ -464,17 +464,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let report = self.runner.simulate(&request).await?;
         let measurement = Measurement::new(MeasurementDraft {
             id: run_id,
-            kind: MeasureKind::Simulate,
-            subject: MeasureSubject::Harness(id),
-            stamp: stamp.into(),
             at,
-            sites: 0,
-            planned: 0,
-            mutants: Vec::new(),
-            sim: Some(SimOutcome {
-                cases: report.cases,
-                reruns: report.reruns,
-            }),
+            body: MeasureBody::Simulation {
+                harness: id,
+                stamp,
+                outcome: SimOutcome {
+                    cases: report.cases,
+                    reruns: report.reruns,
+                },
+            },
             failure: report.failure,
             evidence: report.evidence,
         })?;

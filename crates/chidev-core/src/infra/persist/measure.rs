@@ -10,14 +10,16 @@ use uuid::Uuid;
 
 use super::v1::CorrectionDoc;
 use crate::app::ports::InvocationField;
-use crate::domain::entity::measurement::{Measurement, MeasurementDraft, MeasurementField};
+use crate::domain::entity::measurement::{
+    MeasureBody, Measurement, MeasurementDraft, MeasurementField,
+};
 use crate::domain::repository::StoreError;
 use crate::domain::vo::correction::Correction;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::{ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantKey,
-    MutantOutcome, MutantResult, Operator, Site, Stamp, StepEvidence,
+    MutantOutcome, MutantResult, Operator, Site, StepEvidence,
 };
 use crate::domain::vo::pin_basis::PinBasis;
 use crate::domain::vo::revision::Revision;
@@ -228,8 +230,13 @@ fn clause_of(text: &str) -> Result<ClauseId, StoreError> {
 
 /// The stamp document and the summary document of a run.
 fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
-    match m.stamp() {
-        Stamp::Code(stamp) => {
+    match m.body() {
+        MeasureBody::Mutation {
+            stamp,
+            sites,
+            planned,
+            ..
+        } => {
             let b = stamp.basis();
             let counts = m.counts();
             Ok((
@@ -242,8 +249,8 @@ fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
                     settings: stamp.settings().to_string(),
                 })?,
                 write(&SummaryDoc {
-                    sites: m.sites(),
-                    planned: m.planned(),
+                    sites: *sites,
+                    planned: *planned,
                     killed: counts.killed,
                     survived: counts.survived,
                     stillborn: counts.stillborn,
@@ -251,9 +258,8 @@ fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
                 })?,
             ))
         }
-        Stamp::Sim(stamp) => {
+        MeasureBody::Simulation { stamp, outcome, .. } => {
             let b = stamp.basis();
-            let outcome = m.sim();
             Ok((
                 write(&SimStampDoc {
                     harness: b.harness.number(),
@@ -270,20 +276,16 @@ fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
                     settings: stamp.settings().to_string(),
                 })?,
                 write(&SimSummaryDoc {
-                    cases: outcome.map_or(0, |o| u32::try_from(o.cases.len()).unwrap_or(u32::MAX)),
-                    findings: outcome
-                        .map_or(0, |o| u32::try_from(o.found().len()).unwrap_or(u32::MAX)),
+                    cases: u32::try_from(outcome.cases.len()).unwrap_or(u32::MAX),
+                    findings: u32::try_from(outcome.found().len()).unwrap_or(u32::MAX),
                     reruns: outcome
-                        .map(|o| {
-                            o.reruns
-                                .iter()
-                                .map(|r| RerunDoc {
-                                    case: r.case.to_string(),
-                                    result: r.result.word().to_string(),
-                                })
-                                .collect()
+                        .reruns
+                        .iter()
+                        .map(|r| RerunDoc {
+                            case: r.case.to_string(),
+                            result: r.result.word().to_string(),
                         })
-                        .unwrap_or_default(),
+                        .collect(),
                 })?,
             ))
         }
@@ -478,14 +480,8 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
             return Err(corrupt(format!("a `{}` run of a `{other}`", kind.word())));
         }
     };
-    let (stamp, sites, planned, mutants, sim): (
-        Stamp,
-        u32,
-        u32,
-        Vec<MutantResult>,
-        Option<SimOutcome>,
-    ) = match kind {
-        MeasureKind::Mutate => {
+    let body = match (kind, subject) {
+        (MeasureKind::Mutate, MeasureSubject::Interface(interface)) => {
             let stamp: StampDoc = read(&run.inputs, "its stamp")?;
             let basis = PinBasis::new(
                 Revision::restore(stamp.interface).ok_or_else(|| corrupt("a revision of 0"))?,
@@ -496,15 +492,15 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
             let code = Digest::restore(&stamp.code).ok_or_else(|| corrupt("a code digest"))?;
             let stamp = MeasureStamp::new(code, basis, stamp.settings).map_err(corrupt)?;
             let summary: SummaryDoc = read(&run.summary, "its summary")?;
-            (
-                stamp.into(),
-                summary.sites,
-                summary.planned,
-                mutants_of(items)?,
-                None,
-            )
+            MeasureBody::Mutation {
+                interface,
+                stamp,
+                sites: summary.sites,
+                planned: summary.planned,
+                mutants: mutants_of(items)?,
+            }
         }
-        MeasureKind::Simulate => {
+        (MeasureKind::Simulate, MeasureSubject::Harness(harness)) => {
             let stamp: SimStampDoc = read(&run.inputs, "its stamp")?;
             let interfaces = stamp
                 .interfaces
@@ -528,13 +524,18 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
             };
             let stamp = SimStamp::new(basis, stamp.settings).map_err(corrupt)?;
             let summary: SimSummaryDoc = read(&run.summary, "its summary")?;
-            (
-                stamp.into(),
-                0,
-                0,
-                Vec::new(),
-                Some(sim_of(&summary, items)?),
-            )
+            MeasureBody::Simulation {
+                harness,
+                stamp,
+                outcome: sim_of(&summary, items)?,
+            }
+        }
+        (kind, subject) => {
+            return Err(corrupt(format!(
+                "a `{}` run of a `{}`",
+                kind.word(),
+                subject.word()
+            )));
         }
     };
     let failure = run
@@ -566,16 +567,10 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
         .collect();
     Measurement::new(MeasurementDraft {
         id: MeasurementId::from_uuid(uuid(&run.id)?),
-        kind,
-        subject,
-        stamp,
         at: Timestamp::from_millis(
             u64::try_from(run.started_at).map_err(|_| corrupt("a negative time"))?,
         ),
-        sites,
-        planned,
-        mutants,
-        sim,
+        body,
         failure,
         evidence,
     })
@@ -825,7 +820,7 @@ mod tests {
 
     #[test]
     fn a_mutation_run_keeps_the_sites_it_found_and_the_mutants_it_was_given() {
-        use crate::domain::entity::measurement::fixture::{draft, empty_basis, result};
+        use crate::domain::entity::measurement::fixture::{draft, empty_basis, result, set_counts};
         let mut d = draft(
             9,
             InterfaceId::from_uuid(test_uuid(100)),
@@ -836,7 +831,7 @@ mod tests {
                 result("b", 2, MutantOutcome::Survived),
             ],
         );
-        d.sites = 41;
+        set_counts(&mut d, 41, 2);
         let m = Measurement::new(d).unwrap();
         assert!(m.capped());
         let (run, items) = encode(&m).unwrap();

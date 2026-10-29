@@ -2322,13 +2322,15 @@ mod tests {
             mutants,
         );
         // The settings must survive the round trip as they are, and differ from run to run.
-        d.stamp = crate::domain::vo::measure::MeasureStamp::new(
-            Digest::of(b"code"),
-            empty_basis(),
-            format!("settings-{n}"),
-        )
-        .unwrap()
-        .into();
+        if let crate::domain::entity::measurement::MeasureBody::Mutation { stamp, .. } = &mut d.body
+        {
+            *stamp = crate::domain::vo::measure::MeasureStamp::new(
+                Digest::of(b"code"),
+                empty_basis(),
+                format!("settings-{n}"),
+            )
+            .unwrap();
+        }
         Measurement::new(d).unwrap()
     }
 
