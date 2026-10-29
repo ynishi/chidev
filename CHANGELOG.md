@@ -8,7 +8,27 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `chidev accept`, a runner of acceptance examples (`<name>.args`, `<name>.stdin`,
+  `<name>.expected` ending with `#exit <code>`, and an optional `<name>.stderr`):
+  it runs a command for each example under a time limit, compares the standard
+  output, the exit code and the standard error, and prints `ok <name>` or
+  `fail <name>: <why>`. With `--external` it answers the external-check protocol
+  2, one finding per failing example about each Clause whose text names the
+  example's files, so it can be registered as a gate at `pin` and `resolve`.
+  In Rust, `chidev_core::domain::vo::example` and `chidev_core::infra::accept`
+  (see #45). [ADR 0009](docs/adr/0009-environments-are-assets-and-examples-are-a-kind-of-harness.md)
+  records how verification environments and acceptance examples enter the model
+  in the next steps (see #42).
+
 ### Changed
+
+- A program chidev runs (an external check, a provider, a build, a test or a sim
+  script) that exits without reading all of its standard input is no longer a
+  failed run for that alone, and its process group is stopped as soon as it
+  exits, so a descendant holding a pipe no longer keeps the run open until the
+  deadline.
 
 - The store sets `secure_delete` on every connection, so a row any commit
   replaces or deletes is overwritten in the file. Change requests are written
