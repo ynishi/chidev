@@ -27,7 +27,9 @@ use uuid::Uuid;
 use super::crux::{
     AnswerDoc, CruxDoc, DecisionDoc, OptionDoc, RecommendedDoc, SCHEMA as CRUX_SCHEMA, StateDoc,
 };
-use super::v1::{AnswerBasisDoc, CR_SCHEMA, CruxKindDoc, ImportanceDoc, MakerDoc, OptionExpectDoc};
+use super::v1::{
+    AnswerBasisDoc, CR_SCHEMA_3, CruxKindDoc, ImportanceDoc, MakerDoc, OptionExpectDoc,
+};
 use super::{decode_change_request, decode_crux};
 use crate::domain::service::change_request::check_requests_and_cruxes;
 
@@ -192,7 +194,7 @@ fn take_crux(id: &str, stored: u32, doc: &str) -> Result<Held, Failure> {
             ))
         })?),
     };
-    object.insert("schema".to_string(), serde_json::json!(CR_SCHEMA));
+    object.insert("schema".to_string(), serde_json::json!(CR_SCHEMA_3));
     Ok(Held {
         id: id.to_string(),
         title,
@@ -290,6 +292,7 @@ fn moved(
         importance: old.importance,
         supersedes,
         state,
+        corrections: Vec::new(),
     })
 }
 
@@ -365,7 +368,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Failure> {
     let crs = requests
         .iter()
         .map(|(id, text)| {
-            decode_change_request(CR_SCHEMA, text)
+            decode_change_request(CR_SCHEMA_3, text)
                 .map_err(read(format!("the change request {id} after the migration")))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -390,7 +393,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Failure> {
     for (id, text) in &requests {
         tx.execute(
             "UPDATE change_requests SET schema = ?2, doc = ?3 WHERE id = ?1",
-            params![id, CR_SCHEMA, text],
+            params![id, CR_SCHEMA_3, text],
         )?;
     }
     tx.execute_batch("PRAGMA user_version = 2")?;

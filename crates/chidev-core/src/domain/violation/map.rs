@@ -13,21 +13,23 @@ use crate::domain::entity::interface::InterfaceError;
 use crate::domain::entity::project::ProjectError;
 use crate::domain::rule::{
     CHANGE_SET_NAMED_TWICE, CONTEXT_ALREADY_BASED, CONTEXT_LAST_CONTRACT, CONTEXT_NO_SUCH_ASSET,
-    CR_ALREADY_RESOLVED, CR_CRUX_ANSWER_OUTSIDE, CR_CRUX_ANSWERED, CR_CRUX_BEYOND_ITSELF,
-    CR_CRUX_BEYOND_UNFRAMED, CR_CRUX_BEYOND_WITHDRAWN, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION,
-    CR_CRUX_OPTION_TWICE, CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION,
-    CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN, CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF,
-    CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_SUPERSEDED, CR_SUPERSEDES_UNANSWERED,
-    CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INPUT_RENAME_CONFLICT, INPUT_REPLACES_KEPT,
-    INPUT_UNKNOWN_NAME, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN, INTERFACE_LINES_OUTSIDE,
-    PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE, PROJECT_RETIRE_CITED,
-    PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE, SIM_BUILDS_OF_TESTS,
-    SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME, SIM_CLAUSE_FOREIGN,
-    SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
+    CORRECT_INVALID_AFTER, CORRECT_NO_FIELD, CORRECT_NO_SUCH_PLACE, CORRECT_PLACE_TWICE,
+    CORRECT_TEXT_ABSENT, CORRECT_TEXT_EMPTY, CORRECT_TEXT_IN_MARK, CR_ALREADY_RESOLVED,
+    CR_CRUX_ANSWER_OUTSIDE, CR_CRUX_ANSWERED, CR_CRUX_BEYOND_ITSELF, CR_CRUX_BEYOND_UNFRAMED,
+    CR_CRUX_BEYOND_WITHDRAWN, CR_CRUX_EXPECT_CONFLICT, CR_CRUX_NO_OPTION, CR_CRUX_OPTION_TWICE,
+    CR_CRUX_UNANSWERED, CR_CRUX_UNKNOWN_OPTION, CR_CRUX_UNSPECIFIED_NOT_ALLOWED, CR_PARENT_OPEN,
+    CR_POLICY_LINE_UNKNOWN, CR_REFERENCE_ITSELF, CR_REFERENCE_UNKNOWN, CR_SUPERSEDES_SUPERSEDED,
+    CR_SUPERSEDES_UNANSWERED, CR_SUPERSEDES_UNKNOWN, HARNESS_LINES_OUTSIDE, INPUT_RENAME_CONFLICT,
+    INPUT_REPLACES_KEPT, INPUT_UNKNOWN_NAME, INTERFACE_BLANK_ITEM, INTERFACE_KEY_TAKEN,
+    INTERFACE_LINES_OUTSIDE, PIN_UNCHECKED, PROJECT_BUILD_UNREACHABLE, PROJECT_CITE_UNREACHABLE,
+    PROJECT_RETIRE_CITED, PROJECT_RETIRE_USED, PROJECT_UNKNOWN_CONTEXT, SIM_BUILDS_NONE,
+    SIM_BUILDS_OF_TESTS, SIM_CASE_CITES_ITEM, SIM_CASE_CITES_NONE, SIM_CASE_NAME,
+    SIM_CLAUSE_FOREIGN, SIM_ONE_PER_CONTEXT, SIM_SWEEP_ONCE,
 };
 use crate::domain::service::pin::PinError;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::clause_edit::ClauseNameProblem;
+use crate::domain::vo::correction::CorrectionError;
 use crate::domain::vo::id::{CaseId, ChangeRequestId, HarnessId};
 use crate::domain::vo::policy::PolicyError;
 use crate::domain::vo::target::Target;
@@ -482,6 +484,35 @@ impl PolicyError {
             | PolicyError::DuplicateLine(_)
             | PolicyError::LineFromTheFuture { .. }
             | PolicyError::UnknownLine(_) => Violation::unmapped(self),
+        }
+    }
+}
+
+impl CorrectionError {
+    /// The violation this refusal is. `on` is the record the correction was on, which the error does not hold: it
+    /// is the subject of the violation when there is one. The values are field words, never a text.
+    pub fn violation(&self, on: Option<Party>) -> Violation {
+        let here = |v: Violation| match on {
+            Some(party) => v.on(party),
+            None => v,
+        };
+        let field = |w: &String| Value::Text(w.clone());
+        match self {
+            CorrectionError::EmptyText => here(Violation::of(CORRECT_TEXT_EMPTY)),
+            CorrectionError::TextInMark => here(Violation::of(CORRECT_TEXT_IN_MARK)),
+            CorrectionError::NoField => here(Violation::of(CORRECT_NO_FIELD)),
+            CorrectionError::FieldTwice(w) => {
+                here(Violation::of(CORRECT_PLACE_TWICE).with_value("field", field(w)))
+            }
+            CorrectionError::NoSuchField(w) => {
+                here(Violation::of(CORRECT_NO_SUCH_PLACE).with_value("field", field(w)))
+            }
+            CorrectionError::TextAbsent(w) => {
+                here(Violation::of(CORRECT_TEXT_ABSENT).with_value("field", field(w)))
+            }
+            CorrectionError::Invalid(w) => {
+                here(Violation::of(CORRECT_INVALID_AFTER).with_value("field", field(w)))
+            }
         }
     }
 }
@@ -1399,6 +1430,56 @@ mod tests {
         let v = PinError::Unchecked(i).violation();
         assert_eq!(v.rule().as_str(), "pin.unchecked");
         assert_eq!(v.subjects(), &[Party::Target(Target::Interface(i))]);
+    }
+
+    #[test]
+    fn a_refused_correction_is_a_violation_of_its_rule_and_names_a_field_never_a_text() {
+        let on = Party::ChangeRequest(cr(1));
+        let word = || "assumption[0].reason".to_string();
+        for (error, rule_id, field) in [
+            (CorrectionError::EmptyText, "correct.text-empty", false),
+            (CorrectionError::TextInMark, "correct.text-in-mark", false),
+            (CorrectionError::NoField, "correct.no-field", false),
+            (
+                CorrectionError::FieldTwice(word()),
+                "correct.place-twice",
+                true,
+            ),
+            (
+                CorrectionError::NoSuchField(word()),
+                "correct.no-such-place",
+                true,
+            ),
+            (
+                CorrectionError::TextAbsent(word()),
+                "correct.text-absent",
+                true,
+            ),
+            (
+                CorrectionError::Invalid(word()),
+                "correct.invalid-after",
+                true,
+            ),
+        ] {
+            let v = error.violation(Some(on));
+            assert_eq!(v.rule().as_str(), rule_id);
+            assert_eq!(v.subjects(), &[on]);
+            assert!(error.violation(None).subjects().is_empty());
+            let listed = rule(v.rule().as_str()).expect("registered").values;
+            assert!(v.values().keys().all(|key| listed.contains(key)));
+            assert_eq!(
+                v.values().get("field"),
+                field.then(|| Value::Text(word())).as_ref()
+            );
+        }
+        // a measurement is named by its id
+        let m = Party::Measurement(crate::domain::vo::id::MeasurementId::from_uuid(
+            crate::domain::vo::id::test_uuid(3),
+        ));
+        assert_eq!(
+            CorrectionError::NoField.violation(Some(m)).parties(),
+            vec![m]
+        );
     }
 
     #[test]

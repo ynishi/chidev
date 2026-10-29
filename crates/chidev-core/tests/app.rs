@@ -782,7 +782,7 @@ async fn a_pin_with_nothing_that_checks_it_names_the_interface_not_its_id() {
 mod checks {
     use std::borrow::Cow;
 
-    use chidev_core::app::ports::{Invocation, Outcome};
+    use chidev_core::app::ports::{Invocation, Outcome, Store};
     use chidev_core::app::{
         App, AppError, ChangeRequestInput, ClauseInput, ClauseRef, CruxKind, FindingInput, Intent,
         OptionInput, RaiseCruxInput, Registry, SubjectInput, TargetInput,
@@ -841,7 +841,13 @@ mod checks {
     }
 
     async fn invocations(app: &App<SqliteStore, Counter>) -> Vec<Invocation> {
-        app.store().invocations().await.unwrap()
+        app.store()
+            .invocations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, run)| run)
+            .collect()
     }
 
     /// The rules of `found`.
@@ -1605,7 +1611,14 @@ mod judged {
         assert_eq!(view.rules[0].state, JudgedState::Current);
 
         // each report was recorded as a run of a judged rule, by the judge
-        let ran = app.store().invocations().await.unwrap();
+        let ran: Vec<_> = app
+            .store()
+            .invocations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, run)| run)
+            .collect();
         let reports: Vec<_> = ran
             .iter()
             .filter(|i| i.executor == Executor::Judged)

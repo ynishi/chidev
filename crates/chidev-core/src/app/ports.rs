@@ -5,6 +5,7 @@ pub mod external;
 pub mod items;
 pub mod measure;
 
+use std::fmt;
 use std::future::Future;
 
 use uuid::Uuid;
@@ -19,6 +20,9 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::{
     ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
+};
+use crate::domain::vo::correction::{
+    Correctable, Correction, CorrectionError, SoughtText, check_places, masked,
 };
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
@@ -156,6 +160,97 @@ pub struct Invocation {
     pub external: Option<external::ExecutionEvidence>,
     /// Definition digest echoed by the judge; none for other executors and for old database rows.
     pub rule_digest: Option<Digest>,
+    /// The corrections made of its texts, in the order they were made; empty when the run is recorded.
+    pub corrections: Vec<Correction<InvocationField>>,
+}
+
+/// The identity of a row of the record of runs: the order the rows were kept in. A correction names a row by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InvocationSeq(pub u64);
+
+/// A place of text in a record of a check's run, for a correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InvocationField {
+    /// The resolved executable path of an external check.
+    Command,
+    /// The bounded stderr of an external check.
+    Stderr,
+    /// The agent that judged a judged rule.
+    Judge,
+}
+
+impl InvocationField {
+    /// The words for the field, which a message and an answer name it by.
+    pub fn word(&self) -> String {
+        match self {
+            InvocationField::Command => "external.command".to_string(),
+            InvocationField::Stderr => "external.stderr".to_string(),
+            InvocationField::Judge => "judge".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for InvocationField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.word())
+    }
+}
+
+/// The record of runs is defined here, in the ports (ADR 0002), so its correction is written here, with the
+/// domain's [`Correction`] and [`SoughtText`].
+impl Correctable for Invocation {
+    type Field = InvocationField;
+
+    fn texts(&self) -> Vec<(InvocationField, &str)> {
+        let mut out = Vec::new();
+        if let Some(external) = &self.external {
+            if let Some(command) = &external.command {
+                out.push((InvocationField::Command, command.as_str()));
+            }
+            if !external.stderr.is_empty() {
+                out.push((InvocationField::Stderr, external.stderr.as_str()));
+            }
+        }
+        if let Some(judge) = &self.judge {
+            out.push((InvocationField::Judge, judge.as_str()));
+        }
+        out
+    }
+
+    fn correct(
+        &mut self,
+        sought: &SoughtText,
+        correction: Correction<InvocationField>,
+        _taken: &dyn Fn(&InvocationField, &str) -> bool,
+    ) -> Result<(), CorrectionError> {
+        check_places(self, sought, correction.fields())?;
+        let mut next = self.clone();
+        for field in correction.fields() {
+            let word = field.word();
+            let no_such = || CorrectionError::NoSuchField(word.clone());
+            match field {
+                InvocationField::Command => {
+                    let held = next
+                        .external
+                        .as_mut()
+                        .and_then(|e| e.command.as_mut())
+                        .ok_or_else(no_such)?;
+                    *held = masked(sought, &word, held)?;
+                }
+                InvocationField::Stderr => {
+                    let held = &mut next.external.as_mut().ok_or_else(no_such)?.stderr;
+                    *held = masked(sought, &word, held)?;
+                }
+                InvocationField::Judge => {
+                    let held = next.judge.as_mut().ok_or_else(no_such)?;
+                    *held = masked(sought, &word, held)?;
+                }
+            }
+        }
+        next.corrections.push(correction);
+        *self = next;
+        Ok(())
+    }
 }
 
 /// One finding an agent reported for a judged rule.
@@ -231,6 +326,12 @@ pub struct Changes {
     pub judged: Vec<JudgedReport>,
     /// Latest results of external checks, kept with the candidate model.
     pub external: Vec<external::ExternalReport>,
+    /// Measurements with a text corrected: each replaces the run of its id, which keeps its place among the runs.
+    /// Only a correction of records makes one.
+    pub corrected_measurements: Vec<Measurement>,
+    /// Rows of the record of runs with a text corrected: each replaces the texts and the corrections of its row.
+    /// Only a correction makes one.
+    pub corrected_invocations: Vec<(InvocationSeq, Invocation)>,
 }
 
 /// Where the store stood when a use case began to read. A commit given an older one is refused
@@ -264,6 +365,23 @@ pub trait Store:
     fn latest_measurements(
         &self,
     ) -> impl Future<Output = Result<Vec<Measurement>, StoreError>> + Send;
+
+    /// Every measurement, in the order they were made: the newest of a kind and subject and the runs before it. A
+    /// correction reads them all, because a text can stay in a run that is not the latest.
+    fn measurements(&self) -> impl Future<Output = Result<Vec<Measurement>, StoreError>> + Send;
+
+    /// Every row of the record of check runs, in the order of its `seq`, with the identity a correction names it by.
+    fn invocations(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(InvocationSeq, Invocation)>, StoreError>> + Send;
+
+    /// Writes the file again without what the store freed. A replaced or deleted row leaves its old bytes in the
+    /// free pages and the slack of the pages of the file (and in a write-ahead log); this removes them, so a text
+    /// that a correction replaced is not left beside the mark. It runs outside any commit.
+    ///
+    /// What it cannot reach is what the file system holds: the blocks of a rollback journal that is deleted when a
+    /// commit ends, and the pages cut from the end of the file, go back to the file system as they were.
+    fn clear_freed(&self) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// The code the Pin `pin` accepted; none for a Pin made before the code was kept, or for a Pin that has been
     /// replaced.

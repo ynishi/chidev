@@ -148,6 +148,14 @@ impl DecisionMaker {
         }
     }
 
+    /// The same kind of maker with another name: a correction changes the name and keeps what the maker is.
+    pub fn renamed(&self, name: &str) -> Result<DecisionMaker, DecisionMakerError> {
+        match self {
+            DecisionMaker::Role(_) => DecisionMaker::role(name),
+            DecisionMaker::Person(_) => DecisionMaker::person(name),
+        }
+    }
+
     /// The word for what it is: `role` or `person`.
     pub fn word(&self) -> &'static str {
         match self {

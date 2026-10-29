@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value as Json;
 
+use super::correct::RecordKind;
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetName, IdSource, Store};
 use super::{App, AppError, Found, TargetInput, no_provider};
@@ -744,8 +745,9 @@ pub fn suggest(mend: Mend, how: Applicability) -> Suggestion {
 fn party_kind(p: &Party) -> &'static str {
     match p {
         Party::Target(t) => t.word(),
-        Party::ChangeRequest(_) => "change_request",
-        Party::Crux(_) => "crux",
+        Party::ChangeRequest(_) => RecordKind::ChangeRequest.word(),
+        Party::Crux(_) => RecordKind::Crux.word(),
+        Party::Measurement(_) => RecordKind::Measurement.word(),
         Party::PolicyLine(_) => "policy_line",
         Party::Id(_) => "asset",
     }
@@ -908,7 +910,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Some(r) => vec![Diagnostic::of_rule(
                     r,
                     vec![DiagSubject {
-                        kind: "change_request",
+                        kind: RecordKind::ChangeRequest.word(),
                         name: title.clone(),
                     }],
                     Vec::new(),
@@ -1114,13 +1116,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             AppError::UnknownCrux(id) => {
                 let ids = self.crux_ids().await;
-                vec![self.unknown_name("crux", id, ids, Vec::new())]
+                vec![self.unknown_name(RecordKind::Crux.word(), id, ids, Vec::new())]
             }
             AppError::UnknownSupersedes(id) => {
                 let ids = self.crux_ids().await;
                 // The id is not a Crux to make by naming it, so there is nothing to suggest: `unknown_name` has none
                 // for a crux.
-                let mut d = self.unknown_name("crux", id, ids, Vec::new());
+                let mut d = self.unknown_name(RecordKind::Crux.word(), id, ids, Vec::new());
                 d.field = Some("supersedes".to_string());
                 vec![d]
             }
@@ -1344,6 +1346,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .find(|c| c.id() == id)
                 .map_or_else(|| id.to_string(), |c| c.title().to_string())),
             Party::Crux(id) => Ok(id.to_string()),
+            // A measurement has no name: its id is how an operation addresses it.
+            Party::Measurement(id) => Ok(id.to_string()),
             Party::PolicyLine(line) => Ok(line.to_string()),
             Party::Id(id) => match p.contexts().find(|c| c.id().as_uuid() == id) {
                 Some(c) => Ok(c.name().to_string()),

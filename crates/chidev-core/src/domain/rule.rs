@@ -198,6 +198,24 @@ pub const INPUT_UNKNOWN_NAME: RuleId = RuleId::from_static("input.unknown-name")
 pub const INPUT_INVALID: RuleId = RuleId::from_static("input.invalid");
 /// A view is asked for no section.
 pub const INPUT_VIEW_SECTIONS_EMPTY: RuleId = RuleId::from_static("input.view-sections-empty");
+/// The text to correct is empty.
+pub const CORRECT_TEXT_EMPTY: RuleId = RuleId::from_static("correct.text-empty");
+/// The text to correct is a part of the mark.
+pub const CORRECT_TEXT_IN_MARK: RuleId = RuleId::from_static("correct.text-in-mark");
+/// A correction names no place.
+pub const CORRECT_NO_FIELD: RuleId = RuleId::from_static("correct.no-field");
+/// A correction names a place twice.
+pub const CORRECT_PLACE_TWICE: RuleId = RuleId::from_static("correct.place-twice");
+/// A correction names a place the record does not have.
+pub const CORRECT_NO_SUCH_PLACE: RuleId = RuleId::from_static("correct.no-such-place");
+/// A correction names a place that does not hold the text.
+pub const CORRECT_TEXT_ABSENT: RuleId = RuleId::from_static("correct.text-absent");
+/// A correction names a record that does not exist.
+pub const CORRECT_UNKNOWN_RECORD: RuleId = RuleId::from_static("correct.unknown-record");
+/// A record would not be valid once the text is replaced in a place.
+pub const CORRECT_INVALID_AFTER: RuleId = RuleId::from_static("correct.invalid-after");
+/// The reason of a correction, or the name of who corrects, holds the text being replaced.
+pub const CORRECT_TEXT_IN_REASON: RuleId = RuleId::from_static("correct.text-in-reason");
 
 static RULES: &[Rule] = &[
     Rule {
@@ -757,6 +775,87 @@ static RULES: &[Rule] = &[
         message: "the field `{name}` of the view names no section",
         values: &["name"],
         example: r#"{"op":"view","sections":[]}"#,
+    },
+    Rule {
+        id: CORRECT_TEXT_EMPTY,
+        kind: RuleKind::Input,
+        summary: "The text a correction replaces is not empty.",
+        help: "A correction replaces a text that must not stay in the records. The text is exact (no white space is trimmed), so an empty text matches nowhere and replaces nothing. Give the text itself, as `text_find` took it.",
+        message: "the text to correct is empty",
+        values: &[],
+        example: r#"{"op":"record_correct","text":"","reason":"a token was pasted","by":{"person":"alice"},"places":[{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":"situation"}}]}"#,
+    },
+    Rule {
+        id: CORRECT_TEXT_IN_MARK,
+        kind: RuleKind::Input,
+        summary: "The text a correction replaces is not a part of the mark that replaces it.",
+        help: "The mark is `[redacted]`. A text that is a part of it (`red`, `[`, `[redacted]`) would be found again in every place already corrected, so a correction could never be seen to end. A text that merely contains the mark is accepted. Give the text that must not stay.",
+        message: "the text to correct is a part of the mark that replaces a text",
+        values: &[],
+        example: r#"{"op":"text_find","text":"red"}"#,
+    },
+    Rule {
+        id: CORRECT_NO_FIELD,
+        kind: RuleKind::Input,
+        summary: "A correction names at least one place.",
+        help: "A place is a record and a field of it (see `text_find`, which lists them). A correction that names none replaces nothing; run `text_find` with the text and give the places it answers.",
+        message: "the correction names no place",
+        values: &[],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"a token was pasted","by":{"person":"alice"},"places":[]}"#,
+    },
+    Rule {
+        id: CORRECT_PLACE_TWICE,
+        kind: RuleKind::Input,
+        summary: "A correction names a place once.",
+        help: "A place is a record and a field of it. Name each place once; the same text is replaced in all of a field's occurrences at once.",
+        message: "the place `{field}` is named twice",
+        values: &["field"],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"a token was pasted","by":{"person":"alice"},"places":[{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":"situation"}},{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":"situation"}}]}"#,
+    },
+    Rule {
+        id: CORRECT_NO_SUCH_PLACE,
+        kind: RuleKind::Input,
+        summary: "A correction names a field the record has and has set.",
+        help: "A field is only named when the record holds a text there: an assumption, an evidence, a step of the history or an option that exists, and a field that is set. A step of the history that is a correction has no text to correct. `text_find` lists every field that holds the text.",
+        message: "the {record} {id} has no field `{field}`",
+        values: &["record", "id", "field"],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"a token was pasted","by":{"person":"alice"},"places":[{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":{"assumption_reason":9}}}]}"#,
+    },
+    Rule {
+        id: CORRECT_TEXT_ABSENT,
+        kind: RuleKind::Input,
+        summary: "A correction names only fields that hold the text.",
+        help: "The field is named, but the text is not in it (or it was corrected already). Name the fields `text_find` lists for the text.",
+        message: "the text to correct is not in the field `{field}` of the {record} {id}",
+        values: &["record", "id", "field"],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"a token was pasted","by":{"person":"alice"},"places":[{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":"title"}}]}"#,
+    },
+    Rule {
+        id: CORRECT_UNKNOWN_RECORD,
+        kind: RuleKind::Input,
+        summary: "A correction names a record that exists.",
+        help: "A record is named by its id, not by its title: a title may hold the text. `text_find` answers the ids. The record is a change request, a crux, a measurement, or a run of a check (its `seq`).",
+        message: "there is no {record} with the id {id}",
+        values: &["record", "id"],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"a token was pasted","by":{"person":"alice"},"places":[{"crux":{"id":"018f6b1e-0000-7000-8000-0000000000ff","field":"question"}}]}"#,
+    },
+    Rule {
+        id: CORRECT_INVALID_AFTER,
+        kind: RuleKind::Input,
+        summary: "A record is valid once the text is replaced by the mark.",
+        help: "The record's own rules refused the value with the mark in it (or the text would remain, because the words around the mark make it). The record is unchanged. Correct the field by other means, or name a text that does not touch the words around it.",
+        message: "the field `{field}` of the {record} {id} is not valid once the text is replaced",
+        values: &["record", "id", "field"],
+        example: r#"{"op":"record_correct","text":"b","reason":"a token was pasted","by":{"person":"alice"},"places":[{"measurement":{"id":"018f6b1e-0000-7000-8000-000000000001","field":{"mutant_from":0}}}]}"#,
+    },
+    Rule {
+        id: CORRECT_TEXT_IN_REASON,
+        kind: RuleKind::Input,
+        summary: "The reason of a correction, and who corrects, do not hold the text it replaces.",
+        help: "The reason and the name of who corrects are kept in each record the correction changes, so a text that holds the text to replace would keep it. `values.field` is `reason` or `by`. Say why in other words, or name the person or role differently.",
+        message: "the {field} of the correction holds the text to correct",
+        values: &["field"],
+        example: r#"{"op":"record_correct","text":"tok-123","reason":"removing tok-123","by":{"person":"alice"},"places":[{"change_request":{"id":"018f6b1e-0000-7000-8000-000000000001","field":"situation"}}]}"#,
     },
     Rule {
         id: UNMAPPED,

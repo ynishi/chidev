@@ -44,58 +44,113 @@ What the store keeps, where, and whether an operation corrects it:
 | The name of a Context or an asset, the label of a Clause, the key of an Item (its declaration), the name of a Case, once retired or dropped by a put | `project` (the record of what was retired) and `asset_names` | No. The record keeps names and revisions, not the text (see [Retiring](../../README.md#retiring)), and `asset_names` keeps the name of every asset, retired ones included. |
 | The code a Pin accepted | `pin_codes`, one row per Interface (`pins` keeps a digest of it) | Yes: `pin` the corrected code; the row is replaced. |
 | The latest result of an external check: its findings, the command it ran, the stderr it gave, its failure | `external_reports`, one row per rule | Yes: the next run of the check replaces the rule's row. |
-| The command and the stderr of each run of an external check | `check_invocations` (column `external`), one row per check a use case ran | No: appended, never changed. |
-| What an agent reported for a judged rule: the judge, the messages of its findings | `judged_reports` and `judged_findings`, per rule | Yes: the next report for the same rule replaces the rule's report and its findings. The name of the judge is also kept in the `judge` column of `check_invocations`, which no operation corrects. |
-| A change request: its title, situation and issuer, its Assumptions (statement, reason, evidence), the reason and `by` of each resolution and reopening | `change_requests` | No: no operation edits or removes them (see [Change requests](../../README.md#change-requests)). |
-| A Crux: its question, its options (choice, wording, consequence), the reason of the recommendation, the decision (wording, reason, what must still hold, the reason of an arbitrary basis) and `by` | `cruxes` | No: a Crux that supersedes a decision adds one, and the old one stays (see [Crux, Policy and Assumption](../../README.md#crux-policy-and-assumption)). |
-| A measurement: the command and the stderr of each step, the failure, each mutant's text before and after, and for each simulated case what it found, the situations it could not reach and why it could not decide, in the script's words (its schedule and trace are kept as digests only) | `measure_runs` and `measure_items` (the name of a regress case is also the key of its item row) | No: appended, never changed, by design (see [Measurements](../../README.md#measurements)). |
+| The command and the stderr of each run of an external check | `check_invocations` (column `external`), one row per check a use case ran | Yes, by `record_correct` (step 4). Otherwise appended, never changed. |
+| What an agent reported for a judged rule: the judge, the messages of its findings | `judged_reports` and `judged_findings`, per rule | Yes: the next report for the same rule replaces the rule's report and its findings. The name of the judge is also kept in the `judge` column of `check_invocations`, which `record_correct` corrects (step 4). |
+| A change request: its title, situation and issuer, its Assumptions (statement, reason, evidence), the reason and `by` of each resolution and reopening | `change_requests` | Yes, by `record_correct` (step 4). No other operation edits or removes them (see [Change requests](../../README.md#change-requests)). |
+| A Crux: its question, its options (choice, change, consequence), the reason of the recommendation, the decision (wording, reason, what must still hold, the reason of an arbitrary basis, the reason a `beyond` was declined) and `by` | `cruxes` | Yes, by `record_correct` (step 4). A Crux that supersedes a decision adds one, and the old one stays (see [Crux, Policy and Assumption](../../README.md#crux-policy-and-assumption)). |
+| A measurement: the command and the stderr of each step, the failure, each mutant's text before and after, and for each simulated case what it found, the situations it could not reach, why it could not decide, in the script's words, and why it could not start (its schedule and trace are kept as digests only) | `measure_runs` and `measure_items` | Yes, by `record_correct` (step 4); otherwise appended, never changed (see [Measurements](../../README.md#measurements)). Its inputs (`inputs`) hold digests, ids and revisions only: a command in `[measure]` reaches the store as part of a digest, and as text only in the evidence of a step. Not the name of a regress case or the key of a mutant, which key the item rows. |
 
 Correct the live model first, then the Pins. Then run again each external check
 that reported the text, and have each judged rule that reported it report again.
-A text that was in the code or a Clause can also be in the records no operation
-corrects: in a mutant's text, in what a simulation script wrote, in the stderr of
-a run.
+A text that was in the code or a Clause can also be in the records only
+`record_correct` corrects: in a mutant's text, in what a simulation script wrote,
+in the stderr of a run.
 
-### 4. The records no operation corrects
+### 4. The records only a correction changes
 
-There is no operation that corrects a change request, a Crux, an Assumption, a
-measurement or a check's evidence; issue #44 asks for one. Until there is, a person
-has two ways, and both are outside what chidev promises:
+A change request, a Crux, a measurement and the record of a check's run are
+corrected by `record_correct`, after `text_find` has said where the text is. Both
+are operations of `chidev exec` like any other; the file of operations holds the
+text, so it is one more copy to deal with (step 2).
 
-- **Start a new store.** Stop using the store, move the file aside (keep it under
-  the same protection the text needs, or destroy it), and point `--store` or
-  `[store] path` at a new one. Build the model in it again by putting it (`view` of
-  the old store says what to put), pin again and measure again. The change requests,
-  the Cruxes and the history of the checks do not come over; the file kept aside is
-  the only record of them.
-- **Edit the database by hand, at your own risk.** Make sure no `chidev` runs on the
-  store, and make a backup first (`sqlite3 <store> ".backup <copy>"`). The records
-  are JSON documents in the `doc` column of `change_requests` and `cruxes`, JSON
-  text in the `failure`, `evidence` and `summary` columns of `measure_runs`, the
-  `detail` column of `measure_items` and the `external` column of
-  `check_invocations`, and plain text in the other columns (the `key` of an item
-  row, the `judge` of an invocation). Replace the text with a mark (`[redacted]`), keep everything else as it is, and
-  keep a text distinct where it names something among others (the title of a change
-  request, the choice of an option within its Crux). chidev refuses a document it
-  cannot restore as corrupt rather than repairing it, so run
-  `{"op":"status"}` and `{"op":"check"}` on the edited store before using it, and go
-  back to the backup if either fails. They read the change requests, the Cruxes and
-  the latest measurement of each subject only, not older measurements or
-  `check_invocations`; for those, check that the JSON is still valid (for example
-  `SELECT seq FROM check_invocations WHERE NOT json_valid(external)`) and edit
-  nothing but the text. Then clear what SQLite left (step 5), and
-  destroy the backup or keep it under the same protection as the text.
+1. **Find it.** `text_find` lists every place (the record and the field) where the
+   text occurs, exactly, case-sensitive, and never the text or what is around it:
+
+   ```json
+   {"op":"text_find","text":"<the text>"}
+   ```
+
+   The answer is a list of `places`, each naming a record by its id (a title can
+   hold the text) and the field: for example
+   `{"change_request":{"id":"…","field":"situation"}}`,
+   `{"crux":{"id":"…","field":"recommendation_reason"}}`,
+   `{"measurement":{"id":"…","field":{"step_stderr":0}}}`,
+   `{"invocation":{"seq":12,"field":"stderr"}}`.
+2. **Correct each place.** Give `record_correct` the places, as `text_find`
+   answered them, with why and who:
+
+   ```json
+   {"op":"record_correct","text":"<the text>","reason":"a token got into the record",
+    "by":{"person":"alice"},"places":[…]}
+   ```
+
+   - In each field named, the text is replaced by `[redacted]` and the rest of the
+     field stays.
+   - A title, or a choice within its Crux, that would become equal to another takes
+     `[redacted 2]` (or the next number), so a correction is never refused for it.
+   - Each record keeps the correction: a change request as a step of its history
+     (`status` shows it with the step `corrected`), a Crux and a measurement as their
+     list of `corrections`, and a run as a list the store keeps. `status` shows the
+     corrections of a Crux, and of the latest measurement of each subject; those of
+     an older measurement and of a run are kept, and no operation shows them. A
+     correction holds the fields, the reason, who and when, never the text.
+   - A correction names its fields by a word of its own (`situation`,
+     `recommendation.reason`, `step[0].stderr`, `option[<id>].choice`,
+     `assumption[0].reason`), where a place gives the same field in the form an
+     operation reads (`"situation"`, `"recommendation_reason"`, `{"step_stderr":0}`,
+     `{"option_choice":"<id>"}`, `{"assumption_reason":0}`).
+   - The correction is forced: it runs no check, and no gate refuses it.
+   - It is refused, with nothing changed, and a rule that names the record by its id
+     and the field, never by a title:
+     - the text is empty (`correct.text-empty`), or is part of the mark, such as `red`
+       (`correct.text-in-mark`);
+     - the text is in the `reason` or in the name given as `by`, both of which the
+       record would keep (`correct.text-in-reason`);
+     - no place is given (`correct.no-field`), or one is named twice
+       (`correct.place-twice`);
+     - a record is not found (`correct.unknown-record`), a field is not in its record
+       (`correct.no-such-place`), or the text is not in a field named
+       (`correct.text-absent`);
+     - the field would no longer be a value of its kind once the mark is in
+       (`correct.invalid-after`).
+   - The answer has `corrected` (the places), `remaining` (where the text still
+     occurs, as `text_find` would say) and `cleared` (step 5). When `remaining` is
+     not empty, correct those places too. It is `{"unknown":"<error>"}` when the
+     store could not be searched again after the correction was kept: run
+     `text_find` to know.
+3. **Check what is left.** Run `text_find` again; it should answer no place. It does
+   not look at the live model, the Pins or the reports, which step 3 corrects.
+
+What `record_correct` does not reach, a person can still edit by hand, outside what
+chidev promises: the name of a regress case and the key of a mutant (the `key` column of `measure_items`), and the reason of a correction
+itself. Make sure no `chidev` runs on the store, and make a backup first (`sqlite3
+<store> ".backup <copy>"`). Replace the text with a mark, keep everything else as it
+is, run `{"op":"status"}` and `{"op":"check"}` on the edited store, and go back to the
+backup if either fails. Then clear what SQLite left (step 5), and destroy the backup or
+keep it under the same protection as the text. Starting a new store, and building the
+model in it again, is the other way; the change requests, the Cruxes and the history of
+the checks do not come over to it.
 
 ### 5. What SQLite leaves in the file
 
-Replacing a row does not erase the old bytes. chidev does not set `secure_delete`
-and does not run `VACUUM`, so a row replaced or deleted by an operation or by hand
-can stay readable in the free pages of the file and in the unused space of a page.
-Clear it with the store not in use:
+Replacing a row does not by itself erase the old bytes: they can stay readable in
+the free pages of the file and in the unused space of a page. chidev sets
+`secure_delete` on every connection, so a row it replaces or deletes is overwritten
+with zeros. After a correction, `record_correct` also writes the file again
+(`VACUUM`), which removes what earlier versions of chidev, or an edit by hand,
+left. When the file is in WAL mode, it then empties the `-wal` file (`PRAGMA
+wal_checkpoint(TRUNCATE)`). Its answer says `"cleared":"done"`, or `not_finished` with
+the error when either step failed. Another program that has the file open (a second
+`chidev`, an `sqlite3` shell) can keep either step from finishing, and that is said
+the same way. The correction is kept either way, and the clearing is then done by
+hand, with the store not in use:
 
 ```sh
 sqlite3 <store> "PRAGMA secure_delete = ON; VACUUM;"
 ```
+
+Run the same after a store was edited by hand, or was used by a chidev older than
+the one that sets `secure_delete`.
 
 `VACUUM` writes the file again without its free space; the original pages it
 copies to the `-journal` file while it runs, and the pages it cuts from the end of

@@ -9,7 +9,7 @@ use chidev_core::app::ports::external::{
     ExecutionEvidence, ExternalAttempt, ExternalCall, ExternalExecutor, ExternalFailure,
     ExternalFinding, ExternalReply, ExternalSubject,
 };
-use chidev_core::app::ports::{IdSource, Store};
+use chidev_core::app::ports::{IdSource, Invocation, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, DecisionMakerInput,
     FindingInput, Intent, ItemInput, ItemRef, Registry, ResolutionInput, SubjectInput, TargetInput,
@@ -111,6 +111,17 @@ async fn app(
     app_with_reads(name, hooks, gate, executor, vec![ModelSection::Contracts]).await
 }
 
+/// The runs the store has kept, without the identity of their rows.
+async fn ran(app: &App<SqliteStore, Counter, FakeExecutor>) -> Vec<Invocation> {
+    app.store()
+        .invocations()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect()
+}
+
 async fn app_with_reads(
     name: &str,
     hooks: Vec<Moment>,
@@ -200,7 +211,7 @@ async fn advisory_failure_is_visible_and_kept_with_the_accepted_change() {
     let reports = app.store().external_reports().await.unwrap();
     assert_eq!(reports.len(), 1);
     assert!(reports[0].failure.as_ref().unwrap().contains("timeout"));
-    let invocations = app.store().invocations().await.unwrap();
+    let invocations = ran(&app).await;
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].executor, Executor::External);
     assert_eq!(invocations[0].warnings, 1);
@@ -544,7 +555,7 @@ async fn explicit_check_records_a_failed_gate_without_changing_the_model() {
     assert_eq!(app.store().project().await.unwrap(), project);
     assert_eq!(app.store().model_revision().await.unwrap(), model_revision);
     // The run is kept as the run of the question that was asked.
-    let runs = app.store().invocations().await.unwrap();
+    let runs = ran(&app).await;
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].moment, Moment::Check);
     assert_eq!(runs[0].trigger, Some(Trigger::Ask(AskTrigger::CheckRun)));
@@ -702,7 +713,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
     );
     assert_eq!(app.store().revision().await.unwrap().0, revision.0 + 1);
     assert_eq!(app.store().external_reports().await.unwrap().len(), 1);
-    let invocations = app.store().invocations().await.unwrap();
+    let invocations = ran(&app).await;
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].moment, Moment::Pin);
     assert_eq!(invocations[0].read_at, revision);
@@ -775,7 +786,7 @@ async fn the_resolve_hook_sees_the_candidate_cr_and_commits_it_with_the_check() 
     assert!(app.store().change_requests().await.unwrap()[0].is_resolved());
     assert_eq!(app.store().revision().await.unwrap().0, revision.0 + 1);
     assert_eq!(app.store().external_reports().await.unwrap().len(), 1);
-    let invocations = app.store().invocations().await.unwrap();
+    let invocations = ran(&app).await;
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].moment, Moment::Resolve);
     assert_eq!(invocations[0].read_at, revision);

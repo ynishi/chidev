@@ -321,6 +321,7 @@ where
             judge: Some(judge.to_string()),
             external: None,
             rule_digest: Some(rule_digest),
+            corrections: Vec::new(),
         };
         let stored = StoreRevision(at.0 + 1);
         let stored_report = JudgedReport {

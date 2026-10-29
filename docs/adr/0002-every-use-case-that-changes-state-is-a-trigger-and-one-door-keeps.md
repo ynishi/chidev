@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Amended by [ADR 0008](0008-a-forced-correction-is-a-trigger-of-its-own-kind.md): a
+forced correction is a fifth kind of trigger.
+
 Builds on [ADR 0001](0001-edit-reports-introduced-confirm-judges-whole.md), which
 decided what an edit and a confirmation are told. This decision is about which
 use cases are held to that, and how the code makes sure none is left out.

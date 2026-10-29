@@ -3,10 +3,13 @@
 //!
 //! A use case does not decide which checks apply to it; its trigger does, by its type. An edit is held to
 //! [`Moment::Edit`] and told only what it introduced, a confirmation to [`Moment::Pin`] or [`Moment::Resolve`] and
-//! judged whole, an explicit question to [`Moment::Check`] and never refused, and a record to no check at all. One
-//! entry for each of them runs what its moment asks for and builds the `Gated`, and the store keeps nothing else
-//! ([`Store::commit`]). Only this module can build a `Gated`, so a use case cannot keep a change without passing
-//! through the entry that asks for its checks, and one that is added without an entry cannot keep anything.
+//! judged whole, an explicit question to [`Moment::Check`] and never refused, a record to no check at all, and a
+//! correction to none either. A correction is forced: it runs no check, no gate refuses it, and it changes only the
+//! texts of records, to replace a text that must not stay; it enters by its own entry, which reads what it
+//! corrects (`commit_correct`). One entry for each of them runs what its moment asks for and builds the
+//! `Gated`, and the store keeps nothing else ([`Store::commit`]). Only this module can build a `Gated`, so a use
+//! case cannot keep a change without passing through the entry that asks for its checks, and one that is added
+//! without an entry cannot keep anything.
 //!
 //! What was checked is what is kept. An edit or a confirmation hands over a `ModelDelta`, the part of the model it
 //! changes. The entry reads the model as the store has it, lays the delta on it to make the state the checks run
@@ -14,25 +17,31 @@
 //! read, so the state kept is the state checked.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use super::check::Run;
+use super::correct::{Place, RecordKind, refusal, unknown_record};
 use super::external::ExternalChecked;
 use super::ports::external::{ExternalExecutor, ExternalReport};
 use super::ports::{
-    AssetKind, AssetName, Changes, IdSource, Invocation, JudgedReport, PinCode, Store,
-    StoreRevision,
+    AssetKind, AssetName, Changes, IdSource, Invocation, InvocationField, InvocationSeq,
+    JudgedReport, PinCode, Store, StoreRevision,
 };
 use super::{App, AppError, Found, view};
 use crate::domain::check::{Change, CheckView, Finding, Moment, introduced};
-use crate::domain::entity::change_request::ChangeRequest;
-use crate::domain::entity::crux::Crux;
-use crate::domain::entity::measurement::Measurement;
+use crate::domain::entity::change_request::{ChangeRequest, ChangeRequestField};
+use crate::domain::entity::crux::{Crux, CruxField};
+use crate::domain::entity::measurement::{Measurement, MeasurementField};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
-use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId};
+use crate::domain::vo::answer::DecisionMaker;
+use crate::domain::vo::correction::{Correctable, Correction, CorrectionError, SoughtText};
+use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, MeasurementId};
+use crate::domain::vo::prose::Prose;
+use crate::domain::vo::timestamp::Timestamp;
 
-/// Declares one of the four kinds of trigger: the enum, the word of each variant, and the list of all of them, from
+/// Declares one of the five kinds of trigger: the enum, the word of each variant, and the list of all of them, from
 /// one list of variants, so that a variant cannot be left out of the list or have no word.
 macro_rules! triggers {
     (
@@ -149,6 +158,16 @@ triggers! {
     }
 }
 
+triggers! {
+    /// A use case that replaces a text which must not stay in the records, by a mark. It is forced: it runs no
+    /// check and no gate refuses it, it changes only the texts of records (never a state, an id or a key), and it
+    /// keeps the correction as a step of each record it changes.
+    CorrectTrigger {
+        /// [`App::correct_records`](super::App::correct_records).
+        CorrectRecords = "correct_records",
+    }
+}
+
 impl ConfirmTrigger {
     /// The moment it is held to.
     pub fn moment(self) -> Moment {
@@ -175,16 +194,18 @@ pub enum Trigger {
     Ask(AskTrigger),
     /// A use case that records a fact.
     Record(RecordTrigger),
+    /// A use case that corrects the texts of records.
+    Correct(CorrectTrigger),
 }
 
 impl Trigger {
-    /// The moment its checks run at; none for a record, which runs none.
+    /// The moment its checks run at; none for a record and a correction, which run none.
     pub fn moment(&self) -> Option<Moment> {
         match self {
             Trigger::Edit(_) => Some(Moment::Edit),
             Trigger::Confirm(c) => Some(c.moment()),
             Trigger::Ask(_) => Some(Moment::Check),
-            Trigger::Record(_) => None,
+            Trigger::Record(_) | Trigger::Correct(_) => None,
         }
     }
 
@@ -197,6 +218,7 @@ impl Trigger {
             Trigger::Confirm(t) => t.word(),
             Trigger::Ask(t) => t.word(),
             Trigger::Record(t) => t.word(),
+            Trigger::Correct(t) => t.word(),
         }
     }
 
@@ -219,6 +241,7 @@ impl Trigger {
             .chain(ConfirmTrigger::ALL.iter().copied().map(Trigger::Confirm))
             .chain(AskTrigger::ALL.iter().copied().map(Trigger::Ask))
             .chain(RecordTrigger::ALL.iter().copied().map(Trigger::Record))
+            .chain(CorrectTrigger::ALL.iter().copied().map(Trigger::Correct))
     }
 }
 
@@ -297,6 +320,79 @@ pub struct RecordChanges {
     pub judged: Vec<JudgedReport>,
     /// The runs the use case itself made of the checks (a judged rule's report is the run of that rule).
     pub invocations: Vec<Invocation>,
+}
+
+/// What a correction asks for: the text sought, why, who says so and when, and for each record the fields to replace
+/// it in. The records are named by id, never by title: a title may hold the text.
+///
+/// `Debug` shows no text: [`SoughtText`] hides it.
+#[derive(Debug, Clone)]
+pub(super) struct CorrectionOrder {
+    /// The text to replace.
+    pub(super) sought: SoughtText,
+    /// Why, in words of the person's: kept in each record's step. It holds no text sought (the use case checks).
+    pub(super) reason: Prose,
+    /// Who says so.
+    pub(super) by: DecisionMaker,
+    /// When.
+    pub(super) at: Timestamp,
+    /// The fields of each change request.
+    pub(super) requests: BTreeMap<ChangeRequestId, Vec<ChangeRequestField>>,
+    /// The fields of each Crux.
+    pub(super) cruxes: BTreeMap<CruxId, Vec<CruxField>>,
+    /// The fields of each measurement.
+    pub(super) measurements: BTreeMap<MeasurementId, Vec<MeasurementField>>,
+    /// The fields of each row of the record of runs.
+    pub(super) invocations: BTreeMap<InvocationSeq, Vec<InvocationField>>,
+}
+
+impl CorrectionOrder {
+    /// The step a record keeps of this order, for the fields `fields` of it.
+    fn correction<F: Clone + PartialEq + fmt::Display>(
+        &self,
+        fields: &[F],
+    ) -> Result<Correction<F>, CorrectionError> {
+        Correction::new(
+            fields.to_vec(),
+            self.reason.clone(),
+            self.by.clone(),
+            self.at,
+        )
+    }
+
+    /// The places the order names: the change requests first, then the Cruxes, the measurements and the rows of the
+    /// record of runs, each by id, with the fields of a record as they were given.
+    fn places(&self) -> Vec<Place> {
+        let requests = self.requests.iter().flat_map(|(id, fields)| {
+            fields.iter().map(|field| Place::ChangeRequest {
+                id: *id,
+                field: *field,
+            })
+        });
+        let cruxes = self.cruxes.iter().flat_map(|(id, fields)| {
+            fields.iter().map(|field| Place::Crux {
+                id: *id,
+                field: *field,
+            })
+        });
+        let measurements = self.measurements.iter().flat_map(|(id, fields)| {
+            fields.iter().map(|field| Place::Measurement {
+                id: *id,
+                field: *field,
+            })
+        });
+        let invocations = self.invocations.iter().flat_map(|(seq, fields)| {
+            fields.iter().map(|field| Place::Invocation {
+                seq: *seq,
+                field: *field,
+            })
+        });
+        requests
+            .chain(cruxes)
+            .chain(measurements)
+            .chain(invocations)
+            .collect()
+    }
 }
 
 /// What names an asset in the store: its Context, its kind and its name. The key of a name in a [`ModelDelta`], and
@@ -610,6 +706,100 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         self.settle(at, Trigger::Record(trigger), changes).await
     }
 
+    /// Keeps a correction: the text sought is replaced by a mark in each place the order names, and each record
+    /// changed keeps the correction as a step of its own history. It is forced: no check is run, no external program
+    /// is started, and nothing a check says can refuse it. What it changes is the texts of records and nothing the
+    /// checks read as state.
+    ///
+    /// The entry reads what it corrects (the change requests, the Cruxes, every measurement and every row of the
+    /// record of runs), so the use case does not hand over a record: the order names places, and the records are
+    /// those the store has at `at`, refused with a conflict if it has moved.
+    ///
+    /// A refusal never carries a text of a record. A record is named by its id (not by its title, which may hold the
+    /// text), and the fields by their words.
+    ///
+    /// Answers the places corrected: those of the change requests, the Cruxes, the measurements and the runs of
+    /// checks, each by id, and the fields of a record as the order gave them.
+    pub(super) async fn commit_correct(
+        &mut self,
+        trigger: CorrectTrigger,
+        at: StoreRevision,
+        order: CorrectionOrder,
+    ) -> Result<Vec<Place>, AppError> {
+        let (change_requests, cruxes) = self.requests_and_cruxes().await?;
+        let measurements = self.store.measurements().await?;
+        let invocations = self.store.invocations().await?;
+        if self.store.revision().await? != at {
+            return Err(AppError::Store(StoreError::Conflict));
+        }
+        let mut changes = Changes::default();
+        // The titles as they will be once the order is kept: a title corrected into one another request has (or one
+        // this order has just given) takes a numbered mark.
+        let mut titles: BTreeMap<ChangeRequestId, String> = change_requests
+            .iter()
+            .map(|c| (c.id(), c.title().to_string()))
+            .collect();
+        for (id, fields) in &order.requests {
+            let found = change_requests.iter().find(|c| c.id() == *id);
+            let Some(current) = found else {
+                return Err(unknown_record(RecordKind::ChangeRequest, id));
+            };
+            let refuse = |e: CorrectionError| refusal(RecordKind::ChangeRequest, id, &e);
+            let correction = order.correction(fields).map_err(refuse)?;
+            let mut fixed = current.clone();
+            let taken = |field: &ChangeRequestField, candidate: &str| {
+                *field == ChangeRequestField::Title
+                    && titles
+                        .iter()
+                        .any(|(other, title)| other != id && title == candidate)
+            };
+            fixed
+                .correct(&order.sought, correction, &taken)
+                .map_err(refuse)?;
+            titles.insert(*id, fixed.title().to_string());
+            changes.change_requests.push(fixed);
+        }
+        for (id, fields) in &order.cruxes {
+            let Some(current) = cruxes.iter().find(|q| q.id() == *id) else {
+                return Err(unknown_record(RecordKind::Crux, id));
+            };
+            let refuse = |e: CorrectionError| refusal(RecordKind::Crux, id, &e);
+            let correction = order.correction(fields).map_err(refuse)?;
+            let mut fixed = current.clone();
+            fixed
+                .correct(&order.sought, correction, &|_, _| false)
+                .map_err(refuse)?;
+            changes.cruxes.push(fixed);
+        }
+        for (id, fields) in &order.measurements {
+            let Some(current) = measurements.iter().find(|m| m.id() == *id) else {
+                return Err(unknown_record(RecordKind::Measurement, id));
+            };
+            let refuse = |e: CorrectionError| refusal(RecordKind::Measurement, id, &e);
+            let correction = order.correction(fields).map_err(refuse)?;
+            let mut fixed = current.clone();
+            fixed
+                .correct(&order.sought, correction, &|_, _| false)
+                .map_err(refuse)?;
+            changes.corrected_measurements.push(fixed);
+        }
+        for (seq, fields) in &order.invocations {
+            let Some((_, current)) = invocations.iter().find(|(s, _)| s == seq) else {
+                return Err(unknown_record(RecordKind::Invocation, seq.0));
+            };
+            let refuse = |e: CorrectionError| refusal(RecordKind::Invocation, seq.0, &e);
+            let correction = order.correction(fields).map_err(refuse)?;
+            let mut fixed = current.clone();
+            fixed
+                .correct(&order.sought, correction, &|_, _| false)
+                .map_err(refuse)?;
+            changes.corrected_invocations.push((*seq, fixed));
+        }
+        let places = order.places();
+        self.settle(at, Trigger::Correct(trigger), changes).await?;
+        Ok(places)
+    }
+
     /// Keeps the Project a store begins with. The one use case that makes a Project has this entry of its own, and
     /// runs no check: there is no model before it, and an empty Project introduces nothing.
     pub(super) async fn commit_init(
@@ -751,6 +941,11 @@ mod tests {
             Some(Moment::Check)
         );
         assert_eq!(Trigger::Record(RecordTrigger::Init).moment(), None);
+        // a correction runs no check
+        assert_eq!(
+            Trigger::Correct(CorrectTrigger::CorrectRecords).moment(),
+            None
+        );
     }
 
     #[test]
@@ -766,6 +961,10 @@ mod tests {
         assert_eq!(
             Trigger::from_word("put_clauses"),
             Some(Trigger::Edit(EditTrigger::PutClauses))
+        );
+        assert_eq!(
+            Trigger::from_word("correct_records"),
+            Some(Trigger::Correct(CorrectTrigger::CorrectRecords))
         );
     }
 
@@ -797,13 +996,17 @@ mod tests {
         let total = EditTrigger::ALL.len()
             + ConfirmTrigger::ALL.len()
             + AskTrigger::ALL.len()
-            + RecordTrigger::ALL.len();
+            + RecordTrigger::ALL.len()
+            + CorrectTrigger::ALL.len();
         assert_eq!(all.len(), total);
         for t in EditTrigger::ALL {
             assert!(all.contains(&Trigger::Edit(*t)));
         }
         for t in RecordTrigger::ALL {
             assert!(all.contains(&Trigger::Record(*t)));
+        }
+        for t in CorrectTrigger::ALL {
+            assert!(all.contains(&Trigger::Correct(*t)));
         }
     }
 
@@ -826,6 +1029,7 @@ mod tests {
             judge: None,
             external: None,
             rule_digest: None,
+            corrections: Vec::new(),
         };
         let changes = Changes {
             invocations: vec![invocation],

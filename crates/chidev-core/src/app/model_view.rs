@@ -23,11 +23,13 @@ use crate::domain::entity::crux::Crux;
 use crate::domain::entity::project::Project;
 use crate::domain::service::change_request::state_of;
 use crate::domain::vo::answer::{Basis, Beyond};
+use crate::domain::vo::correction::Correction;
 use crate::domain::vo::crux::{CruxKind, Decision, Importance};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{FindingRef, Subject, SubjectKind};
 use crate::domain::vo::id::ContextId;
 use crate::domain::vo::model_section::ModelSection;
+use crate::domain::vo::resolution::Transition;
 
 /// The version of the view. It is its own: the stored documents have a schema of their own, and the two change
 /// apart. A change that removes or renames a field is a new version; a field added is not. (Version 2: a change
@@ -162,6 +164,23 @@ pub struct ChangeRequestView {
     expects: Vec<ExpectView>,
     /// The findings it deals with.
     addresses: Vec<AddressView>,
+    /// The corrections made of its texts (the title among them), in the order they were made; left out when there
+    /// is none, so that the entry of a request never corrected is the bytes it was before the field was added.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<CorrectionView>,
+}
+
+/// A correction of the texts of a record: which fields had a text replaced by a mark (by their words), why, who said
+/// so (a claim, which nothing checks) and when. The text that was replaced is in none of it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct CorrectionView {
+    /// The fields, by their words (`title`, `question`, `option[<id>].choice`).
+    fields: Vec<String>,
+    /// Why.
+    reason: String,
+    by: MakerView,
+    /// When, in milliseconds since the epoch.
+    at: u64,
 }
 
 /// A Crux: a question that stops the change request it was raised in until a decision maker has decided it. It is
@@ -193,6 +212,9 @@ pub struct CruxView {
     /// The decision, once taken; none while the Crux is open. Only what was decided: the work it asks for is in the
     /// Contracts and in the change request it was raised in.
     answer: Option<AnswerView>,
+    /// The corrections made of its texts, in the order they were made; left out when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<CorrectionView>,
 }
 
 /// The decision of a Crux: what was decided, what it rests on, who said so (a claim, which nothing checks) and when.
@@ -500,6 +522,20 @@ fn crux_view(x: &Crux) -> CruxView {
             },
             at: a.at().millis(),
         }),
+        corrections: x.corrections().iter().map(correction_view).collect(),
+    }
+}
+
+/// A correction as the view shows it: the words of the fields, and no text.
+fn correction_view<F: std::fmt::Display>(c: &Correction<F>) -> CorrectionView {
+    CorrectionView {
+        fields: c.fields().iter().map(ToString::to_string).collect(),
+        reason: c.reason().as_str().to_string(),
+        by: MakerView {
+            kind: c.by().word(),
+            name: c.by().name().to_string(),
+        },
+        at: c.at().millis(),
     }
 }
 
@@ -635,6 +671,14 @@ impl ModelView {
                     .collect(),
                 addresses: c.addresses().iter().map(address_view).collect(),
                 parent: c.parent().map(|p| p.to_string()),
+                corrections: c
+                    .history()
+                    .iter()
+                    .filter_map(|step| match step {
+                        Transition::Corrected(k) => Some(correction_view(k)),
+                        Transition::Resolved(_) | Transition::Reopened(_) => None,
+                    })
+                    .collect(),
             })
             .collect();
         ModelView {

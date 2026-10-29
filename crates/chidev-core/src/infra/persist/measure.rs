@@ -8,8 +8,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::entity::measurement::{Measurement, MeasurementDraft};
+use super::v1::CorrectionDoc;
+use crate::app::ports::InvocationField;
+use crate::domain::entity::measurement::{Measurement, MeasurementDraft, MeasurementField};
 use crate::domain::repository::StoreError;
+use crate::domain::vo::correction::Correction;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::{ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
@@ -174,6 +177,8 @@ pub(crate) struct RunRow {
     pub failure: Option<String>,
     pub evidence: String,
     pub summary: String,
+    /// The corrections made of its texts, as a JSON array; none when there is none.
+    pub corrections: Option<String>,
 }
 
 /// A mutant or a case, as the columns of `measure_items` hold it. A case has no site and no operator (they are
@@ -326,6 +331,7 @@ pub(crate) fn encode(m: &Measurement) -> Result<(RunRow, Vec<ItemRow>), StoreErr
                 .collect::<Vec<_>>(),
         )?,
         summary,
+        corrections: corrections_text(m.corrections(), MeasurementFieldDoc::of)?,
     };
     let mut items = m
         .mutants()
@@ -574,6 +580,144 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
         evidence,
     })
     .map_err(corrupt)
+    .and_then(|m| {
+        let corrections = corrections_read(run.corrections.as_deref(), MeasurementFieldDoc::field)?;
+        Ok(m.with_corrections(corrections))
+    })
+}
+
+/// A field of a measurement, as a correction keeps it: `{"step_stderr":1}`, `"failure"`,
+/// `{"case_finding":[0,1]}`, `{"case_exit":0}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MeasurementFieldDoc {
+    StepCommand(usize),
+    StepStderr(usize),
+    Failure,
+    MutantFrom(usize),
+    MutantTo(usize),
+    CaseFinding(usize, usize),
+    CaseUnreached(usize, usize),
+    CaseUndecided(usize, usize),
+    CaseExit(usize),
+}
+
+impl MeasurementFieldDoc {
+    /// The document of a field. A function of a reference, not a `From`, so that it can be handed on as one
+    /// function for any lifetime.
+    fn of(f: &MeasurementField) -> MeasurementFieldDoc {
+        match *f {
+            MeasurementField::StepCommand { step } => MeasurementFieldDoc::StepCommand(step),
+            MeasurementField::StepStderr { step } => MeasurementFieldDoc::StepStderr(step),
+            MeasurementField::Failure => MeasurementFieldDoc::Failure,
+            MeasurementField::MutantFrom { mutant } => MeasurementFieldDoc::MutantFrom(mutant),
+            MeasurementField::MutantTo { mutant } => MeasurementFieldDoc::MutantTo(mutant),
+            MeasurementField::CaseFinding { case, finding } => {
+                MeasurementFieldDoc::CaseFinding(case, finding)
+            }
+            MeasurementField::CaseUnreached { case, unreached } => {
+                MeasurementFieldDoc::CaseUnreached(case, unreached)
+            }
+            MeasurementField::CaseUndecided { case, undecided } => {
+                MeasurementFieldDoc::CaseUndecided(case, undecided)
+            }
+            MeasurementField::CaseExit { case } => MeasurementFieldDoc::CaseExit(case),
+        }
+    }
+
+    /// The field the document names.
+    fn field(&self) -> Result<MeasurementField, String> {
+        Ok(match *self {
+            MeasurementFieldDoc::StepCommand(step) => MeasurementField::StepCommand { step },
+            MeasurementFieldDoc::StepStderr(step) => MeasurementField::StepStderr { step },
+            MeasurementFieldDoc::Failure => MeasurementField::Failure,
+            MeasurementFieldDoc::MutantFrom(mutant) => MeasurementField::MutantFrom { mutant },
+            MeasurementFieldDoc::MutantTo(mutant) => MeasurementField::MutantTo { mutant },
+            MeasurementFieldDoc::CaseFinding(case, finding) => {
+                MeasurementField::CaseFinding { case, finding }
+            }
+            MeasurementFieldDoc::CaseUnreached(case, unreached) => {
+                MeasurementField::CaseUnreached { case, unreached }
+            }
+            MeasurementFieldDoc::CaseUndecided(case, undecided) => {
+                MeasurementField::CaseUndecided { case, undecided }
+            }
+            MeasurementFieldDoc::CaseExit(case) => MeasurementField::CaseExit { case },
+        })
+    }
+}
+
+/// A field of the record of a check's run, as a correction keeps it: `"stderr"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InvocationFieldDoc {
+    Command,
+    Stderr,
+    Judge,
+}
+
+impl InvocationFieldDoc {
+    /// The document of a field. A function of a reference, not a `From`, so that it can be handed on as one
+    /// function for any lifetime.
+    fn of(f: &InvocationField) -> InvocationFieldDoc {
+        match f {
+            InvocationField::Command => InvocationFieldDoc::Command,
+            InvocationField::Stderr => InvocationFieldDoc::Stderr,
+            InvocationField::Judge => InvocationFieldDoc::Judge,
+        }
+    }
+
+    /// The field the document names.
+    fn field(&self) -> Result<InvocationField, String> {
+        Ok(match self {
+            InvocationFieldDoc::Command => InvocationField::Command,
+            InvocationFieldDoc::Stderr => InvocationField::Stderr,
+            InvocationFieldDoc::Judge => InvocationField::Judge,
+        })
+    }
+}
+
+/// The corrections as a column keeps them: a JSON array of documents, and none (NULL) when there is no correction.
+fn corrections_text<D, F: Serialize>(
+    corrections: &[Correction<D>],
+    field: impl Fn(&D) -> F + Copy,
+) -> Result<Option<String>, StoreError> {
+    if corrections.is_empty() {
+        return Ok(None);
+    }
+    let docs: Vec<CorrectionDoc<F>> = corrections
+        .iter()
+        .map(|c| CorrectionDoc::of(c, field))
+        .collect();
+    write(&docs).map(Some)
+}
+
+/// The corrections a column keeps; none for NULL or an empty array.
+fn corrections_read<D: PartialEq + std::fmt::Display, F: serde::de::DeserializeOwned>(
+    text: Option<&str>,
+    field: impl Fn(&F) -> Result<D, String> + Copy,
+) -> Result<Vec<Correction<D>>, StoreError> {
+    let Some(text) = text else {
+        return Ok(Vec::new());
+    };
+    let docs: Vec<CorrectionDoc<F>> = read(text, "its corrections")?;
+    docs.iter()
+        .map(|d| d.read(field).map_err(corrupt))
+        .collect()
+}
+
+/// The corrections of a row of the record of a check's run, as its column keeps them.
+pub(crate) fn encode_invocation_corrections(
+    corrections: &[Correction<InvocationField>],
+) -> Result<Option<String>, StoreError> {
+    corrections_text(corrections, InvocationFieldDoc::of)
+}
+
+/// The corrections a row of the record of a check's run keeps in its column.
+pub(crate) fn decode_invocation_corrections(
+    text: Option<&str>,
+) -> Result<Vec<Correction<InvocationField>>, StoreError> {
+    corrections_read(text, InvocationFieldDoc::field)
 }
 
 #[cfg(test)]
@@ -708,6 +852,139 @@ mod tests {
         let mut old = run.clone();
         old.summary = old.summary.replace("\"planned\":2,", "");
         assert!(decode(&old, &items).is_err());
+    }
+
+    fn correction<F: PartialEq + std::fmt::Display>(fields: Vec<F>) -> Correction<F> {
+        Correction::new(
+            fields,
+            crate::domain::vo::prose::Prose::try_from("a token was pasted").unwrap(),
+            crate::domain::vo::answer::DecisionMaker::person("carol").unwrap(),
+            Timestamp::from_millis(50),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_corrected_measurement_survives_its_rows_and_they_hold_no_text() {
+        use crate::domain::vo::correction::{Correctable, SoughtText};
+
+        let m = sim_measurement();
+        // a run never corrected has no corrections in its row
+        let (run, _) = encode(&m).unwrap();
+        assert_eq!(run.corrections, None);
+
+        let mut corrected = m.clone();
+        corrected
+            .correct(
+                &SoughtText::try_from("capacity 0").unwrap(),
+                correction(vec![
+                    MeasurementField::CaseFinding {
+                        case: 0,
+                        finding: 0,
+                    },
+                    MeasurementField::CaseFinding {
+                        case: 1,
+                        finding: 0,
+                    },
+                ]),
+                &|_, _| false,
+            )
+            .unwrap_err();
+        // the second case has no finding, so that correction is refused whole; naming the first case alone is not
+        corrected
+            .correct(
+                &SoughtText::try_from("capacity 0").unwrap(),
+                correction(vec![MeasurementField::CaseFinding {
+                    case: 0,
+                    finding: 0,
+                }]),
+                &|_, _| false,
+            )
+            .unwrap();
+        let (run, items) = encode(&corrected).unwrap();
+        assert_eq!(
+            run.corrections.as_deref(),
+            Some(
+                "[{\"fields\":[{\"case_finding\":[0,0]}],\"reason\":\"a token was pasted\",\"by\":{\"person\":\"carol\"},\"at\":50}]"
+            )
+        );
+        assert_eq!(decode(&run, &items).unwrap(), corrected);
+        assert!(!items[0].detail.contains("capacity 0"));
+        assert!(items[0].detail.contains("[redacted] accepted"));
+        // the run keeps what it stood on
+        let (before, _) = encode(&m).unwrap();
+        assert_eq!(
+            (&run.id, &run.stamp, &run.inputs, run.started_at),
+            (&before.id, &before.stamp, &before.inputs, before.started_at)
+        );
+        // a column that is not a list of corrections is corrupt
+        let mut odd = run.clone();
+        odd.corrections = Some("{}".to_string());
+        assert!(decode(&odd, &items).is_err());
+        odd.corrections = Some(
+            "[{\"fields\":[],\"reason\":\"x\",\"by\":{\"person\":\"a\"},\"at\":1}]".to_string(),
+        );
+        assert!(decode(&odd, &items).is_err());
+    }
+
+    #[test]
+    fn a_corrected_exit_of_a_case_that_could_not_start_is_the_outcome_of_its_item() {
+        use crate::domain::vo::correction::{Correctable, SoughtText};
+
+        let mut m = sim_measurement();
+        let mut draft = sim_draft(
+            8,
+            HarnessId::from_uuid(test_uuid(6)),
+            m.stamp().sim().expect("a sim stamp").basis().clone(),
+            SimOutcome {
+                cases: vec![CaseRun {
+                    case: SimCase::Seed(0),
+                    exit: CaseExit::CannotStart("python3 tok-SECRET-123: No such file".into()),
+                    findings: Vec::new(),
+                    unreached: Vec::new(),
+                    undecided: Vec::new(),
+                    schedule: None,
+                    trace: None,
+                }],
+                reruns: Vec::new(),
+            },
+        );
+        draft.failure = Some(MeasureFailure::of(FailureKind::NoStart, "none started"));
+        m = Measurement::new(draft).unwrap();
+        m.correct(
+            &SoughtText::try_from("tok-SECRET-123").unwrap(),
+            correction(vec![MeasurementField::CaseExit { case: 0 }]),
+            &|_, _| false,
+        )
+        .unwrap();
+        let (run, items) = encode(&m).unwrap();
+        assert_eq!(
+            items[0].outcome,
+            "cannot_start:python3 [redacted]: No such file"
+        );
+        assert!(
+            run.corrections
+                .as_deref()
+                .is_some_and(|c| c.contains("{\"case_exit\":0}") && !c.contains("SECRET"))
+        );
+        assert_eq!(decode(&run, &items).unwrap(), m);
+    }
+
+    #[test]
+    fn the_corrections_of_a_check_run_come_back_from_their_column() {
+        assert_eq!(encode_invocation_corrections(&[]).unwrap(), None);
+        assert_eq!(decode_invocation_corrections(None).unwrap(), Vec::new());
+        let made = vec![
+            correction(vec![InvocationField::Stderr, InvocationField::Command]),
+            correction(vec![InvocationField::Judge]),
+        ];
+        let text = encode_invocation_corrections(&made).unwrap().unwrap();
+        assert!(
+            text.contains("\"stderr\"") && text.contains("\"judge\""),
+            "{text}"
+        );
+        assert_eq!(decode_invocation_corrections(Some(&text)).unwrap(), made);
+        assert!(decode_invocation_corrections(Some("nonsense")).is_err());
     }
 
     #[test]

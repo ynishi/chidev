@@ -2,11 +2,12 @@
 //! ([`v1`], and [`crux`] for the Crux). A document that is newer than this code, or that the domain's rules refuse,
 //! is `Corrupt`, never quietly repaired.
 //!
-//! The schemas are numbered per kind of document: the Project and the Pin are at 2, the change request at 3 and the
-//! Crux at 2 (its answer may say where what it added outside its change request went; a Crux of schema 1 is read as
-//! it is, with no such answer). A change request document of schema 1 or 2 held its Crux; it is read only by the
-//! migration of the store to layout 2 ([`layout2`]), which writes it again as schema 3, and never by
-//! [`decode_change_request`].
+//! The schemas are numbered per kind of document: the Project and the Pin are at 2, the change request at 4 and the
+//! Crux at 3. A Crux of schema 2 added where what its answer put outside its change request went, and schema 3 added
+//! the corrections made of its texts; a Crux of an earlier schema is read as it is, with neither. A change request
+//! of schema 4 may have corrections in its history, and a document of schema 3 has none and is read as it is. A change
+//! request document of schema 1 or 2 held its Crux; it is read only by the migration of the store to layout 2
+//! ([`layout2`]), which writes it again as schema 3, and never by [`decode_change_request`].
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -16,6 +17,7 @@ use crate::domain::entity::crux::Crux;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::repository::StoreError;
+use crate::domain::vo::resolution::Transition;
 
 pub(crate) mod crux;
 pub(crate) mod layout2;
@@ -23,7 +25,7 @@ pub(crate) mod measure;
 pub(crate) mod v1;
 
 use self::crux::CruxDoc;
-use self::v1::{CR_SCHEMA, ChangeRequestDoc, PinDoc, ProjectDoc, SCHEMA};
+use self::v1::{CR_SCHEMA, CR_SCHEMA_3, ChangeRequestDoc, PinDoc, ProjectDoc, SCHEMA};
 
 /// The schema number a Project or Pin document is written with.
 pub(crate) const CURRENT: u32 = SCHEMA;
@@ -86,21 +88,45 @@ pub(crate) fn encode_change_request(c: &ChangeRequest) -> Result<String, StoreEr
     encode(&ChangeRequestDoc::from(c))
 }
 
+/// Reads a change request document of schema 3 or 4: a 3 has no corrected step in its history, and is read as it is.
+/// A 3 that has one was never written by a version that wrote 3, and is corrupt.
 pub(crate) fn decode_change_request(stored: u32, text: &str) -> Result<ChangeRequest, StoreError> {
-    if stored < CURRENT_CHANGE_REQUEST {
+    if stored < CR_SCHEMA_3 {
         return Err(StoreError::Corrupt(format!(
             "a change request of schema {stored} is read by the migration of the store to layout 2, not as it is"
         )));
     }
-    decode::<ChangeRequestDoc, ChangeRequest>(stored, CURRENT_CHANGE_REQUEST, text, |d| d.schema)
+    let cr =
+        decode::<ChangeRequestDoc, ChangeRequest>(stored, CURRENT_CHANGE_REQUEST, text, |d| {
+            d.schema
+        })?;
+    if stored == CR_SCHEMA_3
+        && cr
+            .history()
+            .iter()
+            .any(|step| matches!(step, Transition::Corrected(_)))
+    {
+        return Err(StoreError::Corrupt(
+            "a change request of schema 3 has a corrected step in its history, which schema 3 never had".to_string(),
+        ));
+    }
+    Ok(cr)
 }
 
 pub(crate) fn encode_crux(c: &Crux) -> Result<String, StoreError> {
     encode(&CruxDoc::from(c))
 }
 
+/// Reads a Crux document of schema 1, 2 or 3: a document of schema 1 or 2 has no corrections, and is read as it is.
+/// One that has them was never written by a version that wrote 1 or 2, and is corrupt.
 pub(crate) fn decode_crux(stored: u32, text: &str) -> Result<Crux, StoreError> {
-    decode::<CruxDoc, Crux>(stored, CURRENT_CRUX, text, |d| d.schema)
+    let crux = decode::<CruxDoc, Crux>(stored, CURRENT_CRUX, text, |d| d.schema)?;
+    if stored < CURRENT_CRUX && !crux.corrections().is_empty() {
+        return Err(StoreError::Corrupt(format!(
+            "a Crux of schema {stored} has corrections, which it never had before schema {CURRENT_CRUX}"
+        )));
+    }
+    Ok(crux)
 }
 
 #[cfg(test)]
@@ -1463,9 +1489,9 @@ mod tests {
         assert_eq!(decode_pin(1, &text).unwrap(), pin);
         for cr in change_requests(&p) {
             let text = encode_change_request(&cr).unwrap();
-            assert!(text.contains("\"schema\":3"), "{text}");
+            assert!(text.contains("\"schema\":4"), "{text}");
             for old in [1, 2] {
-                let text = text.replace("\"schema\":3", &format!("\"schema\":{old}"));
+                let text = text.replace("\"schema\":4", &format!("\"schema\":{old}"));
                 assert!(matches!(
                     decode_change_request(old, &text),
                     Err(StoreError::Corrupt(why)) if why.contains("migration")
@@ -1702,6 +1728,212 @@ mod tests {
             decode_project(CURRENT, &text),
             Err(StoreError::Corrupt(_))
         ));
+    }
+
+    /// A correction of `fields`, by a person, with a reason, at a time.
+    fn correction<F: PartialEq + std::fmt::Display>(
+        fields: Vec<F>,
+    ) -> crate::domain::vo::correction::Correction<F> {
+        crate::domain::vo::correction::Correction::new(
+            fields,
+            crate::domain::vo::prose::Prose::try_from("a token was pasted").unwrap(),
+            crate::domain::vo::answer::DecisionMaker::person("carol").unwrap(),
+            crate::domain::vo::timestamp::Timestamp::from_millis(50),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_corrected_change_request_comes_back_as_it_was_written_and_its_step_holds_no_text() {
+        use crate::domain::entity::change_request::ChangeRequestField as Field;
+        use crate::domain::vo::correction::{Correctable, SoughtText};
+        use crate::domain::vo::resolution::Transition;
+
+        let p = project();
+        let mut cr = change_requests(&p).remove(0);
+        for (token, field) in [
+            ("caller", Field::StepReason { step: 1 }),
+            ("the other", Field::StepReason { step: 2 }),
+        ] {
+            cr.correct(
+                &SoughtText::try_from(token).unwrap(),
+                correction(vec![field]),
+                &|_, _| false,
+            )
+            .unwrap();
+        }
+        assert_eq!(cr.history().len(), 5);
+        let text = encode_change_request(&cr).unwrap();
+        let back = decode_change_request(CURRENT_CHANGE_REQUEST, &text).unwrap();
+        assert_eq!(back, cr);
+        assert!(matches!(back.history()[4], Transition::Corrected(_)));
+        // the step is written by the words of the fields, and the text is nowhere in the document
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            doc["history"][3],
+            serde_json::json!({"corrected": {
+                "fields": [{"step_reason": 1}],
+                "reason": "a token was pasted",
+                "by": {"person": "carol"},
+                "at": 50
+            }})
+        );
+        assert!(
+            !text.contains("caller") && !text.contains("the other"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_correction_between_a_resolution_and_a_reopening_is_read_back_where_it_stands() {
+        use crate::domain::vo::resolution::Transition;
+
+        let p = project();
+        let cr = change_requests(&p).remove(0);
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&cr).unwrap()).unwrap();
+        let step = serde_json::json!({"corrected": {
+            "fields": [
+                "title",
+                {"assumption_reason": 0},
+                {"assumption_evidence": [0, 1]},
+                {"step_by": 2}
+            ],
+            "reason": "a token was pasted",
+            "by": {"role": "orchestrator"},
+            "at": 77
+        }});
+        doc["history"].as_array_mut().unwrap().insert(1, step);
+        let back = decode_change_request(CURRENT_CHANGE_REQUEST, &doc.to_string()).unwrap();
+        assert_eq!(back.history().len(), 4);
+        let Transition::Corrected(c) = &back.history()[1] else {
+            panic!("the correction stands between the resolution and the reopening")
+        };
+        assert_eq!(c.fields().len(), 4);
+        assert_eq!(c.by().to_string(), "role orchestrator");
+        // it changes no state: the request is resolved by the last resolution, as it was
+        assert!(back.is_resolved());
+        let again: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&back).unwrap()).unwrap();
+        assert_eq!(again, doc);
+        // a correction that names no field, or a field twice, is corrupt
+        for odd in [
+            serde_json::json!([]),
+            serde_json::json!(["title", "title"]),
+            serde_json::json!(["no_such_field"]),
+        ] {
+            let mut bad = doc.clone();
+            bad["history"][1]["corrected"]["fields"] = odd;
+            assert!(matches!(
+                decode_change_request(CURRENT_CHANGE_REQUEST, &bad.to_string()),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_change_request_of_schema_3_is_read_as_it_is_and_has_no_corrected_step() {
+        let p = project();
+        for cr in change_requests(&p) {
+            let text = encode_change_request(&cr).unwrap();
+            assert!(text.contains("\"schema\":4"), "{text}");
+            let three = text.replace("\"schema\":4", "\"schema\":3");
+            assert_eq!(decode_change_request(3, &three).unwrap(), cr);
+            // the number of the record and the document's own must agree
+            assert!(matches!(
+                decode_change_request(4, &three),
+                Err(StoreError::Corrupt(_))
+            ));
+            assert!(matches!(
+                decode_change_request(5, &text),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_change_request_of_schema_3_with_a_corrected_step_is_corrupt() {
+        let p = project();
+        let cr = change_requests(&p).remove(0);
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&encode_change_request(&cr).unwrap()).unwrap();
+        let step = serde_json::json!({"corrected": {
+            "fields": ["title"],
+            "reason": "a token was pasted",
+            "by": {"person": "carol"},
+            "at": 77
+        }});
+        doc["history"].as_array_mut().unwrap().push(step);
+        // as schema 4 it is read, as schema 3 it is refused: schema 3 never had the step
+        assert!(decode_change_request(4, &doc.to_string()).is_ok());
+        doc["schema"] = serde_json::json!(3);
+        assert!(matches!(
+            decode_change_request(3, &doc.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_corrected_crux_comes_back_as_it_was_written_and_a_crux_of_schema_2_is_read_as_it_is() {
+        use crate::domain::entity::crux::CruxField as Field;
+        use crate::domain::vo::correction::{Correctable, SoughtText};
+
+        let p = project();
+        let mut asked = cruxes(&p).remove(0);
+        let plain = encode_crux(&asked).unwrap();
+        // a Crux never corrected writes no `corrections`, so it is the document of schema 2 in all but the number
+        let mut doc: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert!(doc.get("corrections").is_none());
+        doc["schema"] = serde_json::json!(2);
+        assert_eq!(decode_crux(2, &doc.to_string()).unwrap(), asked);
+        assert!(decode_crux(CURRENT_CRUX, &doc.to_string()).is_err());
+
+        let option = option_id(62, 0);
+        asked
+            .correct(
+                &SoughtText::try_from("callers").unwrap(),
+                correction(vec![
+                    Field::OptionConsequence { option },
+                    Field::RecommendationReason,
+                ]),
+                &|_, _| false,
+            )
+            .unwrap();
+        let text = encode_crux(&asked).unwrap();
+        assert_eq!(decode_crux(CURRENT_CRUX, &text).unwrap(), asked);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            doc["corrections"],
+            serde_json::json!([{
+                "fields": [
+                    {"option_consequence": option.as_uuid().to_string()},
+                    "recommendation_reason"
+                ],
+                "reason": "a token was pasted",
+                "by": {"person": "carol"},
+                "at": 50
+            }])
+        );
+        assert!(!text.contains("callers"), "{text}");
+        // an option id that is not one is corrupt
+        let mut odd = doc.clone();
+        odd["corrections"][0]["fields"][0] = serde_json::json!({"option_choice": "not an id"});
+        assert!(matches!(
+            decode_crux(CURRENT_CRUX, &odd.to_string()),
+            Err(StoreError::Corrupt(_))
+        ));
+        // schema 1 and 2 never had corrections: a document of either that has them is corrupt
+        for older in [1, 2] {
+            let mut old = doc.clone();
+            old["schema"] = serde_json::json!(older);
+            assert!(
+                matches!(
+                    decode_crux(older, &old.to_string()),
+                    Err(StoreError::Corrupt(_))
+                ),
+                "schema {older}"
+            );
+        }
     }
 
     #[test]

@@ -1,17 +1,19 @@
-//! The stored document of a Crux, schema 2: the aggregate on its own, with its options, its recommendation and its
+//! The stored document of a Crux, schema 3: the aggregate on its own, with its options, its recommendation and its
 //! answer. It refers to the change request it was raised in, to the Crux it supersedes, and to its own options by
 //! id, and reaches the domain only through [`Crux::restore`], which re-checks every rule.
 //!
 //! Schema 2 differs from schema 1 in the answer alone: it may say where what the decision added outside its change
-//! request went (`beyond`). A document of schema 1 has none and is read as it is.
+//! request went (`beyond`). Schema 3 adds the corrections made of the texts of the Crux (`corrections`, written only
+//! when there is one). A document of an earlier schema has none of these and is read as it is; one of schema 1 or 2
+//! that has corrections is corrupt (`decode_crux`).
 
 use serde::{Deserialize, Serialize};
 
 use super::v1::{
-    AddressDoc, AnswerBasisDoc, Bad, CruxKindDoc, ImportanceDoc, MakerDoc, OptionExpectDoc, bad,
-    option_expects_of, prose, revision, target_doc, uuid,
+    AddressDoc, AnswerBasisDoc, Bad, CorrectionDoc, CruxKindDoc, ImportanceDoc, MakerDoc,
+    OptionExpectDoc, bad, option_expects_of, prose, revision, target_doc, uuid,
 };
-use crate::domain::entity::crux::{Crux, CruxDraft, CruxState};
+use crate::domain::entity::crux::{Crux, CruxDraft, CruxField, CruxState};
 use crate::domain::vo::answer::{Answer, Basis as AnswerBasis, Beyond, DecisionMaker};
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::confidence::Confidence;
@@ -23,7 +25,7 @@ use crate::domain::vo::prose::Prose;
 use crate::domain::vo::timestamp::Timestamp;
 
 /// The schema number a Crux document is written with.
-pub(crate) const SCHEMA: u32 = 2;
+pub(crate) const SCHEMA: u32 = 3;
 
 /// A Crux, with its answer once it has one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +45,73 @@ pub(crate) struct CruxDoc {
     /// The id of the Crux whose decision this one replaces.
     pub(super) supersedes: Option<String>,
     pub(super) state: StateDoc,
+    /// The corrections made of its texts, in the order they were made; schema 3. A document of an earlier schema has
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) corrections: Vec<CorrectionDoc<CruxFieldDoc>>,
+}
+
+/// A field of a Crux, as a correction keeps it: `"question"`, `{"option_choice":"<option id>"}`,
+/// `{"decision_keep":0}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CruxFieldDoc {
+    Question,
+    OptionChoice(String),
+    OptionChange(String),
+    OptionConsequence(String),
+    RecommendationReason,
+    DecisionReason,
+    DecisionWording,
+    DecisionKeep(usize),
+    BasisReason,
+    BeyondReason,
+    AnswerBy,
+}
+
+impl CruxFieldDoc {
+    /// The document of a field. A function of a reference, not a `From`, so that it can be handed on as one
+    /// function for any lifetime.
+    fn of(f: &CruxField) -> CruxFieldDoc {
+        let id = |option: &CruxOptionId| option.as_uuid().to_string();
+        match f {
+            CruxField::Question => CruxFieldDoc::Question,
+            CruxField::OptionChoice { option } => CruxFieldDoc::OptionChoice(id(option)),
+            CruxField::OptionChange { option } => CruxFieldDoc::OptionChange(id(option)),
+            CruxField::OptionConsequence { option } => CruxFieldDoc::OptionConsequence(id(option)),
+            CruxField::RecommendationReason => CruxFieldDoc::RecommendationReason,
+            CruxField::DecisionReason => CruxFieldDoc::DecisionReason,
+            CruxField::DecisionWording => CruxFieldDoc::DecisionWording,
+            CruxField::DecisionKeep { keep } => CruxFieldDoc::DecisionKeep(*keep),
+            CruxField::BasisReason => CruxFieldDoc::BasisReason,
+            CruxField::BeyondReason => CruxFieldDoc::BeyondReason,
+            CruxField::AnswerBy => CruxFieldDoc::AnswerBy,
+        }
+    }
+
+    /// The field the document names.
+    fn field(&self) -> Result<CruxField, Bad> {
+        let id = |option: &String| Ok::<_, Bad>(CruxOptionId::from_uuid(uuid(option)?));
+        Ok(match self {
+            CruxFieldDoc::Question => CruxField::Question,
+            CruxFieldDoc::OptionChoice(option) => CruxField::OptionChoice {
+                option: id(option)?,
+            },
+            CruxFieldDoc::OptionChange(option) => CruxField::OptionChange {
+                option: id(option)?,
+            },
+            CruxFieldDoc::OptionConsequence(option) => CruxField::OptionConsequence {
+                option: id(option)?,
+            },
+            CruxFieldDoc::RecommendationReason => CruxField::RecommendationReason,
+            CruxFieldDoc::DecisionReason => CruxField::DecisionReason,
+            CruxFieldDoc::DecisionWording => CruxField::DecisionWording,
+            CruxFieldDoc::DecisionKeep(keep) => CruxField::DecisionKeep { keep: *keep },
+            CruxFieldDoc::BasisReason => CruxField::BasisReason,
+            CruxFieldDoc::BeyondReason => CruxField::BeyondReason,
+            CruxFieldDoc::AnswerBy => CruxField::AnswerBy,
+        })
+    }
 }
 
 /// Whether the Crux is answered, and the answer.
@@ -299,6 +368,11 @@ impl From<&Crux> for CruxDoc {
                 CruxState::Open => StateDoc::Open,
                 CruxState::Answered(a) => StateDoc::Answered(AnswerDoc::from(a)),
             },
+            corrections: q
+                .corrections()
+                .iter()
+                .map(|c| CorrectionDoc::of(c, CruxFieldDoc::of))
+                .collect(),
         }
     }
 }
@@ -361,6 +435,11 @@ impl TryFrom<CruxDoc> for Crux {
                 .map(|s| Ok::<_, Bad>(CruxId::from_uuid(uuid(s)?)))
                 .transpose()?,
         };
-        Crux::restore(CruxId::from_uuid(uuid(&d.id)?), draft, state).map_err(bad)
+        let corrections = d
+            .corrections
+            .iter()
+            .map(|c| c.read(CruxFieldDoc::field))
+            .collect::<Result<_, _>>()?;
+        Crux::restore(CruxId::from_uuid(uuid(&d.id)?), draft, state, corrections).map_err(bad)
     }
 }

@@ -518,7 +518,14 @@ async fn check_run_keeps_what_it_found_when_a_mandatory_check_finds_an_error() {
     assert_eq!(asked.findings[0].rule.as_str(), "test.always");
     assert_eq!(asked.findings[0].level, Level::Error);
     assert_eq!(app.store().revision().await.unwrap().0, revision.0 + 1);
-    let kept = app.store().invocations().await.unwrap();
+    let kept: Vec<_> = app
+        .store()
+        .invocations()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].moment, Moment::Check);
     assert_eq!(kept[0].trigger, Some(Trigger::Ask(AskTrigger::CheckRun)));
@@ -720,7 +727,7 @@ async fn the_checks_a_use_case_ran_are_recorded_under_its_trigger() {
         let all = app.store().invocations().await.unwrap();
         let now = all[*seen..]
             .iter()
-            .map(|i| (i.moment, i.trigger))
+            .map(|(_, i)| (i.moment, i.trigger))
             .collect::<Vec<_>>();
         *seen = all.len();
         now
@@ -960,6 +967,26 @@ impl Store for Flaky {
 
     async fn latest_measurements(&self) -> Result<Vec<Measurement>, StoreError> {
         self.inner.latest_measurements().await
+    }
+
+    async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        self.inner.measurements().await
+    }
+
+    async fn invocations(
+        &self,
+    ) -> Result<
+        Vec<(
+            chidev_core::app::ports::InvocationSeq,
+            chidev_core::app::ports::Invocation,
+        )>,
+        StoreError,
+    > {
+        self.inner.invocations().await
+    }
+
+    async fn clear_freed(&self) -> Result<(), StoreError> {
+        self.inner.clear_freed().await
     }
 
     async fn pin_code(&self, pin: PinId) -> Result<Option<String>, StoreError> {

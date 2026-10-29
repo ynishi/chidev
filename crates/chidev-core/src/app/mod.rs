@@ -19,6 +19,8 @@ use self::change_set::{only_put, only_setting};
 mod check;
 pub mod commit;
 use self::commit::{ConfirmTrigger, EditTrigger, ModelDelta};
+mod correct;
+pub use self::correct::{Cleared, CorrectAnswer, CorrectInput, Place, RecordKind, Remaining};
 mod diagnostic;
 pub use self::diagnostic::{
     Beyond, DiagSubject, DiagValue, Diagnostic, Mend, Names, RuleCard, RuleExplanation,
@@ -83,6 +85,7 @@ use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath
 use crate::domain::vo::choice::Choice;
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::confidence::Confidence;
+use crate::domain::vo::correction::Correction;
 pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
@@ -976,6 +979,22 @@ pub struct ReopeningStatus {
     pub at: u64,
 }
 
+/// A correction of the texts of a record, in the result of `status`: the words of the fields, why, who and when. The
+/// text that was replaced is in none of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionStatus {
+    /// The fields, by their words (`situation`, `step[1].reason`).
+    pub fields: Vec<String>,
+    /// Why.
+    pub reason: String,
+    /// `role` or `person`.
+    pub by_kind: &'static str,
+    /// The name of the role or the person.
+    pub by: String,
+    /// When, in milliseconds since the epoch.
+    pub at: u64,
+}
+
 /// One step of the history of a change request, in the result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionStatus {
@@ -983,6 +1002,8 @@ pub enum TransitionStatus {
     Resolved(ResolutionStatus),
     /// It was opened again.
     Reopened(ReopeningStatus),
+    /// A text in it was replaced by a mark.
+    Corrected(CorrectionStatus),
 }
 
 /// A target a change request asks to be revised or retired, and what its work did to it, in the result of
@@ -1142,6 +1163,8 @@ pub struct CruxStatus {
     pub state: &'static str,
     /// The answer: the decision, what it rests on, who gave it and when.
     pub answer: Option<AnswerStatus>,
+    /// The corrections made of its texts, in the order they were made.
+    pub corrections: Vec<CorrectionStatus>,
 }
 
 /// A Crux that has no decision yet: what a decision maker is asked. Its change request, resolved or not, waits.
@@ -1270,6 +1293,17 @@ fn maker_of(by: &DecisionMakerInput) -> Result<DecisionMaker, AppError> {
         DecisionMakerInput::Person(name) => DecisionMaker::person(name),
     }
     .map_err(input)
+}
+
+/// The status of a correction: the words of its fields, and no text.
+fn correction_status<F: std::fmt::Display>(c: &Correction<F>) -> CorrectionStatus {
+    CorrectionStatus {
+        fields: c.fields().iter().map(ToString::to_string).collect(),
+        reason: c.reason().to_string(),
+        by_kind: c.by().word(),
+        by: c.by().name().to_string(),
+        at: c.at().millis(),
+    }
 }
 
 /// The status of a resolution; `title_of` names the change request it points at.
@@ -2451,6 +2485,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             by: r.by().name().to_string(),
                             at: r.at().millis(),
                         }),
+                        Transition::Corrected(k) => {
+                            TransitionStatus::Corrected(correction_status(k))
+                        }
                     })
                     .collect(),
                 assumptions: c.assumptions().iter().map(assumption_status).collect(),
@@ -2568,6 +2605,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             supersedes: q.supersedes().map(|s| s.to_string()),
             state: q.state().word(),
             answer: q.answer_given().map(|a| answer_status(a, title_of)),
+            corrections: q.corrections().iter().map(correction_status).collect(),
         })
     }
 
