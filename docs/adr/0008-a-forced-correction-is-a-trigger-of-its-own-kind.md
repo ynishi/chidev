@@ -94,8 +94,9 @@ is left. Neither answer holds the text.
   correction rewrites their texts in place. A run keeps its place among the runs, so
   the latest stays the latest, and its stamp is not touched, so its standing does not
   move. The settings in a measurement's stamp are not a field: they are what its
-  standing is read from, and they come from `chidev.toml`, where a secret is fixed
-  before measuring again.
+  standing is read from, and they are a digest, so no text of `chidev.toml` is in
+  them. A command's text reaches a measurement only in the evidence of a step,
+  which is a field.
 - The documents of a change request (schema 4) and a Crux (schema 3) are written in a
   form an older chidev refuses as newer than it reads; the earlier forms are still
   read.
