@@ -13,9 +13,11 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use chidev_core::app::{App, Registry};
 use chidev_core::domain::check::builtin;
+use chidev_core::infra::accept;
 use chidev_core::infra::clock::SystemClock;
 use chidev_core::infra::external;
 use chidev_core::infra::ids::UuidV7;
@@ -60,6 +62,35 @@ enum Command {
         #[command(subcommand)]
         provider: Provider,
     },
+    /// Runs the acceptance examples in DIR against a program, one after another, and prints a line for each and
+    /// a count (`ok`, or `fail` with every reason). An example is a name with files `<name>.args` (the arguments,
+    /// split on white space, after those of the command), `<name>.stdin`, `<name>.expected` (the standard output,
+    /// then a last line `#exit <code>`) and, optionally, `<name>.stderr` (the standard error, compared when it is
+    /// there). The program runs without a shell, from the current directory, in a process group that is killed when
+    /// it ends. The exit code is 0 when every example passed, 1 when one failed, and 2 when nothing could be run.
+    ///
+    /// With `--external` it is an external check (`protocol` 2, see the README): it reads the request on standard
+    /// input, where the protocol puts it (chidev writes it there, not in a file), and writes the reply on standard
+    /// output, a finding for each failing example and each Clause whose text names a file of it by its path from DIR,
+    /// and exits 0.
+    Accept {
+        /// The most seconds one example may take (1 to 86400, a day); a program that is still running is killed.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 10,
+            value_parser = clap::value_parser!(u64).range(1..=86_400)
+        )]
+        timeout: u64,
+        /// Answer as an external check: read a request on standard input, write a reply on standard output.
+        #[arg(long)]
+        external: bool,
+        /// The directory of the examples, relative to the current directory.
+        dir: PathBuf,
+        /// The program to run and its first arguments, after `--`.
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -102,10 +133,74 @@ fn serve<E: std::fmt::Display>(
     }
 }
 
+/// Runs the examples in `dir` against `command` and prints what the mode asks for: lines for a person, or the reply
+/// of an external check. A failure to run at all is a message on standard error, the exit code 2 and nothing on
+/// standard output.
+async fn accept(
+    dir: PathBuf,
+    command: Vec<String>,
+    timeout: u64,
+    external: bool,
+) -> Result<bool, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    // the request is read and refused before any example runs: a call that cannot be answered runs nothing
+    let call = if external {
+        let mut request = Vec::new();
+        io::stdin()
+            .lock()
+            .read_to_end(&mut request)
+            .map_err(|e| format!("cannot read the request: {e}"))?;
+        let dir = dir
+            .to_str()
+            .ok_or_else(|| "the directory is not UTF-8".to_string())?;
+        Some((
+            accept::Call::read(&request).map_err(|e| e.to_string())?,
+            dir,
+        ))
+    } else {
+        None
+    };
+    let results = accept::run_all(&dir, &command, &cwd, Duration::from_secs(timeout))
+        .await
+        .map_err(|e| e.to_string())?;
+    let (text, passed) = match call {
+        Some((call, dir)) => {
+            let reply = call.reply(dir, &results);
+            let text = serde_json::to_string(&reply)
+                .map_err(|e| format!("cannot write the reply: {e}"))?;
+            // a reply is a protocol document: whatever it says, the check ran
+            (format!("{text}\n"), true)
+        }
+        None => (
+            accept::lines(&results),
+            results.iter().all(|(_, verdict)| verdict.is_ok()),
+        ),
+    };
+    let mut out = io::stdout().lock();
+    out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("cannot write the report: {e}"))?;
+    Ok(passed)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Accept {
+            timeout,
+            external,
+            dir,
+            command,
+        } => match accept(dir, command, timeout, external).await {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(1),
+            Err(e) => {
+                eprintln!("chidev accept: {e}");
+                ExitCode::from(2)
+            }
+        },
         Command::Schema { name } => {
             // a document to read, not a line of a stream: indented
             let printed = match name {

@@ -625,6 +625,76 @@ saved result does not re-hash the executable or check the filesystem. The check
 input consists of the selected model sections, not a snapshot of the working
 tree. Re-run a check after changing inputs outside that model.
 
+### Acceptance examples: `chidev accept`
+
+`chidev accept [--timeout <seconds>] [--external] <dir> -- <command> [<arg>...]` runs the acceptance examples of a
+directory against a program. An example is a name `<name>` for which `<dir>` holds a regular file `<name>.args`,
+`<name>.stdin`, `<name>.expected` or `<name>.stderr`; other files and subdirectories are ignored, and the examples are
+taken in the byte order of their names.
+
+- `<name>.args`: the arguments, split on white space. There is no quoting, so an argument that holds white space cannot
+  be written. They follow the `<arg>...` of the command line.
+- `<name>.stdin`: the bytes the program reads on standard input. An empty file is an empty input.
+- `<name>.expected`: the expected standard output, then a last line `#exit <code>` (an integer in decimal, with an
+  optional `-`). The output is everything before that line and keeps its own final line feed; a line feed after the
+  exit line is optional. So an expected output is empty or ends with a line feed: a program whose output does not
+  end with one cannot pass. A file whose last line is not `#exit <code>` fails the example.
+- `<name>.stderr`: optional. When present, standard error must equal its bytes exactly; when absent, standard error is
+  not compared.
+
+`.args`, `.stdin` and `.expected` are required. An example with one missing fails (`missing a1.stdin`), and so does one
+whose file cannot be read (the file and the system's error are named) or whose `.args` is not UTF-8. A directory that
+cannot be read, or that holds no example, is not an example failing: nothing can be run.
+
+The program runs without a shell, from the directory `chidev accept` runs in. A `<command>` with a directory part is
+taken relative to that directory and is not followed through links; a bare name is searched for in `PATH`. It runs in a
+process group of its own, which is killed as soon as the program exits, so a descendant is neither left running nor
+keeps the example open. A program that exits without reading all of its input is judged on what it answered.
+Standard output and standard error are each capped at 4 MiB, and more fails the example. `--timeout` (seconds, from 1
+to 86400, 10 by default) bounds one example; the examples run one after another.
+
+A program that gave no answer fails its example with that one reason: `cannot start: <message>`,
+`did not end within <n> s`, `output over 4 MiB (<pipe>)`, `ended by a signal`, or the system's message when a pipe
+could not be read or written. Otherwise every difference is a reason, in this order: `standard output differs at line
+<k>: expected <line>, got <line>` (a line is shown escaped, and only its first 200 characters, followed by `...`, when
+it is longer; `end of output` stands for a side with no such line; `expected a final newline` or `expected no final newline` says
+that only the last line feed differs), `exit code: expected <e>, got <g>`, and, with a `.stderr`, `standard error
+differs ...` in the same form as the first.
+
+Plain mode prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for each example, then
+`<p> passed, <f> failed`. The exit code is 0 when every example passed, 1 when one failed, and 2 when nothing could be
+run (a usage error, a directory that cannot be read or has no example), with `chidev accept: <what>` on standard error
+and nothing on standard output.
+
+With `--external` the command is an external check. It reads the request (protocol 2) on standard input, runs the
+examples, and writes one reply, `{"protocol":2,"findings":[...]}`, on standard output; it exits 0 whether or not an
+example failed. A request that is not JSON, is not protocol 2 or asks for other than one rule is a usage error, found
+before any example runs (exit 2, nothing on standard output), which `chidev` records as a failed run. Register it like any external check:
+
+```toml
+[external."ext.accept"]
+command = "chidev"
+args = ["accept", "--external", "acceptance", "--", "./target/release/prog"]
+moments = ["pin", "resolve", "check"]
+timeout = 120
+reads = ["contracts"]
+gate = true
+```
+
+The registration's `timeout` bounds the whole run, and `--timeout` one example. A failing example gives one finding,
+`<name>: <reasons>`, for each Clause of the model sent whose text names one of the example's four files by its path
+from the project's root, `<dir>/<name>.<ext>`, with `<dir>` as given on the command line less any leading `./` and
+trailing `/` (a `<dir>` of `.` gives `<name>.<ext>`). The path must stand as a whole: the character before it is not a
+letter, a digit, `_`, `-`, `.` or `/`, and the one after it is not a letter, a digit, `_` or `-`, so
+`acceptance/a1.expected` is found in "`acceptance/a1.expected` gives" and in a sentence that ends with it, and not in
+`acceptance/a10.expected` or `./acceptance/a1.expected`. A Clause that names the file in another way (a different
+relative path, a glob) is not found. An example no Clause names gives one finding about the project, ending
+`(no clause names <dir>/<name>.expected)`. A Clause is found only when the registration's `reads` has `contracts`;
+without it every finding is about the project. Passing examples give nothing.
+
+The files of the examples are not part of the model sent, so a change to them alone leaves `status.external`
+`current`: re-run the check, as the paragraph on the recorded SHA-256 says.
+
 ## Measurements
 
 A Harness that passes does not show it is strong. `measure` runs the pinned code
