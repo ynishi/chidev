@@ -533,7 +533,7 @@ static RULES: &[Rule] = &[
         id: EXAMPLES_CITES_ITEM,
         kind: RuleKind::Invariant,
         summary: "An example Case cites Clauses only, never an Item.",
-        help: "An example shows what a Clause promises. The Interfaces whose pinned code the program is built from are the ones the Harness names in `builds`; naming one is not citing it, and puts the Harness on no Pin's basis. Cite Clauses only, and name the Interfaces in `builds`.",
+        help: "An example shows what a Clause promises. The Interfaces whose pinned code the program is built from are the ones the Harness names in `builds`; naming one is not citing it, and puts the Harness on no Pin's basis. Cite Clauses only, and name the Interfaces in `builds`. A put that gives an example Case `items` is refused as input before this rule (the example below); the rule is what a Harness the store keeps is held to.",
         message: "{s0} of a harness of examples cites an item; an example case cites clauses only",
         values: &[],
         example: r##"{"op":"harness_put","context":"core","name":"acceptance","kind":"examples","builds":["api"],"cases":[{"name":"a1","example":{"args":"","stdin":"","expected":"#exit 0\n"},"items":[{"interface":"api","key":"price"}]}]}"##,

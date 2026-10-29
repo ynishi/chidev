@@ -428,12 +428,17 @@ fn what_the_domain_refuses_is_a_violation_of_its_rule() {
     let d = one(&r[0]);
     assert_eq!(d["code"], "examples.case-name");
     assert_eq!(d["values"]["reason"], "not-a-name");
-    // (in a Harness of its own: in this one a Case named `a1` already has an id, which both would be given)
+    // in a new Harness, and in this one, where a Case named `a1` already has an id that both are given
     let mut twice = inline("2\n#exit 0\n");
     twice["name"] = json!("second");
     twice["cases"][1]["name"] = json!("a1");
-    let r = run_ops(&dir, &[twice]);
+    let r = run_ops(&dir, &[twice.clone()]);
     assert_eq!(one(&r[0])["values"]["reason"], "named-twice");
+    twice["name"] = json!("acceptance");
+    let r = run_ops(&dir, &[twice]);
+    let d = one(&r[0]);
+    assert_eq!(d["code"], "examples.case-name");
+    assert_eq!(d["values"]["reason"], "named-twice");
 
     // code put to a Harness of examples without saying it is code
     let code = json!({"op":"harness_put","context":"core","name":"acceptance","source":"fn t() {}\n",

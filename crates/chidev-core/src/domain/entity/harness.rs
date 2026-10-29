@@ -525,6 +525,14 @@ fn check_examples(
         return Err(HarnessError::ExamplesBuildNone(id));
     }
     for (k, (case, name, _, cites)) in cases.iter().enumerate() {
+        // the name first: a put names its Cases, and two Cases of one name are given the id of the Case of that name
+        // the Harness has, so the repeated name is the fault the person made, and the repeated id only follows from it
+        if cases[..k].iter().any(|(_, n, ..)| n == name) {
+            return Err(HarnessError::ExampleName {
+                case: *case,
+                fault: ExampleNameFault::NamedTwice,
+            });
+        }
         if cases[..k].iter().any(|(i, ..)| i == case) {
             return Err(HarnessError::DuplicateId(*case));
         }
@@ -538,12 +546,6 @@ fn check_examples(
             return Err(HarnessError::ExampleName {
                 case: *case,
                 fault: ExampleNameFault::NotAName,
-            });
-        }
-        if cases[..k].iter().any(|(_, n, ..)| n == name) {
-            return Err(HarnessError::ExampleName {
-                case: *case,
-                fault: ExampleNameFault::NamedTwice,
             });
         }
     }
