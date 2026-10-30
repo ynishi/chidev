@@ -142,11 +142,27 @@ impl Selector {
         }
     }
 
+    /// Whether the check `id` is the one selected, or is in the family selected. A family is every id that begins
+    /// with its prefix, `.` included, so `cite.` is `cite.stale` and the rest and not `cite-x`, and an id that is
+    /// itself the prefix (`cite.`) is in it. The one rule for a policy file and for a run that selects checks.
+    pub fn matches(&self, id: &RuleId) -> bool {
+        match self {
+            Selector::Check(own) => own == id,
+            Selector::Family(prefix) => id.in_family(prefix),
+        }
+    }
+
     fn describe(&self) -> String {
         match self {
             Selector::Check(id) => id.to_string(),
             Selector::Family(p) => p.clone(),
         }
+    }
+}
+
+impl std::fmt::Display for Selector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.describe())
     }
 }
 
@@ -260,10 +276,7 @@ impl Policy {
                 let matched: Vec<&Descriptor> = descriptors
                     .iter()
                     .copied()
-                    .filter(|d| match selector {
-                        Selector::Check(id) => d.id == *id,
-                        Selector::Family(p) => d.id.in_family(p),
-                    })
+                    .filter(|d| selector.matches(&d.id))
                     .collect();
                 if matched.is_empty() {
                     return Err(PolicyError::UnknownCheck {
@@ -586,5 +599,52 @@ mod tests {
         );
         assert!(Selector::parse(".").is_err());
         assert!(Selector::parse("Cite.").is_err());
+        assert!(Selector::parse("").is_err());
+        assert!(Selector::parse("cite stale").is_err());
+        // written as it was read
+        assert_eq!(Selector::parse("cite.").unwrap().to_string(), "cite.");
+        assert_eq!(
+            Selector::parse("cite.stale").unwrap().to_string(),
+            "cite.stale"
+        );
+    }
+
+    #[test]
+    fn a_selector_matches_an_id_or_a_family_by_whole_segments() {
+        let check = Selector::parse("examples.failed").unwrap();
+        assert!(check.matches(&id("examples.failed")));
+        assert!(!check.matches(&id("examples.unrun")));
+        assert!(!check.matches(&id("examples.failed.more")));
+        assert!(!check.matches(&id("examples")));
+
+        let family = Selector::parse("examples.").unwrap();
+        assert!(family.matches(&id("examples.failed")));
+        assert!(family.matches(&id("examples.unrun")));
+        assert!(family.matches(&id("examples.a.b")));
+        assert!(!family.matches(&id("measure.failed")));
+        // the bare word is an id, not a family, and a part of a segment is neither
+        assert!(
+            !Selector::parse("examples")
+                .unwrap()
+                .matches(&id("examples.failed"))
+        );
+        assert!(!family.matches(&id("examples-x.failed")));
+        assert!(
+            !Selector::parse("exam.")
+                .unwrap()
+                .matches(&id("examples.failed"))
+        );
+    }
+
+    #[test]
+    fn an_id_of_an_odd_shape_is_selected_by_its_exact_id() {
+        // an id may end in `.`; written as it is, the key is a family of which the id is a member, so it is selected
+        // (with the ids that begin with it); a bare word that is an id is that id
+        let odd = id("odd.");
+        assert!(Selector::parse("odd.").unwrap().matches(&odd));
+        assert!(Selector::parse("odd.").unwrap().matches(&id("odd.more")));
+        let bare = id("odd");
+        assert!(Selector::parse("odd").unwrap().matches(&bare));
+        assert!(!Selector::parse("odd").unwrap().matches(&odd));
     }
 }

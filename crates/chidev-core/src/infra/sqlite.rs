@@ -21,7 +21,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use rusqlite_isle::{AsyncIsle, AsyncIsleDriver, IsleError};
 use uuid::Uuid;
 
@@ -300,29 +300,35 @@ impl SqliteStore {
             std::fs::create_dir_all(dir)
                 .map_err(|e| StoreError::Failed(format!("{}: {e}", dir.display())))?;
         }
-        Self::connect(path).await
+        Self::connect(path, OpenFlags::default()).await
     }
 
     /// Opens the database at `path` only if the file is there, as [`SqliteStore::open`] does then. A missing file
-    /// is refused, naming the path, and neither it nor its directory is made: a command that only reads or measures
-    /// a project must not make an empty store of a mistyped path, which `init` is for.
+    /// is refused, and neither it nor its directory is made: a command that only reads or measures a project must
+    /// not make an empty store of a mistyped path, which `init` is for. The error does not repeat `path`, which the
+    /// caller has; a path whose metadata cannot be read (no permission, say) is refused with the system's message,
+    /// not as a missing file.
     pub async fn open_existing(path: impl AsRef<Path>) -> Result<SqliteStore, StoreError> {
         let path = path.as_ref();
-        // Once, before the connection exists, as in `open`.
-        if !path.is_file() {
-            return Err(StoreError::Failed(format!(
-                "no store file at {}",
-                path.display()
-            )));
+        // Once, before the connection exists, as in `open`; the connection is opened without `SQLITE_OPEN_CREATE`
+        // besides, so a file removed in between is refused rather than made empty.
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Err(StoreError::Failed("it is not a file".to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::Failed("there is no store file".to_string()));
+            }
+            Err(e) => return Err(StoreError::Failed(e.to_string())),
         }
-        Self::connect(path).await
+        Self::connect(path, OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE).await
     }
 
-    /// Connects to the database file `path` (SQLite makes the file if it is not there, in a directory that is),
-    /// makes or brings up to date its tables, and checks its layout.
-    async fn connect(path: &Path) -> Result<SqliteStore, StoreError> {
+    /// Connects to the database file `path` with `flags` (with `SQLITE_OPEN_CREATE`, SQLite makes the file if it is
+    /// not there, in a directory that is), makes or brings up to date its tables, and checks its layout.
+    async fn connect(path: &Path, flags: OpenFlags) -> Result<SqliteStore, StoreError> {
         let (isle, driver) = AsyncIsle::builder()
             .busy_timeout(BUSY_TIMEOUT)
+            .open_flags(flags)
             .spawn(path, prepare)
             .await
             .map_err(failed)?;

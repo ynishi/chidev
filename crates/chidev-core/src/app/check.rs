@@ -159,11 +159,7 @@ impl Registry {
     /// Every check with the level and parameters it runs with, in order: the builtin checks, then the judged
     /// rules.
     pub fn list(&self) -> Vec<CheckInfo<'_>> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
+        self.descriptors()
             .filter_map(|d| {
                 let r = self.policy.of(&d.id)?;
                 Some(CheckInfo {
@@ -177,13 +173,17 @@ impl Registry {
 
     /// The id of every registered check, builtin, judged and external: the ids a finding of a run can carry.
     pub fn ids(&self) -> Vec<&RuleId> {
+        self.descriptors().map(|d| &d.id).collect()
+    }
+
+    /// The descriptor of every registered check, in order: the builtin checks, the judged rules, then the external
+    /// ones.
+    fn descriptors(&self) -> impl Iterator<Item = &Descriptor> {
         self.checks
             .iter()
             .map(|c| c.descriptor())
             .chain(self.judged.iter().map(JudgedRule::descriptor))
             .chain(self.external.iter().map(ExternalRule::descriptor))
-            .map(|d| &d.id)
-            .collect()
     }
 
     /// External rules, in configured order.
@@ -203,22 +203,12 @@ impl Registry {
 
     /// Who runs the check `id`; none when there is no such check.
     pub fn executor_of(&self, id: &RuleId) -> Option<Executor> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
-            .find(|d| d.id == *id)
-            .map(|d| d.executor)
+        self.descriptors().find(|d| d.id == *id).map(|d| d.executor)
     }
 
     /// The help of the check `id`; none when there is no such check.
     pub fn help_of(&self, id: &RuleId) -> Option<&str> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
+        self.descriptors()
             .find(|d| d.id == *id)
             .map(|d| d.help.as_ref())
     }

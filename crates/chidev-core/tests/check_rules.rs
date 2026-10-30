@@ -7,10 +7,9 @@ use std::path::PathBuf;
 
 use chidev_core::app::ports::IdSource;
 use chidev_core::app::{App, AppError, CheckResult, ClauseInput, Found, Registry};
-use chidev_core::domain::check::Moment;
-use chidev_core::domain::check::builtin;
 use chidev_core::domain::check::external::ExternalRule;
-use chidev_core::domain::vo::finding::{RuleId, RuleSelector};
+use chidev_core::domain::check::{Moment, Selector, builtin};
+use chidev_core::domain::vo::finding::RuleId;
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
@@ -32,12 +31,9 @@ const BUILTIN: &str = "cite.uncited-clause";
 const JUDGED: &str = "judged.clause-review";
 const EXTERNAL: &str = "ext.contract";
 
-fn selector(text: &str) -> RuleSelector {
-    RuleSelector::try_from(text).unwrap()
-}
-
-fn selectors(texts: &[&str]) -> Vec<RuleSelector> {
-    texts.iter().map(|t| selector(t)).collect()
+/// Selectors written as a key of the policy file is: an id, or a family with its dot.
+fn selectors(texts: &[&str]) -> Vec<Selector> {
+    texts.iter().map(|t| Selector::parse(t).unwrap()).collect()
 }
 
 /// A registry of the builtin checks, one judged rule and one external rule, all at the defaults.
@@ -122,7 +118,7 @@ async fn rules_narrow_the_findings_and_the_rest_is_counted_outside() {
     assert!(one.outside > 0);
 
     // by prefix, whole segments
-    let family = app.check(None, &selectors(&["context"])).await.unwrap();
+    let family = app.check(None, &selectors(&["context."])).await.unwrap();
     assert_eq!(
         family.findings,
         of_rules(&all.findings, |r| r.starts_with("context."))
@@ -134,7 +130,7 @@ async fn rules_narrow_the_findings_and_the_rest_is_counted_outside() {
     let union = app
         .check(
             None,
-            &selectors(&[BUILTIN, "context.no-harness", "context"]),
+            &selectors(&[BUILTIN, "context.no-harness", "context."]),
         )
         .await
         .unwrap();
@@ -167,7 +163,7 @@ async fn a_context_and_rules_narrow_together_and_a_finding_left_out_by_both_is_c
 async fn a_selector_of_a_rule_with_no_finding_is_known_and_gives_none() {
     let app = app("quiet").await;
     // `pin.stale` is a builtin check; nothing is pinned, so it has nothing to say
-    let none = app.check(None, &selectors(&["pin"])).await.unwrap();
+    let none = app.check(None, &selectors(&["pin."])).await.unwrap();
     assert!(none.findings.is_empty(), "{:?}", rules(&none));
     let all = app.check(None, &[]).await.unwrap();
     assert_eq!(none.outside, all.findings.len());
@@ -177,9 +173,9 @@ async fn a_selector_of_a_rule_with_no_finding_is_known_and_gives_none() {
 async fn a_builtin_judged_or_external_rule_is_a_known_selector() {
     let app = app("known").await;
     for (kind, id, family) in [
-        ("builtin", BUILTIN, "cite"),
-        ("judged", JUDGED, "judged"),
-        ("external", EXTERNAL, "ext"),
+        ("builtin", BUILTIN, "cite."),
+        ("judged", JUDGED, "judged."),
+        ("external", EXTERNAL, "ext."),
     ] {
         for text in [id, family] {
             app.check(None, &selectors(&[text]))
@@ -207,23 +203,32 @@ async fn a_selector_that_matches_no_check_is_refused_with_the_names_near_it() {
         e => panic!("expected an unknown rule selector, got {e:?}"),
     }
 
-    // a typo of a family
-    match app.check(None, &selectors(&["judge"])).await.unwrap_err() {
+    // a typo of a family, which the names near it write as the policy does, with the dot
+    match app.check(None, &selectors(&["judge."])).await.unwrap_err() {
         AppError::UnknownRuleSelector { given, near } => {
-            assert_eq!(given, "judge");
-            assert!(near.contains(&"judged".to_string()), "{near:?}");
+            assert_eq!(given, "judge.");
+            assert!(near.contains(&"judged.".to_string()), "{near:?}");
         }
         e => panic!("expected an unknown rule selector, got {e:?}"),
     }
 
-    // a part of a segment is no family, though it begins an id; the family it is a part of is near
-    match app.check(None, &selectors(&["cit"])).await.unwrap_err() {
-        AppError::UnknownRuleSelector { given, near } => {
-            assert_eq!(given, "cit");
-            assert!(near.contains(&"cite".to_string()), "{near:?}");
+    // a family written without its dot is an id, as in a policy file, and there is none: the family is near
+    for bare in ["cite", "exam"] {
+        match app.check(None, &selectors(&[bare])).await.unwrap_err() {
+            AppError::UnknownRuleSelector { given, near } => {
+                assert_eq!(given, bare);
+                if bare == "cite" {
+                    assert!(near.contains(&"cite.".to_string()), "{near:?}");
+                }
+            }
+            e => panic!("expected an unknown rule selector, got {e:?}"),
         }
-        e => panic!("expected an unknown rule selector, got {e:?}"),
     }
+    // a part of a segment is no family, though it begins an id
+    assert!(matches!(
+        app.check(None, &selectors(&["cit."])).await.unwrap_err(),
+        AppError::UnknownRuleSelector { .. }
+    ));
 
     // the first that matches nothing is the one said, whatever stands before it
     match app

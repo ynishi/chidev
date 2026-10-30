@@ -307,11 +307,15 @@ where they belong):
     about the Project as a whole, about a change request that names nothing of the
     Context, and about something that is gone. It is in the answer only when a
     `context` or `rules` was given. A name that is no Context's is `input.unknown-name`.
-  - `{"op":"check","rules":["examples","cite.stale"]}` narrows the answer to some
-    rules: each is a rule id or a prefix of whole segments (`examples` is every
-    `examples.*`, `exam` is none), and the findings are those of a rule one of them
-    matches. A selector that matches no builtin, judged or external check is
-    `input.unknown-name`, with the ids near it as `did_you_mean`, and nothing is run.
+  - `{"op":"check","rules":["examples.","cite.stale"]}` narrows the answer to some
+    rules. A selector is written as a key of the policy file is (`[checks."cite."]`,
+    `[checks."cite.stale"]`): a rule id (`cite.stale`), or a family with its dot
+    (`examples.` is every id that begins with `examples.`; `examples` without the dot
+    is an id, and `exam.` is a family none of whose ids begin so). The findings are
+    those of a rule one of the selectors matches. A selector that matches no builtin,
+    judged or external check is `input.unknown-name`, with the ids and families near it
+    as `did_you_mean`, and nothing is run. A malformed one (upper case, white space,
+    empty) is `input.invalid`.
     `rules` and `context` together narrow both ways. The run is the whole one here
     too, and `outside` counts what either left out.
   - `chidev check` runs the operation as a command (see "Commands: `chidev check` and
@@ -482,16 +486,19 @@ chidev measure examples --context <C> --harness <H>   [--store <db>]
 ```
 
 - `chidev check` is `{"op":"check","context":"<C>","rules":["<RULE>",...]}`: every check on the project as it is,
-  nothing kept. Each `RULE` is a rule id (`examples.failed`) or a prefix of whole segments (`examples`); the
-  `findings` are those of the rules selected, and all of them when none is given. `--context` narrows them to a Context
-  as `context` does. `outside` is in the output when either was given. A `RULE` that no check has (builtin, judged or
-  external) is refused with the ids near it, and so is a Context that is not there.
+  nothing kept. Each `RULE` is written as in the `rules` of the operation: a rule id (`examples.failed`) or a family
+  with its dot (`examples.`), as a key of the policy file is. The `findings` are those of the rules selected, and all of
+  them when none is given. `--context` narrows them to a Context as `context` does. `outside` is in the output when
+  either was given. A `RULE` that no check has (builtin, judged or external) is refused with the ids near it, and so is
+  a Context that is not there.
 - `chidev measure <kind>` is `{"op":"measure","kind":"<kind>",...}`. There is a subcommand for each kind, and each
   takes the asset its kind takes (`mutate` an Interface, `simulate` and `examples` a Harness) and no other, so a pair
   that `exec` refuses cannot be written: the argument parser refuses it. It runs for as long as the build and the
   tests, script or program take, and keeps the run.
-- **Exit status.** `check`: 0 when no finding in the output is at `error`; 1 when one is, or the operation was refused
-  (a rule or a Context that is not there, a selector that is not well formed). `measure`: 0 when the run was recorded
+- **Exit status.** `check`: 0 when no finding in the output is an `error` that no change request deals with (its `state`
+  is `open`; one that a change request `addressed` or `decided` is not owed, as the gate of a change counts what is
+  still owed); 1 when one is, or the operation was refused (a rule or a Context that is not there, a selector that is
+  not well formed). `measure`: 0 when the run was recorded
   and did not fail; 1 when it was recorded and failed (`"outcome":"failed"`), or the operation was refused (no Pin, a
   name the Context has not, no `[measure]` table). 2 for both when nothing could be run: bad arguments, no project
   or settings that cannot be read, or no store.

@@ -65,7 +65,7 @@ pub use self::judged::{
 pub use self::model_view::{ModelSlice, ModelView, VIEW_VERSION};
 use self::ports::{AssetKind, Clock, IdSource, NamedAsset, Store, StoreRevision};
 pub use crate::domain::check::ParamValue;
-use crate::domain::check::{CheckView, Finding, Mention, Moment};
+use crate::domain::check::{CheckView, Finding, Mention, Moment, Selector};
 use crate::domain::entity::change_request::{
     ChangeRequest, ChangeRequestDraft, ChangeRequestError,
 };
@@ -91,7 +91,7 @@ use crate::domain::vo::correction::Correction;
 pub use crate::domain::vo::crux::{CruxKind, Importance};
 use crate::domain::vo::crux::{CruxOption, Decision, Recommended};
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::finding::{FindingRef, RuleId, RuleSelector, Subject};
+use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::footprint::{Move, Rename};
 pub use crate::domain::vo::harness_kind::{CodeKind, HarnessKind};
 use crate::domain::vo::id::{
@@ -398,7 +398,7 @@ pub enum AppError {
     /// would say nothing for it. It is a different refusal from [`AppError::UnknownRule`], which names one rule of
     /// any kind to explain: this one is about a run, and about the checks that can have findings.
     #[error(
-        "no check has the id `{given}` or an id that begins with `{given}.`; `rules` lists the checks"
+        "no check has the id `{given}`, and no id begins with it; a family of checks is written with its dot (`cite.`), and `rules` lists the checks"
     )]
     UnknownRuleSelector {
         /// The selector, as given.
@@ -2319,14 +2319,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// that is gone. The whole run is made either way; only what is returned is narrowed. A name that is no
     /// Context's is refused.
     ///
-    /// With `rules`, the findings are narrowed the same way to those of a rule one of the selectors matches (a rule
-    /// id, or a prefix of whole segments such as `examples`); with none, every rule's are kept. A finding that both
-    /// narrowings leave out is counted once in `outside`. A selector that matches no registered check (builtin,
-    /// judged or external) is refused before anything runs, with the ids near it, so a typo is not an empty answer.
+    /// With `rules`, the findings are narrowed the same way to those of a rule one of the selectors matches (the
+    /// policy's: a rule id, or a family written with its dot, such as `examples.`); with none, every rule's are
+    /// kept. A finding that both narrowings leave out is counted once in `outside`. A selector that matches no
+    /// registered check (builtin, judged or external) is refused before anything runs, with the ids near it, so a
+    /// typo is not an empty answer.
     pub async fn check(
         &self,
         context: Option<&str>,
-        rules: &[RuleSelector],
+        rules: &[Selector],
     ) -> Result<CheckResult, AppError> {
         self.known_selectors(rules)?;
         let at = self.store.revision().await?;
@@ -2358,29 +2359,27 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// Whether every selector matches the id of some registered check, of any of the three kinds a finding of
     /// [`App::check`] can carry; else the first that does not, refused with the ids and prefixes of ids near it.
-    fn known_selectors(&self, rules: &[RuleSelector]) -> Result<(), AppError> {
+    fn known_selectors(&self, rules: &[Selector]) -> Result<(), AppError> {
         let ids = self.registry.ids();
         let Some(unknown) = rules.iter().find(|s| !ids.iter().any(|id| s.matches(id))) else {
             return Ok(());
         };
-        // a selector may be a family as well as a rule, so a family is something it can be a typo of
+        // a selector may be a family as well as an id, so a family, written as the policy writes it (`cite.`), is
+        // something it can be a typo of
         let mut names: Vec<String> = Vec::new();
         for id in ids {
-            let mut family = String::new();
-            for segment in id.as_str().split('.') {
-                if !family.is_empty() {
-                    family.push('.');
-                }
-                family.push_str(segment);
-                names.push(family.clone());
-            }
+            names.push(id.to_string());
+            names.extend(
+                id.as_str()
+                    .match_indices('.')
+                    .map(|(k, _)| id.as_str()[..=k].to_string()),
+            );
         }
         names.sort();
         names.dedup();
-        Err(AppError::UnknownRuleSelector {
-            given: unknown.to_string(),
-            near: did_you_mean(unknown.as_str(), &names),
-        })
+        let given = unknown.to_string();
+        let near = did_you_mean(&given, &names);
+        Err(AppError::UnknownRuleSelector { given, near })
     }
 
     /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read, on the

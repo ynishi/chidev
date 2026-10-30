@@ -184,14 +184,14 @@ fn check_prints_what_exec_prints_for_the_operation_and_exits_by_its_error_findin
     );
 
     // by prefix, whole segments, and several at once
-    let (family, code) = line_of(&chidev(&dir, &["check", "examples"]));
+    let (family, code) = line_of(&chidev(&dir, &["check", "examples."]));
     assert_eq!(code, 1);
     assert!(
         rules_of(&family).iter().all(|r| r.starts_with("examples.")),
         "{family:#?}"
     );
     assert!(rules_of(&family).contains(&"examples.failed"));
-    let (two, _) = line_of(&chidev(&dir, &["check", "examples.failed", "context"]));
+    let (two, _) = line_of(&chidev(&dir, &["check", "examples.failed", "context."]));
     let rules = rules_of(&two);
     assert!(rules.contains(&"examples.failed"), "{two:#?}");
     assert!(
@@ -204,7 +204,7 @@ fn check_prints_what_exec_prints_for_the_operation_and_exits_by_its_error_findin
         two,
         exec(
             &dir,
-            &[json!({"op":"check","rules":["examples.failed","context"]})]
+            &[json!({"op":"check","rules":["examples.failed","context."]})]
         )[0]
     );
 
@@ -216,7 +216,7 @@ fn check_prints_what_exec_prints_for_the_operation_and_exits_by_its_error_findin
         in_core,
         exec(&dir, &[json!({"op":"check","context":"core"})])[0]
     );
-    let (narrow, code) = line_of(&chidev(&dir, &["check", "examples", "--context", "other"]));
+    let (narrow, code) = line_of(&chidev(&dir, &["check", "examples.", "--context", "other"]));
     // nothing of the family is about the other Context
     assert_eq!(code, 0, "{narrow:#?}");
     assert!(narrow["findings"].as_array().expect("findings").is_empty());
@@ -224,7 +224,7 @@ fn check_prints_what_exec_prints_for_the_operation_and_exits_by_its_error_findin
         narrow,
         exec(
             &dir,
-            &[json!({"op":"check","context":"other","rules":["examples"]})]
+            &[json!({"op":"check","context":"other","rules":["examples."]})]
         )[0]
     );
 }
@@ -250,9 +250,33 @@ fn check_exits_0_when_no_finding_is_an_error() {
             .all(|f| f["level"] != "error"),
         "{all:#?}"
     );
-    let (family, code) = line_of(&chidev(&dir, &["check", "examples"]));
+    let (family, code) = line_of(&chidev(&dir, &["check", "examples."]));
     assert_eq!(code, 0);
     assert!(family["findings"].as_array().expect("findings").is_empty());
+}
+
+#[test]
+fn an_error_finding_a_change_request_deals_with_is_not_owed_and_does_not_fail_the_command() {
+    let dir = project("commands-check-addressed");
+    let (done, _) = line_of(&chidev(&dir, &MEASURE));
+    assert_eq!(done["outcome"], "ok");
+    let (open, code) = line_of(&chidev(&dir, &["check", "examples.failed"]));
+    assert_eq!(code, 1, "{open:#?}");
+    assert_eq!(open["findings"][0]["state"], "open");
+
+    // a change request that addresses the finding is dealing with it
+    exec(
+        &dir,
+        &[
+            json!({"op":"cr_open","title":"Fix a2","intent":"change_behavior","addresses":[
+            {"rule":"examples.failed","subject":{"clause":
+                {"context":"core","contract":"lines","label":"C2"}}}]}),
+        ],
+    );
+    let (addressed, code) = line_of(&chidev(&dir, &["check", "examples.failed"]));
+    assert_eq!(addressed["findings"][0]["level"], "error", "{addressed:#?}");
+    assert_eq!(addressed["findings"][0]["state"], "addressed");
+    assert_eq!(code, 0, "{addressed:#?}");
 }
 
 #[test]
@@ -274,8 +298,15 @@ fn check_refuses_what_exec_refuses_with_the_exit_code_1() {
         run_ops(&dir, &[json!({"op":"check","rules":["examples.faild"]})])[0]
     );
     // a part of a segment is no family
-    let (part, code) = line_of(&chidev(&dir, &["check", "exam"]));
+    let (part, code) = line_of(&chidev(&dir, &["check", "exam."]));
     assert_eq!((part["ok"].clone(), code), (json!(false), 1), "{part:#?}");
+    // a family is written with its dot, as in a policy file: the bare word is an id, and none has it
+    let (bare, code) = line_of(&chidev(&dir, &["check", "examples"]));
+    assert_eq!((bare["ok"].clone(), code), (json!(false), 1), "{bare:#?}");
+    assert_eq!(
+        bare["diagnostics"][0]["did_you_mean"][0], "examples.",
+        "{bare:#?}"
+    );
 
     // a Context that is not there
     let (no_context, code) = line_of(&chidev(&dir, &["check", "--context", "nowhere"]));
@@ -322,7 +353,9 @@ fn check_and_measure_open_a_store_that_is_there_and_make_none() {
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(out.stdout.is_empty(), "{args:?}");
         let said = String::from_utf8(out.stderr).expect("utf-8");
-        assert!(said.contains("no store file at"), "{args:?}: {said}");
+        assert!(said.contains("there is no store file"), "{args:?}: {said}");
+        // the path is said once
+        assert_eq!(said.matches("chidev.db").count(), 1, "{args:?}: {said}");
     }
     // neither a store nor a directory for one
     assert!(!dir.join(".chidev").exists());
@@ -357,7 +390,7 @@ fn check_and_measure_stop_with_2_when_the_settings_cannot_be_read() {
 #[test]
 fn measure_examples_records_a_run_and_check_reports_on_it() {
     let dir = project("commands-measure");
-    let (before, _) = line_of(&chidev(&dir, &["check", "examples"]));
+    let (before, _) = line_of(&chidev(&dir, &["check", "examples."]));
     assert_eq!(rules_of(&before), ["examples.unrun"], "{before:#?}");
 
     let (done, code) = line_of(&chidev(&dir, &MEASURE));
@@ -373,7 +406,7 @@ fn measure_examples_records_a_run_and_check_reports_on_it() {
     assert_eq!(examples[1]["passed"], false);
 
     // the run was kept, so the check judges it
-    let (after, code) = line_of(&chidev(&dir, &["check", "examples"]));
+    let (after, code) = line_of(&chidev(&dir, &["check", "examples."]));
     assert_eq!(code, 1, "{after:#?}");
     assert_eq!(rules_of(&after), ["examples.failed"], "{after:#?}");
     let status = exec(&dir, &[json!({"op":"status"})]);

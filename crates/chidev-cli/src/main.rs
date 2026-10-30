@@ -48,17 +48,18 @@ enum Command {
     },
     /// Runs every check on the project kept in the store as it is, and prints the result of the operation `check`
     /// (a JSON object: the `findings`, and `outside` when RULE or `--context` left some out). Nothing is kept. Each
-    /// RULE is a rule id (`examples.failed`) or a prefix of whole segments (`examples`); the findings are those of
-    /// the rules selected, all when none is given. A RULE that matches no check is refused. The exit code is 0 when
-    /// no finding is at `error`, 1 when one is or the operation was refused (an unknown rule or context), and 2
-    /// when it could not be run (bad arguments, no project, no store).
+    /// RULE is written as a key of the policy file is, a rule id (`examples.failed`) or a family with its dot
+    /// (`examples.`); the findings are those of the rules selected, all when none is given. A RULE that matches no
+    /// check is refused. The exit code is 0 when no finding is an `error` that no change request deals with, 1 when
+    /// one is or the operation was refused (an unknown rule or context), and 2 when it could not be run (bad
+    /// arguments, no project, no store).
     Check {
         /// The context to narrow the findings to.
         #[arg(long, value_name = "C")]
         context: Option<String>,
         #[command(flatten)]
         store: StoreArg,
-        /// The rules to report, each an id or a prefix of whole segments.
+        /// The rules to report, each an id or a family with its dot.
         #[arg(value_name = "RULE")]
         rules: Vec<String>,
     },
@@ -309,18 +310,18 @@ async fn main() -> ExitCode {
             store,
             rules,
         } => {
-            with_app(store, Opening::Existing, async move |app, root| {
+            with_app(store, Opening::Existing, async move |app, _root| {
                 let mut out = io::stdout().lock();
-                let done = ops::check(app, root, context, rules, &mut out).await;
+                let done = ops::check(app, context, rules, &mut out).await;
                 exit_code(done, &mut out)
             })
             .await
         }
         Command::Measure { measure } => {
             let (store, context, what) = measure.parts();
-            with_app(store, Opening::Existing, async move |app, root| {
+            with_app(store, Opening::Existing, async move |app, _root| {
                 let mut out = io::stdout().lock();
-                let done = ops::measure(app, root, context, what, &mut out).await;
+                let done = ops::measure(app, context, what, &mut out).await;
                 exit_code(done, &mut out)
             })
             .await
