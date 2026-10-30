@@ -9,14 +9,30 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use chidev_core::app::commit::Gated;
+use chidev_core::app::ports::external::ExternalReport;
 use chidev_core::app::ports::measure::{
     BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
 };
-use chidev_core::app::ports::{IdSource, Store};
-use chidev_core::app::{App, CaseInput, ClauseInput, ClauseRef, ItemInput, ItemRef, Registry};
+use chidev_core::app::ports::{
+    AssetKind, AssetNames, IdSource, Invocation, InvocationSeq, JudgedReport, JudgedRepository,
+    Store, StoreRevision,
+};
+use chidev_core::app::{
+    App, CaseInput, ClauseInput, ClauseRef, ItemInput, ItemRef, MeasurementStanding,
+    MeasurementState, Registry,
+};
 use chidev_core::domain::check::{CheckView, Moment};
-use chidev_core::domain::repository::{PinRepository, ProjectRepository};
+use chidev_core::domain::entity::change_request::ChangeRequest;
+use chidev_core::domain::entity::crux::Crux;
+use chidev_core::domain::entity::measurement::Measurement;
+use chidev_core::domain::entity::pin::Pin;
+use chidev_core::domain::entity::project::Project;
+use chidev_core::domain::repository::{
+    ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
+};
 use chidev_core::domain::vo::digest::Digest;
+use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
 use chidev_core::domain::vo::measure::{MeasureKind, SettingsDigest, SettingsNow};
 use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -322,11 +338,27 @@ fn unconfigured(app: TestApp) -> TestApp {
     App::new(app.into_store(), Counter(10_000), clock())
 }
 
-/// Where the one mutation run stands.
+/// Where the one mutation run stands, in the word for it.
 async fn state(app: &TestApp) -> &'static str {
-    let status = app.status().await.unwrap();
+    standing(app).await.state.word()
+}
+
+/// The standing of the one mutation run.
+async fn standing(app: &TestApp) -> MeasurementStanding {
+    let mut status = app.status().await.unwrap();
     assert_eq!(status.measurements.len(), 1, "{:?}", status.measurements);
-    status.measurements[0].state
+    status.measurements.remove(0)
+}
+
+/// What moved of the one mutation run, as `(word, name)` of each part: it is stale.
+async fn moved(app: &TestApp) -> Vec<(&'static str, Option<String>)> {
+    let MeasurementState::Stale(parts) = standing(app).await.state else {
+        panic!("the run is not stale");
+    };
+    parts
+        .iter()
+        .map(|p| (p.part().word(), p.name().map(ToString::to_string)))
+        .collect()
 }
 
 /// The messages of the findings of the rule `rule` in `app.check`, and in a run that asks every check (`ask`).
@@ -364,6 +396,7 @@ async fn changing_the_sim_table_of_the_context_leaves_a_mutation_run_current() {
     fixture.table(&with("max_mutants = 3"));
     let app = restarted(app, &fixture).await;
     assert_eq!(state(&app).await, "stale");
+    assert_eq!(moved(&app).await, [("settings", None)]);
 }
 
 #[tokio::test]
@@ -404,6 +437,7 @@ async fn removing_measure_after_a_run_makes_it_stale_and_says_measure_is_not_con
     assert_eq!(state(&app).await, "current");
     let mut app = unconfigured(app);
     assert_eq!(state(&app).await, "stale");
+    assert_eq!(moved(&app).await, [("settings", None)]);
     let (checked, asked) = said(&mut app, "mutation.stale").await;
     for messages in [checked, asked] {
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -468,7 +502,7 @@ async fn a_program_that_is_another_file_in_the_copy_fails_the_measure_as_setting
     // the failure is kept as the run, stamped with the settings it resolved
     let status = app.status().await.unwrap();
     assert_eq!(status.measurements[0].outcome, "failed");
-    assert_eq!(status.measurements[0].state, "current");
+    assert_eq!(status.measurements[0].state, MeasurementState::Current);
 }
 
 #[tokio::test]
@@ -523,6 +557,11 @@ async fn a_measure_and_the_settings_asked_for_later_pick_the_same_harnesses() {
     // a second Harness that checks the Interface: the pin's basis has it, and the recorded run is stale
     put_tests(&mut app, "more", "also").await;
     assert_eq!(state(&app).await, "stale");
+    // what moved is the new Harness, by its name, and the settings, which now name both Harnesses
+    assert_eq!(
+        moved(&app).await,
+        [("harness", Some("more".to_string())), ("settings", None)]
+    );
     // measured again, it is stamped with the settings of both, and asking for them later gives those: current
     app.measure(MeasureKind::Mutate, "core", "api")
         .await
@@ -553,4 +592,135 @@ async fn a_measure_and_the_settings_asked_for_later_pick_the_same_harnesses() {
     assert_ne!(both, one);
     let kept = app.store().latest_measurements().await.unwrap();
     assert_eq!(kept[0].stamp().settings().to_string(), both.to_string());
+}
+
+/// A store as it is, except that it knows of no Pin: a Project whose measurement outlived the Pin it was made for.
+struct NoPins(SqliteStore);
+
+impl ProjectRepository for NoPins {
+    async fn project(&self) -> Result<Option<Project>, StoreError> {
+        self.0.project().await
+    }
+}
+
+impl PinRepository for NoPins {
+    async fn pin_of(&self, _: InterfaceId) -> Result<Option<Pin>, StoreError> {
+        Ok(None)
+    }
+
+    async fn pins(&self) -> Result<Vec<Pin>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+impl ChangeRequestRepository for NoPins {
+    async fn change_request(
+        &self,
+        id: ChangeRequestId,
+    ) -> Result<Option<ChangeRequest>, StoreError> {
+        self.0.change_request(id).await
+    }
+
+    async fn change_requests(&self) -> Result<Vec<ChangeRequest>, StoreError> {
+        self.0.change_requests().await
+    }
+}
+
+impl CruxRepository for NoPins {
+    async fn crux(&self, id: CruxId) -> Result<Option<Crux>, StoreError> {
+        self.0.crux(id).await
+    }
+
+    async fn cruxes(&self) -> Result<Vec<Crux>, StoreError> {
+        self.0.cruxes().await
+    }
+
+    async fn cruxes_raised_in(&self, raised_in: ChangeRequestId) -> Result<Vec<Crux>, StoreError> {
+        self.0.cruxes_raised_in(raised_in).await
+    }
+}
+
+impl AssetNames for NoPins {
+    async fn asset_id(
+        &self,
+        context: ContextId,
+        kind: AssetKind,
+        name: &AssetName,
+    ) -> Result<Option<Uuid>, StoreError> {
+        self.0.asset_id(context, kind, name).await
+    }
+
+    async fn asset_name(&self, id: Uuid) -> Result<Option<AssetName>, StoreError> {
+        self.0.asset_name(id).await
+    }
+}
+
+impl JudgedRepository for NoPins {
+    async fn judged_reports(&self) -> Result<Vec<JudgedReport>, StoreError> {
+        self.0.judged_reports().await
+    }
+}
+
+impl Store for NoPins {
+    async fn external_reports(&self) -> Result<Vec<ExternalReport>, StoreError> {
+        self.0.external_reports().await
+    }
+
+    async fn latest_measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        self.0.latest_measurements().await
+    }
+
+    async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
+        self.0.measurements().await
+    }
+
+    async fn invocations(&self) -> Result<Vec<(InvocationSeq, Invocation)>, StoreError> {
+        self.0.invocations().await
+    }
+
+    async fn clear_freed(&self) -> Result<(), StoreError> {
+        self.0.clear_freed().await
+    }
+
+    async fn pin_code(&self, pin: PinId) -> Result<Option<String>, StoreError> {
+        self.0.pin_code(pin).await
+    }
+
+    async fn revision(&self) -> Result<StoreRevision, StoreError> {
+        self.0.revision().await
+    }
+
+    async fn model_revision(&self) -> Result<StoreRevision, StoreError> {
+        self.0.model_revision().await
+    }
+
+    async fn commit(&self, read_at: StoreRevision, gated: Gated) -> Result<(), StoreError> {
+        self.0.commit(read_at, gated).await
+    }
+}
+
+#[tokio::test]
+async fn a_run_of_an_interface_with_no_pin_is_unpinned_and_not_stale() {
+    let fixture = Fixture::new(TABLE);
+    let app = measured(&fixture).await;
+    assert_eq!(state(&app).await, "current");
+    let app = App::new(NoPins(app.into_store()), Counter(10_000), clock())
+        .with_runner(Resolving(fixture.runner()));
+    let status = app.status().await.unwrap();
+    assert_eq!(status.measurements.len(), 1, "{:?}", status.measurements);
+    assert_eq!(status.measurements[0].state, MeasurementState::Unpinned);
+    assert_eq!(status.measurements[0].state.word(), "unpinned");
+}
+
+#[tokio::test]
+async fn a_run_of_an_interface_retired_since_stays_retired() {
+    let fixture = Fixture::new(TABLE);
+    let mut app = measured(&fixture).await;
+    // the Harness cites the Interface's Item: it goes first
+    app.retire_harness("core", "tests").await.unwrap();
+    app.retire_interface("core", "api").await.unwrap();
+    let standing = standing(&app).await;
+    assert_eq!(standing.state, MeasurementState::Retired);
+    assert_eq!(standing.state.word(), "retired");
+    assert_eq!(standing.interface.as_deref(), Some("api (retired)"));
 }

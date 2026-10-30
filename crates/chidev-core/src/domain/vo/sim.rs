@@ -13,8 +13,9 @@ use thiserror::Error;
 use super::clause::ClauseLabel;
 use super::digest::Digest;
 use super::id::{ClauseId, ContractId, InterfaceId};
-use super::measure::{SettingsDigest, SettingsNow};
+use super::measure::{BuiltPart, SettingsDigest, SettingsNow, StampPart};
 use super::name::AssetName;
+use super::pin_basis::moved_keys;
 use super::revision::Revision;
 
 /// The name a sim Harness gives its one Case that stands for the seeded sweep.
@@ -527,11 +528,33 @@ impl SimStamp {
         &self.settings
     }
 
-    /// Whether this is the stamp of a simulation that stood on `basis` under the settings that are `settings` now.
-    /// Only settings that are known are compared; settings that are not (`Unconfigured`, `Unreadable`) hold for
-    /// nothing.
-    pub fn holds(&self, basis: &SimBasis, settings: &SettingsNow) -> bool {
-        self.basis == *basis && matches!(settings, SettingsNow::Known(s) if *s == self.settings)
+    /// What of this stamp has moved, given the `basis` the model gives now and the `settings` that are now: the
+    /// script of the Harness, then each Contract and then each Interface it builds, by id, then the settings. An
+    /// Interface that moved in two ways says both. Empty when this is the stamp of a simulation that stood on
+    /// `basis` under those settings. Settings that are not known (`Unconfigured`, `Unreadable`) are a part that
+    /// moved, for nothing shows the run was made under them.
+    pub fn moved(&self, basis: &SimBasis, settings: &SettingsNow) -> Vec<StampPart> {
+        let was = &self.basis;
+        let mut parts = Vec::new();
+        if was.harness != basis.harness {
+            parts.push(StampPart::Script);
+        }
+        parts.extend(moved_keys(&was.contracts, &basis.contracts).map(StampPart::Contract));
+        for id in moved_keys(&was.interfaces, &basis.interfaces) {
+            match (was.interfaces.get(&id), basis.interfaces.get(&id)) {
+                (Some((was_revision, was_code)), Some((revision, code))) => {
+                    if was_revision != revision {
+                        parts.push(StampPart::Built(id, BuiltPart::Revision));
+                    }
+                    if was_code != code {
+                        parts.push(StampPart::Built(id, BuiltPart::PinnedCode));
+                    }
+                }
+                _ => parts.push(StampPart::Built(id, BuiltPart::Membership)),
+            }
+        }
+        parts.extend(settings.moved_from(&self.settings));
+        parts
     }
 
     /// One digest of the whole stamp, for a person to compare two stamps by eye.
@@ -556,6 +579,7 @@ impl SimStamp {
 mod tests {
     use super::*;
     use crate::domain::vo::id::test_uuid;
+    use crate::domain::vo::measure::SettingsGap;
 
     fn label(n: u32) -> ClauseLabel {
         ClauseLabel::try_from(format!("C{n}").as_str()).unwrap()
@@ -915,24 +939,110 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_holds_for_what_it_ran_and_not_for_any_moved_part() {
-        let stamp = SimStamp::new(basis(Revision::first(), Some(b"code")), settings("s1"));
+    fn a_stamp_says_which_part_moved_and_nothing_when_none_did() {
+        let first = Revision::first();
+        let stamp = SimStamp::new(basis(first, Some(b"code")), settings("s1"));
         let now = known("s1");
-        assert!(stamp.holds(&basis(Revision::first(), Some(b"code")), &now));
-        assert!(!stamp.holds(&basis(Revision::first(), Some(b"code")), &known("s2")));
-        assert!(!stamp.holds(&basis(Revision::first().next(), Some(b"code")), &now));
-        assert!(!stamp.holds(&basis(Revision::first(), Some(b"other")), &now));
-        assert!(!stamp.holds(&basis(Revision::first(), None), &now));
-        // settings that cannot be compared hold for nothing, whatever else is as it was
-        for now in [
-            SettingsNow::Unconfigured,
-            SettingsNow::Unreadable("no layout".to_string()),
-        ] {
-            assert!(
-                !stamp.holds(&basis(Revision::first(), Some(b"code")), &now),
-                "{now:?}"
+        let contract = ContractId::from_uuid(test_uuid(1));
+        let built = InterfaceId::from_uuid(test_uuid(2));
+        let moved = |basis: SimBasis, now: &SettingsNow| stamp.moved(&basis, now);
+        assert_eq!(moved(basis(first, Some(b"code")), &now), []);
+        // the script of the Harness
+        assert_eq!(
+            moved(basis(first.next(), Some(b"code")), &now),
+            [StampPart::Script]
+        );
+        // a Contract it cites a Clause of: changed, no longer cited, or cited anew
+        let mut changed = basis(first, Some(b"code"));
+        changed.contracts.insert(contract, first.next());
+        assert_eq!(moved(changed, &now), [StampPart::Contract(contract)]);
+        let mut dropped = basis(first, Some(b"code"));
+        dropped.contracts.remove(&contract);
+        assert_eq!(moved(dropped, &now), [StampPart::Contract(contract)]);
+        let other = ContractId::from_uuid(test_uuid(7));
+        let mut added = basis(first, Some(b"code"));
+        added.contracts.insert(other, first);
+        assert_eq!(moved(added, &now), [StampPart::Contract(other)]);
+        // an Interface it builds: its revision
+        let mut revised = basis(first, Some(b"code"));
+        revised
+            .interfaces
+            .insert(built, (first.next(), Some(Digest::of(b"code"))));
+        assert_eq!(
+            moved(revised, &now),
+            [StampPart::Built(built, BuiltPart::Revision)]
+        );
+        // the code pinned for it: other code, lost, or got
+        for pinned in [Some(&b"other"[..]), None] {
+            assert_eq!(
+                moved(basis(first, pinned), &now),
+                [StampPart::Built(built, BuiltPart::PinnedCode)]
             );
         }
+        let unpinned = SimStamp::new(basis(first, None), settings("s1"));
+        assert_eq!(
+            unpinned.moved(&basis(first, Some(b"code")), &now),
+            [StampPart::Built(built, BuiltPart::PinnedCode)]
+        );
+        // an Interface it builds that is no longer built, or is built anew
+        let mut left = basis(first, Some(b"code"));
+        left.interfaces.remove(&built);
+        assert_eq!(
+            moved(left, &now),
+            [StampPart::Built(built, BuiltPart::Membership)]
+        );
+        let entered = InterfaceId::from_uuid(test_uuid(8));
+        let mut joined = basis(first, Some(b"code"));
+        joined.interfaces.insert(entered, (first, None));
+        assert_eq!(
+            moved(joined, &now),
+            [StampPart::Built(entered, BuiltPart::Membership)]
+        );
+        // both the revision and the pinned code of one Interface
+        let mut both = basis(first, Some(b"other"));
+        both.interfaces
+            .insert(built, (first.next(), Some(Digest::of(b"other"))));
+        assert_eq!(
+            moved(both, &now),
+            [
+                StampPart::Built(built, BuiltPart::Revision),
+                StampPart::Built(built, BuiltPart::PinnedCode),
+            ]
+        );
+        // the settings: another digest, no `[measure]`, or ones the runner cannot read
+        assert_eq!(
+            moved(basis(first, Some(b"code")), &known("s2")),
+            [StampPart::Settings(SettingsGap::Differ)]
+        );
+        assert_eq!(
+            moved(basis(first, Some(b"code")), &SettingsNow::Unconfigured),
+            [StampPart::Settings(SettingsGap::Unconfigured)]
+        );
+        assert_eq!(
+            moved(
+                basis(first, Some(b"code")),
+                &SettingsNow::Unreadable("no layout".to_string())
+            ),
+            [StampPart::Settings(SettingsGap::Unreadable(
+                "no layout".to_string()
+            ))]
+        );
+        // several at once come in the order of the stamp: the script, the Contracts, the Interfaces, the settings
+        let mut many = basis(first.next(), Some(b"other"));
+        many.contracts.insert(contract, first.next());
+        assert_eq!(
+            moved(many, &known("s2")),
+            [
+                StampPart::Script,
+                StampPart::Contract(contract),
+                StampPart::Built(built, BuiltPart::PinnedCode),
+                StampPart::Settings(SettingsGap::Differ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_follows_every_part_of_the_stamp() {
         let print = |r: Revision, p: Option<&[u8]>, s: &str| {
             SimStamp::new(basis(r, p), settings(s)).fingerprint()
         };

@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 use thiserror::Error;
 
 use super::digest::Digest;
-use super::id::{HarnessId, InterfaceId};
-use super::pin_basis::PinBasis;
+use super::id::{ContractId, HarnessId, InterfaceId};
+use super::pin_basis::{PinBasis, StaleReason};
 use super::sim::SimStamp;
 
 /// Why a value of a measurement is refused.
@@ -475,6 +475,126 @@ impl SettingsNow {
             SettingsNow::Unreadable(why) => Some(format!("the settings cannot be read: {why}")),
         }
     }
+
+    /// The part of a stamp the settings now move, given the digest `was` the run was made with; none when they
+    /// are known and are the same. Settings that are not known are a part that moved, for nothing shows the run
+    /// was made under them. The one place that says so, for a mutation run and for a simulation.
+    pub(super) fn moved_from(&self, was: &SettingsDigest) -> Option<StampPart> {
+        let gap = match self {
+            SettingsNow::Known(now) if now == was => return None,
+            SettingsNow::Known(_) => SettingsGap::Differ,
+            SettingsNow::Unconfigured => SettingsGap::Unconfigured,
+            SettingsNow::Unreadable(why) => SettingsGap::Unreadable(why.clone()),
+        };
+        Some(StampPart::Settings(gap))
+    }
+}
+
+/// How the settings now stand against the ones a run was made with, when they are not the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsGap {
+    /// They read as another digest.
+    Differ,
+    /// The project has no `[measure]` table.
+    Unconfigured,
+    /// The runner cannot read them for the subject, and says why.
+    Unreadable(String),
+}
+
+/// How an Interface that a sim Harness builds moved since a simulation was run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltPart {
+    /// The Interface changed revision.
+    Revision,
+    /// The code pinned for it changed, or it got a Pin or lost it.
+    PinnedCode,
+    /// The Harness began to build the Interface, or no longer builds it.
+    Membership,
+}
+
+/// An asset that has a name a person gives it, which a moved part of a stamp is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetRef {
+    /// A Contract.
+    Contract(ContractId),
+    /// An Interface.
+    Interface(InterfaceId),
+    /// A Harness.
+    Harness(HarnessId),
+}
+
+impl AssetRef {
+    /// The id of the asset as a uuid, whichever it is.
+    pub fn as_uuid(self) -> uuid::Uuid {
+        match self {
+            AssetRef::Contract(i) => i.as_uuid(),
+            AssetRef::Interface(i) => i.as_uuid(),
+            AssetRef::Harness(i) => i.as_uuid(),
+        }
+    }
+}
+
+/// One part of what a measurement stands on that has moved since the run: the one kind of part for a mutation run
+/// and for a simulation, so that a status and a finding say what moved in the same words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StampPart {
+    /// A mutation run: a part of the basis of the Pin it stood on moved.
+    Pin(StaleReason),
+    /// A mutation run: the pinned code of the measured Interface.
+    Code,
+    /// A simulation: the revision of the sim Harness itself (its script and its Cases). The basis of a simulation
+    /// has no id for it, for the Harness is the subject.
+    Script,
+    /// A simulation: a Contract that its Cases cite a Clause of changed, is gone, or is newly cited.
+    Contract(ContractId),
+    /// A simulation: an Interface that it builds moved in the way the part says.
+    Built(InterfaceId, BuiltPart),
+    /// The settings the run was made under, as they are now.
+    Settings(SettingsGap),
+    /// The subject is no longer in the model, so there is no basis to compare with. An Interface that is in the
+    /// model with no Pin is not this: nothing is compared for it, and it is not stale for want of the subject.
+    Gone,
+}
+
+impl StampPart {
+    /// The word for it, one of `code`, `interface`, `harness`, `contract`, `used-interface`, `script`,
+    /// `built-revision`, `built-code`, `builds`, `settings` and `gone`: the one place that names the parts in words,
+    /// for a finding and for the status. A Contract a Pin stood on and a Contract a simulation cites both say
+    /// `contract`: each is a cited Contract that moved.
+    pub fn word(&self) -> &'static str {
+        match self {
+            StampPart::Code => "code",
+            StampPart::Pin(StaleReason::Interface) => "interface",
+            StampPart::Pin(StaleReason::Harness(_)) => "harness",
+            StampPart::Pin(StaleReason::Contract(_)) | StampPart::Contract(_) => "contract",
+            StampPart::Pin(StaleReason::UsedInterface(_)) => "used-interface",
+            StampPart::Script => "script",
+            StampPart::Built(_, BuiltPart::Revision) => "built-revision",
+            StampPart::Built(_, BuiltPart::PinnedCode) => "built-code",
+            StampPart::Built(_, BuiltPart::Membership) => "builds",
+            StampPart::Settings(_) => "settings",
+            StampPart::Gone => "gone",
+        }
+    }
+
+    /// The named asset the part is about; none for a part that is not about one. The one source of which parts
+    /// name an asset.
+    pub fn asset(&self) -> Option<AssetRef> {
+        match self {
+            StampPart::Pin(StaleReason::Harness(id)) => Some(AssetRef::Harness(*id)),
+            StampPart::Pin(StaleReason::Contract(id)) | StampPart::Contract(id) => {
+                Some(AssetRef::Contract(*id))
+            }
+            StampPart::Pin(StaleReason::UsedInterface(id)) | StampPart::Built(id, _) => {
+                Some(AssetRef::Interface(*id))
+            }
+            StampPart::Pin(StaleReason::Interface)
+            | StampPart::Code
+            | StampPart::Script
+            | StampPart::Settings(_)
+            | StampPart::Gone => None,
+        }
+    }
 }
 
 /// What a measurement stands on: the code that was measured, what the Pin of that code stood on, and the settings
@@ -513,13 +633,19 @@ impl MeasureStamp {
         &self.settings
     }
 
-    /// Whether this is the stamp of measuring `code` standing on `basis` under the settings that are `settings`
-    /// now. Only settings that are known are compared; settings that are not (`Unconfigured`, `Unreadable`) hold
-    /// for nothing.
-    pub fn holds(&self, code: Digest, basis: &PinBasis, settings: &SettingsNow) -> bool {
-        self.code == code
-            && self.basis == *basis
-            && matches!(settings, SettingsNow::Known(s) if *s == self.settings)
+    /// What of this stamp has moved, given the `code` pinned now, the `basis` the Pin stands on now and the
+    /// `settings` that are now: the code, then each part of the basis as [`PinBasis::moved`] gives it, then the
+    /// settings. Empty when this is the stamp of measuring `code` standing on `basis` under those settings. Settings
+    /// that are not known (`Unconfigured`, `Unreadable`) are a part that moved, for nothing shows the run was made
+    /// under them.
+    pub fn moved(&self, code: Digest, basis: &PinBasis, settings: &SettingsNow) -> Vec<StampPart> {
+        let mut parts = Vec::new();
+        if self.code != code {
+            parts.push(StampPart::Code);
+        }
+        parts.extend(self.basis.moved(basis).into_iter().map(StampPart::Pin));
+        parts.extend(settings.moved_from(&self.settings));
+        parts
     }
 
     /// One digest of the whole stamp, for a person to compare two stamps by eye.
@@ -620,7 +746,7 @@ fn rows<K: std::fmt::Display>(map: &BTreeMap<K, super::revision::Revision>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::vo::id::{HarnessId, test_uuid};
+    use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId, test_uuid};
     use crate::domain::vo::revision::Revision;
 
     #[test]
@@ -695,29 +821,95 @@ mod tests {
         SettingsNow::Known(settings(word))
     }
 
-    #[test]
-    fn a_stamp_holds_for_what_it_measured_and_not_for_a_moved_part() {
-        let code = Digest::of(b"code");
-        let stamp = MeasureStamp::new(code, basis(Revision::first()), settings("settings-1"));
-        let now = known("settings-1");
-        assert!(stamp.holds(code, &basis(Revision::first()), &now));
-        assert!(!stamp.holds(code, &basis(Revision::first()), &known("settings-2")));
-        assert!(!stamp.holds(Digest::of(b"other"), &basis(Revision::first()), &now));
-        assert!(!stamp.holds(code, &basis(Revision::first().next()), &now));
+    /// A basis of the Interface at `interface`, Harness 4 at `harness`, Contract 3 at `contract` and the other
+    /// Interface 2 at `used`.
+    fn whole(
+        interface: Revision,
+        harness: Revision,
+        contract: Revision,
+        used: Revision,
+    ) -> PinBasis {
+        PinBasis::new(
+            interface,
+            BTreeMap::from([(HarnessId::from_uuid(test_uuid(4)), harness)]),
+            BTreeMap::from([(ContractId::from_uuid(test_uuid(3)), contract)]),
+            BTreeMap::from([(InterfaceId::from_uuid(test_uuid(2)), used)]),
+        )
     }
 
     #[test]
-    fn settings_that_cannot_be_compared_hold_for_nothing_and_say_why() {
+    fn a_stamp_says_which_part_moved_and_nothing_when_none_did() {
+        let first = Revision::first();
+        let next = first.next();
+        let code = Digest::of(b"code");
+        let stamp = MeasureStamp::new(code, whole(first, first, first, first), settings("s1"));
+        let moved =
+            |code: Digest, basis: PinBasis, now: &SettingsNow| stamp.moved(code, &basis, now);
+        let same = whole(first, first, first, first);
+        assert_eq!(moved(code, same.clone(), &known("s1")), []);
+        // each part alone moves only that part
+        assert_eq!(
+            moved(Digest::of(b"other"), same.clone(), &known("s1")),
+            [StampPart::Code]
+        );
+        assert_eq!(
+            moved(code, whole(next, first, first, first), &known("s1")),
+            [StampPart::Pin(StaleReason::Interface)]
+        );
+        assert_eq!(
+            moved(code, whole(first, next, first, first), &known("s1")),
+            [StampPart::Pin(StaleReason::Harness(HarnessId::from_uuid(
+                test_uuid(4)
+            )))]
+        );
+        assert_eq!(
+            moved(code, whole(first, first, next, first), &known("s1")),
+            [StampPart::Pin(StaleReason::Contract(
+                ContractId::from_uuid(test_uuid(3))
+            ))]
+        );
+        assert_eq!(
+            moved(code, whole(first, first, first, next), &known("s1")),
+            [StampPart::Pin(StaleReason::UsedInterface(
+                InterfaceId::from_uuid(test_uuid(2))
+            ))]
+        );
+        assert_eq!(
+            moved(code, same.clone(), &known("s2")),
+            [StampPart::Settings(SettingsGap::Differ)]
+        );
+        // several at once come in the order of the stamp: the code, the basis, the settings
+        assert_eq!(
+            moved(
+                Digest::of(b"other"),
+                whole(next, next, first, first),
+                &known("s2")
+            ),
+            [
+                StampPart::Code,
+                StampPart::Pin(StaleReason::Interface),
+                StampPart::Pin(StaleReason::Harness(HarnessId::from_uuid(test_uuid(4)))),
+                StampPart::Settings(SettingsGap::Differ),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_that_cannot_be_compared_are_a_part_that_moved_and_say_why() {
         let code = Digest::of(b"code");
         let stamp = MeasureStamp::new(code, basis(Revision::first()), settings("s"));
-        // everything else is as measured, and still the stamp does not hold
+        // everything else is as measured, and still the stamp has a part that moved
         let unreadable = SettingsNow::Unreadable("no layout".to_string());
-        for now in [SettingsNow::Unconfigured, unreadable.clone()] {
-            assert!(
-                !stamp.holds(code, &basis(Revision::first()), &now),
-                "{now:?}"
-            );
-        }
+        assert_eq!(
+            stamp.moved(code, &basis(Revision::first()), &SettingsNow::Unconfigured),
+            [StampPart::Settings(SettingsGap::Unconfigured)]
+        );
+        assert_eq!(
+            stamp.moved(code, &basis(Revision::first()), &unreadable),
+            [StampPart::Settings(SettingsGap::Unreadable(
+                "no layout".to_string()
+            ))]
+        );
         assert_eq!(
             SettingsNow::Unconfigured.why_not_compared().as_deref(),
             Some("measure is not configured")
@@ -759,5 +951,67 @@ mod tests {
         assert_ne!(base, print(Digest::of(b"x"), Revision::first(), "s"));
         assert_ne!(base, print(code, Revision::first().next(), "s"));
         assert_ne!(base, print(code, Revision::first(), "t"));
+    }
+
+    #[test]
+    fn every_part_has_its_word_and_only_the_parts_about_an_asset_name_one() {
+        let h = HarnessId::from_uuid(test_uuid(4));
+        let c = ContractId::from_uuid(test_uuid(3));
+        let i = InterfaceId::from_uuid(test_uuid(2));
+        let unreadable = || SettingsGap::Unreadable("why".to_string());
+        for (part, word, asset) in [
+            (StampPart::Code, "code", None),
+            (StampPart::Pin(StaleReason::Interface), "interface", None),
+            (
+                StampPart::Pin(StaleReason::Harness(h)),
+                "harness",
+                Some(AssetRef::Harness(h)),
+            ),
+            (
+                StampPart::Pin(StaleReason::Contract(c)),
+                "contract",
+                Some(AssetRef::Contract(c)),
+            ),
+            (
+                StampPart::Pin(StaleReason::UsedInterface(i)),
+                "used-interface",
+                Some(AssetRef::Interface(i)),
+            ),
+            (StampPart::Script, "script", None),
+            (
+                StampPart::Contract(c),
+                "contract",
+                Some(AssetRef::Contract(c)),
+            ),
+            (
+                StampPart::Built(i, BuiltPart::Revision),
+                "built-revision",
+                Some(AssetRef::Interface(i)),
+            ),
+            (
+                StampPart::Built(i, BuiltPart::PinnedCode),
+                "built-code",
+                Some(AssetRef::Interface(i)),
+            ),
+            (
+                StampPart::Built(i, BuiltPart::Membership),
+                "builds",
+                Some(AssetRef::Interface(i)),
+            ),
+            (StampPart::Settings(SettingsGap::Differ), "settings", None),
+            (
+                StampPart::Settings(SettingsGap::Unconfigured),
+                "settings",
+                None,
+            ),
+            (StampPart::Settings(unreadable()), "settings", None),
+            (StampPart::Gone, "gone", None),
+        ] {
+            assert_eq!(part.word(), word, "{part:?}");
+            assert_eq!(part.asset(), asset, "{part:?}");
+        }
+        assert_eq!(AssetRef::Harness(h).as_uuid(), h.as_uuid());
+        assert_eq!(AssetRef::Contract(c).as_uuid(), c.as_uuid());
+        assert_eq!(AssetRef::Interface(i).as_uuid(), i.as_uuid());
     }
 }

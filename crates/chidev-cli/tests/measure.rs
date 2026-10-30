@@ -252,6 +252,8 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     );
     assert_eq!(standing["interface"], "stock");
     assert_eq!(standing["state"], "current");
+    // a run that is current has nothing that moved
+    assert!(standing.get("moved").is_none(), "{standing:#?}");
     assert_eq!(standing["outcome"], "ok");
     assert_eq!(
         (standing["killed"].as_u64(), standing["survived"].as_u64()),
@@ -273,6 +275,16 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     assert_eq!(stale[0]["about"], "interface stock");
     assert!(findings(&moved[0], "mutation.survived").is_empty());
     assert_eq!(moved[1]["measurements"][0]["state"], "stale");
+    // the status says what moved: the Harness, by its name
+    assert_eq!(
+        moved[1]["measurements"][0]["moved"],
+        json!([{"part": "harness", "name": "stock-tests"}])
+    );
+    // and so does the finding
+    assert_eq!(
+        stale[0]["message"],
+        "the latest mutation run is stale: harness"
+    );
     assert_eq!(moved[1]["measurements"][0]["stamp"], m["stamp"]);
 
     // Measured again against the new Harness, the run is current and has a new stamp.

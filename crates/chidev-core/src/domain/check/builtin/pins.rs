@@ -9,9 +9,10 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding, Ground};
 use crate::domain::service::cite::revision_of;
-use crate::domain::service::pin::{StaleReason, Staleness, staleness};
+use crate::domain::service::pin::{Staleness, staleness};
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::InterfaceId;
+use crate::domain::vo::pin_basis::StaleReason;
 use crate::domain::vo::target::Target;
 
 /// A Pin whose basis moved.

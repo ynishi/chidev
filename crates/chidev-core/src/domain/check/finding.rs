@@ -3,9 +3,9 @@
 use super::descriptor::Descriptor;
 use super::level::Level;
 use crate::domain::entity::change_request::ChangeRequest;
-use crate::domain::service::pin::StaleReason;
 use crate::domain::vo::finding::{FindingRef, RuleId, Subject};
 use crate::domain::vo::id::{ChangeRequestId, ContractId, HarnessId, InterfaceId};
+use crate::domain::vo::pin_basis::StaleReason;
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::Target;

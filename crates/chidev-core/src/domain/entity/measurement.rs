@@ -200,6 +200,32 @@ impl Measurement {
         }
     }
 
+    /// It as a mutation run; none for a simulation.
+    pub fn as_mutation(&self) -> Option<MutationRun<'_>> {
+        match &self.body {
+            MeasureBody::Mutation {
+                interface, stamp, ..
+            } => Some(MutationRun {
+                interface: *interface,
+                stamp,
+                measurement: self,
+            }),
+            MeasureBody::Simulation { .. } => None,
+        }
+    }
+
+    /// It as a simulation; none for a mutation run.
+    pub fn as_simulation(&self) -> Option<SimulationRun<'_>> {
+        match &self.body {
+            MeasureBody::Simulation { harness, stamp, .. } => Some(SimulationRun {
+                harness: *harness,
+                stamp,
+                measurement: self,
+            }),
+            MeasureBody::Mutation { .. } => None,
+        }
+    }
+
     /// When it began.
     pub fn at(&self) -> Timestamp {
         self.at
@@ -279,6 +305,60 @@ impl Measurement {
         self.mutants()
             .iter()
             .filter(|m| m.outcome == MutantOutcome::Survived)
+    }
+}
+
+/// A measurement seen as the mutation run it is: the Interface whose code was measured and the stamp it stands on,
+/// with the measurement itself for what else a caller reads of it (the failure, the mutants). The kind is chosen
+/// once, by [`Measurement::as_mutation`], so what reads a mutation run has no other kind to turn away.
+#[derive(Debug, Clone, Copy)]
+pub struct MutationRun<'a> {
+    interface: InterfaceId,
+    stamp: &'a MeasureStamp,
+    measurement: &'a Measurement,
+}
+
+impl<'a> MutationRun<'a> {
+    /// The Interface whose code was measured.
+    pub fn interface(&self) -> InterfaceId {
+        self.interface
+    }
+
+    /// What the run stands on.
+    pub fn stamp(&self) -> &'a MeasureStamp {
+        self.stamp
+    }
+
+    /// The measurement.
+    pub fn measurement(&self) -> &'a Measurement {
+        self.measurement
+    }
+}
+
+/// A measurement seen as the simulation it is: the sim Harness that was run and the stamp it stands on, with the
+/// measurement itself for what else a caller reads of it (the failure, the outcome). The kind is chosen once, by
+/// [`Measurement::as_simulation`].
+#[derive(Debug, Clone, Copy)]
+pub struct SimulationRun<'a> {
+    harness: HarnessId,
+    stamp: &'a SimStamp,
+    measurement: &'a Measurement,
+}
+
+impl<'a> SimulationRun<'a> {
+    /// The sim Harness that was run.
+    pub fn harness(&self) -> HarnessId {
+        self.harness
+    }
+
+    /// What the simulation stands on.
+    pub fn stamp(&self) -> &'a SimStamp {
+        self.stamp
+    }
+
+    /// The measurement.
+    pub fn measurement(&self) -> &'a Measurement {
+        self.measurement
     }
 }
 
@@ -797,6 +877,32 @@ mod tests {
         assert!(sim.stamp().sim().is_some());
         assert!(sim.stamp().code().is_none());
         assert_eq!(sim.counts(), Counts::default());
+    }
+
+    #[test]
+    fn a_run_is_seen_as_its_own_kind_and_as_no_other() {
+        let mutation = Measurement::new(draft(
+            1,
+            iface(),
+            Digest::of(b"c"),
+            empty_basis(),
+            vec![result("a", 1, MutantOutcome::Killed)],
+        ))
+        .unwrap();
+        let run = mutation.as_mutation().expect("a mutation run");
+        assert_eq!(run.interface(), iface());
+        assert_eq!(StampRef::Code(run.stamp()), mutation.stamp());
+        assert_eq!(run.measurement(), &mutation);
+        assert!(mutation.as_simulation().is_none());
+
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        let sim =
+            Measurement::new(sim_draft(2, harness, sim_basis(), SimOutcome::default())).unwrap();
+        let run = sim.as_simulation().expect("a simulation");
+        assert_eq!(run.harness(), harness);
+        assert_eq!(StampRef::Sim(run.stamp()), sim.stamp());
+        assert_eq!(run.measurement(), &sim);
+        assert!(sim.as_mutation().is_none());
     }
 
     // --- correction

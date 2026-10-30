@@ -9,8 +9,8 @@ use crate::domain::entity::interface::Interface;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId, PinId};
-use crate::domain::vo::pin_basis::PinBasis;
+use crate::domain::vo::id::{InterfaceId, PinId};
+use crate::domain::vo::pin_basis::{PinBasis, StaleReason};
 
 /// Why the code of an Interface cannot be pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -21,19 +21,6 @@ pub enum PinError {
     /// No Case cites an Item of the Interface, so nothing checked the code.
     #[error("no case cites an item of the interface {0}")]
     Unchecked(InterfaceId),
-}
-
-/// Why a Pin no longer holds: what moved past the revision it recorded, or is gone, or is new.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleReason {
-    /// The pinned Interface changed.
-    Interface,
-    /// This Harness changed, is gone, or newly checks the Interface.
-    Harness(HarnessId),
-    /// This Contract changed, is gone, or is newly cited.
-    Contract(ContractId),
-    /// This other Interface changed, is gone, or is newly cited.
-    UsedInterface(InterfaceId),
 }
 
 /// Whether a Pin still holds.
@@ -71,14 +58,7 @@ pub fn staleness(pin: &Pin, project: &Project) -> Staleness {
         return Staleness::InterfaceGone;
     };
     let now = basis(project, context, pinned);
-    let was = pin.basis();
-    let mut why = Vec::new();
-    if now.interface() != was.interface() {
-        why.push(StaleReason::Interface);
-    }
-    why.extend(moved(was.harnesses(), now.harnesses()).map(StaleReason::Harness));
-    why.extend(moved(was.contracts(), now.contracts()).map(StaleReason::Contract));
-    why.extend(moved(was.used_interfaces(), now.used_interfaces()).map(StaleReason::UsedInterface));
+    let why = pin.basis().moved(&now);
     if why.is_empty() {
         Staleness::Fresh
     } else {
@@ -91,17 +71,6 @@ pub fn staleness(pin: &Pin, project: &Project) -> Staleness {
 /// is not in the Project.
 pub fn current_basis(project: &Project, interface: InterfaceId) -> Option<PinBasis> {
     find(project, interface).map(|(context, pinned)| basis(project, context, pinned))
-}
-
-/// The keys whose revision differs between `was` and `now`, or that are in only one of them, in order.
-fn moved<'a, K: Ord + Copy, V: PartialEq>(
-    was: &'a BTreeMap<K, V>,
-    now: &'a BTreeMap<K, V>,
-) -> impl Iterator<Item = K> + 'a {
-    let mut keys: Vec<K> = was.keys().chain(now.keys()).copied().collect();
-    keys.sort();
-    keys.dedup();
-    keys.into_iter().filter(move |k| was.get(k) != now.get(k))
 }
 
 /// The Context that has `interface`, and the Interface.
@@ -152,7 +121,9 @@ mod tests {
     use super::*;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseLabel, ClauseText};
-    use crate::domain::vo::id::{CaseId, ClauseId, ContextId, ItemId, ProjectId, test_uuid};
+    use crate::domain::vo::id::{
+        CaseId, ClauseId, ContextId, ContractId, HarnessId, ItemId, ProjectId, test_uuid,
+    };
     use crate::domain::vo::item_key::ItemKey;
     use crate::domain::vo::line_range::LineRange;
     use crate::domain::vo::name::ContextName;
