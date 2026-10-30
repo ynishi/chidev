@@ -1140,6 +1140,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 );
                 vec![self.unknown_name("rule", id, Ok(names), Vec::new())]
             }
+            // The names near it were found when the run was refused, from the checks the registry held then, so they
+            // are the error's own and need no read of the store.
+            AppError::UnknownRuleSelector { given, near } => {
+                let mut d = self.unknown_name("rule", given, Ok(Vec::new()), Vec::new());
+                d.did_you_mean.clone_from(near);
+                vec![d]
+            }
             AppError::ContextNotGiven => {
                 vec![Diagnostic::input(INPUT_MISSING_FIELD, None, "context")]
             }

@@ -20,7 +20,7 @@ use chidev_core::app::{
     ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
     RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
-use chidev_core::domain::check::{Level, Moment, renamed_key};
+use chidev_core::domain::check::{Level, Moment, Selector, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
 use chidev_core::domain::entity::crux::CruxField;
 use chidev_core::domain::entity::measurement::MeasurementField;
@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod diagnostic;
+use crate::Measure;
 use diagnostic::DiagnosticOut;
 
 /// One operation. `op` names it; the other fields are its arguments.
@@ -218,6 +219,7 @@ enum Op {
     /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. `kind` `examples`
     /// (with `harness`, a Harness of examples) builds the program the same way and runs each example of the Harness
     /// against it. Any of them takes as long as the project's build and tests, script or program take.
+    /// `chidev measure` runs it as a command.
     Measure {
         kind: MeasureKindDto,
         context: String,
@@ -237,10 +239,15 @@ enum Op {
     /// Runs every check on the project as it is; nothing is kept. With a `context`, the findings are those about
     /// that Context (what it holds, and the change requests that revise, retire or keep something in it), and
     /// `outside` is how many findings were left out (the Project's own, and change requests that name nothing of
-    /// the Context). The whole run is made either way.
+    /// the Context). With `rules`, the findings are those of a rule one of them matches, each written as a key of
+    /// the policy file is: a rule id (`examples.failed`) or a family with its dot (`examples.`); a selector that
+    /// matches no check is refused, and what is left out by either is counted in `outside`. The whole run is made either way. `chidev check`
+    /// runs it as a command.
     Check {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<String>,
     },
     /// Explicitly executes external check-moment programs and records this run.
     CheckRun,
@@ -2567,7 +2574,7 @@ struct StatusOut<'a> {
 #[derive(Debug, Serialize)]
 struct CheckOut<'a> {
     findings: Vec<FindingOut<'a>>,
-    /// How many findings the `context` asked for left out; only when one was asked for.
+    /// How many findings the `context` or the `rules` asked for left out; only when either was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     outside: Option<usize>,
 }
@@ -3165,34 +3172,135 @@ where
                 raw.as_ref(),
             ))),
         };
-        let mut result = match result {
-            Ok(Value::Object(mut fields)) => {
-                fields.insert("ok".to_string(), json!(true));
-                // serde matched raw["op"] against the variant's tag when reading Op,
-                // so raw["op"] is that variant's tag, derived once and never hand-written in replies.
-                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
-                    fields.insert("op".to_string(), op.clone());
-                }
-                Value::Object(fields)
-            }
-            Ok(other) => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("ok".to_string(), json!(true));
-                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
-                    obj.insert("op".to_string(), op.clone());
-                }
-                obj.insert("result".to_string(), other);
-                Value::Object(obj)
-            }
-            Err(refusal) => {
-                all_ok = false;
-                refused_out(app, refusal, raw.as_ref()).await
-            }
-        };
-        result["line"] = json!(k + 1);
+        let (result, ok) = result_line(app, result, raw.as_ref(), k + 1).await;
+        all_ok &= ok;
         writeln!(out, "{result}")?;
     }
     Ok(all_ok)
+}
+
+/// The line `exec` prints for the `line`th line of its input, whose outcome is `result` and which was read as `raw`
+/// (the JSON of the operation, to say where a refusal is about), and whether the operation was accepted.
+async fn result_line<S, G, E>(
+    app: &App<S, G, E>,
+    result: Result<Value, Refusal>,
+    raw: Option<&Value>,
+    line: usize,
+) -> (Value, bool)
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (mut result, ok) = match result {
+        Ok(Value::Object(mut fields)) => {
+            fields.insert("ok".to_string(), json!(true));
+            // serde matched raw["op"] against the variant's tag when reading Op,
+            // so raw["op"] is that variant's tag, derived once and never hand-written in replies.
+            if let Some(op) = raw.and_then(|r| r.get("op")) {
+                fields.insert("op".to_string(), op.clone());
+            }
+            (Value::Object(fields), true)
+        }
+        Ok(other) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("ok".to_string(), json!(true));
+            if let Some(op) = raw.and_then(|r| r.get("op")) {
+                obj.insert("op".to_string(), op.clone());
+            }
+            obj.insert("result".to_string(), other);
+            (Value::Object(obj), true)
+        }
+        Err(refusal) => (refused_out(app, refusal, raw).await, false),
+    };
+    result["line"] = json!(line);
+    (result, ok)
+}
+
+/// Writes the line `exec` would print for the operation `op` (its first line) given what the use case answered: the
+/// result and whether the command is to fail on it, or a refusal, which fails it. Returns whether the command
+/// succeeded. An error is only a failure to write.
+async fn command_line<S, G, E>(
+    app: &App<S, G, E>,
+    op: &Op,
+    result: Result<(Value, bool), AppError>,
+    out: &mut impl Write,
+) -> io::Result<bool>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    // the tag of the operation is what `exec` reads it by, so it is what the line says; an operation that cannot be
+    // written is no line to print, and is said as a failure to write
+    let raw = serde_json::to_value(op).map_err(io::Error::other)?;
+    let (result, failed) = match result {
+        Ok((value, failed)) => (Ok(value), failed),
+        Err(error) => (Err(Refusal::Refused(error)), true),
+    };
+    let (line, _) = result_line(app, result, Some(&raw), 1).await;
+    writeln!(out, "{line}")?;
+    Ok(!failed)
+}
+
+/// `chidev check`: runs the operation `check` and writes its result line to `out`, the line `exec` would print for
+/// the same operation. Returns whether the command succeeded: the operation was accepted and no finding in its
+/// answer is an `error` that no change request deals with. An error is only a failure to write.
+pub async fn check<S, G, E>(
+    app: &App<S, G, E>,
+    context: Option<String>,
+    rules: Vec<String>,
+    out: &mut impl Write,
+) -> io::Result<bool>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let result = check_op(app, context.as_deref(), &rules).await;
+    command_line(app, &Op::Check { context, rules }, result, out).await
+}
+
+/// `chidev measure`: runs the operation `measure` that the command `measure` stands for and writes its result line to
+/// `out`, the line `exec` would print for the same operation. Returns whether the command succeeded: the operation was
+/// accepted and the run it recorded did not fail. An error is only a failure to write. The one place the command is
+/// mapped to the shape of the operation.
+pub async fn measure<S, G, E>(
+    app: &mut App<S, G, E>,
+    measure: Measure,
+    out: &mut impl Write,
+) -> io::Result<bool>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (kind, context, interface, harness) = match measure {
+        Measure::Mutate {
+            context, interface, ..
+        } => (MeasureKindDto::Mutate, context, Some(interface), None),
+        Measure::Simulate {
+            context, harness, ..
+        } => (MeasureKindDto::Simulate, context, None, Some(harness)),
+        Measure::Examples {
+            context, harness, ..
+        } => (MeasureKindDto::Examples, context, None, Some(harness)),
+    };
+    let result = measure_op(
+        app,
+        kind,
+        &context,
+        interface.as_deref(),
+        harness.as_deref(),
+    )
+    .await;
+    let op = Op::Measure {
+        kind,
+        context,
+        interface,
+        harness,
+    };
+    command_line(app, &op, result, out).await
 }
 
 /// Why a line gave no result: it could not be read as an operation, or the use case refused it.
@@ -3284,6 +3392,157 @@ fn retire_out(done: &Checked<Retirement>) -> Result<Value, AppError> {
     })
 }
 
+/// The operation `measure`: the result, and whether the run it recorded failed (what `chidev measure` exits 1 for),
+/// read from the run and not from the result.
+async fn measure_op<S, G, E>(
+    app: &mut App<S, G, E>,
+    kind: MeasureKindDto,
+    context: &str,
+    interface: Option<&str>,
+    harness: Option<&str>,
+) -> Result<(Value, bool), AppError>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let done = match (MeasureKind::from(kind), interface, harness) {
+        (MeasureKind::Mutate, Some(interface), None) => {
+            app.measure(MeasureKind::Mutate, context, interface).await?
+        }
+        (MeasureKind::Simulate, None, Some(harness)) => app.simulate(context, harness).await?,
+        (MeasureKind::Examples, None, Some(harness)) => app.run_examples(context, harness).await?,
+        (MeasureKind::Mutate, _, _) => {
+            return Err(AppError::Input(
+                "a `mutate` measure takes an `interface` and no `harness`".to_string(),
+            ));
+        }
+        (MeasureKind::Simulate, _, _) => {
+            return Err(AppError::Input(
+                "a `simulate` measure takes a `harness` (a sim harness) and no `interface`"
+                    .to_string(),
+            ));
+        }
+        (MeasureKind::Examples, _, _) => {
+            return Err(AppError::Input(
+                "an `examples` measure takes a `harness` (a harness of examples) and no `interface`"
+                    .to_string(),
+            ));
+        }
+    };
+    let out = to_value(&MeasureOut {
+        kind: done.kind,
+        id: &done.id,
+        stamp: &done.stamp,
+        outcome: if done.failure.is_some() {
+            "failed"
+        } else {
+            "ok"
+        },
+        failure: done.failure.as_deref(),
+        sites: done.sites,
+        evaluated: done.evaluated,
+        capped: done.capped,
+        killed: done.counts.killed,
+        survived: done.counts.survived,
+        stillborn: done.counts.stillborn,
+        timeout: done.counts.timeout,
+        mutants: done
+            .mutants
+            .iter()
+            .map(|m| MutantOut {
+                key: &m.key,
+                site: &m.site,
+                operator: &m.operator,
+                change: &m.change,
+                outcome: m.outcome,
+            })
+            .collect(),
+        cases: done
+            .cases
+            .iter()
+            .map(|c| CaseOut {
+                case: &c.case,
+                exit: &c.exit,
+                findings: c
+                    .findings
+                    .iter()
+                    .map(|f| CaseFindingOut {
+                        step: f.step,
+                        clause: &f.clause,
+                        text: &f.text,
+                    })
+                    .collect(),
+                unreached: c
+                    .unreached
+                    .iter()
+                    .map(|u| UnreachedOut {
+                        clause: &u.clause,
+                        text: &u.text,
+                    })
+                    .collect(),
+                undecided: &c.undecided,
+                schedule: c.schedule.as_deref(),
+                trace: c.trace.as_deref(),
+            })
+            .collect(),
+        reruns: done
+            .reruns
+            .iter()
+            .map(|r| RerunOut {
+                case: &r.case,
+                result: r.result,
+            })
+            .collect(),
+        examples: done
+            .examples
+            .iter()
+            .map(|e| ExampleOut {
+                example: &e.example,
+                passed: e.passed,
+                reasons: &e.reasons,
+            })
+            .collect(),
+        evidence: done
+            .evidence
+            .iter()
+            .map(|e| StepOut {
+                step: &e.step,
+                command: &e.command,
+                exit_code: e.exit_code,
+                duration_ms: e.duration_ms,
+            })
+            .collect(),
+    })?;
+    Ok((out, done.failure.is_some()))
+}
+
+/// The operation `check`: the result, and whether a finding in it is still owed (what `chidev check` exits 1 for),
+/// as the use case says ([`chidev_core::app::CheckResult::owed`]) and not as the result reads.
+async fn check_op<S, G, E>(
+    app: &App<S, G, E>,
+    context: Option<&str>,
+    rules: &[String],
+) -> Result<(Value, bool), AppError>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let selectors = rules
+        .iter()
+        .map(|r| {
+            Selector::parse(r).map_err(|e| AppError::Input(format!("the rule selector `{r}`: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let checked = app.check(context, &selectors).await?;
+    let out = to_value(&CheckOut {
+        findings: findings_out(&checked.findings),
+        outside: (context.is_some() || !selectors.is_empty()).then_some(checked.outside),
+    })?;
+    Ok((out, checked.owed()))
+}
+
 async fn apply<S, G, E>(app: &mut App<S, G, E>, root: &Path, op: Op) -> Result<Value, AppError>
 where
     S: Store,
@@ -3306,119 +3565,15 @@ where
             interface,
             harness,
         } => {
-            let done = match (MeasureKind::from(kind), interface, harness) {
-                (MeasureKind::Mutate, Some(interface), None) => {
-                    app.measure(MeasureKind::Mutate, &context, &interface)
-                        .await?
-                }
-                (MeasureKind::Simulate, None, Some(harness)) => {
-                    app.simulate(&context, &harness).await?
-                }
-                (MeasureKind::Examples, None, Some(harness)) => {
-                    app.run_examples(&context, &harness).await?
-                }
-                (MeasureKind::Mutate, _, _) => {
-                    return Err(AppError::Input(
-                        "a `mutate` measure takes an `interface` and no `harness`".to_string(),
-                    ));
-                }
-                (MeasureKind::Simulate, _, _) => {
-                    return Err(AppError::Input(
-                        "a `simulate` measure takes a `harness` (a sim harness) and no `interface`"
-                            .to_string(),
-                    ));
-                }
-                (MeasureKind::Examples, _, _) => {
-                    return Err(AppError::Input(
-                        "an `examples` measure takes a `harness` (a harness of examples) and no `interface`"
-                            .to_string(),
-                    ));
-                }
-            };
-            to_value(&MeasureOut {
-                kind: done.kind,
-                id: &done.id,
-                stamp: &done.stamp,
-                outcome: if done.failure.is_some() {
-                    "failed"
-                } else {
-                    "ok"
-                },
-                failure: done.failure.as_deref(),
-                sites: done.sites,
-                evaluated: done.evaluated,
-                capped: done.capped,
-                killed: done.counts.killed,
-                survived: done.counts.survived,
-                stillborn: done.counts.stillborn,
-                timeout: done.counts.timeout,
-                mutants: done
-                    .mutants
-                    .iter()
-                    .map(|m| MutantOut {
-                        key: &m.key,
-                        site: &m.site,
-                        operator: &m.operator,
-                        change: &m.change,
-                        outcome: m.outcome,
-                    })
-                    .collect(),
-                cases: done
-                    .cases
-                    .iter()
-                    .map(|c| CaseOut {
-                        case: &c.case,
-                        exit: &c.exit,
-                        findings: c
-                            .findings
-                            .iter()
-                            .map(|f| CaseFindingOut {
-                                step: f.step,
-                                clause: &f.clause,
-                                text: &f.text,
-                            })
-                            .collect(),
-                        unreached: c
-                            .unreached
-                            .iter()
-                            .map(|u| UnreachedOut {
-                                clause: &u.clause,
-                                text: &u.text,
-                            })
-                            .collect(),
-                        undecided: &c.undecided,
-                        schedule: c.schedule.as_deref(),
-                        trace: c.trace.as_deref(),
-                    })
-                    .collect(),
-                reruns: done
-                    .reruns
-                    .iter()
-                    .map(|r| RerunOut {
-                        case: &r.case,
-                        result: r.result,
-                    })
-                    .collect(),
-                examples: done
-                    .examples
-                    .iter()
-                    .map(|e| ExampleOut {
-                        example: &e.example,
-                        passed: e.passed,
-                        reasons: &e.reasons,
-                    })
-                    .collect(),
-                evidence: done
-                    .evidence
-                    .iter()
-                    .map(|e| StepOut {
-                        step: &e.step,
-                        command: &e.command,
-                        exit_code: e.exit_code,
-                        duration_ms: e.duration_ms,
-                    })
-                    .collect(),
-            })?
+            measure_op(
+                app,
+                kind,
+                &context,
+                interface.as_deref(),
+                harness.as_deref(),
+            )
+            .await?
+            .0
         }
         Op::Init => to_value(&InitOut {
             project: app.init().await?.to_string(),
@@ -3925,13 +4080,7 @@ where
                     .collect(),
             })?
         }
-        Op::Check { context } => {
-            let checked = app.check(context.as_deref()).await?;
-            to_value(&CheckOut {
-                findings: findings_out(&checked.findings),
-                outside: context.as_ref().map(|_| checked.outside),
-            })?
-        }
+        Op::Check { context, rules } => check_op(app, context.as_deref(), &rules).await?.0,
         Op::CheckRules { moment, hook, rule } => {
             if hook.is_some() {
                 return Err(AppError::Input(renamed_key("hook", "moment")));

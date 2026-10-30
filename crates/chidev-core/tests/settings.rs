@@ -403,7 +403,7 @@ async fn said(app: &mut TestApp, rule: &str) -> (Vec<String>, Vec<String>) {
             .map(|f| f.message)
             .collect()
     };
-    let checked = of(app.check(None).await.unwrap().findings);
+    let checked = of(app.check(None, &[]).await.unwrap().findings);
     let asked = of(app.check_run().await.unwrap().findings);
     (checked, asked)
 }

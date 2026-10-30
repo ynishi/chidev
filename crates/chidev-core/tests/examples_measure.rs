@@ -294,7 +294,7 @@ impl Fixture {
     }
 
     async fn findings(&self) -> Vec<Found> {
-        self.app.check(None).await.unwrap().findings
+        self.app.check(None, &[]).await.unwrap().findings
     }
 
     /// The findings of the rules of the examples, as `(rule, message)`.

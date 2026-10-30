@@ -159,11 +159,7 @@ impl Registry {
     /// Every check with the level and parameters it runs with, in order: the builtin checks, then the judged
     /// rules.
     pub fn list(&self) -> Vec<CheckInfo<'_>> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
+        self.descriptors()
             .filter_map(|d| {
                 let r = self.policy.of(&d.id)?;
                 Some(CheckInfo {
@@ -173,6 +169,21 @@ impl Registry {
                 })
             })
             .collect()
+    }
+
+    /// The id of every registered check, builtin, judged and external: the ids a finding of a run can carry.
+    pub fn ids(&self) -> Vec<&RuleId> {
+        self.descriptors().map(|d| &d.id).collect()
+    }
+
+    /// The descriptor of every registered check, in order: the builtin checks, the judged rules, then the external
+    /// ones.
+    fn descriptors(&self) -> impl Iterator<Item = &Descriptor> {
+        self.checks
+            .iter()
+            .map(|c| c.descriptor())
+            .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .chain(self.external.iter().map(ExternalRule::descriptor))
     }
 
     /// External rules, in configured order.
@@ -192,22 +203,12 @@ impl Registry {
 
     /// Who runs the check `id`; none when there is no such check.
     pub fn executor_of(&self, id: &RuleId) -> Option<Executor> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
-            .find(|d| d.id == *id)
-            .map(|d| d.executor)
+        self.descriptors().find(|d| d.id == *id).map(|d| d.executor)
     }
 
     /// The help of the check `id`; none when there is no such check.
     pub fn help_of(&self, id: &RuleId) -> Option<&str> {
-        self.checks
-            .iter()
-            .map(|c| c.descriptor())
-            .chain(self.judged.iter().map(JudgedRule::descriptor))
-            .chain(self.external.iter().map(ExternalRule::descriptor))
+        self.descriptors()
             .find(|d| d.id == *id)
             .map(|d| d.help.as_ref())
     }
@@ -327,14 +328,26 @@ pub struct Judgment {
     pub rule_digest: Option<crate::domain::vo::digest::Digest>,
 }
 
-/// What a check of the whole state found, perhaps narrowed to one Context.
+/// What a check of the whole state found, perhaps narrowed to one Context and to some rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckResult {
-    /// The findings: all of them, or those about the Context asked for.
+    /// The findings: all of them, or those about the Context and of the rules asked for.
     pub findings: Vec<Found>,
-    /// How many findings the Context asked for left out; 0 when none was asked for. A finding about the Project as
-    /// a whole, or about a change request that names nothing of the Context, is about no Context in particular.
+    /// How many findings the Context or the rules asked for left out; 0 when neither was asked for. A finding about
+    /// the Project as a whole, or about a change request that names nothing of the Context, is about no Context in
+    /// particular.
     pub outside: usize,
+}
+
+impl CheckResult {
+    /// Whether a finding of the result is still owed: an `error` that no change request deals with (its state is
+    /// `open`). One a change request addresses, or has decided, is not: it is being dealt with, or was dealt with,
+    /// as the gate of a change counts what is still owed. What a command that answers by exit status exits 1 for.
+    pub fn owed(&self) -> bool {
+        self.findings
+            .iter()
+            .any(|f| f.level == Level::Error && f.state == FindingState::Open)
+    }
 }
 
 /// What a use case did and what the checks found while it did it.

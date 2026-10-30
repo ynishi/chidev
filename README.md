@@ -306,7 +306,20 @@ where they belong):
     what is answered is narrowed. `outside` counts the findings left out: those
     about the Project as a whole, about a change request that names nothing of the
     Context, and about something that is gone. It is in the answer only when a
-    `context` was given. A name that is no Context's is `input.unknown-name`.
+    `context` or `rules` was given. A name that is no Context's is `input.unknown-name`.
+  - `{"op":"check","rules":["examples.","cite.stale"]}` narrows the answer to some
+    rules. A selector is written as a key of the policy file is (`[checks."cite."]`,
+    `[checks."cite.stale"]`): a rule id (`cite.stale`), or a family with its dot
+    (`examples.` is every id that begins with `examples.`; `examples` without the dot
+    is an id, and `exam.` is a family none of whose ids begin so). The findings are
+    those of a rule one of the selectors matches. A selector that matches no builtin,
+    judged or external check is `input.unknown-name`, with the ids and families near it
+    as `did_you_mean`, and nothing is run. A malformed one (upper case, white space,
+    empty) is `input.invalid`.
+    `rules` and `context` together narrow both ways. The run is the whole one here
+    too, and `outside` counts what either left out.
+  - `chidev check` runs the operation as a command (see "Commands: `chidev check` and
+    `chidev measure`").
 - `view` reads the part of the model you ask for, as the model holds it (the
   Clauses' text, the Interfaces' source and Items, the Harnesses' source and Cases):
 
@@ -457,6 +470,42 @@ chidev schema external-reply  # what an external check answers. title "chidev-ex
   Rust) has its own promise: a field added does not change it, and only a change of
   meaning or shape (a field removed or renamed) does. A reader ignores a field it does
   not know and refuses a version it does not know.
+
+### Commands: `chidev check` and `chidev measure`
+
+Two operations can be run without a line of JSON. Each is the operation of the same name, run on the
+project the command is in (found as for `exec`) and kept in a store that is already there; it prints the line `exec`
+would print for that operation (`"ok"`, `"op"`, `"line"` 1 and the fields of the result, or `"ok":false` and
+`diagnostics`), so a program reads it as it reads `exec`.
+
+```text
+chidev check [RULE...] [--context <C>] [--store <db>]
+chidev measure mutate   --context <C> --interface <I> [--store <db>]
+chidev measure simulate --context <C> --harness <H>   [--store <db>]
+chidev measure examples --context <C> --harness <H>   [--store <db>]
+```
+
+- `chidev check` is `{"op":"check","context":"<C>","rules":["<RULE>",...]}`: every check on the project as it is,
+  nothing kept. Each `RULE` is written as in the `rules` of the operation: a rule id (`examples.failed`) or a family
+  with its dot (`examples.`), as a key of the policy file is. The `findings` are those of the rules selected, and all of
+  them when none is given. `--context` narrows them to a Context as `context` does. `outside` is in the output when
+  either was given. A `RULE` that no check has (builtin, judged or external) is refused with the ids near it, and so is
+  a Context that is not there.
+- `chidev measure <kind>` is `{"op":"measure","kind":"<kind>",...}`. There is a subcommand for each kind, and each
+  takes the asset its kind takes (`mutate` an Interface, `simulate` and `examples` a Harness) and no other, so a pair
+  that `exec` refuses cannot be written: the argument parser refuses it. It runs for as long as the build and the
+  tests, script or program take, and keeps the run.
+- **Exit status.** `check`: 0 when no finding in the output is an `error` that no change request deals with (its `state`
+  is `open`; one that a change request `addressed` or `decided` is not owed, as the gate of a change counts what is
+  still owed); 1 when one is, or the operation was refused (a rule or a Context that is not there, a selector that is
+  not well formed). `measure`: 0 when the run was recorded
+  and did not fail; 1 when it was recorded and failed (`"outcome":"failed"`), or the operation was refused (no Pin, a
+  name the Context has not, no `[measure]` table). 2 for both when nothing could be run: bad arguments, no project
+  or settings that cannot be read, or no store.
+- **The store must be there.** Unlike `exec`, which makes it (its `init` is the first operation of a project), these
+  commands open a store that exists and stop with status 2, naming the path, when it does not; they make neither the
+  file nor its directory. `--store` and the `[store]` setting say where, as for `exec`.
+- The `check_run` operation (it starts the external programs) and the other operations are run with `exec`.
 
 ## Change sets
 
@@ -740,6 +789,9 @@ against changes of itself (mutants) and keeps what the Harness noticed:
 ```text
 {"op":"measure","kind":"mutate","context":"inventory","interface":"stock"}
 ```
+
+`chidev measure mutate --context inventory --interface stock` runs it as a command (see "Commands: `chidev check`
+and `chidev measure`").
 
 It is an operation of its own and a record, never an edit or a moment of the checks: it takes as long as the project's
 build and tests take, once per mutant. It runs the code the Pin accepted (`pin`
@@ -1052,6 +1104,8 @@ stale (`sim.stale`).
 {"op":"measure","kind":"simulate","context":"ledger","harness":"bank-sim"}
 ```
 
+(`chidev measure simulate --context ledger --harness bank-sim` runs it as a command.)
+
 It copies the project under `.chidev/measure/<run>/` as a mutation run does,
 writes the code the Pins of the Interfaces the Harness builds accepted and
 the script (the Harness's source as the model holds it) over the copy, and runs
@@ -1224,6 +1278,8 @@ expected output makes the last run stale:
 ```text
 {"op":"measure","kind":"examples","context":"tally","harness":"acceptance"}
 ```
+
+(`chidev measure examples --context tally --harness acceptance` runs it as a command.)
 
 It copies the project under `.chidev/measure/<run>/`, writes the code the Pins of the Interfaces the Harness builds
 accepted over the copy, and runs `build` (a program that does not build is a failed run, `no_build`, and no example is
