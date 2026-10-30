@@ -16,8 +16,8 @@ use chidev_core::app::ports::measure::{
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
     App, AppError, CaseInput, ChangeRequestInput, ClauseInput, ClauseRef, CorrectInput,
-    DecisionMakerInput, ExampleInput, ExampleTexts, Found, Intent, ItemInput, ItemRef,
-    MeasurementState, Place, ResolutionInput,
+    DecisionMakerInput, ExampleInput, ExampleTexts, ExamplesSummary, Found, Intent, ItemInput,
+    ItemRef, MeasureSummary, MeasurementState, Place, ResolutionInput,
 };
 use chidev_core::domain::entity::measurement::MeasurementField;
 use chidev_core::domain::repository::ProjectRepository;
@@ -366,9 +366,13 @@ async fn when_every_example_passes_the_run_is_current_and_finds_nothing() {
     assert_eq!(standing.harness.as_deref(), Some("acceptance"));
     assert_eq!(standing.state, MeasurementState::Current);
     assert_eq!(standing.outcome, "ok");
-    let summary = standing.examples.expect("counts of the examples");
-    assert_eq!((summary.passed, summary.failed), (2, 0));
-    assert_eq!(standing.sim, None);
+    assert_eq!(
+        standing.summary,
+        MeasureSummary::Examples(ExamplesSummary {
+            passed: 2,
+            failed: 0
+        })
+    );
     // the runner was asked for the examples in the order of the Cases, as the model holds them
     assert_eq!(f.script.lock().unwrap().asked, [["a1", "a2"]]);
 }
@@ -402,8 +406,13 @@ async fn an_example_that_fails_is_a_finding_on_each_clause_its_case_cites() {
             .all(|f| f.message == "example `a2` failed: exit code: got 1")
     );
     let status = f.app.status().await.unwrap();
-    let summary = status.measurements[0].examples.unwrap();
-    assert_eq!((summary.passed, summary.failed), (1, 1));
+    assert_eq!(
+        status.measurements[0].summary,
+        MeasureSummary::Examples(ExamplesSummary {
+            passed: 1,
+            failed: 1
+        })
+    );
 }
 
 #[tokio::test]

@@ -35,8 +35,8 @@ mod judged;
 mod measure;
 pub use self::measure::{
     CaseLine, Coverage, EvidenceLine, ExampleLine, ExamplesSummary, FindingLine, MeasureDone,
-    MeasurementStanding, MeasurementState, MovedPart, MutantLine, RerunLine, SimSummary,
-    UnreachedLine,
+    MeasureSummary, MeasurementStanding, MeasurementState, MovedPart, MutantLine, RerunLine,
+    SimSummary, UnreachedLine,
 };
 use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};

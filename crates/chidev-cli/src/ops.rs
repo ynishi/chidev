@@ -13,12 +13,12 @@ use chidev_core::app::{
     ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
     DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
     ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
-    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasurementState, ModelSlice,
-    ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput,
-    PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining,
-    RenameInput, ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput,
-    RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
-    TargetRef, TransitionStatus, ViewInput,
+    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasureSummary,
+    MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue,
+    PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
+    RecommendationInput, RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding,
+    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
@@ -988,6 +988,86 @@ struct ExamplesSummaryOut {
     failed: u32,
 }
 
+/// How many mutants ended each way, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct CountsOut {
+    killed: u32,
+    survived: u32,
+    stillborn: u32,
+    timeout: u32,
+}
+
+/// What a run found, by its kind, in the result of `status`: each kind has its own keys, flattened into the entry.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum SummaryOut {
+    /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
+    /// out of a run that ended.
+    Mutation {
+        sites: u32,
+        evaluated: u32,
+        capped: bool,
+    },
+    /// A simulation.
+    Simulation { sim: SimSummaryOut },
+    /// A run of examples.
+    Examples { examples: ExamplesSummaryOut },
+}
+
+impl SummaryOut {
+    /// The keys of what a run found, and how many mutants ended each way (none did, for a run that is not a mutation
+    /// run).
+    fn of(summary: &MeasureSummary) -> (CountsOut, SummaryOut) {
+        match *summary {
+            MeasureSummary::Mutation { coverage, counts } => (
+                CountsOut {
+                    killed: counts.killed,
+                    survived: counts.survived,
+                    stillborn: counts.stillborn,
+                    timeout: counts.timeout,
+                },
+                SummaryOut::Mutation {
+                    sites: coverage.sites,
+                    evaluated: coverage.evaluated,
+                    capped: coverage.capped,
+                },
+            ),
+            MeasureSummary::Simulation(x) => (
+                CountsOut {
+                    killed: 0,
+                    survived: 0,
+                    stillborn: 0,
+                    timeout: 0,
+                },
+                SummaryOut::Simulation {
+                    sim: SimSummaryOut {
+                        cases: x.cases,
+                        findings: x.findings,
+                        unreached: x.unreached,
+                        abnormal: x.abnormal,
+                        reruns: x.reruns,
+                        differing: x.differing,
+                    },
+                },
+            ),
+            MeasureSummary::Examples(x) => (
+                CountsOut {
+                    killed: 0,
+                    survived: 0,
+                    stillborn: 0,
+                    timeout: 0,
+                },
+                SummaryOut::Examples {
+                    examples: ExamplesSummaryOut {
+                        passed: x.passed,
+                        failed: x.failed,
+                    },
+                },
+            ),
+        }
+    }
+}
+
 /// A mutant in the result of `measure`.
 #[derive(Debug, Serialize)]
 struct MutantOut<'a> {
@@ -1079,22 +1159,12 @@ struct MeasurementOut<'a> {
     moved: Vec<MovedOut<'a>>,
     outcome: &'static str,
     failure: Option<&'a str>,
-    /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
-    /// out of a run that ended.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sites: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    evaluated: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    capped: Option<bool>,
-    killed: u32,
-    survived: u32,
-    stillborn: u32,
-    timeout: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sim: Option<SimSummaryOut>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    examples: Option<ExamplesSummaryOut>,
+    /// How many mutants ended each way: all zero for a run that is not a mutation run.
+    #[serde(flatten)]
+    counts: CountsOut,
+    /// What the run found, by its kind.
+    #[serde(flatten)]
+    summary: SummaryOut,
     at: u64,
     /// The corrections made of its texts, in the order they were made; left out when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -3826,45 +3896,31 @@ where
                 measurements: s
                     .measurements
                     .iter()
-                    .map(|m| MeasurementOut {
-                        context: &m.context,
-                        interface: m.interface.as_deref(),
-                        harness: m.harness.as_deref(),
-                        kind: m.kind,
-                        id: &m.id,
-                        stamp: &m.stamp,
-                        state: m.state.word(),
-                        moved: match &m.state {
-                            MeasurementState::Stale(parts) => {
-                                parts.iter().map(MovedOut::from).collect()
-                            }
-                            MeasurementState::Current
-                            | MeasurementState::Retired
-                            | MeasurementState::Unpinned => Vec::new(),
-                        },
-                        outcome: m.outcome,
-                        failure: m.failure.as_deref(),
-                        sites: m.coverage.map(|c| c.sites),
-                        evaluated: m.coverage.map(|c| c.evaluated),
-                        capped: m.coverage.map(|c| c.capped),
-                        killed: m.counts.killed,
-                        survived: m.counts.survived,
-                        stillborn: m.counts.stillborn,
-                        timeout: m.counts.timeout,
-                        sim: m.sim.map(|x| SimSummaryOut {
-                            cases: x.cases,
-                            findings: x.findings,
-                            unreached: x.unreached,
-                            abnormal: x.abnormal,
-                            reruns: x.reruns,
-                            differing: x.differing,
-                        }),
-                        examples: m.examples.map(|x| ExamplesSummaryOut {
-                            passed: x.passed,
-                            failed: x.failed,
-                        }),
-                        at: m.at,
-                        corrections: m.corrections.iter().map(CorrectionOut::from).collect(),
+                    .map(|m| {
+                        let (counts, summary) = SummaryOut::of(&m.summary);
+                        MeasurementOut {
+                            context: &m.context,
+                            interface: m.interface.as_deref(),
+                            harness: m.harness.as_deref(),
+                            kind: m.kind,
+                            id: &m.id,
+                            stamp: &m.stamp,
+                            state: m.state.word(),
+                            moved: match &m.state {
+                                MeasurementState::Stale(parts) => {
+                                    parts.iter().map(MovedOut::from).collect()
+                                }
+                                MeasurementState::Current
+                                | MeasurementState::Retired
+                                | MeasurementState::Unpinned => Vec::new(),
+                            },
+                            outcome: m.outcome,
+                            failure: m.failure.as_deref(),
+                            counts,
+                            summary,
+                            at: m.at,
+                            corrections: m.corrections.iter().map(CorrectionOut::from).collect(),
+                        }
                     })
                     .collect(),
             })?

@@ -313,39 +313,52 @@ pub struct MeasurementStanding {
     pub outcome: &'static str,
     /// Why it failed, when it did.
     pub failure: Option<String>,
-    /// How many mutants ended each way.
-    pub counts: Counts,
-    /// How much of the code's sites a mutation run evaluated; none for a simulation.
-    pub coverage: Option<Coverage>,
-    /// What a simulation found; none for any other run.
-    pub sim: Option<SimSummary>,
-    /// What a run of examples found; none for any other run.
-    pub examples: Option<ExamplesSummary>,
+    /// What the run found, in numbers, by the kind of run.
+    pub summary: MeasureSummary,
     /// When the run began, in milliseconds since the epoch.
     pub at: u64,
     /// The corrections made of its texts, in the order they were made.
     pub corrections: Vec<CorrectionStatus>,
 }
 
-/// How many examples of a run of examples passed and failed; none for any other run.
-fn examples_summary_of(m: &Measurement) -> Option<ExamplesSummary> {
+/// What a run found, in numbers. A kind holds only the numbers that belong to it, so a simulation has no mutants
+/// counted and a run of examples has no sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasureSummary {
+    /// A mutation run: how much of the code it looked at, and how many mutants ended each way.
+    Mutation {
+        /// The places the provider found and the mutants evaluated.
+        coverage: Coverage,
+        /// How many mutants ended each way.
+        counts: Counts,
+    },
+    /// A simulation.
+    Simulation(SimSummary),
+    /// A run of examples.
+    Examples(ExamplesSummary),
+}
+
+/// What the run `m` found, in numbers; the one place that makes a [`MeasureSummary`].
+fn summary_of(m: &Measurement) -> MeasureSummary {
     let n = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
-    m.examples().map(|outcome| ExamplesSummary {
-        passed: n(outcome.passed()),
-        failed: n(outcome.records().len() - outcome.passed()),
-    })
+    match m.body() {
+        MeasureBody::Mutation { .. } => MeasureSummary::Mutation {
+            coverage: Coverage {
+                sites: m.sites(),
+                evaluated: m.evaluated(),
+                capped: m.capped(),
+            },
+            counts: m.counts(),
+        },
+        MeasureBody::Simulation { outcome, .. } => MeasureSummary::Simulation(sim_summary(outcome)),
+        MeasureBody::Examples { outcome, .. } => MeasureSummary::Examples(ExamplesSummary {
+            passed: n(outcome.passed()),
+            failed: n(outcome.records().len() - outcome.passed()),
+        }),
+    }
 }
 
-/// How much of the code a mutation run looked at; none for any other run.
-fn coverage_of(m: &Measurement) -> Option<Coverage> {
-    (m.kind() == MeasureKind::Mutate).then(|| Coverage {
-        sites: m.sites(),
-        evaluated: m.evaluated(),
-        capped: m.capped(),
-    })
-}
-
-fn summary_of(outcome: &SimOutcome) -> SimSummary {
+fn sim_summary(outcome: &SimOutcome) -> SimSummary {
     let n = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
     SimSummary {
         cases: n(outcome.cases.len()),
@@ -1002,10 +1015,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             "ok"
                         },
                         failure: m.failure().map(ToString::to_string),
-                        counts: m.counts(),
-                        coverage: coverage_of(m),
-                        sim: None,
-                        examples: None,
+                        summary: summary_of(m),
                         at: m.at().millis(),
                         corrections: m.corrections().iter().map(correction_status).collect(),
                     });
@@ -1035,10 +1045,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             "ok"
                         },
                         failure: m.failure().map(ToString::to_string),
-                        counts: m.counts(),
-                        coverage: None,
-                        sim: m.sim().map(summary_of),
-                        examples: None,
+                        summary: summary_of(m),
                         at: m.at().millis(),
                         corrections: m.corrections().iter().map(correction_status).collect(),
                     });
@@ -1068,10 +1075,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                             "ok"
                         },
                         failure: m.failure().map(ToString::to_string),
-                        counts: m.counts(),
-                        coverage: None,
-                        sim: None,
-                        examples: examples_summary_of(m),
+                        summary: summary_of(m),
                         at: m.at().millis(),
                         corrections: m.corrections().iter().map(correction_status).collect(),
                     });
@@ -1104,10 +1108,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     "ok"
                 },
                 failure: m.failure().map(ToString::to_string),
-                counts: m.counts(),
-                coverage: coverage_of(m),
-                sim: m.sim().map(summary_of),
-                examples: examples_summary_of(m),
+                summary: summary_of(m),
                 at: m.at().millis(),
                 corrections: m.corrections().iter().map(correction_status).collect(),
             });
