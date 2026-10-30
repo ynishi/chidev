@@ -238,11 +238,9 @@ impl ProcessRunner {
         harness: &AssetName,
         builds: &[AssetName],
     ) -> Result<SettingsDigest, RunnerError> {
-        Ok(
-            SimSettings::resolve(&self.config, &self.root, context, harness, builds)
-                .await?
-                .digest(),
-        )
+        SimSettings::resolve(&self.config, &self.root, context, harness, builds)
+            .await?
+            .digest()
     }
 
     /// Runs the simulation `request` asks for.
@@ -259,6 +257,7 @@ impl ProcessRunner {
             &builds,
         )
         .await?;
+        let digest = settings.digest()?;
         let mut interfaces = Vec::with_capacity(request.interfaces.len());
         for i in &request.interfaces {
             let path = settings
@@ -288,7 +287,7 @@ impl ProcessRunner {
         let finished = first.sim_steps(&plan, &mut progress).await;
         first.clean().await;
         Ok(SimulateReport {
-            settings: settings.digest(),
+            settings: digest,
             cases: progress.cases,
             reruns: progress.reruns,
             failure: finished.err(),

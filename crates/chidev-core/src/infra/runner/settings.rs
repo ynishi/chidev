@@ -231,14 +231,10 @@ impl CopySettings {
     }
 }
 
-/// The digest of `settings` written as JSON.
-fn digest_of<T: Serialize + std::fmt::Debug>(settings: &T) -> SettingsDigest {
-    // The settings are strings, numbers, and lists and maps of them, none of which fails to be written. Were one
-    // to, the digest is still of the whole value (its debug text), so it moves with the settings and never stands
-    // still for all of them.
-    let json =
-        serde_json::to_vec(settings).unwrap_or_else(|e| format!("{e}: {settings:?}").into_bytes());
-    SettingsDigest::new(Digest::of(&json))
+/// The digest of `settings` written as JSON. It errs when they cannot be written as JSON.
+fn digest_of<T: Serialize>(settings: &T) -> Result<SettingsDigest, RunnerError> {
+    let json = serde_json::to_vec(settings).map_err(|e| RunnerError::Digest(e.to_string()))?;
+    Ok(SettingsDigest::new(Digest::of(&json)))
 }
 
 /// What a mutation run of an Interface reads: how it copies, builds and tests, the provider that makes the mutants
@@ -320,8 +316,8 @@ impl MutationSettings {
         })
     }
 
-    /// The digest of the settings.
-    pub(super) fn digest(&self) -> SettingsDigest {
+    /// The digest of the settings; an error when they cannot be written down to be digested.
+    pub(super) fn digest(&self) -> Result<SettingsDigest, RunnerError> {
         digest_of(self)
     }
 
@@ -396,8 +392,8 @@ impl SimSettings {
         })
     }
 
-    /// The digest of the settings.
-    pub(super) fn digest(&self) -> SettingsDigest {
+    /// The digest of the settings; an error when they cannot be written down to be digested.
+    pub(super) fn digest(&self) -> Result<SettingsDigest, RunnerError> {
         digest_of(self)
     }
 
@@ -422,6 +418,21 @@ mod tests {
 
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn settings_that_cannot_be_written_as_json_cannot_be_digested() {
+        // a map whose key is not a string has no JSON form
+        let unwritable = BTreeMap::from([((1u8, 2u8), 3u8)]);
+        let error = digest_of(&unwritable).unwrap_err();
+        assert!(matches!(&error, RunnerError::Digest(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("the settings cannot be digested: "),
+            "{error}"
+        );
+        assert!(digest_of(&BTreeMap::from([("a", 1u8)])).is_ok());
     }
 
     #[tokio::test]

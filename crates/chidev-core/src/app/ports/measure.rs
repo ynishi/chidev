@@ -207,6 +207,9 @@ pub enum RunnerError {
     /// The name of a run is not one for a directory: it could lead out of the directory the runs work in.
     #[error("`{0}` is not a name for a run's directory")]
     BadRunName(String),
+    /// The settings cannot be written down to be digested.
+    #[error("the settings cannot be digested: {0}")]
+    Digest(String),
     /// A time limit of the configuration is more than the clock can count.
     #[error("{0}")]
     Deadline(String),

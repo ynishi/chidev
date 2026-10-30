@@ -54,6 +54,15 @@ fn settings_now(said: Result<SettingsDigest, RunnerError>) -> SettingsNow {
     }
 }
 
+/// The Harnesses a mutation run of `interface` runs, by [`tests_run`] over the basis of its Pin. An Interface with
+/// no basis (it is not pinned) has no tests to name, and its settings are unreadable for that reason.
+fn tests_of(p: &Project, interface: InterfaceId) -> Result<Vec<(&Harness, &Source)>, SettingsNow> {
+    let basis = current_basis(p, interface).ok_or_else(|| {
+        SettingsNow::Unreadable("the interface is not pinned, so no tests are known".to_string())
+    })?;
+    Ok(tests_run(p, &basis))
+}
+
 /// The Harnesses a mutation run of an Interface runs, which stand in the `basis` of its Pin: the tests that hold a
 /// source. A simulation does not test the code against the Interface (it is run by `simulate`), and examples are
 /// data, not tests, and have no code to read. One rule for the run and for the settings it is stamped with, so that
@@ -277,11 +286,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         continue;
                     };
                     let interface = self.name_of(i.as_uuid()).await?;
-                    let mut harnesses = Vec::new();
-                    for (h, _) in current_basis(p, i)
-                        .map(|basis| tests_run(p, &basis))
-                        .unwrap_or_default()
-                    {
+                    // An Interface with no basis is not asked about as if it ran no Harness: nothing says which
+                    // tests a run of it would run.
+                    let tests = match tests_of(p, i) {
+                        Ok(tests) => tests,
+                        Err(unreadable) => {
+                            settings.insert(i, unreadable);
+                            continue;
+                        }
+                    };
+                    let mut harnesses = Vec::with_capacity(tests.len());
+                    for (h, _) in tests {
                         harnesses.push(self.name_of(h.id().as_uuid()).await?);
                     }
                     let said = self
@@ -766,5 +781,29 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::vo::id::{ProjectId, test_uuid};
+
+    #[test]
+    fn an_interface_with_no_basis_has_unreadable_settings_and_is_not_asked_as_if_it_ran_no_tests() {
+        // an Interface the Project does not have (so it is not pinned) has no basis
+        let p = Project::new(ProjectId::from_uuid(test_uuid(1)));
+        let interface = InterfaceId::from_uuid(test_uuid(2));
+        let Err(now) = tests_of(&p, interface) else {
+            panic!("an Interface with no basis has no tests to name");
+        };
+        let SettingsNow::Unreadable(why) = &now else {
+            panic!("not unreadable: {now:?}");
+        };
+        assert!(why.contains("not pinned"), "{why}");
+        assert_eq!(
+            now.why_not_compared().as_deref(),
+            Some("the settings cannot be read: the interface is not pinned, so no tests are known")
+        );
     }
 }

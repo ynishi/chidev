@@ -173,11 +173,9 @@ impl ProcessRunner {
         interface: &AssetName,
         harnesses: &[AssetName],
     ) -> Result<SettingsDigest, RunnerError> {
-        Ok(
-            MutationSettings::resolve(&self.config, &self.root, context, interface, harnesses)
-                .await?
-                .digest(),
-        )
+        MutationSettings::resolve(&self.config, &self.root, context, interface, harnesses)
+            .await?
+            .digest()
     }
 
     /// The Items the provider of `lang` finds in `source`.
@@ -214,6 +212,7 @@ impl ProcessRunner {
             &names,
         )
         .await?;
+        let digest = settings.digest()?;
         let mut harnesses = Vec::with_capacity(request.harnesses.len());
         for h in &request.harnesses {
             let path = settings
@@ -244,7 +243,7 @@ impl ProcessRunner {
             .await;
         job.clean().await;
         Ok(MutateReport {
-            settings: settings.digest(),
+            settings: digest,
             sites: progress.sites,
             planned: progress.planned,
             mutants: progress.mutants,
