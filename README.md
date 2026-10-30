@@ -680,38 +680,15 @@ it is longer; `end of output` stands for a side with no such line; `expected a f
 that only the last line feed differs), `exit code: expected <e>, got <g>`, and, with a `.stderr`, `standard error
 differs ...` in the same form as the first.
 
-Plain mode prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for each example, then
+It prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for each example, then
 `<p> passed, <f> failed`. The exit code is 0 when every example passed, 1 when one failed, and 2 when nothing could be
 run (a usage error, a directory that cannot be read or has no example), with `chidev accept: <what>` on standard error
 and nothing on standard output.
 
-`chidev accept [--timeout <seconds>] --external --context <context> --harness <harness> -- <command> [<arg>...]` is
-an external check of the examples the model holds: those of a Harness of `examples` (see "Acceptance examples as a
-Harness"). It takes no `<dir>`. It reads the request (protocol 2) on standard input, finds the Harness `<harness>` of
-the Context `<context>` in the model sent, runs the example of each of its Cases as the plain mode runs a file of a
-directory, and writes one reply, `{"protocol":2,"findings":[...]}`, on standard output; it exits 0 whether or not an
-example failed. Register it like any external check, reading the Contracts and the Harnesses:
-
-```toml
-[external."ext.accept"]
-command = "chidev"
-args = ["accept", "--external", "--context", "tally", "--harness", "acceptance", "--", "./prog"]
-moments = ["pin", "resolve", "check"]
-timeout = 120
-reads = ["contracts", "harnesses"]
-gate = true
-```
-
-The registration's `timeout` bounds the whole run, and `--timeout` one example. A failing example gives one finding,
-`<name>: <reasons>`, about each Clause its Case cites; passing examples give nothing. A Clause is named by the
-citation, so its words do not have to name the example. These are usage errors, found before any example runs (exit
-2, nothing on standard output), which `chidev` records as a failed run: a request that is not JSON, is not protocol 2
-or asks for other than one rule; a model sent without `harnesses`; no Harness `<harness>` in the Context `<context>`;
-a Harness that is not of `examples`; and a cited Clause that is not in the model sent (`reads` without `contracts`).
-
-The examples are part of the model sent, so a change of one example (put again) makes the saved result `stale` in
-`status.external`, and the check runs again where it is registered. The program is still outside the model: re-run
-the check after changing it, as the paragraph on the recorded SHA-256 says.
+`chidev accept` is a runner for a person and keeps nothing. The examples the model holds, those of a Harness of
+`examples` (see "Acceptance examples as a Harness"), are run against the pinned program by `measure` of kind `examples`
+(see "Examples"), which keeps the run and has the checks judge it. Both judge one example by the same code, so they
+cannot differ on what a program that ended answered.
 
 ### Acceptance examples as a Harness
 
@@ -753,7 +730,7 @@ names the Interfaces whose pinned code the program is built from, as for a sim.
   code makes it one, and a put with `kind` `examples` makes a Harness of code one of examples: a change of kind is a
   new revision.
 - chidev runs the examples of a Harness at no moment of the checks. `measure` of kind `examples` runs them and keeps
-  the run (see "Examples"), and `chidev accept --external` runs them as an external check that keeps nothing.
+  the run (see "Examples"); `chidev accept <dir>` runs the files of a directory for a person and keeps nothing.
 
 ## Measurements
 
@@ -1252,7 +1229,8 @@ It copies the project under `.chidev/measure/<run>/`, writes the code the Pins o
 accepted over the copy, and runs `build` (a program that does not build is a failed run, `no_build`, and no example is
 run). It then starts the program once per example, in the order of the Cases, with the example's arguments after the
 words of `program`, its input on standard input, the copy as the working directory and the `env` of the table. The
-answer is judged as `chidev accept` judges it (see "Acceptance examples: `chidev accept`"): a program that gave no
+answer is judged as `chidev accept` judges it (see "Acceptance examples: `chidev accept`", which gives the
+reasons): a program that gave no
 answer (it cannot be started, it does not end within `timeout`, it writes over 4 MiB, a signal ends it) fails that
 example with one reason, and the run goes on. The run fails, keeping the examples it got through, when `build` fails or
 `budget` is used up. The Harness's own Cases are the examples: the working tree's example files are not read.
@@ -1309,9 +1287,9 @@ The checks read the record and run nothing (they are builtin):
 
 None of these is mandatory, so none refuses anything, and a failing example is reported at `pin` and `resolve` and
 does not stop either. A builtin check's `mandatory` is fixed by the check and a policy cannot raise it, so a project
-that wants a confirmation refused for a failing example registers an external gate (`chidev accept --external` is
-one; see "External checks"). A run that is stale is judged stale first, and a run that failed is judged by
-`examples.error` alone, so a failure of an old run is never reported for a program that has since changed.
+that wants a confirmation refused for a failing example registers an external gate of its own (see "External checks").
+A run that is stale is not judged for its failing examples, and a run that failed is not either: it is reported by
+`examples.error` alone, whether or not the model has moved since.
 
 ## Change requests
 

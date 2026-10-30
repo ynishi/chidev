@@ -132,3 +132,5 @@ Each is one change, verifiable on its own:
 - The vocabulary of what an environment observes is designed before a provider exists
   and may need a second version of its protocol; the record (slice 4) comes before the
   provider (slice 5) so that the model is settled first.
+- 2026-10-30: with slice 3 the external-check face of `chidev accept` is retired; examples are run by `measure` of
+  kind `examples`; `chidev accept <dir>` stays as a runner for a person.

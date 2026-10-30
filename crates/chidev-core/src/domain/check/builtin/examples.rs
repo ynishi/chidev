@@ -5,7 +5,7 @@
 //!
 //! None of them is mandatory, so none refuses a pin, a resolution or any other use case, whatever it finds: a
 //! builtin check's `mandatory` is fixed by the check and a policy cannot raise it. A project that wants a
-//! confirmation refused for a failing example registers an external gate (`chidev accept --external` is one).
+//! confirmation refused for a failing example registers an external gate of its own.
 //!
 //! A run that no longer describes the model (an example, a built Interface or the code pinned for it, or the
 //! settings moved) is judged stale before anything else, so a failing example of an old run is never reported for a

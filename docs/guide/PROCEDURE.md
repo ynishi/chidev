@@ -201,9 +201,9 @@ Crux names there waits on that question. `view` does not give a request's
    implementer runs it again, and `examples.failed` reports each failing example
    about every Clause its Case cites, at `check`, `pin` and `cr_resolve`. It
    reports and refuses nothing; to have a `pin` or a resolution refused for a
-   failing example, register `chidev accept --external` as an external check
-   that gates (see [Acceptance
-   examples](../../README.md#acceptance-examples-chidev-accept)).
+   failing example, register a program of the project's own as an external
+   check that gates (see
+   [External checks](../../README.md#external-checks)).
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. chidev does not run the tests
    itself; to have it refuse a `pin` while they fail, register a program that

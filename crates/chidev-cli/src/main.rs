@@ -69,12 +69,8 @@ enum Command {
     /// there). The program runs without a shell, from the current directory, in a process group that is killed when
     /// it ends. The exit code is 0 when every example passed, 1 when one failed, and 2 when nothing could be run.
     ///
-    /// With `--external --context NAME --harness NAME` (and no DIR) it is an external check (`protocol` 2, see the
-    /// README) of the Harness of kind `examples` of that name: it reads the request on standard input, where the
-    /// protocol puts it (chidev writes it there, not in a file), runs the examples the model sent holds in that
-    /// Harness, and writes the reply on standard output, a finding for each failing example and each Clause its Case
-    /// cites, and exits 0. Register it to read `contracts` and `harnesses`. Nothing is read from a directory: a
-    /// change of an example is a change of the model, and a result saved for the check goes stale with it.
+    /// The examples a Harness of kind `examples` holds in the model are run by `measure` of kind `examples`, which
+    /// keeps the run.
     Accept {
         /// The most seconds one example may take (1 to 86400, a day); a program that is still running is killed.
         #[arg(
@@ -84,19 +80,8 @@ enum Command {
             value_parser = clap::value_parser!(u64).range(1..=86_400)
         )]
         timeout: u64,
-        /// Answer as an external check: read a request on standard input, write a reply on standard output. The
-        /// examples are the ones of the Harness named by `--context` and `--harness`, not a directory's.
-        #[arg(long, requires_all = ["context", "harness"])]
-        external: bool,
-        /// The name of the Context that has the Harness (with `--external`).
-        #[arg(long, value_name = "NAME", requires = "external")]
-        context: Option<String>,
-        /// The name of the Harness of kind `examples` to run (with `--external`).
-        #[arg(long, value_name = "NAME", requires = "external")]
-        harness: Option<String>,
-        /// The directory of the examples, relative to the current directory (not with `--external`).
-        #[arg(required_unless_present = "external", conflicts_with = "external")]
-        dir: Option<PathBuf>,
+        /// The directory of the examples, relative to the current directory.
+        dir: PathBuf,
         /// The program to run and its first arguments, after `--`.
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<String>,
@@ -143,51 +128,18 @@ fn serve<E: std::fmt::Display>(
     }
 }
 
-/// What `chidev accept` runs: the examples of a directory, or the ones a Harness holds in the model an external
-/// check is sent.
-enum Source {
-    /// The directory of the examples, for a person.
-    Directory(PathBuf),
-    /// The Harness `harness` of the Context `context`, as an external check.
-    Harness { context: String, harness: String },
-}
-
-/// Runs the examples of `source` against `command` and prints what the mode asks for: lines for a person, or the
-/// reply of an external check. A failure to run at all is a message on standard error, the exit code 2 and nothing
-/// on standard output.
-async fn accept(source: Source, command: Vec<String>, timeout: u64) -> Result<bool, String> {
+/// Runs the examples of the directory `dir` against `command` and prints a line for each and a count. A failure to
+/// run at all is a message on standard error, the exit code 2 and nothing on standard output.
+async fn accept(dir: PathBuf, command: Vec<String>, timeout: u64) -> Result<bool, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let timeout = Duration::from_secs(timeout);
-    let (text, passed) = match source {
-        Source::Directory(dir) => {
-            let results = accept::run_all(&dir, &command, &cwd, timeout)
-                .await
-                .map_err(|e| e.to_string())?;
-            (
-                accept::lines(&results),
-                results.iter().all(|(_, verdict)| verdict.is_ok()),
-            )
-        }
-        Source::Harness { context, harness } => {
-            // the request is read and refused before any example runs: a call that cannot be answered runs nothing
-            let mut request = Vec::new();
-            io::stdin()
-                .lock()
-                .read_to_end(&mut request)
-                .map_err(|e| format!("cannot read the request: {e}"))?;
-            let call =
-                accept::Call::read(&request, &context, &harness).map_err(|e| e.to_string())?;
-            let results = call.run(&command, &cwd, timeout).await;
-            let reply = call.reply(&results);
-            let text = serde_json::to_string(&reply)
-                .map_err(|e| format!("cannot write the reply: {e}"))?;
-            // a reply is a protocol document: whatever it says, the check ran
-            (format!("{text}\n"), true)
-        }
-    };
+    let results = accept::run_all(&dir, &command, &cwd, timeout)
+        .await
+        .map_err(|e| e.to_string())?;
+    let passed = results.iter().all(|(_, verdict)| verdict.is_ok());
     let mut out = io::stdout().lock();
-    out.write_all(text.as_bytes())
+    out.write_all(accept::lines(&results).as_bytes())
         .and_then(|()| out.flush())
         .map_err(|e| format!("cannot write the report: {e}"))?;
     Ok(passed)
@@ -199,37 +151,16 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Accept {
             timeout,
-            external,
-            context,
-            harness,
             dir,
             command,
-        } => {
-            // clap holds the two forms apart (`dir`, or `--external` with `--context` and `--harness`)
-            let source = match (dir, external, context, harness) {
-                (Some(dir), false, None, None) => Ok(Source::Directory(dir)),
-                (None, true, Some(context), Some(harness)) => {
-                    Ok(Source::Harness { context, harness })
-                }
-                _ => {
-                    Err("give a directory, or --external with --context and --harness".to_string())
-                }
-            };
-            match source {
-                Ok(source) => match accept(source, command, timeout).await {
-                    Ok(true) => ExitCode::SUCCESS,
-                    Ok(false) => ExitCode::from(1),
-                    Err(e) => {
-                        eprintln!("chidev accept: {e}");
-                        ExitCode::from(2)
-                    }
-                },
-                Err(e) => {
-                    eprintln!("chidev accept: {e}");
-                    ExitCode::from(2)
-                }
+        } => match accept(dir, command, timeout).await {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(1),
+            Err(e) => {
+                eprintln!("chidev accept: {e}");
+                ExitCode::from(2)
             }
-        }
+        },
         Command::Schema { name } => {
             // a document to read, not a line of a stream: indented
             let printed = match name {
