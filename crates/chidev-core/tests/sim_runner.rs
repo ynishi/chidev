@@ -735,3 +735,30 @@ async fn an_interpreter_that_is_another_file_in_the_copy_than_at_the_root_fails_
     assert!(report.cases.is_empty());
     assert!(!project.0.join(WORK_DIR).join("run-moved").exists());
 }
+
+#[tokio::test]
+async fn an_interpreter_the_build_rewrites_in_the_copy_is_the_runs_and_not_a_moved_setting() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::new(GOOD);
+    std::fs::write(project.0.join("interp.sh"), "#!/bin/sh\nexec sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(
+        project.0.join("interp.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    // the copy has the interpreter as digested, and the build then writes another one over it
+    project.edit(|t| {
+        t.replace("interpreter = [\"sh\"]", "interpreter = [\"./interp.sh\"]")
+            .replace(
+                "\"grep -q PINNED prog.sh\"",
+                r##"'grep -q PINNED prog.sh && printf "#!/bin/sh\nexec sh \"\$@\" # rebuilt\n" > interp.sh'"##,
+            )
+    });
+    let report = project
+        .runner()
+        .simulate(&request("run-rebuilt", GOOD))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.cases.len(), 4);
+}

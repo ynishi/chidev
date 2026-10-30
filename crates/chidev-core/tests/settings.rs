@@ -388,7 +388,9 @@ async fn a_configured_runner_with_no_layout_for_the_interface_makes_the_run_stal
     for messages in [checked, asked] {
         assert_eq!(messages.len(), 1, "{messages:?}");
         assert!(
-            messages[0].contains("the settings cannot be read"),
+            messages[0].contains(
+                "the settings cannot be read: [[measure.layout]] has no entry for the interface `api` of `core`"
+            ),
             "{messages:?}"
         );
         assert!(!messages[0].contains("not configured"), "{messages:?}");
@@ -502,10 +504,10 @@ async fn a_subject_the_view_has_no_settings_for_is_stale() {
             .collect::<Vec<_>>()
     };
     let interface = runs[0].interface().expect("a mutation run");
-    // no entry for the Interface: its settings cannot be read
+    // no entry for the Interface: its settings were not read
     let messages = stale(&BTreeMap::new());
     assert_eq!(messages.len(), 1, "{messages:?}");
-    assert!(messages[0].contains("the settings cannot be read"));
+    assert!(messages[0].contains("the settings cannot be read: its settings were not read"));
     // the settings the run was made with: not stale
     let same = BTreeMap::from([(interface, SettingsNow::Known(*runs[0].stamp().settings()))]);
     assert!(stale(&same).is_empty());

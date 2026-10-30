@@ -924,7 +924,10 @@ mod tests {
         assert!(!stamp.holds(&basis(Revision::first(), Some(b"other")), &now));
         assert!(!stamp.holds(&basis(Revision::first(), None), &now));
         // settings that cannot be compared hold for nothing, whatever else is as it was
-        for now in [SettingsNow::Unconfigured, SettingsNow::Unreadable] {
+        for now in [
+            SettingsNow::Unconfigured,
+            SettingsNow::Unreadable("no layout".to_string()),
+        ] {
             assert!(
                 !stamp.holds(&basis(Revision::first(), Some(b"code")), &now),
                 "{now:?}"

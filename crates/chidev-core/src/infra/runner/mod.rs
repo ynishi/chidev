@@ -40,7 +40,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use self::config::{Config, RunDirs, WORK_DIR};
-use self::settings::{CopySettings, MutationSettings, Program, find};
+use self::settings::{CopySettings, MutationSettings, NotFound, Program, find};
 use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
@@ -317,13 +317,18 @@ impl Job<'_> {
             .collect()
     }
 
-    /// The command `program` in the copy: the file it names there, which is the one the run starts. It has to be
-    /// the executable the settings were digested with; a copy where the same name is another file (the code or a
-    /// Harness written over it, say) would be a run under other settings than the ones it is stamped with.
-    async fn command(&self, program: &Program) -> Result<Command, MeasureFailure> {
-        let found = find(&self.dirs.tree, program.program())
-            .await
-            .map_err(|e| self.fail(e.failure()))?;
+    /// Checks that `program` is, in the copy as it is made, the executable the settings were digested with. A copy
+    /// where the same name is another file (the code or a Harness written over it, say) would be a run under other
+    /// settings than the ones it is stamped with. It is asked once, after the copy is made and before any command
+    /// runs: what a command (the build) writes afterwards is part of the run and not a change of the settings. A
+    /// program the copy does not have yet is not asked about; [`Job::command`] stops the run if it is still not
+    /// there when it is started.
+    async fn verify(&self, program: &Program) -> Result<(), MeasureFailure> {
+        let found = match find(&self.dirs.tree, program.program()).await {
+            Ok(found) => found,
+            Err(NotFound::Locate(_)) => return Ok(()),
+            Err(e) => return Err(self.fail(e.failure())),
+        };
         let expected = program.executable().digest();
         if found.digest != expected {
             return Err(MeasureFailure::of(
@@ -336,6 +341,15 @@ impl Job<'_> {
                 ),
             ));
         }
+        Ok(())
+    }
+
+    /// The command `program` in the copy: the file it names there now, which is the one the run starts. Its digest
+    /// is the evidence of what ran.
+    async fn command(&self, program: &Program) -> Result<Command, MeasureFailure> {
+        let found = find(&self.dirs.tree, program.program())
+            .await
+            .map_err(|e| self.fail(e.failure()))?;
         Ok(Command {
             executable: found.executable,
             args: program.args().to_vec(),
@@ -482,6 +496,8 @@ impl Job<'_> {
         for (path, source) in harnesses {
             self.write(path, source).await?;
         }
+        self.verify(&self.copy.build).await?;
+        self.verify(&settings.test).await?;
         let env = self.env();
         let build = self.command(&self.copy.build).await?;
         let test = self.command(&settings.test).await?;
@@ -499,7 +515,21 @@ impl Job<'_> {
             self.deadline,
         )
         .await;
+        // The provider is started at the project's root, not in the copy, and after the baseline, which can take
+        // long: the file it started has to be the one the settings were digested with, or the run would be kept
+        // under a stamp that names another provider.
+        let ran = evidence.command_digest.clone();
         out.evidence.push(evidence);
+        let expected = settings.provider.executable().digest();
+        if let Some(ran) = ran.filter(|ran| ran != expected) {
+            return Err(MeasureFailure::of(
+                FailureKind::SettingsMoved,
+                format!(
+                    "`{}` is another file at the project's root (sha256 {ran}) than when the settings were digested (sha256 {expected})",
+                    settings.provider.program(),
+                ),
+            ));
+        }
         let mutants = asked?;
         out.sites = mutants.sites;
         // What the provider gave is what the run owes; the sites it did not give (the cap) are told apart from the
@@ -1109,6 +1139,53 @@ path = "check.txt"
             .await
             .unwrap();
         assert_eq!(report.failure, None, "{report:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_is_another_file_when_it_is_started_fails_the_run_as_settings_moved() {
+        // the baseline build changes the provider at the project's root after the settings were digested
+        let project = Project::new(TABLE);
+        let table = TABLE
+            .replace(
+                "env = {}",
+                &format!(
+                    "env = {{ PROVIDER = \"{}\" }}",
+                    project.0.join("provider.sh").display()
+                ),
+            )
+            .replace(
+                "build = [\"sh\", \"-c\", \"! grep -q BROKEN code.txt\"]",
+                "build = [\"sh\", \"-c\", \"echo '# moved' >> \\\"$PROVIDER\\\"\"]",
+            );
+        assert_ne!(table, TABLE);
+        project.table(&table);
+        let report = project
+            .runner()
+            .mutate_run(&request("run-provider-moved"))
+            .await
+            .unwrap();
+        let failure = report.failure.expect("a failure");
+        assert_eq!(failure.kind(), FailureKind::SettingsMoved, "{failure}");
+        assert!(failure.message().contains("`./provider.sh`"), "{failure}");
+        assert!(report.mutants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_program_the_build_rewrites_in_the_copy_is_the_runs_and_not_a_moved_setting() {
+        // the build writes `test.sh` in the copy, after the copy is made and its programs were found as digested
+        let project = Project::new(&scripted());
+        project.script(
+            "build.sh",
+            "#!/bin/sh\nprintf '#!/bin/sh\\ntrue # rebuilt\\n' > test.sh\n",
+        );
+        project.script("test.sh", "#!/bin/sh\ntrue\n");
+        let report = project
+            .runner()
+            .mutate_run(&request("run-rebuilt"))
+            .await
+            .unwrap();
+        assert_eq!(report.failure, None, "{report:#?}");
+        assert_eq!(report.mutants.len(), 3);
     }
 
     #[test]

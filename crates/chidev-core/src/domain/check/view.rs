@@ -42,16 +42,16 @@ pub struct CheckView<'a> {
     pub resolving: Option<ChangeRequestId>,
 }
 
-impl<'a> CheckView<'a> {
-    /// What the settings of a mutation run of `interface` are now; settings that cannot be read when the view has
+impl CheckView<'_> {
+    /// What the settings of a mutation run of `interface` are now; settings that were not read when the view has
     /// none for it.
-    pub fn measure_settings_now(&self, interface: InterfaceId) -> &'a SettingsNow {
+    pub fn measure_settings_now(&self, interface: InterfaceId) -> SettingsNow {
         SettingsNow::of(self.measure_settings, &interface)
     }
 
-    /// What the settings of a simulation of `harness` are now; settings that cannot be read when the view has none
+    /// What the settings of a simulation of `harness` are now; settings that were not read when the view has none
     /// for it.
-    pub fn sim_settings_now(&self, harness: HarnessId) -> &'a SettingsNow {
+    pub fn sim_settings_now(&self, harness: HarnessId) -> SettingsNow {
         SettingsNow::of(self.sim_settings, &harness)
     }
 }

@@ -867,8 +867,10 @@ layout of other things) does not. The host environment and `PATH`, the files of 
 other than the pinned code and the Harnesses, and the programs a later word of a command
 starts are not in it (`sh -c "cargo test"` digests `sh`), so a changed toolchain is in
 general not seen. A run whose settings cannot be read now (no `[measure]`, or no layout
-for it) is stale, not current. A run whose program in the copy is not the file digested
-at the project's root fails with kind `settings_moved`.
+for it) is stale, not current, and the finding says which and why. A run whose program in
+the copy, as the copy is made and before any command runs, or whose provider when it is
+started, is not the file digested at the project's root fails with kind `settings_moved`;
+a program the build writes later is the run's own.
 
 **Placeholders.** A run has two places, and each has a name of its own that means the
 same wherever it is taken: `{run}` is the run's directory (under `.chidev/measure/`,

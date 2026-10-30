@@ -219,7 +219,6 @@ pub(super) fn parse_report(
 struct Plan<'a> {
     request: &'a SimulateRequest,
     settings: &'a SimSettings,
-    script: &'a Path,
     interfaces: Vec<(&'a Path, &'a InterfaceText)>,
 }
 
@@ -277,7 +276,6 @@ impl ProcessRunner {
         let plan = Plan {
             request,
             settings: &settings,
-            script: settings.harness.path(),
             interfaces,
         };
         let first = Job {
@@ -320,7 +318,12 @@ impl Job<'_> {
         for (path, i) in &plan.interfaces {
             self.write(path, &i.code).await?;
         }
-        self.write(plan.script, &plan.request.script).await?;
+        self.write(plan.settings.harness.path(), &plan.request.script)
+            .await?;
+        // Every program of the copy is the one the settings were digested with, as the copy is made. The build runs
+        // after that and may write an executable (the interpreter, say): that is the run's, not a moved setting.
+        self.verify(&self.copy.build).await?;
+        self.verify(&plan.settings.interpreter).await?;
         let env = self.env();
         let build = self.command(&self.copy.build).await?;
         let started = Instant::now();
@@ -384,7 +387,7 @@ impl Job<'_> {
         args.push(
             self.dirs
                 .tree
-                .join(plan.script)
+                .join(plan.settings.harness.path())
                 .to_string_lossy()
                 .into_owned(),
         );

@@ -38,7 +38,7 @@ struct Sim<'a> {
 
 impl Sim<'_> {
     /// What the settings of a simulation of the Harness are now.
-    fn settings<'v>(&self, view: &CheckView<'v>) -> &'v SettingsNow {
+    fn settings(&self, view: &CheckView<'_>) -> SettingsNow {
         view.sim_settings_now(self.harness.id())
     }
 
@@ -49,7 +49,7 @@ impl Sim<'_> {
             m,
             view.project,
             view.pins,
-            self.settings(view),
+            &self.settings(view),
         ))
     }
 }
@@ -1049,7 +1049,10 @@ mod tests {
         let runs = std::slice::from_ref(&run);
         for (now, said) in [
             (SettingsNow::Unconfigured, "measure is not configured"),
-            (SettingsNow::Unreadable, "the settings cannot be read"),
+            (
+                SettingsNow::Unreadable("no layout for the script".to_string()),
+                "the settings cannot be read: no layout for the script",
+            ),
         ] {
             let now = settings_now(now);
             let stale = found(&SimStale, &p, runs, &now);
@@ -1067,10 +1070,14 @@ mod tests {
         );
         assert_eq!(moved.len(), 1);
         assert!(moved[0].message().contains("have moved"));
-        // a Harness the view has no settings for is read as settings that cannot be read
+        // a Harness the view has no settings for has settings that were not read
         let missing = found(&SimStale, &p, runs, &BTreeMap::new());
         assert_eq!(missing.len(), 1);
-        assert!(missing[0].message().contains("the settings cannot be read"));
+        assert!(
+            missing[0]
+                .message()
+                .contains("the settings cannot be read: its settings were not read")
+        );
     }
 
     #[test]

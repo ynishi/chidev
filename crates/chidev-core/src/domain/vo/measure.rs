@@ -445,31 +445,34 @@ impl std::fmt::Display for SettingsDigest {
 /// which they are "not compared": a run whose settings cannot be compared with what it was made with cannot be
 /// shown to describe the settings, so it is stale, and the two ways of not being comparable are told apart so that
 /// a person is told which to fix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsNow {
     /// The project has no `[measure]` table: there is no runner to say anything.
     Unconfigured,
     /// The settings read as this digest.
     Known(SettingsDigest),
     /// The project has a runner, and it cannot read the settings for this subject (no layout for it, no command to
-    /// find, a program that is gone).
-    Unreadable,
+    /// find, a program that is gone). The text says why, in the words of the runner.
+    Unreadable(String),
 }
 
 impl SettingsNow {
     /// The settings of `subject` among `settings`. A subject that is not in them has none that can be read: a
     /// measurement of it cannot be compared on its settings, so it is stale, and not current by default. This is
     /// the one place that says so.
-    pub fn of<'a, K: Ord>(settings: &'a BTreeMap<K, SettingsNow>, subject: &K) -> &'a SettingsNow {
-        settings.get(subject).unwrap_or(&SettingsNow::Unreadable)
+    pub fn of<K: Ord>(settings: &BTreeMap<K, SettingsNow>, subject: &K) -> SettingsNow {
+        settings
+            .get(subject)
+            .cloned()
+            .unwrap_or_else(|| SettingsNow::Unreadable("its settings were not read".to_string()))
     }
 
     /// Why a run cannot be compared on its settings; none when they are known.
-    pub fn why_not_compared(&self) -> Option<&'static str> {
+    pub fn why_not_compared(&self) -> Option<String> {
         match self {
-            SettingsNow::Unconfigured => Some("measure is not configured"),
+            SettingsNow::Unconfigured => Some("measure is not configured".to_string()),
             SettingsNow::Known(_) => None,
-            SettingsNow::Unreadable => Some("the settings cannot be read"),
+            SettingsNow::Unreadable(why) => Some(format!("the settings cannot be read: {why}")),
         }
     }
 }
@@ -708,21 +711,33 @@ mod tests {
         let code = Digest::of(b"code");
         let stamp = MeasureStamp::new(code, basis(Revision::first()), settings("s"));
         // everything else is as measured, and still the stamp does not hold
-        for now in [SettingsNow::Unconfigured, SettingsNow::Unreadable] {
+        let unreadable = SettingsNow::Unreadable("no layout".to_string());
+        for now in [SettingsNow::Unconfigured, unreadable.clone()] {
             assert!(
                 !stamp.holds(code, &basis(Revision::first()), &now),
                 "{now:?}"
             );
         }
         assert_eq!(
-            SettingsNow::Unconfigured.why_not_compared(),
+            SettingsNow::Unconfigured.why_not_compared().as_deref(),
             Some("measure is not configured")
         );
         assert_eq!(
-            SettingsNow::Unreadable.why_not_compared(),
-            Some("the settings cannot be read")
+            unreadable.why_not_compared().as_deref(),
+            Some("the settings cannot be read: no layout")
         );
         assert_eq!(known("s").why_not_compared(), None);
+    }
+
+    #[test]
+    fn a_subject_with_no_settings_among_them_has_settings_that_were_not_read() {
+        let among = BTreeMap::from([(1u8, known("s"))]);
+        assert_eq!(SettingsNow::of(&among, &1), known("s"));
+        let missing = SettingsNow::of(&among, &2);
+        assert_eq!(
+            missing.why_not_compared().as_deref(),
+            Some("the settings cannot be read: its settings were not read")
+        );
     }
 
     #[test]

@@ -143,7 +143,7 @@ impl Check for Stale {
                 let m = m?;
                 let settings = view.measure_settings_now(i.id());
                 if m.failure().is_some()
-                    || standing(m, view.project, pin, settings) == Standing::Current
+                    || standing(m, view.project, pin, &settings) == Standing::Current
                 {
                     return None;
                 }
@@ -200,7 +200,7 @@ impl Check for Capped {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if !m.capped()
-                    || standing(m, view.project, pin, view.measure_settings_now(i.id()))
+                    || standing(m, view.project, pin, &view.measure_settings_now(i.id()))
                         == Standing::Stale
                 {
                     return None;
@@ -246,7 +246,7 @@ impl Check for Survived {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if m.failure().is_some()
-                    || standing(m, view.project, pin, view.measure_settings_now(i.id()))
+                    || standing(m, view.project, pin, &view.measure_settings_now(i.id()))
                         == Standing::Stale
                 {
                     return None;
@@ -440,7 +440,10 @@ mod tests {
         let runs = std::slice::from_ref(&run);
         for (now, said) in [
             (SettingsNow::Unconfigured, "measure is not configured"),
-            (SettingsNow::Unreadable, "the settings cannot be read"),
+            (
+                SettingsNow::Unreadable("no layout for the interface".to_string()),
+                "the settings cannot be read: no layout for the interface",
+            ),
         ] {
             let now = settings_now(now);
             let stale = found(&Stale, &p, &pins, runs, &now);
@@ -459,10 +462,14 @@ mod tests {
         );
         assert_eq!(moved.len(), 1);
         assert!(moved[0].message().contains("has moved"));
-        // an Interface the view has no settings for is read as settings that cannot be read
+        // an Interface the view has no settings for has settings that were not read
         let missing = found(&Stale, &p, &pins, runs, &BTreeMap::new());
         assert_eq!(missing.len(), 1);
-        assert!(missing[0].message().contains("the settings cannot be read"));
+        assert!(
+            missing[0]
+                .message()
+                .contains("the settings cannot be read: its settings were not read")
+        );
     }
 
     #[test]

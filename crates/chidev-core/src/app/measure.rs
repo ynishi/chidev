@@ -45,12 +45,12 @@ pub(super) struct Measured {
 }
 
 /// What the settings are now, from what the runner said of them: no runner is a project that has no `[measure]`
-/// table, and any other error is a runner that cannot read the settings for this subject.
+/// table, and any other error is a runner that cannot read the settings for this subject, for the reason it gives.
 fn settings_now(said: Result<SettingsDigest, RunnerError>) -> SettingsNow {
     match said {
         Ok(digest) => SettingsNow::Known(digest),
         Err(RunnerError::Unconfigured) => SettingsNow::Unconfigured,
-        Err(_) => SettingsNow::Unreadable,
+        Err(why) => SettingsNow::Unreadable(why.to_string()),
     }
 }
 
@@ -265,7 +265,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// The latest measurements, and the settings now of the subjects they are of that are in the model. What the
     /// runner says is kept as it is: no runner is `Unconfigured`, and any error of a runner that is there is
     /// `Unreadable`, never a subject left out as if its settings did not matter. A subject that is not in the model
-    /// has no settings here, and the checks read it as settings that cannot be read.
+    /// has no settings here, and the checks read it as settings that were not read.
     pub(super) async fn measured(&self, p: &Project) -> Result<Measured, AppError> {
         let measurements = self.store.latest_measurements().await?;
         let mut settings = BTreeMap::new();
@@ -671,7 +671,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 {
                     let state = match pins.iter().find(|pin| pin.interface() == i.id()) {
                         Some(pin) => {
-                            standing(m, p, pin, SettingsNow::of(&measured.settings, &i.id()))
+                            standing(m, p, pin, &SettingsNow::of(&measured.settings, &i.id()))
                         }
                         None => Standing::Stale,
                     };
@@ -707,7 +707,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         m,
                         p,
                         &pins,
-                        SettingsNow::of(&measured.sim_settings, &h.id()),
+                        &SettingsNow::of(&measured.sim_settings, &h.id()),
                     );
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
