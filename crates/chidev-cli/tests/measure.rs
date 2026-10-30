@@ -252,6 +252,8 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     );
     assert_eq!(standing["interface"], "stock");
     assert_eq!(standing["state"], "current");
+    // a run that is current has nothing that moved
+    assert!(standing.get("moved").is_none(), "{standing:#?}");
     assert_eq!(standing["outcome"], "ok");
     assert_eq!(
         (standing["killed"].as_u64(), standing["survived"].as_u64()),
@@ -273,6 +275,16 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     assert_eq!(stale[0]["about"], "interface stock");
     assert!(findings(&moved[0], "mutation.survived").is_empty());
     assert_eq!(moved[1]["measurements"][0]["state"], "stale");
+    // the status says what moved: the Harness, by its name
+    assert_eq!(
+        moved[1]["measurements"][0]["moved"],
+        json!([{"part": "harness", "name": "stock-tests"}])
+    );
+    // and so does the finding
+    assert_eq!(
+        stale[0]["message"],
+        "the latest mutation run is stale: harness"
+    );
     assert_eq!(moved[1]["measurements"][0]["stamp"], m["stamp"]);
 
     // Measured again against the new Harness, the run is current and has a new stamp.
@@ -286,6 +298,42 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     let fresh = exec(&dir, &[json!({"op":"check"})]);
     assert!(findings(&fresh[0], "mutation.stale").is_empty());
     assert_eq!(findings(&fresh[0], "mutation.survived").len(), 1);
+
+    // The table loses the layout of the Interface: the settings cannot be read, and the status says so apart from
+    // a change of them, with the runner's reason; the finding says it beside the word.
+    let table = std::fs::read_to_string(dir.join("chidev.toml")).expect("chidev.toml");
+    let layout = "[[measure.layout]]\ncontext = \"inventory\"\ninterface = \"stock\"\nlang = \"rust\"\npath = \"src/stock.rs\"\n";
+    assert!(table.contains(layout), "{table}");
+    std::fs::write(dir.join("chidev.toml"), table.replace(layout, "")).expect("chidev.toml");
+    let unreadable = exec(&dir, &[json!({"op":"check"}), json!({"op":"status"})]);
+    let standing = &unreadable[1]["measurements"][0];
+    assert_eq!(standing["state"], "stale");
+    let parts = standing["moved"].as_array().expect("what moved");
+    assert_eq!(parts.len(), 1, "{parts:#?}");
+    assert_eq!(parts[0]["part"], "settings-unreadable");
+    assert!(parts[0].get("name").is_none());
+    assert!(
+        parts[0]["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("no entry for the interface `stock`"),
+        "{parts:#?}"
+    );
+    let stale = findings(&unreadable[0], "mutation.stale");
+    assert_eq!(stale.len(), 1, "{:#?}", unreadable[0]);
+    let message = stale[0]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with(
+            "the latest mutation run is stale: settings-unreadable (the settings cannot be read: "
+        ),
+        "{message}"
+    );
+    // and a part that is not about unreadable settings has no reason
+    assert!(
+        moved[1]["measurements"][0]["moved"][0]
+            .get("reason")
+            .is_none()
+    );
 
     eprintln!(
         "measure e2e: first measure {:.1}s, whole test {:.1}s",

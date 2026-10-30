@@ -41,6 +41,23 @@ and this project adheres to
 
 ### Changed
 
+- A stale measurement says what moved. `mutation.stale` and `sim.stale` name
+  every moved part, and a settings part gives its reason
+  (`settings-unconfigured (measure is not configured)`). In
+  `status.measurements`, `state` is `current`, `stale`, `retired` or
+  `unpinned`, which is a run of an Interface with no Pin and no longer reads
+  `stale`. A stale run also has `moved`, listing each moved part by its word,
+  with the asset's `name` when the part is an asset, and with its `reason` when
+  the settings cannot be read; the words are those of `StampPart::word`. In
+  Rust: `StampPart`, `BuiltPart`, `SettingsGap` and `AssetRef`;
+  `MeasureStamp::moved` and `SimStamp::moved` replace `holds`; `Standing` is
+  `Current` or `Stale(Moved)` and is no longer `Copy`;
+  `Measurement::as_mutation` and `as_simulation` give `MutationRun` and
+  `SimulationRun`, which `latest`, `latest_sim`, `standing` and `sim_standing`
+  take; `MeasurementStanding::state` is a `MeasurementState`, with
+  `MovedPart`; `StaleReason` moves to `domain::vo::pin_basis`, next to
+  `PinBasis::moved` (#45).
+
 - A measurement's settings are compared by what its run resolved, kind by kind:
   a mutation run by the copy, build, test, provider and limits it ran with and
   the layout of its Interface and the Harnesses it ran; a simulation by the

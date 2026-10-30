@@ -24,7 +24,7 @@ use crate::domain::vo::digest::Digest;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
-    MeasureKind, MeasureStamp, MeasureSubject, SettingsDigest, SettingsNow,
+    MeasureKind, MeasureStamp, MeasureSubject, SettingsDigest, SettingsNow, StampPart,
 };
 use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::pin_basis::PinBasis;
@@ -215,6 +215,52 @@ pub struct Coverage {
     pub capped: bool,
 }
 
+/// A part of what a measurement stands on that has moved, with the name of the asset it is about. The name is
+/// present exactly when the part names an asset ([`StampPart::asset`]): an asset the store has no name for is a
+/// store out of step with its model, which is an error and never a part without a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedPart {
+    part: StampPart,
+    name: Option<AssetName>,
+}
+
+impl MovedPart {
+    /// The part that moved.
+    pub fn part(&self) -> &StampPart {
+        &self.part
+    }
+
+    /// The name of the asset the part is about; none for a part that is not about one.
+    pub fn name(&self) -> Option<&AssetName> {
+        self.name.as_ref()
+    }
+}
+
+/// Where a measurement stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeasurementState {
+    /// What it stands on and the settings are as measured.
+    Current,
+    /// Something it stands on has moved: these parts, in the order the stamp gives them. There is at least one.
+    Stale(Vec<MovedPart>),
+    /// The Interface or Harness it is of was retired since. It is not judged: the thing is not in the model.
+    Retired,
+    /// It is of an Interface that has no Pin, so there is no accepted code to compare it with.
+    Unpinned,
+}
+
+impl MeasurementState {
+    /// The word for it: `current`, `stale`, `retired` or `unpinned`.
+    pub fn word(&self) -> &'static str {
+        match self {
+            MeasurementState::Current => "current",
+            MeasurementState::Stale(_) => "stale",
+            MeasurementState::Retired => "retired",
+            MeasurementState::Unpinned => "unpinned",
+        }
+    }
+}
+
 /// Where the latest measurement of an Interface or a sim Harness stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementStanding {
@@ -230,9 +276,10 @@ pub struct MeasurementStanding {
     pub id: String,
     /// The stamp's digest.
     pub stamp: String,
-    /// `current` while what it stands on and the settings are as measured; `stale` once any moved; `retired` once
-    /// the Interface or Harness it is of was retired (the name then ends in `(retired)`).
-    pub state: &'static str,
+    /// `Current` while what it stands on and the settings are as measured; `Stale` once any moved, with the parts
+    /// that did; `Retired` once the Interface or Harness it is of was retired (the name then ends in `(retired)`);
+    /// `Unpinned` for an Interface that has no Pin.
+    pub state: MeasurementState,
     /// `ok`, or `failed` when the run did not finish.
     pub outcome: &'static str,
     /// Why it failed, when it did.
@@ -669,6 +716,35 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         })
     }
 
+    /// What a measurement's `standing` says of where it stands: for a stale one, the parts that moved, each with the
+    /// name of the asset it is about when it is one. An asset with no name is a store out of step with its model,
+    /// which fails the reading and is never left out.
+    async fn state_of(&self, standing: Standing) -> Result<MeasurementState, AppError> {
+        match standing {
+            Standing::Current => Ok(MeasurementState::Current),
+            Standing::Stale(moved) => {
+                let mut parts = Vec::with_capacity(moved.parts().len());
+                for part in moved.parts() {
+                    parts.push(self.moved_part(part).await?);
+                }
+                Ok(MeasurementState::Stale(parts))
+            }
+        }
+    }
+
+    /// The part `part` with the name of the asset it is about, when it is about one. The only way to make a
+    /// [`MovedPart`]: a part that names an asset gets the name the store has for it, or the error of not having one.
+    async fn moved_part(&self, part: &StampPart) -> Result<MovedPart, AppError> {
+        let name = match part.asset() {
+            Some(asset) => Some(self.name_of(asset.as_uuid()).await?),
+            None => None,
+        };
+        Ok(MovedPart {
+            part: part.clone(),
+            name,
+        })
+    }
+
     /// Where the latest measurement of each Interface and each sim Harness stands, in the order of the Contexts.
     pub(super) async fn measurement_standings(
         &self,
@@ -679,16 +755,19 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let pins = self.store.pins().await?;
         for c in p.contexts() {
             for i in c.interfaces() {
-                for m in measured
+                for run in measured
                     .measurements
                     .iter()
-                    .filter(|m| m.interface() == Some(i.id()))
+                    .filter_map(Measurement::as_mutation)
+                    .filter(|run| run.interface() == i.id())
                 {
+                    let m = run.measurement();
                     let state = match pins.iter().find(|pin| pin.interface() == i.id()) {
                         Some(pin) => {
-                            standing(m, p, pin, &SettingsNow::of(&measured.settings, &i.id()))
+                            let now = SettingsNow::of(&measured.settings, &i.id());
+                            self.state_of(standing(run, p, pin, &now)).await?
                         }
-                        None => Standing::Stale,
+                        None => MeasurementState::Unpinned,
                     };
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
@@ -697,7 +776,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         kind: m.kind().word(),
                         id: m.id().to_string(),
                         stamp: m.stamp().fingerprint().to_string(),
-                        state: state.word(),
+                        state,
                         outcome: if m.failure().is_some() {
                             "failed"
                         } else {
@@ -713,17 +792,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 }
             }
             for h in c.harnesses() {
-                for m in measured
+                for run in measured
                     .measurements
                     .iter()
-                    .filter(|m| m.harness() == Some(h.id()))
+                    .filter_map(Measurement::as_simulation)
+                    .filter(|run| run.harness() == h.id())
                 {
-                    let state = sim_standing(
-                        m,
-                        p,
-                        &pins,
-                        &SettingsNow::of(&measured.sim_settings, &h.id()),
-                    );
+                    let m = run.measurement();
+                    let now = SettingsNow::of(&measured.sim_settings, &h.id());
+                    let state = self.state_of(sim_standing(run, p, &pins, &now)).await?;
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
                         interface: None,
@@ -731,7 +808,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         kind: m.kind().word(),
                         id: m.id().to_string(),
                         stamp: m.stamp().fingerprint().to_string(),
-                        state: state.word(),
+                        state,
                         outcome: if m.failure().is_some() {
                             "failed"
                         } else {
@@ -766,7 +843,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 kind: m.kind().word(),
                 id: m.id().to_string(),
                 stamp: m.stamp().fingerprint().to_string(),
-                state: "retired",
+                state: MeasurementState::Retired,
                 outcome: if m.failure().is_some() {
                     "failed"
                 } else {

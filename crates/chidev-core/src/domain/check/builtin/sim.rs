@@ -18,7 +18,7 @@ use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::context::Context;
 use crate::domain::entity::harness::{Case, Harness, SimShapeProblem};
-use crate::domain::entity::measurement::Measurement;
+use crate::domain::entity::measurement::SimulationRun;
 use crate::domain::entity::project::Project;
 use crate::domain::rule::rule;
 use crate::domain::service::measure::{Standing, latest_sim, sim_standing};
@@ -33,7 +33,7 @@ use crate::domain::vo::sim::{CaseRole, Reproduction, SimCase, role_of};
 struct Sim<'a> {
     harness: &'a Harness,
     sweep: &'a Case,
-    run: Option<&'a Measurement>,
+    run: Option<SimulationRun<'a>>,
 }
 
 impl Sim<'_> {
@@ -42,15 +42,12 @@ impl Sim<'_> {
         view.sim_settings_now(self.harness.id())
     }
 
-    /// Whether the run still describes the model. A run whose settings cannot be compared is stale.
-    fn standing(&self, view: &CheckView<'_>) -> Option<Standing> {
-        let m = self.run?;
-        Some(sim_standing(
-            m,
-            view.project,
-            view.pins,
-            &self.settings(view),
-        ))
+    /// Whether there is a run, and it no longer describes the model. A run whose settings cannot be compared is
+    /// stale.
+    fn is_stale(&self, view: &CheckView<'_>) -> bool {
+        self.run.is_some_and(|run| {
+            sim_standing(run, view.project, view.pins, &self.settings(view)).is_stale()
+        })
     }
 }
 
@@ -271,20 +268,23 @@ impl Check for SimStale {
 
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         sims(view)
-            .filter(|(_, s)| {
-                s.run.is_some_and(|m| m.failure().is_none())
-                    && s.standing(view) == Some(Standing::Stale)
-            })
-            .map(|(_, s)| {
-                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
-                // to configure `[measure]` or to make its settings readable.
-                let message = match s.settings(view).why_not_compared() {
-                    Some(why) => format!(
-                        "the latest simulation cannot be shown to describe the program now: {why}"
-                    ),
-                    None => "the script, what it cites, the pinned code or the settings have moved since the latest simulation".to_string(),
+            .filter_map(|(_, s)| {
+                let run = s.run?;
+                if run.measurement().failure().is_some() {
+                    return None;
+                }
+                let settings = s.settings(view);
+                let Standing::Stale(moved) = sim_standing(run, view.project, view.pins, &settings)
+                else {
+                    return None;
                 };
-                Finding::new(&SIM_STALE, Some(Subject::Case(s.sweep.id())), message)
+                // Every part that moved is said; settings that cannot be compared say why, for the cure is not to
+                // run again but to configure `[measure]` or to make its settings readable.
+                Some(Finding::new(
+                    &SIM_STALE,
+                    Some(Subject::Case(s.sweep.id())),
+                    format!("the latest simulation is stale: {}", moved.said()),
+                ))
             })
             .collect()
     }
@@ -320,8 +320,9 @@ impl Check for SimFinding {
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let mut out = Vec::new();
         for (_, s) in sims(view) {
-            let Some(m) = s.run else { continue };
-            if m.failure().is_some() || s.standing(view) == Some(Standing::Stale) {
+            let Some(run) = s.run else { continue };
+            let m = run.measurement();
+            if m.failure().is_some() || s.is_stale(view) {
                 continue;
             }
             let Some(outcome) = m.sim() else { continue };
@@ -371,8 +372,9 @@ impl Check for SimUnreached {
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let mut out = Vec::new();
         for (_, s) in sims(view) {
-            let Some(m) = s.run else { continue };
-            if m.failure().is_some() || s.standing(view) == Some(Standing::Stale) {
+            let Some(run) = s.run else { continue };
+            let m = run.measurement();
+            if m.failure().is_some() || s.is_stale(view) {
                 continue;
             }
             let Some(outcome) = m.sim() else { continue };
@@ -424,11 +426,13 @@ impl Check for SimNondeterministic {
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let mut out = Vec::new();
         for (_, s) in sims(view) {
-            let Some(m) = s.run else { continue };
-            if s.standing(view) == Some(Standing::Stale) {
+            let Some(run) = s.run else { continue };
+            if s.is_stale(view) {
                 continue;
             }
-            let Some(outcome) = m.sim() else { continue };
+            let Some(outcome) = run.measurement().sim() else {
+                continue;
+            };
             for r in outcome.differing() {
                 let case = match &r.case {
                     SimCase::Regress(n) => s
@@ -490,7 +494,8 @@ impl Check for SimError {
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         let mut out = Vec::new();
         for (_, s) in sims(view) {
-            let Some(m) = s.run else { continue };
+            let Some(run) = s.run else { continue };
+            let m = run.measurement();
             let subject = Some(Subject::Case(s.sweep.id()));
             if let Some(failure) = m.failure() {
                 out.push(Finding::new(
@@ -500,7 +505,7 @@ impl Check for SimError {
                 ));
                 continue;
             }
-            if s.standing(view) == Some(Standing::Stale) {
+            if s.is_stale(view) {
                 continue;
             }
             let Some(outcome) = m.sim() else { continue };
@@ -535,6 +540,7 @@ mod tests {
 
     use super::super::fixture::*;
     use super::*;
+    use crate::domain::entity::measurement::Measurement;
     use crate::domain::entity::measurement::fixture::{same_settings, settings_of, sim_draft};
     use crate::domain::service::sim::basis_of;
     use crate::domain::vo::case::{CaseCites, CaseName};
@@ -1000,15 +1006,26 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].subject(), Some(Subject::Case(sweep_id())));
         assert_eq!(stale[0].level(), Level::Warning);
+        assert_eq!(stale[0].message(), "the latest simulation is stale: script");
 
         // a cited Contract moves
         let mut q = sim_project();
         put_contract(&mut q, "a half rounds to even");
-        assert_eq!(found(&SimStale, &q, runs, &unchanged()).len(), 1);
+        let stale = found(&SimStale, &q, runs, &unchanged());
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            stale[0].message(),
+            "the latest simulation is stale: contract"
+        );
         // a cited Interface moves
         let mut r = sim_project();
         put_interface(&mut r, "fn a(x: u8)");
-        assert_eq!(found(&SimStale, &r, runs, &unchanged()).len(), 1);
+        let stale = found(&SimStale, &r, runs, &unchanged());
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            stale[0].message(),
+            "the latest simulation is stale: built-revision"
+        );
     }
 
     #[test]
@@ -1019,7 +1036,12 @@ mod tests {
         let same = unchanged();
         let other = settings_now(SettingsNow::Known(settings_of("settings-2")));
         assert!(found(&SimStale, &p, runs, &same).is_empty());
-        assert_eq!(found(&SimStale, &p, runs, &other).len(), 1);
+        let by_settings = found(&SimStale, &p, runs, &other);
+        assert_eq!(by_settings.len(), 1);
+        assert_eq!(
+            by_settings[0].message(),
+            "the latest simulation is stale: settings"
+        );
         // the interface is pinned (to other code than the run saw, which saw none)
         let pins = [pin(&p)];
         let with_pin = SimStale.run(
@@ -1036,6 +1058,10 @@ mod tests {
             &Params::default(),
         );
         assert_eq!(with_pin.len(), 1);
+        assert_eq!(
+            with_pin[0].message(),
+            "the latest simulation is stale: built-code"
+        );
     }
 
     #[test]
@@ -1047,20 +1073,42 @@ mod tests {
         };
         let run = simulated(&p, 1, outcome);
         let runs = std::slice::from_ref(&run);
-        for (now, said) in [
-            (SettingsNow::Unconfigured, "measure is not configured"),
+        for (now, word, said) in [
+            (
+                SettingsNow::Unconfigured,
+                "settings-unconfigured",
+                "measure is not configured",
+            ),
             (
                 SettingsNow::Unreadable("no layout for the script".to_string()),
+                "settings-unreadable",
                 "the settings cannot be read: no layout for the script",
             ),
         ] {
             let now = settings_now(now);
             let stale = found(&SimStale, &p, runs, &now);
             assert_eq!(stale.len(), 1, "{said}");
-            assert!(stale[0].message().contains(said), "{}", stale[0].message());
+            assert_eq!(
+                stale[0].message(),
+                format!("the latest simulation is stale: {word} ({said})")
+            );
             // a stale run is not judged: its finding is not reported
             assert!(found(&SimFinding, &p, runs, &now).is_empty());
         }
+        // what else moved is said beside the settings: the script, and no `[measure]`
+        let mut changed = p.clone();
+        put_sim(&mut changed, "changed");
+        let both = found(
+            &SimStale,
+            &changed,
+            runs,
+            &settings_now(SettingsNow::Unconfigured),
+        );
+        assert_eq!(both.len(), 1);
+        assert_eq!(
+            both[0].message(),
+            "the latest simulation is stale: script, settings-unconfigured (measure is not configured)"
+        );
         // settings that moved are a change, and say nothing of being unreadable
         let moved = found(
             &SimStale,
@@ -1069,7 +1117,10 @@ mod tests {
             &settings_now(SettingsNow::Known(settings_of("settings-2"))),
         );
         assert_eq!(moved.len(), 1);
-        assert!(moved[0].message().contains("have moved"));
+        assert_eq!(
+            moved[0].message(),
+            "the latest simulation is stale: settings"
+        );
         // a Harness the view has no settings for has settings that were not read
         let missing = found(&SimStale, &p, runs, &BTreeMap::new());
         assert_eq!(missing.len(), 1);

@@ -34,8 +34,8 @@ use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod measure;
 pub use self::measure::{
-    CaseLine, Coverage, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding, MutantLine,
-    RerunLine, SimSummary, UnreachedLine,
+    CaseLine, Coverage, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding,
+    MeasurementState, MovedPart, MutantLine, RerunLine, SimSummary, UnreachedLine,
 };
 use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
@@ -79,7 +79,7 @@ use crate::domain::service::change_request::{
 };
 use crate::domain::service::cite::stale_cites;
 use crate::domain::service::crux::{decide, raise};
-use crate::domain::service::pin::{PinError, StaleReason, Staleness, record, staleness};
+use crate::domain::service::pin::{PinError, Staleness, record, staleness};
 use crate::domain::violation::{Party, Value, Violation};
 use crate::domain::vo::answer::{self, Answer, Basis, DecisionMaker};
 use crate::domain::vo::assumption::{Assumption, Evidence, KnowledgeRef, RepoPath};
@@ -103,6 +103,7 @@ use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::measure::{MeasureError, SettingsNow};
 use crate::domain::vo::name::{AssetName, ContextName, NameError};
+use crate::domain::vo::pin_basis::StaleReason;
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind, Transition};

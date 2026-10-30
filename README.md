@@ -802,8 +802,14 @@ The checks read the record and run nothing (they are builtin, at the `check` mom
 A stale run is judged stale first, so a survivor of an old run is not reported for
 moved code. `status.measurements` lists the latest run per Interface: stamp,
 `sites` (the places the provider found), `evaluated` (the mutants run) and
-`capped`, `killed` / `survived` / `stillborn` / `timeout`, `outcome` and `state`
-(`current` or `stale`). The result of `measure` has the same `sites`, `evaluated` and
+`capped`, `killed` / `survived` / `stillborn` / `timeout`, `outcome` and `state`:
+`current`, `stale`, `retired` (the Interface was retired since) or `unpinned` (the
+Interface has no Pin, so there is no accepted code to compare the run with). A
+`stale` run also has `moved`, which names each part that moved by its word, and by
+the asset's name when the part is an asset (`{"part": ..., "name": ...}`); the words
+are listed in the RustDoc of `StampPart::word`, and a part for settings the runner
+cannot read also has a `reason`. The finding of `mutation.stale` says what moved too,
+with the reason settings could not be compared. The result of `measure` has the same `sites`, `evaluated` and
 `capped`.
 
 A run that did not look at every site says so. `max_mutants` limits what the
@@ -1205,7 +1211,9 @@ only a put of that Harness is refused; `sim.shape-kept` reports it.
 A stale run is judged stale first (only a second run that did not reproduce is
 still reported). A failed run is judged by `sim.error` alone. `status.measurements`
 lists the latest simulation per sim Harness with `harness`, `sim` counts (`cases`,
-`findings`, `unreached`, `abnormal`, `reruns`, `differing`), `outcome` and `state`.
+`findings`, `unreached`, `abnormal`, `reruns`, `differing`), `outcome` and `state`
+(`current`, `stale`, `retired` or `unpinned`, as for a mutation run, which also tells
+what `moved`; the finding of `sim.stale` says what moved too).
 
 #### Writing a sim script (for the procedure that writes it)
 

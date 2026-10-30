@@ -13,12 +13,12 @@ use chidev_core::app::{
     ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
     DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
     ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
-    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, ModelSlice, ModelView,
-    OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput, PutDone, PutInput,
-    RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining, RenameInput,
-    ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus,
-    Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef,
-    TransitionStatus, ViewInput,
+    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasurementState, ModelSlice,
+    ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput,
+    PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining,
+    RenameInput, ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput,
+    RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
+    TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
@@ -1012,6 +1012,33 @@ struct MeasureOut<'a> {
     evidence: Vec<StepOut<'a>>,
 }
 
+/// A part of what a measurement stands on that moved, in the result of `status`.
+/// Each shape has exactly the fields it says, and none is left out by a flag.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MovedOut<'a> {
+    /// A part about an asset: its word and the asset's name.
+    Asset { part: &'static str, name: &'a str },
+    /// Settings the runner cannot read: the word and the runner's reason.
+    Unreadable { part: &'static str, reason: &'a str },
+    /// Any other part: its word.
+    Plain { part: &'static str },
+}
+
+impl<'a> From<&'a MovedPart> for MovedOut<'a> {
+    fn from(moved: &'a MovedPart) -> MovedOut<'a> {
+        let part = moved.part().word();
+        match (moved.name(), moved.part().reason()) {
+            (Some(name), _) => MovedOut::Asset {
+                part,
+                name: name.as_str(),
+            },
+            (None, Some(reason)) => MovedOut::Unreadable { part, reason },
+            (None, None) => MovedOut::Plain { part },
+        }
+    }
+}
+
 /// The latest measurement of an Interface or a sim Harness, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct MeasurementOut<'a> {
@@ -1023,7 +1050,11 @@ struct MeasurementOut<'a> {
     kind: &'static str,
     id: &'a str,
     stamp: &'a str,
+    /// `current`, `stale`, `retired` or `unpinned`.
     state: &'static str,
+    /// The parts that moved, when it is stale: each by its word, with the name of the asset when it is about one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    moved: Vec<MovedOut<'a>>,
     outcome: &'static str,
     failure: Option<&'a str>,
     /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
@@ -3751,7 +3782,15 @@ where
                         kind: m.kind,
                         id: &m.id,
                         stamp: &m.stamp,
-                        state: m.state,
+                        state: m.state.word(),
+                        moved: match &m.state {
+                            MeasurementState::Stale(parts) => {
+                                parts.iter().map(MovedOut::from).collect()
+                            }
+                            MeasurementState::Current
+                            | MeasurementState::Retired
+                            | MeasurementState::Unpinned => Vec::new(),
+                        },
                         outcome: m.outcome,
                         failure: m.failure.as_deref(),
                         sites: m.coverage.map(|c| c.sites),

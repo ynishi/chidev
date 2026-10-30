@@ -12,26 +12,21 @@ use crate::domain::check::policy::Params;
 use crate::domain::check::view::CheckView;
 use crate::domain::check::{Check, Finding};
 use crate::domain::entity::interface::Interface;
-use crate::domain::entity::measurement::Measurement;
+use crate::domain::entity::measurement::MutationRun;
 use crate::domain::entity::pin::Pin;
 use crate::domain::service::measure::{Standing, latest, standing};
 use crate::domain::vo::finding::{RuleId, Subject};
-use crate::domain::vo::measure::MeasureKind;
 
 /// The Interfaces of the Project that are pinned, with the latest mutation run of each (if any).
 fn pinned<'a>(
     view: &'a CheckView<'a>,
-) -> impl Iterator<Item = (&'a Interface, &'a Pin, Option<&'a Measurement>)> + 'a {
+) -> impl Iterator<Item = (&'a Interface, &'a Pin, Option<MutationRun<'a>>)> + 'a {
     view.project
         .contexts()
         .flat_map(|c| c.interfaces())
         .filter_map(|i| {
             let pin = view.pins.iter().find(|p| p.interface() == i.id())?;
-            Some((
-                i,
-                pin,
-                latest(view.measurements, MeasureKind::Mutate, i.id()),
-            ))
+            Some((i, pin, latest(view.measurements, i.id())))
         })
 }
 
@@ -64,7 +59,7 @@ impl Check for MeasureFailed {
     fn run(&self, view: &CheckView<'_>, _params: &Params) -> Vec<Finding> {
         pinned(view)
             .filter_map(|(i, _, m)| {
-                let failure = m?.failure()?;
+                let failure = m?.measurement().failure()?;
                 Some(Finding::new(
                     &MEASURE_FAILED,
                     Some(Subject::Interface(i.id())),
@@ -141,27 +136,19 @@ impl Check for Stale {
         pinned(view)
             .filter_map(|(i, pin, m)| {
                 let m = m?;
-                let settings = view.measure_settings_now(i.id());
-                if m.failure().is_some()
-                    || standing(m, view.project, pin, &settings) == Standing::Current
-                {
+                if m.measurement().failure().is_some() {
                     return None;
                 }
-                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
-                // to configure `[measure]` or to make its settings readable.
-                let message = match settings.why_not_compared() {
-                    Some(why) => format!(
-                        "the latest mutation run cannot be shown to describe the code now: {why}"
-                    ),
-                    None => {
-                        "the code, or what it stands on, has moved since the latest mutation run"
-                            .to_string()
-                    }
+                let settings = view.measure_settings_now(i.id());
+                let Standing::Stale(moved) = standing(m, view.project, pin, &settings) else {
+                    return None;
                 };
+                // Every part that moved is said; settings that cannot be compared say why, for the cure is not to
+                // run again but to configure `[measure]` or to make its settings readable.
                 Some(Finding::new(
                     &STALE,
                     Some(Subject::Interface(i.id())),
-                    message,
+                    format!("the latest mutation run is stale: {}", moved.said()),
                 ))
             })
             .collect()
@@ -199,16 +186,20 @@ impl Check for Capped {
         pinned(view)
             .filter_map(|(i, pin, m)| {
                 let m = m?;
-                if !m.capped()
-                    || standing(m, view.project, pin, &view.measure_settings_now(i.id()))
-                        == Standing::Stale
+                let measurement = m.measurement();
+                if !measurement.capped()
+                    || standing(m, view.project, pin, &view.measure_settings_now(i.id())).is_stale()
                 {
                     return None;
                 }
                 Some(Finding::new(
                     &CAPPED,
                     Some(Subject::Interface(i.id())),
-                    format!("evaluated {} of {} sites", m.evaluated(), m.sites()),
+                    format!(
+                        "evaluated {} of {} sites",
+                        measurement.evaluated(),
+                        measurement.sites()
+                    ),
                 ))
             })
             .collect()
@@ -245,13 +236,12 @@ impl Check for Survived {
         pinned(view)
             .filter_map(|(i, pin, m)| {
                 let m = m?;
-                if m.failure().is_some()
-                    || standing(m, view.project, pin, &view.measure_settings_now(i.id()))
-                        == Standing::Stale
+                if m.measurement().failure().is_some()
+                    || standing(m, view.project, pin, &view.measure_settings_now(i.id())).is_stale()
                 {
                     return None;
                 }
-                Some(m.survivors().map(move |s| {
+                Some(m.measurement().survivors().map(move |s| {
                     Finding::new(
                         &SURVIVED,
                         Some(Subject::Interface(i.id())),
@@ -391,17 +381,31 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].level(), Level::Warning);
         assert_eq!(stale[0].subject(), Some(Subject::Interface(iface())));
+        assert_eq!(
+            stale[0].message(),
+            "the latest mutation run is stale: harness"
+        );
         // stale comes before the verdict: the old survivor is not reported for moved code
         assert!(found(&Survived, &p, &pins, runs, &now).is_empty());
 
         // The Interface moves.
         let mut q = project();
         put_interface(&mut q, "fn a(x: u8)");
-        assert_eq!(found(&Stale, &q, &pins, runs, &now).len(), 1);
+        let stale = found(&Stale, &q, &pins, runs, &now);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            stale[0].message(),
+            "the latest mutation run is stale: interface"
+        );
         // A Contract the Harness cites moves.
         let mut r = project();
         put_contract(&mut r, "a half rounds to even");
-        assert_eq!(found(&Stale, &r, &pins, runs, &now).len(), 1);
+        let stale = found(&Stale, &r, &pins, runs, &now);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            stale[0].message(),
+            "the latest mutation run is stale: contract"
+        );
     }
 
     /// The settings of the fixture's Interface as they are now: `now`.
@@ -419,7 +423,12 @@ mod tests {
         let same = unchanged();
         let other = settings_now(SettingsNow::Known(settings_of("settings-2")));
         assert!(found(&Stale, &p, &pins, runs, &same).is_empty());
-        assert_eq!(found(&Stale, &p, &pins, runs, &other).len(), 1);
+        let by_settings = found(&Stale, &p, &pins, runs, &other);
+        assert_eq!(by_settings.len(), 1);
+        assert_eq!(
+            by_settings[0].message(),
+            "the latest mutation run is stale: settings"
+        );
         // pinned again with other code
         let repinned = [crate::domain::service::pin::record(
             &p,
@@ -428,7 +437,18 @@ mod tests {
             Digest::of(b"other code"),
         )
         .unwrap()];
-        assert_eq!(found(&Stale, &p, &repinned, runs, &same).len(), 1);
+        let by_code = found(&Stale, &p, &repinned, runs, &same);
+        assert_eq!(by_code.len(), 1);
+        assert_eq!(
+            by_code[0].message(),
+            "the latest mutation run is stale: code"
+        );
+        // and both at once say both, each once
+        let both = found(&Stale, &p, &repinned, runs, &other);
+        assert_eq!(
+            both[0].message(),
+            "the latest mutation run is stale: code, settings"
+        );
     }
 
     #[test]
@@ -438,20 +458,48 @@ mod tests {
         let survivor = vec![result("f/rel/1/aaaa", 7, MutantOutcome::Survived)];
         let run = Measurement::new(run_of(&p, &pins[0], 1, survivor)).unwrap();
         let runs = std::slice::from_ref(&run);
-        for (now, said) in [
-            (SettingsNow::Unconfigured, "measure is not configured"),
+        for (now, word, said) in [
+            (
+                SettingsNow::Unconfigured,
+                "settings-unconfigured",
+                "measure is not configured",
+            ),
             (
                 SettingsNow::Unreadable("no layout for the interface".to_string()),
+                "settings-unreadable",
                 "the settings cannot be read: no layout for the interface",
             ),
         ] {
             let now = settings_now(now);
             let stale = found(&Stale, &p, &pins, runs, &now);
             assert_eq!(stale.len(), 1, "{said}");
-            assert!(stale[0].message().contains(said), "{}", stale[0].message());
+            assert_eq!(
+                stale[0].message(),
+                format!("the latest mutation run is stale: {word} ({said})")
+            );
             // a stale run is not judged: its survivor is not reported
             assert!(found(&Survived, &p, &pins, runs, &now).is_empty());
         }
+        // what else moved is said beside the settings: the code pinned again, and no `[measure]`
+        let repinned = [crate::domain::service::pin::record(
+            &p,
+            iface(),
+            crate::domain::vo::id::PinId::from_uuid(crate::domain::vo::id::test_uuid(51)),
+            Digest::of(b"other code"),
+        )
+        .unwrap()];
+        let both = found(
+            &Stale,
+            &p,
+            &repinned,
+            runs,
+            &settings_now(SettingsNow::Unconfigured),
+        );
+        assert_eq!(both.len(), 1);
+        assert_eq!(
+            both[0].message(),
+            "the latest mutation run is stale: code, settings-unconfigured (measure is not configured)"
+        );
         // settings that moved are a change, and say nothing of being unreadable
         let moved = found(
             &Stale,
@@ -461,7 +509,10 @@ mod tests {
             &settings_now(SettingsNow::Known(settings_of("settings-2"))),
         );
         assert_eq!(moved.len(), 1);
-        assert!(moved[0].message().contains("has moved"));
+        assert_eq!(
+            moved[0].message(),
+            "the latest mutation run is stale: settings"
+        );
         // an Interface the view has no settings for has settings that were not read
         let missing = found(&Stale, &p, &pins, runs, &BTreeMap::new());
         assert_eq!(missing.len(), 1);
