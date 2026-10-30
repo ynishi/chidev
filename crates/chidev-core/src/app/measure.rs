@@ -1,15 +1,16 @@
 //! Measuring: the operations that run a measure and keep what it observed, and the reading of what is kept. A
 //! mutation run takes the code a Pin accepted and tests it against changes of itself; a simulation builds the
-//! program from the code of the Pins of the Interfaces a sim Harness builds and drives it with the script. A measure takes minutes and
-//! makes facts, so it is an operation of its own and never a moment of the checks; the checks (`measure.failed`, `mutation.*`,
-//! `sim.*`) only judge the record it leaves.
+//! program from the code of the Pins of the Interfaces a sim Harness builds and drives it with the script; a run of
+//! examples builds the same program and runs each example of a Harness of examples against it. A measure takes
+//! minutes and makes facts, so it is an operation of its own and never a moment of the checks; the checks
+//! (`measure.failed`, `mutation.*`, `sim.*`, `examples.*`) only judge the record it leaves.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{
-    HarnessText, InterfaceText, MutateRequest, RunnerError, SimulateRequest,
+    ExamplesRequest, HarnessText, InterfaceText, MutateRequest, RunnerError, SimulateRequest,
 };
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, CorrectionStatus, context_named, correction_status};
@@ -17,10 +18,15 @@ use crate::domain::entity::harness::Harness;
 use crate::domain::entity::measurement::{Counts, MeasureBody, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
-use crate::domain::service::measure::{Standing, sim_standing, standing};
+use crate::domain::service::examples;
+use crate::domain::service::measure::{Standing, examples_standing, sim_standing, standing};
 use crate::domain::service::pin::current_basis;
 use crate::domain::service::sim::{basis_of, cited_in, regress_names, sweep};
 use crate::domain::vo::digest::Digest;
+use crate::domain::vo::example::ExampleName;
+use crate::domain::vo::examples_run::{
+    ExampleRecord, ExampleResult, ExamplesOutcome, ExamplesStamp,
+};
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
@@ -42,6 +48,7 @@ pub(super) struct Measured {
     pub(super) measurements: Vec<Measurement>,
     pub(super) settings: BTreeMap<InterfaceId, SettingsNow>,
     pub(super) sim_settings: BTreeMap<HarnessId, SettingsNow>,
+    pub(super) examples_settings: BTreeMap<HarnessId, SettingsNow>,
 }
 
 /// What the settings are now, from what the runner said of them: no runner is a project that has no `[measure]`
@@ -144,6 +151,17 @@ pub struct RerunLine {
     pub result: &'static str,
 }
 
+/// One example of a run of examples, in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExampleLine {
+    /// The name of its Case, as the model has it now; the Case's id when the model has not the Case any more.
+    pub example: String,
+    /// Whether the program answered as the example expects.
+    pub passed: bool,
+    /// Why it did not, one reason each, in the order the judge told them; none when it passed.
+    pub reasons: Vec<String>,
+}
+
 /// A command of a run, in words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceLine {
@@ -183,6 +201,8 @@ pub struct MeasureDone {
     pub cases: Vec<CaseLine>,
     /// The cases of a simulation that were run a second time.
     pub reruns: Vec<RerunLine>,
+    /// Each example of a run of examples that was run.
+    pub examples: Vec<ExampleLine>,
     /// What the commands did.
     pub evidence: Vec<EvidenceLine>,
 }
@@ -202,6 +222,15 @@ pub struct SimSummary {
     pub reruns: u32,
     /// How many of those did not give the same schedule and trace.
     pub differing: u32,
+}
+
+/// What a run of examples found, in numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExamplesSummary {
+    /// How many examples passed.
+    pub passed: u32,
+    /// How many examples failed.
+    pub failed: u32,
 }
 
 /// How much of the code a mutation run looked at: the places the provider found, and the mutants evaluated.
@@ -261,14 +290,14 @@ impl MeasurementState {
     }
 }
 
-/// Where the latest measurement of an Interface or a sim Harness stands.
+/// Where the latest measurement of an Interface or a Harness stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementStanding {
     /// The Context's name.
     pub context: String,
     /// The Interface's name (a mutation run).
     pub interface: Option<String>,
-    /// The Harness's name (a simulation).
+    /// The Harness's name (a simulation or a run of examples).
     pub harness: Option<String>,
     /// What was measured.
     pub kind: &'static str,
@@ -288,15 +317,26 @@ pub struct MeasurementStanding {
     pub counts: Counts,
     /// How much of the code's sites a mutation run evaluated; none for a simulation.
     pub coverage: Option<Coverage>,
-    /// What a simulation found; none for a mutation run.
+    /// What a simulation found; none for any other run.
     pub sim: Option<SimSummary>,
+    /// What a run of examples found; none for any other run.
+    pub examples: Option<ExamplesSummary>,
     /// When the run began, in milliseconds since the epoch.
     pub at: u64,
     /// The corrections made of its texts, in the order they were made.
     pub corrections: Vec<CorrectionStatus>,
 }
 
-/// How much of the code a mutation run looked at; none for a simulation.
+/// How many examples of a run of examples passed and failed; none for any other run.
+fn examples_summary_of(m: &Measurement) -> Option<ExamplesSummary> {
+    let n = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+    m.examples().map(|outcome| ExamplesSummary {
+        passed: n(outcome.passed()),
+        failed: n(outcome.records().len() - outcome.passed()),
+    })
+}
+
+/// How much of the code a mutation run looked at; none for any other run.
 fn coverage_of(m: &Measurement) -> Option<Coverage> {
     (m.kind() == MeasureKind::Mutate).then(|| Coverage {
         sites: m.sites(),
@@ -324,8 +364,32 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// has no settings here, and the checks read it as settings that were not read.
     pub(super) async fn measured(&self, p: &Project) -> Result<Measured, AppError> {
         let measurements = self.store.latest_measurements().await?;
+        self.with_settings(p, measurements).await
+    }
+
+    /// The latest runs of examples alone, and the settings now of the Harnesses they are of that are in the model.
+    /// What a confirmation (a pin, a resolution) reads of the measurements: a mutation run or a simulation is not
+    /// asked about, for the checks that judge them run on demand only, and what the runner is asked costs.
+    pub(super) async fn examples_measured(&self, p: &Project) -> Result<Measured, AppError> {
+        let measurements = self
+            .store
+            .latest_measurements()
+            .await?
+            .into_iter()
+            .filter(|m| m.kind() == MeasureKind::Examples)
+            .collect();
+        self.with_settings(p, measurements).await
+    }
+
+    /// `measurements`, with the settings now of the subjects they are of that are in the model.
+    async fn with_settings(
+        &self,
+        p: &Project,
+        measurements: Vec<Measurement>,
+    ) -> Result<Measured, AppError> {
         let mut settings = BTreeMap::new();
         let mut sim_settings = BTreeMap::new();
+        let mut examples_settings = BTreeMap::new();
         for m in &measurements {
             match m.subject() {
                 MeasureSubject::Interface(i) => {
@@ -364,11 +428,21 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     for iface in harness_entity.builds() {
                         builds.push(self.name_of(iface.as_uuid()).await?);
                     }
-                    let said = self
-                        .runner
-                        .sim_settings(context.name(), &harness, &builds)
-                        .await;
-                    sim_settings.insert(h, settings_now(said));
+                    // A kind of run asks the runner for the settings of that kind: a Harness whose kind has
+                    // changed since is asked as its runs were made.
+                    if m.kind() == MeasureKind::Examples {
+                        let said = self
+                            .runner
+                            .examples_settings(context.name(), &harness, &builds)
+                            .await;
+                        examples_settings.insert(h, settings_now(said));
+                    } else {
+                        let said = self
+                            .runner
+                            .sim_settings(context.name(), &harness, &builds)
+                            .await;
+                        sim_settings.insert(h, settings_now(said));
+                    }
                 }
             }
         }
@@ -376,6 +450,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             measurements,
             settings,
             sim_settings,
+            examples_settings,
         })
     }
 
@@ -390,9 +465,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         context: &str,
         interface: &str,
     ) -> Result<MeasureDone, AppError> {
-        if kind != MeasureKind::Mutate {
+        let instead = match kind {
+            MeasureKind::Mutate => None,
+            MeasureKind::Simulate => Some("simulate"),
+            MeasureKind::Examples => Some("run_examples"),
+        };
+        if let Some(instead) = instead {
             return Err(AppError::Input(format!(
-                "a `{}` measure is of a harness, not of an interface; use `simulate`",
+                "a `{}` measure is of a harness, not of an interface; use `{instead}`",
                 kind.word()
             )));
         }
@@ -523,27 +603,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let name = ClauseName::new(contract, c.label);
             clauses.push(CitedClause { name, id: c.clause });
         }
-        let mut interfaces = Vec::new();
-        for iface in h.builds().iter().copied() {
-            let name = self.name_of(iface.as_uuid()).await?;
-            let pin = self
-                .store
-                .pin_of(iface)
-                .await?
-                .ok_or_else(|| AppError::NotPinned {
-                    context: context.clone(),
-                    interface: name.clone(),
-                })?;
-            let code = self
-                .store
-                .pin_code(pin.id())
-                .await?
-                .filter(|c| Digest::of(c.as_bytes()) == pin.code())
-                .ok_or_else(|| AppError::PinCodeNotKept {
-                    interface: name.clone(),
-                })?;
-            interfaces.push(InterfaceText { name, code });
-        }
+        let interfaces = self.built_code(&context, h).await?;
         let pins = self.store.pins().await?;
         let basis = basis_of(&p, id, &pins).ok_or_else(|| {
             AppError::Input(format!("the sim harness `{harness}` is not in the project"))
@@ -579,6 +639,138 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         self.keep_measurement(RecordTrigger::Simulate, &measurement)
             .await?;
         self.measured_words(&measurement).await
+    }
+
+    /// Runs the examples of the Harness of examples `harness` of the Context `context` against the program built
+    /// from the code the Pins of the Interfaces it builds accepted, and keeps what the run observed. The examples
+    /// are the model's as they are now, one for each Case; the working tree's own copies are not read, and no file
+    /// of the project is changed. The runner names each example by its Case's name, and each is resolved to the
+    /// Case: the record keeps the Case's id, so a Case that is named otherwise later is still the one. A name the
+    /// Harness has no Case of stops the recording, and keeps nothing. A run that could not finish (the program does
+    /// not build, the time runs out) is kept as a failed measurement; a Harness that is not of examples, an
+    /// Interface it builds that is not pinned, or a configuration that cannot run it is an error and keeps nothing.
+    pub async fn run_examples(
+        &mut self,
+        context: &str,
+        harness: &str,
+    ) -> Result<MeasureDone, AppError> {
+        let p = self.project().await?;
+        let (context, harness) = (
+            ContextName::try_from(context)?,
+            AssetName::try_from(harness)?,
+        );
+        let ctx = context_named(&p, &context)?;
+        let id = HarnessId::from_uuid(
+            self.asset(ctx, &context, AssetKind::Harness, &harness)
+                .await?,
+        );
+        let owner = p
+            .context(ctx)
+            .ok_or_else(|| AppError::Input(format!("the context `{context}` is gone")))?;
+        let h = owner
+            .harness(id)
+            .ok_or_else(|| AppError::Input(format!("the harness `{harness}` is gone")))?;
+        if h.kind() != HarnessKind::Examples {
+            return Err(AppError::Input(format!(
+                "the harness `{harness}` is of {}; only a harness of examples is run as examples (put it with kind `examples`)",
+                h.kind().word()
+            )));
+        }
+        let mut examples = Vec::with_capacity(h.cases().len());
+        for case in h.cases() {
+            let held = case.example().ok_or_else(|| {
+                AppError::Input(format!(
+                    "the case `{}` of the harness `{harness}` holds no example",
+                    case.name()
+                ))
+            })?;
+            let name = ExampleName::new(case.name().as_str()).map_err(|e| {
+                AppError::Input(format!(
+                    "the case `{}` of the harness `{harness}` is not an example name: {e}",
+                    case.name()
+                ))
+            })?;
+            examples.push((name, held.clone()));
+        }
+        let interfaces = self.built_code(&context, h).await?;
+        let pins = self.store.pins().await?;
+        let basis = examples::basis_of(&p, id, &pins).ok_or_else(|| {
+            AppError::Input(format!(
+                "the harness `{harness}` is not a harness of examples in the project"
+            ))
+        })?;
+        let run_id = MeasurementId::from_uuid(self.ids.next_uuid());
+        let at = self.clock.now();
+        let request = ExamplesRequest {
+            run: run_id.to_string(),
+            context,
+            harness: harness.clone(),
+            interfaces,
+            examples,
+        };
+        let report = self.runner.run_examples(&request).await?;
+        // Each example the runner reported is a Case of the Harness, or the run is not recorded: a record that left
+        // an example out would say less than the run did.
+        let mut records = Vec::with_capacity(report.examples.len());
+        for (name, verdict) in &report.examples {
+            let case = h
+                .cases()
+                .iter()
+                .find(|c| c.name().as_str() == name.as_str())
+                .ok_or_else(|| {
+                    AppError::Input(format!(
+                        "the runner reported the example `{name}`, which is no case of the harness `{harness}`"
+                    ))
+                })?;
+            records.push(ExampleRecord::from_verdict(case.id(), verdict));
+        }
+        // The stamp names the settings the run resolved and ran under, not a digest asked for before it.
+        let stamp = ExamplesStamp::new(basis, report.settings);
+        let measurement = Measurement::new(MeasurementDraft {
+            id: run_id,
+            at,
+            body: MeasureBody::Examples {
+                harness: id,
+                stamp,
+                outcome: ExamplesOutcome::new(records)?,
+            },
+            failure: report.failure,
+            evidence: report.evidence,
+        })?;
+        self.keep_measurement(RecordTrigger::Examples, &measurement)
+            .await?;
+        self.measured_words(&measurement).await
+    }
+
+    /// The code the Pin of each Interface the Harness `h` builds accepted, as it was pinned, by the Interface's name.
+    /// An Interface with no Pin, or whose code the store does not keep, is an error.
+    async fn built_code(
+        &self,
+        context: &ContextName,
+        h: &Harness,
+    ) -> Result<Vec<InterfaceText>, AppError> {
+        let mut interfaces = Vec::new();
+        for iface in h.builds().iter().copied() {
+            let name = self.name_of(iface.as_uuid()).await?;
+            let pin = self
+                .store
+                .pin_of(iface)
+                .await?
+                .ok_or_else(|| AppError::NotPinned {
+                    context: context.clone(),
+                    interface: name.clone(),
+                })?;
+            let code = self
+                .store
+                .pin_code(pin.id())
+                .await?
+                .filter(|c| Digest::of(c.as_bytes()) == pin.code())
+                .ok_or_else(|| AppError::PinCodeNotKept {
+                    interface: name.clone(),
+                })?;
+            interfaces.push(InterfaceText { name, code });
+        }
+        Ok(interfaces)
     }
 
     /// Keeps `measurement` alone as the record of `trigger`, trying again when another writer got in between.
@@ -631,10 +823,39 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Ok(names)
     }
 
+    /// Each example of the run of examples `m`, in words. A Case is named as the model has it now, so a Case that was
+    /// named otherwise when the run was made is shown by its name today; the Case's id when the model has it no more.
+    async fn example_lines(&self, m: &Measurement) -> Result<Vec<ExampleLine>, AppError> {
+        let Some(outcome) = m.examples() else {
+            return Ok(Vec::new());
+        };
+        let p = self.project().await?;
+        let harness = m
+            .harness()
+            .and_then(|id| p.contexts().find_map(|c| c.harness(id)));
+        Ok(outcome
+            .records()
+            .iter()
+            .map(|r| ExampleLine {
+                example: harness
+                    .and_then(|h| h.case(r.case))
+                    .map_or_else(|| r.case.to_string(), |c| c.name().to_string()),
+                passed: r.passed(),
+                reasons: match &r.result {
+                    ExampleResult::Passed => Vec::new(),
+                    ExampleResult::Failed(reasons) => {
+                        reasons.iter().map(ToString::to_string).collect()
+                    }
+                },
+            })
+            .collect())
+    }
+
     async fn measured_words(&self, m: &Measurement) -> Result<MeasureDone, AppError> {
         let digest = |d: Option<Digest>| d.map(|d| d.to_string());
         let sim = m.sim();
         let names = self.clause_names(sim).await?;
+        let examples = self.example_lines(m).await?;
         let named = |id: ClauseId| {
             names
                 .get(&id)
@@ -703,6 +924,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            examples,
             evidence: m
                 .evidence()
                 .iter()
@@ -786,6 +1008,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         counts: m.counts(),
                         coverage: coverage_of(m),
                         sim: None,
+                        examples: None,
                         at: m.at().millis(),
                         corrections: m.corrections().iter().map(correction_status).collect(),
                     });
@@ -818,6 +1041,40 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         counts: m.counts(),
                         coverage: None,
                         sim: m.sim().map(summary_of),
+                        examples: None,
+                        at: m.at().millis(),
+                        corrections: m.corrections().iter().map(correction_status).collect(),
+                    });
+                }
+                for run in measured
+                    .measurements
+                    .iter()
+                    .filter_map(Measurement::as_examples)
+                    .filter(|run| run.harness() == h.id())
+                {
+                    let m = run.measurement();
+                    let now = SettingsNow::of(&measured.examples_settings, &h.id());
+                    let state = self
+                        .state_of(examples_standing(run, p, &pins, &now))
+                        .await?;
+                    out.push(MeasurementStanding {
+                        context: c.name().to_string(),
+                        interface: None,
+                        harness: Some(self.name_of(h.id().as_uuid()).await?.to_string()),
+                        kind: m.kind().word(),
+                        id: m.id().to_string(),
+                        stamp: m.stamp().fingerprint().to_string(),
+                        state,
+                        outcome: if m.failure().is_some() {
+                            "failed"
+                        } else {
+                            "ok"
+                        },
+                        failure: m.failure().map(ToString::to_string),
+                        counts: m.counts(),
+                        coverage: None,
+                        sim: None,
+                        examples: examples_summary_of(m),
                         at: m.at().millis(),
                         corrections: m.corrections().iter().map(correction_status).collect(),
                     });
@@ -853,6 +1110,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 counts: m.counts(),
                 coverage: coverage_of(m),
                 sim: m.sim().map(summary_of),
+                examples: examples_summary_of(m),
                 at: m.at().millis(),
                 corrections: m.corrections().iter().map(correction_status).collect(),
             });

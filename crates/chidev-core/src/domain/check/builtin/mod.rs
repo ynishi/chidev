@@ -2,7 +2,8 @@
 //! the domain services that already decide it (`stale_cites`, `staleness`, `keep_moved`), so the rule is written
 //! once. What must never be kept the Project already refuses (its invariants), and a check is for what may be kept
 //! but should not be left. The one builtin that is mandatory is `sim.nondeterministic`: a simulation that cannot be
-//! repeated finds nothing anyone can reproduce, so no policy turns it down.
+//! repeated finds nothing anyone can reproduce, so no policy turns it down. A mandatory flag is the check's own and
+//! a policy cannot raise it, so `examples.*` (none is mandatory) report and refuse nothing.
 //!
 //! Each descriptor lists its moments, and the moments say what its check speaks about ([`Descriptor::kind`]). A check
 //! that runs at an edit speaks about what an edit made stale or out of place: only what the edit introduced is
@@ -15,6 +16,7 @@
 mod change_requests;
 mod citations;
 mod contexts;
+mod examples;
 mod measure;
 mod pins;
 mod sim;
@@ -28,6 +30,7 @@ pub use self::change_requests::{
 };
 pub use self::citations::{StaleCite, UncitedClause, UncitedItem};
 pub use self::contexts::{NoHarness, NoInterface};
+pub use self::examples::{ExamplesError, ExamplesFailed, ExamplesStale, ExamplesUnrun};
 pub use self::measure::{Capped, MeasureFailed, Stale as StaleMutation, Survived, Unmeasured};
 pub use self::pins::{StalePin, Unpinned};
 pub use self::sim::{
@@ -66,6 +69,10 @@ pub fn all() -> &'static [&'static dyn Check] {
         &SimUnreached,
         &SimNondeterministic,
         &SimError,
+        &ExamplesUnrun,
+        &ExamplesStale,
+        &ExamplesError,
+        &ExamplesFailed,
     ]
 }
 
@@ -331,6 +338,7 @@ mod fixture {
                 measurements: &[],
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
+                examples_settings: &BTreeMap::new(),
                 resolving: None,
             },
             &Params::default(),
@@ -402,7 +410,11 @@ mod tests {
             );
             let error = matches!(
                 d.id.as_str(),
-                "sim.shape-kept" | "sim.finding" | "sim.unreached" | "sim.nondeterministic"
+                "sim.shape-kept"
+                    | "sim.finding"
+                    | "sim.unreached"
+                    | "sim.nondeterministic"
+                    | "examples.failed"
             );
             assert_eq!(
                 d.default_level,

@@ -215,8 +215,9 @@ enum Op {
     /// Measures, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. `kind`
     /// `mutate` (with `interface`) runs the code the Pin of the Interface accepted against the Harnesses as the
     /// model holds them, once per mutant. `kind` `simulate` (with `harness`, a sim Harness) builds the program from
-    /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. Either takes as
-    /// long as the project's build and tests or script take.
+    /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. `kind` `examples`
+    /// (with `harness`, a Harness of examples) builds the program the same way and runs each example of the Harness
+    /// against it. Any of them takes as long as the project's build and tests, script or program take.
     Measure {
         kind: MeasureKindDto,
         context: String,
@@ -912,6 +913,7 @@ impl From<SectionDto> for ModelSection {
 enum MeasureKindDto {
     Mutate,
     Simulate,
+    Examples,
 }
 
 impl From<MeasureKindDto> for MeasureKind {
@@ -919,6 +921,7 @@ impl From<MeasureKindDto> for MeasureKind {
         match k {
             MeasureKindDto::Mutate => MeasureKind::Mutate,
             MeasureKindDto::Simulate => MeasureKind::Simulate,
+            MeasureKindDto::Examples => MeasureKind::Examples,
         }
     }
 }
@@ -968,6 +971,23 @@ struct SimSummaryOut {
     differing: u32,
 }
 
+/// An example of a run of examples, in the result of `measure`: the name of its Case, whether the program answered
+/// as it expects, and the reasons it did not.
+#[derive(Debug, Serialize)]
+struct ExampleOut<'a> {
+    example: &'a str,
+    passed: bool,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    reasons: &'a [String],
+}
+
+/// What a run of examples found, in numbers, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct ExamplesSummaryOut {
+    passed: u32,
+    failed: u32,
+}
+
 /// A mutant in the result of `measure`.
 #[derive(Debug, Serialize)]
 struct MutantOut<'a> {
@@ -1009,6 +1029,8 @@ struct MeasureOut<'a> {
     cases: Vec<CaseOut<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reruns: Vec<RerunOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    examples: Vec<ExampleOut<'a>>,
     evidence: Vec<StepOut<'a>>,
 }
 
@@ -1039,7 +1061,7 @@ impl<'a> From<&'a MovedPart> for MovedOut<'a> {
     }
 }
 
-/// The latest measurement of an Interface or a sim Harness, in the result of `status`.
+/// The latest measurement of an Interface or a Harness, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct MeasurementOut<'a> {
     context: &'a str,
@@ -1071,6 +1093,8 @@ struct MeasurementOut<'a> {
     timeout: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     sim: Option<SimSummaryOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    examples: Option<ExamplesSummaryOut>,
     at: u64,
     /// The corrections made of its texts, in the order they were made; left out when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1381,6 +1405,8 @@ enum CruxFieldDto {
 
 /// A field of a measurement. An index counts from 0 in the list it is of; a case is an index into the cases of a
 /// simulation, in the order they were run. `case_exit` is the reason a case could not start the program.
+/// `example_reason` is the text of a reason an example of a run of examples failed (`example` is an index into the
+/// examples in the order they were run, `reason` into its reasons).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum MeasurementFieldDto {
@@ -1393,6 +1419,7 @@ enum MeasurementFieldDto {
     CaseUnreached { case: usize, unreached: usize },
     CaseUndecided { case: usize, undecided: usize },
     CaseExit(usize),
+    ExampleReason { example: usize, reason: usize },
 }
 
 /// A field of a row of the record of check runs.
@@ -1505,6 +1532,9 @@ impl From<MeasurementFieldDto> for MeasurementField {
                 MeasurementField::CaseUndecided { case, undecided }
             }
             MeasurementFieldDto::CaseExit(case) => MeasurementField::CaseExit { case },
+            MeasurementFieldDto::ExampleReason { example, reason } => {
+                MeasurementField::ExampleReason { example, reason }
+            }
         }
     }
 }
@@ -1605,6 +1635,9 @@ impl From<&MeasurementField> for MeasurementFieldDto {
                 MeasurementFieldDto::CaseUndecided { case, undecided }
             }
             MeasurementField::CaseExit { case } => MeasurementFieldDto::CaseExit(case),
+            MeasurementField::ExampleReason { example, reason } => {
+                MeasurementFieldDto::ExampleReason { example, reason }
+            }
         }
     }
 }
@@ -3211,6 +3244,9 @@ where
                 (MeasureKind::Simulate, None, Some(harness)) => {
                     app.simulate(&context, &harness).await?
                 }
+                (MeasureKind::Examples, None, Some(harness)) => {
+                    app.run_examples(&context, &harness).await?
+                }
                 (MeasureKind::Mutate, _, _) => {
                     return Err(AppError::Input(
                         "a `mutate` measure takes an `interface` and no `harness`".to_string(),
@@ -3219,6 +3255,12 @@ where
                 (MeasureKind::Simulate, _, _) => {
                     return Err(AppError::Input(
                         "a `simulate` measure takes a `harness` (a sim harness) and no `interface`"
+                            .to_string(),
+                    ));
+                }
+                (MeasureKind::Examples, _, _) => {
+                    return Err(AppError::Input(
+                        "an `examples` measure takes a `harness` (a harness of examples) and no `interface`"
                             .to_string(),
                     ));
                 }
@@ -3285,6 +3327,15 @@ where
                     .map(|r| RerunOut {
                         case: &r.case,
                         result: r.result,
+                    })
+                    .collect(),
+                examples: done
+                    .examples
+                    .iter()
+                    .map(|e| ExampleOut {
+                        example: &e.example,
+                        passed: e.passed,
+                        reasons: &e.reasons,
                     })
                     .collect(),
                 evidence: done
@@ -3807,6 +3858,10 @@ where
                             abnormal: x.abnormal,
                             reruns: x.reruns,
                             differing: x.differing,
+                        }),
+                        examples: m.examples.map(|x| ExamplesSummaryOut {
+                            passed: x.passed,
+                            failed: x.failed,
                         }),
                         at: m.at,
                         corrections: m.corrections.iter().map(CorrectionOut::from).collect(),

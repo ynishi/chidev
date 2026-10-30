@@ -154,6 +154,8 @@ triggers! {
         Measure = "measure",
         /// [`App::simulate`](super::App::simulate).
         Simulate = "simulate",
+        /// [`App::run_examples`](super::App::run_examples).
+        Examples = "examples",
         /// [`App::finding_report`](super::App::finding_report): what an agent judged, kept as the run of a rule.
         ReportFinding = "report_finding",
     }
@@ -633,7 +635,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let moment = trigger.moment();
         let before = self.read_state(at).await?;
         let after = delta.apply(&before);
+        // A confirmation does not claim a state the latest run of the examples contradicts, so it is given the runs
+        // of examples (and the settings now of what they are of). It reads no other measurement: running a
+        // program is slow and the checks of the other measures run on demand.
+        let examples = self.examples_measured(&after.project).await?;
         let view = CheckView {
+            measurements: &examples.measurements,
+            examples_settings: &examples.examples_settings,
             resolving,
             ..after.view()
         };
@@ -664,6 +672,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             measurements: &measured.measurements,
             measure_settings: &measured.settings,
             sim_settings: &measured.sim_settings,
+            examples_settings: &measured.examples_settings,
             ..state.view()
         };
         let (p, crs, cruxes) = (&state.project, &state.change_requests, &state.cruxes);

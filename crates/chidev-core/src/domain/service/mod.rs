@@ -4,6 +4,7 @@
 pub mod change_request;
 pub mod cite;
 pub mod crux;
+pub mod examples;
 pub mod footprint;
 pub mod measure;
 pub mod pin;

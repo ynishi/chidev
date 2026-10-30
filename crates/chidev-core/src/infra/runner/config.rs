@@ -1,7 +1,8 @@
 //! The `[measure]` table of `chidev.toml`: what to run to build and test a project, where each Interface and Harness
 //! lives in the working tree, which command makes mutants for a language (`[measure.mutants]`), which command finds
 //! the Items of an Interface from its code (`[measure.items]`), and (`[measure.sim.<context>]`) how to run the sim
-//! script of a Context against its program. Nothing here is guessed from the project's files; a field
+//! script of a Context against its program and (`[measure.examples.<context>]`) how to run the examples of its
+//! Harnesses of examples against theirs. Nothing here is guessed from the project's files; a field
 //! that is not known is refused by name, so a typo does not silently measure nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,9 +39,10 @@ const RETIRED: &str = "{work}";
 const DEFAULT_ENV: [(&str, &str); 1] = [("CARGO_TARGET_DIR", "{run}/target")];
 
 /// A value of the configuration that may name the places of a run: the value of an `env` variable and a word of
-/// the `program` of a sim. `{run}` is the run's directory and `{tree}` the root of the copy the run works in (the
-/// second copy of a sim, which its second runs are made in, is `rerun-tree` in the same directory, so there `{tree}`
-/// is its root); any other `{...}` stays as it is. Only [`RunDirs::expand`] reads the text, so the fields that are
+/// the `program` of a sim or of the examples of a Context. `{run}` is the run's directory and `{tree}` the root of
+/// the copy the run works in (the second copy of a sim, which its second runs are made in, is `rerun-tree` in the
+/// same directory, so there `{tree}` is its root); any other `{...}` stays as it is. Only [`RunDirs::expand`] and
+/// [`RunDirs::expand_text`] read the text, so the fields that are
 /// a `Template` are the ones that are expanded; every other string of the table is a [`Plain`], which refuses a
 /// placeholder. The types of the table are therefore the one statement of where a placeholder is taken. It is
 /// written as the text it is, placeholders unexpanded, which is how the settings digest holds it.
@@ -55,6 +57,13 @@ impl<'de> Deserialize<'de> for Template {
             return Err(D::Error::custom(retired()));
         }
         Ok(Self(text))
+    }
+}
+
+impl Template {
+    /// The text as it was written, placeholders unexpanded.
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -87,7 +96,7 @@ fn retired() -> String {
 /// after it; a map that has such a key is named, not the key.
 fn no_placeholder() -> String {
     format!(
-        "this takes no placeholder (`{RUN}`, `{TREE}`): only the value of an `env` variable and a word of `sim.<context>.program` do"
+        "this takes no placeholder (`{RUN}`, `{TREE}`): only the value of an `env` variable and a word of `sim.<context>.program` or `examples.<context>.program` do"
     )
 }
 
@@ -128,9 +137,15 @@ impl RunDirs {
     /// `template` with `{run}` made the directory of the run and `{tree}` the root of the copy. Any other `{...}`
     /// is left as it is: a script may need a brace in an argument.
     pub(super) fn expand(&self, template: &Template) -> String {
+        self.expand_text(&template.0)
+    }
+
+    /// As [`RunDirs::expand`], for the text of a template that is held as the text it was written (the words of a
+    /// command, whose settings digest holds them so).
+    pub(super) fn expand_text(&self, text: &str) -> String {
         let (dir, tree) = (self.dir.to_string_lossy(), self.tree.to_string_lossy());
-        let mut out = String::with_capacity(template.0.len());
-        let mut rest = template.0.as_str();
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
         while let Some(at) = rest.find('{') {
             out.push_str(&rest[..at]);
             let tail = &rest[at..];
@@ -167,6 +182,8 @@ struct Raw {
     #[serde(default)]
     sim: BTreeMap<Plain, RawSim>,
     #[serde(default)]
+    examples: BTreeMap<Plain, RawExamples>,
+    #[serde(default)]
     layout: Vec<RawLayout>,
     #[serde(default)]
     timeout: Option<u64>,
@@ -192,6 +209,17 @@ struct RawSim {
     seeds: Option<u32>,
     #[serde(default)]
     sample: Option<usize>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    budget: Option<u64>,
+}
+
+/// `[measure.examples.<context>]`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExamples {
+    program: Vec<Template>,
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
@@ -252,6 +280,18 @@ pub(super) struct SimConfig {
     pub budget: Duration,
 }
 
+/// How the examples of the Harnesses of examples of one Context are run.
+#[derive(Debug, Clone)]
+pub(super) struct ExamplesConfig {
+    /// The program under test: the words that start it, to which the arguments of an example are added. Each word is
+    /// a [`Template`], so `{tree}` is the root of the copy. The program its first word names is the one digested.
+    pub program: Vec<Template>,
+    /// For one example.
+    pub timeout: Duration,
+    /// For the whole run.
+    pub budget: Duration,
+}
+
 /// The measure configuration of a project.
 #[derive(Debug, Clone)]
 pub(super) struct Config {
@@ -267,6 +307,8 @@ pub(super) struct Config {
     pub items: BTreeMap<String, Vec<String>>,
     /// Context name to how its sim script is run.
     pub sim: BTreeMap<ContextName, SimConfig>,
+    /// Context name to how the examples of its Harnesses are run.
+    pub examples: BTreeMap<ContextName, ExamplesConfig>,
     pub layout: Vec<Layout>,
     /// For one build or one test of a mutant.
     pub timeout: Duration,
@@ -458,6 +500,28 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             },
         );
     }
+    let mut examples = BTreeMap::new();
+    for (Plain(context), e) in raw.examples {
+        let context = ContextName::try_from(context.as_str())
+            .map_err(|e| format!("`[measure.examples.<context>]`: {e}"))?;
+        let program: Vec<String> = e.program.iter().map(|w| w.0.clone()).collect();
+        command(&format!("examples.{context}.program"), &program)?;
+        let example_timeout = seconds(&format!("examples.{context}.timeout"), e.timeout, 10)?;
+        let example_budget = seconds(&format!("examples.{context}.budget"), e.budget, 600)?;
+        if example_budget.as_secs() > 3600 {
+            return Err(format!(
+                "`examples.{context}.budget` is at most 3600 seconds"
+            ));
+        }
+        examples.insert(
+            context,
+            ExamplesConfig {
+                program: e.program,
+                timeout: example_timeout,
+                budget: example_budget,
+            },
+        );
+    }
     let mut layout = Vec::with_capacity(raw.layout.len());
     let mut seen = BTreeSet::new();
     for l in raw.layout {
@@ -517,6 +581,7 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         mutants,
         items,
         sim,
+        examples,
         layout,
         timeout,
         baseline_timeout,
@@ -824,6 +889,110 @@ path = "sim.py"
             (sim.timeout, sim.budget),
             (Duration::from_secs(5), Duration::from_secs(90))
         );
+    }
+
+    const EXAMPLES: &str = r#"
+build = ["cargo", "build"]
+
+[examples.inventory]
+program = ["./run.sh", "{tree}/prog", "--plain"]
+
+[[layout]]
+context = "inventory"
+interface = "prog"
+path = "prog.py"
+[[layout]]
+context = "inventory"
+harness = "acceptance"
+path = "acceptance"
+"#;
+
+    #[test]
+    fn the_examples_of_a_context_get_their_defaults_and_need_no_test_interpreter_or_language() {
+        let config = parse(&table(EXAMPLES)).unwrap();
+        assert!(config.test.is_none() && config.sim.is_empty());
+        let examples = &config.examples[&context("inventory")];
+        assert_eq!(
+            examples.program,
+            ["./run.sh", "{tree}/prog", "--plain"].map(|w| Template(w.to_string()))
+        );
+        assert_eq!(examples.timeout, Duration::from_secs(10));
+        assert_eq!(examples.budget, Duration::from_secs(600));
+        assert_eq!(
+            config
+                .harness(&context("inventory"), &asset("acceptance"))
+                .unwrap()
+                .path,
+            Path::new("acceptance")
+        );
+        let tuned = EXAMPLES.replacen(
+            "[examples.inventory]",
+            "[examples.inventory]\ntimeout = 3\nbudget = 90",
+            1,
+        );
+        let examples = &parse(&table(&tuned)).unwrap().examples[&context("inventory")];
+        assert_eq!(
+            (examples.timeout, examples.budget),
+            (Duration::from_secs(3), Duration::from_secs(90))
+        );
+        // a table without one has none
+        assert!(parse(&table(MINIMAL)).unwrap().examples.is_empty());
+    }
+
+    #[test]
+    fn what_the_examples_cannot_run_with_is_refused_by_name() {
+        for (from, to, expected) in [
+            (
+                "program = [\"./run.sh\", \"{tree}/prog\", \"--plain\"]",
+                "program = []",
+                "examples.inventory.program",
+            ),
+            (
+                "[examples.inventory]",
+                "[examples.inventory]\ntimeout = 0",
+                "examples.inventory.timeout",
+            ),
+            (
+                "[examples.inventory]",
+                "[examples.inventory]\nbudget = 3601",
+                "3600",
+            ),
+            (
+                "[examples.inventory]",
+                "[examples.inventory]\nbudget = 0",
+                "positive",
+            ),
+            (
+                "[examples.inventory]",
+                "[examples.inventory]\ntimeoutz = 3",
+                "timeoutz",
+            ),
+            (
+                "[examples.inventory]",
+                "[examples.Inventory]",
+                "[measure.examples.<context>]",
+            ),
+        ] {
+            let error = parse(&table(&EXAMPLES.replacen(from, to, 1))).unwrap_err();
+            assert!(error.contains(expected), "{error} vs {expected}");
+        }
+        // the program is a command with a program: the key `program` is required
+        let error = parse(&table(&EXAMPLES.replacen(
+            "program = [\"./run.sh\", \"{tree}/prog\", \"--plain\"]",
+            "",
+            1,
+        )))
+        .unwrap_err();
+        assert!(error.contains("program"), "{error}");
+        // a placeholder is taken in a word of the program, and in no other string of the table
+        let error = parse(&table(&EXAMPLES.replacen(
+            "build = [\"cargo\", \"build\"]",
+            "build = [\"{tree}/b\"]",
+            1,
+        )))
+        .unwrap_err();
+        assert!(error.contains("takes no placeholder"), "{error}");
+        assert!(error.contains("examples.<context>.program"), "{error}");
     }
 
     fn dirs() -> RunDirs {

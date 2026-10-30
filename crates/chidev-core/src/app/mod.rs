@@ -34,8 +34,9 @@ use self::ports::external::{ExternalExecutor, ExternalReport, NoExternal};
 mod judged;
 mod measure;
 pub use self::measure::{
-    CaseLine, Coverage, EvidenceLine, FindingLine, MeasureDone, MeasurementStanding,
-    MeasurementState, MovedPart, MutantLine, RerunLine, SimSummary, UnreachedLine,
+    CaseLine, Coverage, EvidenceLine, ExampleLine, ExamplesSummary, FindingLine, MeasureDone,
+    MeasurementStanding, MeasurementState, MovedPart, MutantLine, RerunLine, SimSummary,
+    UnreachedLine,
 };
 use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
@@ -496,6 +497,7 @@ fn input(e: impl Display) -> AppError {
 /// were given all the same would find its subject without settings, which they read as settings that cannot be read.
 static NO_SETTINGS: BTreeMap<InterfaceId, SettingsNow> = BTreeMap::new();
 static NO_SIM_SETTINGS: BTreeMap<HarnessId, SettingsNow> = BTreeMap::new();
+static NO_EXAMPLES_SETTINGS: BTreeMap<HarnessId, SettingsNow> = BTreeMap::new();
 
 /// What the checks of a moment read: one state of the model.
 fn view<'a>(
@@ -512,6 +514,7 @@ fn view<'a>(
         measurements: &[],
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
+        examples_settings: &NO_EXAMPLES_SETTINGS,
         resolving: None,
     }
 }
@@ -2353,6 +2356,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 measurements: &measured.measurements,
                 measure_settings: &measured.settings,
                 sim_settings: &measured.sim_settings,
+                examples_settings: &measured.examples_settings,
                 resolving: None,
             },
         );

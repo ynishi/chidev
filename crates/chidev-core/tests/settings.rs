@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use chidev_core::app::commit::Gated;
 use chidev_core::app::ports::external::ExternalReport;
 use chidev_core::app::ports::measure::{
-    BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
+    BoxFuture, ExamplesReport, ExamplesRequest, MutateReport, MutateRequest, Runner, RunnerError,
+    SimulateReport, SimulateRequest,
 };
 use chidev_core::app::ports::{
     AssetKind, AssetNames, IdSource, Invocation, InvocationSeq, JudgedReport, JudgedRepository,
@@ -207,6 +208,22 @@ impl Runner for Resolving {
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         self.0.simulate(request)
     }
+
+    fn examples_settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        harness: &'a AssetName,
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        self.0.examples_settings(context, harness, builds)
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        request: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
+        self.0.run_examples(request)
+    }
 }
 
 /// A runner that says one thing of the settings before a run and runs under another.
@@ -256,6 +273,22 @@ impl Runner for Racy {
         &'a self,
         _: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn examples_settings<'a>(
+        &'a self,
+        _: &'a ContextName,
+        _: &'a AssetName,
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        _: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 }
@@ -529,6 +562,7 @@ async fn a_subject_the_view_has_no_settings_for_is_stale() {
                     measurements: &runs,
                     measure_settings,
                     sim_settings: &BTreeMap::new(),
+                    examples_settings: &BTreeMap::new(),
                     resolving: None,
                 },
             )

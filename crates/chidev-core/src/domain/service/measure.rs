@@ -1,12 +1,13 @@
 //! Telling whether a measurement still describes the Project: a mutation run stands on the code of a Pin and on
 //! what that Pin stands on (the Interface, the Harnesses that check it, the Contracts they cite), a simulation on
 //! the sim Harness, the Contracts its Cases cite a Clause of and the Interfaces it builds with the code pinned for
-//! them; both on the settings
+//! them, a run of examples on the Harness of examples and the code pinned for what it builds; all on the settings
 //! they were run with. The Project moves on; this reads how far, and which part moved.
 
-use crate::domain::entity::measurement::{Measurement, MutationRun, SimulationRun};
+use crate::domain::entity::measurement::{ExamplesRun, Measurement, MutationRun, SimulationRun};
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
+use crate::domain::service::examples;
 use crate::domain::service::pin::current_basis;
 use crate::domain::service::sim::basis_of;
 use crate::domain::vo::id::{HarnessId, InterfaceId};
@@ -98,6 +99,21 @@ pub fn sim_standing(
     })
 }
 
+/// Whether the run of examples `run` still describes `project`, given the Pins as they are now. A Harness that is
+/// gone, or no longer of examples, is `Gone`: it has no basis to compare with. The settings are judged as
+/// [`standing`] judges them.
+pub fn examples_standing(
+    run: ExamplesRun<'_>,
+    project: &Project,
+    pins: &[Pin],
+    settings: &SettingsNow,
+) -> Standing {
+    Standing::of(match examples::basis_of(project, run.harness(), pins) {
+        Some(basis) => run.stamp().moved(&basis, settings),
+        None => vec![StampPart::Gone],
+    })
+}
+
 /// The mutation run for `interface` among `all`, the last one if more than one is given (the store gives the
 /// newest of each subject; a later one replaces an earlier one).
 pub fn latest(all: &[Measurement], interface: InterfaceId) -> Option<MutationRun<'_>> {
@@ -112,6 +128,14 @@ pub fn latest_sim(all: &[Measurement], harness: HarnessId) -> Option<SimulationR
     all.iter()
         .rev()
         .filter_map(Measurement::as_simulation)
+        .find(|run| run.harness() == harness)
+}
+
+/// The run of the examples of `harness` among `all`, the last one if more than one is given.
+pub fn latest_examples(all: &[Measurement], harness: HarnessId) -> Option<ExamplesRun<'_>> {
+    all.iter()
+        .rev()
+        .filter_map(Measurement::as_examples)
         .find(|run| run.harness() == harness)
 }
 
@@ -177,6 +201,35 @@ mod tests {
         .unwrap();
         let run = sim.as_simulation().expect("a simulation");
         assert_eq!(sim_standing(run, &project, &[], &same_settings()), gone);
+        let basis = crate::domain::vo::examples_run::ExamplesBasis {
+            harness: Revision::first(),
+            builds: Default::default(),
+        };
+        let examples =
+            Measurement::new(crate::domain::entity::measurement::fixture::examples_draft(
+                3,
+                HarnessId::from_uuid(test_uuid(400)),
+                basis,
+                Default::default(),
+            ))
+            .unwrap();
+        let run = examples.as_examples().expect("a run of examples");
+        assert_eq!(
+            examples_standing(run, &project, &[], &same_settings()),
+            gone
+        );
+        // and the latest of each kind is found by its own reader
+        let all = [mutation, sim, examples];
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        assert_eq!(
+            latest_examples(&all, harness).map(|r| r.measurement().id()),
+            Some(all[2].id())
+        );
+        assert_eq!(
+            latest_sim(&all, harness).map(|r| r.measurement().id()),
+            Some(all[1].id())
+        );
+        assert!(latest_examples(&all, HarnessId::from_uuid(test_uuid(401))).is_none());
     }
 
     #[test]

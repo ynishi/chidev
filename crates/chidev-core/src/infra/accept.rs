@@ -458,10 +458,9 @@ pub(crate) async fn run(
     cwd: &Path,
     timeout: Duration,
 ) -> Verdict {
-    let expected = match &example.expected {
-        Ok(expected) => expected,
-        Err(reasons) => return Verdict::Fail(reasons.clone()),
-    };
+    if let Err(reasons) = &example.expected {
+        return Verdict::Fail(reasons.clone());
+    }
     let Some((program, fixed)) = command.split_first() else {
         return Verdict::fail(Why::Abnormal("cannot start: no command".to_string()));
     };
@@ -470,20 +469,60 @@ pub(crate) async fn run(
         Ok(executable) => executable,
         Err(failure) => return Verdict::fail(abnormal(&failure, timeout)),
     };
+    run_resolved(
+        example,
+        &Resolved {
+            executable: &executable,
+            fixed,
+            env: &[],
+            cwd,
+        },
+        timeout,
+    )
+    .await
+}
+
+/// A program that is already found: the file to start, the words that come before the example's own arguments, the
+/// variables added to the environment, and the directory it runs in. What [`run`] finds from a command line and the
+/// runner of a measure finds in its copy of the project, so that one example is run and judged by one code path.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Resolved<'a> {
+    /// The file to start.
+    pub executable: &'a Path,
+    /// The arguments before those of the example.
+    pub fixed: &'a [String],
+    /// Variables added to the environment the runner inherits.
+    pub env: &'a [(String, String)],
+    /// The directory it runs in.
+    pub cwd: &'a Path,
+}
+
+/// Runs the program `program` for `example` and judges what it answered, as [`run`] does once it has found the
+/// program. The arguments of the example follow `program.fixed`; its standard input is the example's; `timeout`
+/// bounds the one example. An example that could not be read fails without running anything.
+pub(crate) async fn run_resolved(
+    example: &Example,
+    program: &Resolved<'_>,
+    timeout: Duration,
+) -> Verdict {
+    let expected = match &example.expected {
+        Ok(expected) => expected,
+        Err(reasons) => return Verdict::Fail(reasons.clone()),
+    };
     let deadline = match process::deadline_in(timeout) {
         Ok(deadline) => deadline,
         Err(failure) => return Verdict::fail(abnormal(&failure, timeout)),
     };
-    let args: Vec<String> = fixed.iter().chain(&example.args).cloned().collect();
+    let args: Vec<String> = program.fixed.iter().chain(&example.args).cloned().collect();
     let pipe = Pipe {
         limit: LIMIT,
         over: Over::Fail,
     };
     let spec = Spec {
-        executable: &executable,
+        executable: program.executable,
         args: &args,
-        cwd,
-        env: &[],
+        cwd: program.cwd,
+        env: program.env,
         stdin: Some(example.stdin.as_slice()),
         deadline,
         stdout: pipe,

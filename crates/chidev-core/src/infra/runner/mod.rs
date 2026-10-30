@@ -22,12 +22,18 @@
 //! script is started once per case under the protocol `chidev-sim 2`. The sampled cases are then run a second time
 //! in a second, fresh copy.
 //!
+//! The examples of a Harness of examples (`examples.rs`) are run in the same kind of copy, prepared the same way: the
+//! pinned code of the Interfaces the Harness builds is written over it and the build command runs. The program is then
+//! started once per example, with the example's arguments and input, and the answer is judged by the same judge as
+//! `chidev accept` uses.
+//!
 //! The same configuration answers a second question for the use cases, as the [`ItemSource`] port: the language of an
 //! Interface (its layout's `lang`) and the Items a provider of that language finds in its code (`items.rs`, which
 //! holds the protocol `chidev-items 1`). That provider is started in the project's root, not in a copy, under the
 //! `timeout` of the table.
 
 mod config;
+mod examples;
 mod items;
 mod provider;
 mod settings;
@@ -45,8 +51,8 @@ use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
-    BoxFuture, LayoutPlace, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport,
-    SimulateRequest,
+    BoxFuture, ExamplesReport, ExamplesRequest, LayoutPlace, MutateReport, MutateRequest, Runner,
+    RunnerError, SimulateReport, SimulateRequest,
 };
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MutantOutcome, MutantResult, SettingsDigest, StepEvidence,
@@ -124,6 +130,22 @@ impl Runner for ProcessRunner {
         request: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         Box::pin(self.simulate_run(request))
+    }
+
+    fn examples_settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        harness: &'a AssetName,
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(self.examples_settings_of(context, harness, builds))
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        request: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
+        Box::pin(self.examples_run(request))
     }
 }
 
@@ -354,6 +376,74 @@ impl Job<'_> {
             args: program.args().to_vec(),
             digest: found.digest,
         })
+    }
+
+    /// Makes the copy a program is run from: copies the project, writes `written` over it (the code the Pins
+    /// accepted, and any file the kind of run owns, each at its path in the copy), checks that the build command and
+    /// the `programs` of the run are in the copy the files the settings were digested with, and runs the build command
+    /// under the time of the baseline. `tag` names the step in the evidence (`<tag>-build`), which is put in
+    /// `evidence` whether or not the build passes. A build that fails is the failure `no_build`: there is no program
+    /// to run. The one preparation of every run that builds a program from pinned code, so that a simulation and a
+    /// run of examples cannot be prepared differently.
+    async fn prepare(
+        &self,
+        tag: &str,
+        written: &[(&Path, &str)],
+        programs: &[&Program],
+        evidence: &mut Vec<StepEvidence>,
+    ) -> Result<(), MeasureFailure> {
+        let (root, tree, exclude) = (
+            self.root.to_path_buf(),
+            self.dirs.tree.clone(),
+            self.copy.excluded(),
+        );
+        tokio::task::spawn_blocking(move || copy_tree(&root, &tree, &exclude))
+            .await
+            .map_err(|e| io("the copy of the project", e))?
+            .map_err(|e| io("cannot copy the project", e))?;
+        for (path, text) in written {
+            self.write(path, text).await?;
+        }
+        // Every program of the copy is the one the settings were digested with, as the copy is made. The build runs
+        // after that and may write an executable (the interpreter, say): that is the run's, not a moved setting.
+        self.verify(&self.copy.build).await?;
+        for program in programs {
+            self.verify(program).await?;
+        }
+        let env = self.env();
+        let build = self.command(&self.copy.build).await?;
+        let started = Instant::now();
+        let result = self.exec(&build, &env, self.copy.baseline_timeout).await;
+        let (exit_code, stderr) = match &result {
+            Ok((ran, _)) => (ran.exit_code, provider::tail(&ran.stderr, TAIL)),
+            Err(_) => (None, String::new()),
+        };
+        evidence.push(StepEvidence {
+            step: format!("{tag}-build"),
+            command: build.line(),
+            command_digest: Some(build.digest.clone()),
+            exit_code,
+            duration_ms: millis(started),
+            stderr,
+        });
+        let (ran, _) = result.map_err(|f| self.fail(f))?;
+        if !ran.success {
+            let said = [
+                provider::tail(&ran.stderr, TAIL / 2),
+                provider::tail(&ran.stdout, TAIL / 2),
+            ]
+            .join("\n");
+            return Err(MeasureFailure::of(
+                FailureKind::NoBuild,
+                format!(
+                    "the program does not build (exit {}): {}",
+                    ran.exit_code
+                        .map_or_else(|| "by a signal".to_string(), |c| c.to_string()),
+                    said.trim()
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Runs `command` in the copy for at most `limit`, and not past the budget.

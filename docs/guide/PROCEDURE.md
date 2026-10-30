@@ -193,10 +193,17 @@ Crux names there waits on that question. `view` does not give a request's
    one (a new line of an expected output) is a put of that Harness `for` the
    request: the example's Case and the Harness go to their next revision and the
    request has touched them; reword the Clause only when the promise itself
-   changes. The examples are run by `chidev accept --external`, registered as an
-   external check that gates `pin` and `resolve` (see [Acceptance
-   examples](../../README.md#acceptance-examples-chidev-accept)); it reports
-   each failing example about the Clauses its Case cites.
+   changes. Once the Interfaces the Harness builds are pinned, the implementer
+   records a run of the examples with `measure` of kind `examples` (see
+   [Examples](../../README.md#examples-a-harness-of-examples-run-against-the-pinned-program)):
+   the run stands on the Harness and the code pinned for what it builds, so a
+   changed expected output makes the last run `examples.stale` and the
+   implementer runs it again, and `examples.failed` reports each failing example
+   about every Clause its Case cites, at `check`, `pin` and `cr_resolve`. It
+   reports and refuses nothing; to have a `pin` or a resolution refused for a
+   failing example, register `chidev accept --external` as an external check
+   that gates (see [Acceptance
+   examples](../../README.md#acceptance-examples-chidev-accept)).
 5. **Implement.** Write the code against the Interfaces, run the tests, and
    `pin` each Interface's code once they pass. chidev does not run the tests
    itself; to have it refuse a `pin` while they fail, register a program that

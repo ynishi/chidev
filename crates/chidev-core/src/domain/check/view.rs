@@ -24,9 +24,10 @@ pub struct CheckView<'a> {
     /// Every Crux, as the use case would leave them. A change request does not hold its Cruxes: those raised in it
     /// are the ones here whose `raised_in` is its id.
     pub cruxes: &'a [Crux],
-    /// The latest measurement of each subject (an Interface for a mutation run, a sim Harness for a simulation)
-    /// and kind that has one. The moments of a change give none: a measurement is read by the on-demand moment, and a
-    /// change does not move it.
+    /// The latest measurement of each subject (an Interface for a mutation run, a Harness for a simulation or a run
+    /// of examples) and kind that has one. The moments of a change give none: a measurement is read by the
+    /// on-demand moment, and a change does not move it. The confirmations (a pin, a resolution) give the runs of
+    /// examples alone, for a confirmation must not claim a state the latest run of them contradicts.
     pub measurements: &'a [Measurement],
     /// What the settings of a mutation run are now, for each Interface that is in the model and whose
     /// measurements are read. An Interface that is absent (it is no longer in the model, or the moment reads no
@@ -35,6 +36,9 @@ pub struct CheckView<'a> {
     pub measure_settings: &'a BTreeMap<InterfaceId, SettingsNow>,
     /// The same for the sim Harnesses: what the settings of a simulation of each are now, absent as above.
     pub sim_settings: &'a BTreeMap<HarnessId, SettingsNow>,
+    /// The same for the Harnesses of examples: what the settings of a run of the examples of each are now, absent
+    /// as above.
+    pub examples_settings: &'a BTreeMap<HarnessId, SettingsNow>,
     /// The change request this state is the resolution of: set only when the use case that resolves one runs the
     /// checks, on the state with it already resolved. The checks that judge only unresolved requests judge this one
     /// too, so that the resolution is told what was left (`cr.keep-moved`, `cr.out-of-frame`). None in every other
@@ -53,6 +57,12 @@ impl CheckView<'_> {
     /// for it.
     pub fn sim_settings_now(&self, harness: HarnessId) -> SettingsNow {
         SettingsNow::of(self.sim_settings, &harness)
+    }
+
+    /// What the settings of a run of the examples of `harness` are now; settings that were not read when the view
+    /// has none for it.
+    pub fn examples_settings_now(&self, harness: HarnessId) -> SettingsNow {
+        SettingsNow::of(self.examples_settings, &harness)
     }
 }
 
