@@ -1,7 +1,7 @@
 //! Measurements as the store keeps them: a run is one row (its stamp as a JSON document of the revisions it stood
 //! on, its failure and its evidence as JSON) and what it ran are item rows: the mutants of a mutation run, the
-//! cases of a simulation. The domain refuses what is not a measurement, so a row that was changed by hand to
-//! something impossible is `Corrupt`, never quietly repaired.
+//! cases of a simulation, the examples of a run of examples. The domain refuses what is not a measurement, so a row
+//! that was changed by hand to something impossible is `Corrupt`, never quietly repaired.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,10 @@ use crate::domain::entity::measurement::{
 use crate::domain::repository::StoreError;
 use crate::domain::vo::correction::Correction;
 use crate::domain::vo::digest::Digest;
-use crate::domain::vo::id::{ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
+use crate::domain::vo::examples_run::{
+    ExampleRecord, ExampleResult, ExamplesBasis, ExamplesOutcome, ExamplesStamp, Got, Reason,
+};
+use crate::domain::vo::id::{CaseId, ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantKey,
     MutantOutcome, MutantResult, Operator, SettingsDigest, Site, StepEvidence,
@@ -78,6 +81,99 @@ struct SimStampDoc {
     contracts: Vec<RevDoc>,
     interfaces: Vec<PinnedDoc>,
     settings: String,
+}
+
+/// An Interface a run of examples stood on: the digest of the code pinned for it (none when it has no Pin).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuiltDoc {
+    id: String,
+    pin: Option<String>,
+}
+
+/// The stamp of a run of examples, as the run row keeps it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExamplesStampDoc {
+    harness: u64,
+    builds: Vec<BuiltDoc>,
+    settings: String,
+}
+
+/// What a run of examples says apart from its examples, for a reader of the row that does not want the items.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExamplesSummaryDoc {
+    examples: u32,
+    passed: u32,
+    failed: u32,
+}
+
+/// Where a program's answer differs, as an item row keeps it.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GotDoc {
+    Line { line: usize, got: Option<String> },
+    FinalNewline { line: usize, got_newline: bool },
+}
+
+/// One reason an example failed, as an item row keeps it.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReasonDoc {
+    Unreadable(String),
+    Abnormal(String),
+    Output(GotDoc),
+    Errors(GotDoc),
+    Exit(i32),
+}
+
+impl From<&Got> for GotDoc {
+    fn from(got: &Got) -> GotDoc {
+        match got {
+            Got::Line { line, got } => GotDoc::Line {
+                line: *line,
+                got: got.clone(),
+            },
+            Got::FinalNewline { line, got_newline } => GotDoc::FinalNewline {
+                line: *line,
+                got_newline: *got_newline,
+            },
+        }
+    }
+}
+
+impl From<GotDoc> for Got {
+    fn from(doc: GotDoc) -> Got {
+        match doc {
+            GotDoc::Line { line, got } => Got::Line { line, got },
+            GotDoc::FinalNewline { line, got_newline } => Got::FinalNewline { line, got_newline },
+        }
+    }
+}
+
+impl From<&Reason> for ReasonDoc {
+    fn from(reason: &Reason) -> ReasonDoc {
+        match reason {
+            Reason::Unreadable(text) => ReasonDoc::Unreadable(text.clone()),
+            Reason::Abnormal(text) => ReasonDoc::Abnormal(text.clone()),
+            Reason::Output(got) => ReasonDoc::Output(got.into()),
+            Reason::Errors(got) => ReasonDoc::Errors(got.into()),
+            Reason::Exit { got } => ReasonDoc::Exit(*got),
+        }
+    }
+}
+
+impl From<ReasonDoc> for Reason {
+    fn from(doc: ReasonDoc) -> Reason {
+        match doc {
+            ReasonDoc::Unreadable(text) => Reason::Unreadable(text),
+            ReasonDoc::Abnormal(text) => Reason::Abnormal(text),
+            ReasonDoc::Output(got) => Reason::Output(got.into()),
+            ReasonDoc::Errors(got) => Reason::Errors(got.into()),
+            ReasonDoc::Exit(got) => Reason::Exit { got },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,8 +279,10 @@ pub(crate) struct RunRow {
     pub corrections: Option<String>,
 }
 
-/// A mutant or a case, as the columns of `measure_items` hold it. A case has no site and no operator (they are
-/// empty), its key is the case, its outcome the way the script ended and its detail what it found.
+/// A mutant, a case or an example, as the columns of `measure_items` hold it. A case has no site and no operator
+/// (they are empty), its key is the case, its outcome the way the script ended and its detail what it found. An
+/// example has neither either: its key is the id of its Case, its outcome `passed` or `failed` and its detail the
+/// reasons it failed (a list, empty for an example that passed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ItemRow {
     pub key: String,
@@ -296,6 +394,29 @@ fn stamp_and_summary(m: &Measurement) -> Result<(String, String), StoreError> {
                 })?,
             ))
         }
+        MeasureBody::Examples { stamp, outcome, .. } => {
+            let n = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+            let b = stamp.basis();
+            Ok((
+                write(&ExamplesStampDoc {
+                    harness: b.harness.number(),
+                    builds: b
+                        .builds
+                        .iter()
+                        .map(|(id, pin)| BuiltDoc {
+                            id: id.as_uuid().to_string(),
+                            pin: pin.map(|d| d.to_string()),
+                        })
+                        .collect(),
+                    settings: stamp.settings().to_string(),
+                })?,
+                write(&ExamplesSummaryDoc {
+                    examples: n(outcome.records().len()),
+                    passed: n(outcome.passed()),
+                    failed: n(outcome.records().len() - outcome.passed()),
+                })?,
+            ))
+        }
     }
 }
 
@@ -388,7 +509,49 @@ pub(crate) fn encode(m: &Measurement) -> Result<(RunRow, Vec<ItemRow>), StoreErr
             })?,
         });
     }
+    for r in m.examples().map(|o| o.records()).unwrap_or_default() {
+        let (outcome, reasons) = match &r.result {
+            ExampleResult::Passed => ("passed", Vec::new()),
+            ExampleResult::Failed(reasons) => {
+                ("failed", reasons.iter().map(ReasonDoc::from).collect())
+            }
+        };
+        items.push(ItemRow {
+            key: r.case.as_uuid().to_string(),
+            site: String::new(),
+            operator: String::new(),
+            outcome: outcome.to_string(),
+            detail: write::<Vec<ReasonDoc>>(&reasons)?,
+        });
+    }
     Ok((run, items))
+}
+
+/// The examples the item rows of a run of examples are.
+fn examples_of(items: &[ItemRow]) -> Result<ExamplesOutcome, StoreError> {
+    let records = items
+        .iter()
+        .map(|i| {
+            let case = Uuid::parse_str(&i.key)
+                .map(CaseId::from_uuid)
+                .map_err(|_| corrupt(format!("`{}` is not a case id", i.key)))?;
+            let reasons: Vec<ReasonDoc> = read(&i.detail, "an example's reasons")?;
+            // an example that passed has no reason, and one that failed has at least one
+            let result = match (i.outcome.as_str(), reasons.is_empty()) {
+                ("passed", true) => ExampleResult::Passed,
+                ("failed", false) => {
+                    ExampleResult::Failed(reasons.into_iter().map(Reason::from).collect())
+                }
+                ("passed", false) => return Err(corrupt("an example that passed with reasons")),
+                ("failed", true) => return Err(corrupt("an example that failed without a reason")),
+                (other, _) => {
+                    return Err(corrupt(format!("an example with outcome `{other}`")));
+                }
+            };
+            Ok(ExampleRecord { case, result })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    ExamplesOutcome::new(records).map_err(corrupt)
 }
 
 /// The mutants the item rows of a mutation run are.
@@ -480,7 +643,7 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
         (MeasureKind::Mutate, "interface") => {
             MeasureSubject::Interface(InterfaceId::from_uuid(uuid(&run.subject)?))
         }
-        (MeasureKind::Simulate, "harness") => {
+        (MeasureKind::Simulate | MeasureKind::Examples, "harness") => {
             MeasureSubject::Harness(HarnessId::from_uuid(uuid(&run.subject)?))
         }
         (_, other) => {
@@ -537,6 +700,32 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
                 outcome: sim_of(&summary, items)?,
             }
         }
+        (MeasureKind::Examples, MeasureSubject::Harness(harness)) => {
+            let stamp: ExamplesStampDoc = read(&run.inputs, "its stamp")?;
+            let builds = stamp
+                .builds
+                .iter()
+                .map(|b| {
+                    Ok((
+                        InterfaceId::from_uuid(uuid(&b.id)?),
+                        b.pin.as_deref().map(digest_of).transpose()?,
+                    ))
+                })
+                .collect::<Result<_, StoreError>>()?;
+            let basis = ExamplesBasis {
+                harness: Revision::restore(stamp.harness)
+                    .ok_or_else(|| corrupt("a revision of 0"))?,
+                builds,
+            };
+            let stamp = ExamplesStamp::new(basis, settings_of(&stamp.settings)?);
+            // the summary is for a reader of the row; the items are what the run is
+            let _: ExamplesSummaryDoc = read(&run.summary, "its summary")?;
+            MeasureBody::Examples {
+                harness,
+                stamp,
+                outcome: examples_of(items)?,
+            }
+        }
         (kind, subject) => {
             return Err(corrupt(format!(
                 "a `{}` run of a `{}`",
@@ -589,7 +778,7 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
 }
 
 /// A field of a measurement, as a correction keeps it: `{"step_stderr":1}`, `"failure"`,
-/// `{"case_finding":[0,1]}`, `{"case_exit":0}`.
+/// `{"case_finding":[0,1]}`, `{"case_exit":0}`, `{"example_reason":[0,1]}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MeasurementFieldDoc {
@@ -602,6 +791,7 @@ enum MeasurementFieldDoc {
     CaseUnreached(usize, usize),
     CaseUndecided(usize, usize),
     CaseExit(usize),
+    ExampleReason(usize, usize),
 }
 
 impl MeasurementFieldDoc {
@@ -624,6 +814,9 @@ impl MeasurementFieldDoc {
                 MeasurementFieldDoc::CaseUndecided(case, undecided)
             }
             MeasurementField::CaseExit { case } => MeasurementFieldDoc::CaseExit(case),
+            MeasurementField::ExampleReason { example, reason } => {
+                MeasurementFieldDoc::ExampleReason(example, reason)
+            }
         }
     }
 
@@ -645,6 +838,9 @@ impl MeasurementFieldDoc {
                 MeasurementField::CaseUndecided { case, undecided }
             }
             MeasurementFieldDoc::CaseExit(case) => MeasurementField::CaseExit { case },
+            MeasurementFieldDoc::ExampleReason(example, reason) => {
+                MeasurementField::ExampleReason { example, reason }
+            }
         })
     }
 }
@@ -970,6 +1166,191 @@ mod tests {
                 .is_some_and(|c| c.contains("{\"case_exit\":0}") && !c.contains("SECRET"))
         );
         assert_eq!(decode(&run, &items).unwrap(), m);
+    }
+
+    fn examples_measurement() -> Measurement {
+        use crate::domain::entity::measurement::fixture::examples_draft;
+        let case = |n: u128| CaseId::from_uuid(test_uuid(n));
+        let line = |got: Option<&str>| Got::Line {
+            line: 2,
+            got: got.map(str::to_string),
+        };
+        let records = vec![
+            ExampleRecord {
+                case: case(1),
+                result: ExampleResult::Passed,
+            },
+            ExampleRecord {
+                case: case(2),
+                result: ExampleResult::Failed(vec![
+                    Reason::Output(line(Some("tok-SECRET-123 \"x\""))),
+                    Reason::Output(line(None)),
+                    Reason::Output(Got::FinalNewline {
+                        line: 3,
+                        got_newline: false,
+                    }),
+                    Reason::Exit { got: -1 },
+                    Reason::Errors(line(Some("oops"))),
+                ]),
+            },
+            ExampleRecord {
+                case: case(3),
+                result: ExampleResult::Failed(vec![
+                    Reason::Unreadable("missing a3.args".to_string()),
+                    Reason::Abnormal("did not end within 10 s".to_string()),
+                ]),
+            },
+        ];
+        let basis = ExamplesBasis {
+            harness: Revision::first().next(),
+            builds: BTreeMap::from([
+                (
+                    InterfaceId::from_uuid(test_uuid(4)),
+                    Some(Digest::of(b"code")),
+                ),
+                (InterfaceId::from_uuid(test_uuid(5)), None),
+            ]),
+        };
+        Measurement::new(examples_draft(
+            7,
+            HarnessId::from_uuid(test_uuid(6)),
+            basis,
+            ExamplesOutcome::new(records).unwrap(),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_run_of_examples_survives_the_rows_it_is_kept_as() {
+        let m = examples_measurement();
+        let (run, items) = encode(&m).unwrap();
+        assert_eq!(run.kind, "examples");
+        assert_eq!(run.subject_kind, "harness");
+        assert_eq!(
+            run.summary,
+            "{\"examples\":3,\"passed\":1,\"failed\":2}".to_string()
+        );
+        // one item for each example: the Case's id, no site and no operator, passed or failed, and the reasons
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0].key,
+            CaseId::from_uuid(test_uuid(1)).as_uuid().to_string()
+        );
+        assert_eq!(
+            (items[0].outcome.as_str(), items[0].detail.as_str()),
+            ("passed", "[]")
+        );
+        assert_eq!(items[1].outcome, "failed");
+        assert!(
+            items
+                .iter()
+                .all(|i| i.site.is_empty() && i.operator.is_empty())
+        );
+        assert_eq!(decode(&run, &items).unwrap(), m);
+        // an item whose outcome and reasons disagree is corrupt, not read as one or the other
+        for (at, outcome, detail) in [
+            (1, "failed", "[]"),
+            (0, "passed", "[{\"exit\":1}]"),
+            (0, "skipped", "[]"),
+        ] {
+            let mut changed = items.clone();
+            changed[at].outcome = outcome.to_string();
+            changed[at].detail = detail.to_string();
+            assert!(
+                matches!(decode(&run, &changed), Err(StoreError::Corrupt(_))),
+                "{outcome} {detail}"
+            );
+        }
+        // and a failed run keeps the examples it got through
+        let mut draft = crate::domain::entity::measurement::fixture::examples_draft(
+            8,
+            HarnessId::from_uuid(test_uuid(6)),
+            m.stamp()
+                .examples()
+                .expect("an examples stamp")
+                .basis()
+                .clone(),
+            ExamplesOutcome::default(),
+        );
+        draft.failure = Some(MeasureFailure::of(FailureKind::NoBuild, "does not build"));
+        let failed = Measurement::new(draft).unwrap();
+        let (run, items) = encode(&failed).unwrap();
+        assert_eq!(run.outcome, "failed");
+        assert!(items.is_empty());
+        assert_eq!(decode(&run, &items).unwrap(), failed);
+    }
+
+    #[test]
+    fn a_corrected_reason_of_an_example_is_the_detail_of_its_item_and_the_row_holds_no_text() {
+        use crate::domain::vo::correction::{Correctable, SoughtText};
+
+        let m = examples_measurement();
+        let (before, _) = encode(&m).unwrap();
+        assert_eq!(before.corrections, None);
+        let mut corrected = m.clone();
+        corrected
+            .correct(
+                &SoughtText::try_from("tok-SECRET-123").unwrap(),
+                correction(vec![MeasurementField::ExampleReason {
+                    example: 1,
+                    reason: 0,
+                }]),
+                &|_, _| false,
+            )
+            .unwrap();
+        let (run, items) = encode(&corrected).unwrap();
+        assert!(
+            run.corrections
+                .as_deref()
+                .is_some_and(|c| c.contains("{\"example_reason\":[1,0]}") && !c.contains("SECRET"))
+        );
+        assert!(!items[1].detail.contains("SECRET"));
+        assert!(items[1].detail.contains("[redacted]"));
+        assert_eq!(decode(&run, &items).unwrap(), corrected);
+        // the run keeps what it stood on and the others of its items
+        assert_eq!(
+            (&run.id, &run.stamp, &run.inputs, run.started_at),
+            (&before.id, &before.stamp, &before.inputs, before.started_at)
+        );
+        let (_, original) = encode(&m).unwrap();
+        assert_eq!(items[0], original[0]);
+        assert_eq!(items[2], original[2]);
+    }
+
+    #[test]
+    fn rows_that_cannot_be_a_run_of_examples_are_corrupt() {
+        let m = examples_measurement();
+        let (run, items) = encode(&m).unwrap();
+        let bad_item = |f: fn(&mut ItemRow)| {
+            let mut items = items.clone();
+            f(&mut items[1]);
+            decode(&run, &items)
+        };
+        assert!(bad_item(|i| i.key = "a1".into()).is_err());
+        assert!(bad_item(|i| i.outcome = "lost".into()).is_err());
+        assert!(bad_item(|i| i.detail = "{".into()).is_err());
+        assert!(bad_item(|i| i.detail = "[{\"unknown\":1}]".into()).is_err());
+        // a passed example has no reason
+        assert!(bad_item(|i| i.outcome = "passed".into()).is_err());
+        // a Case twice
+        let mut twice = items.clone();
+        twice[2].key = twice[0].key.clone();
+        assert!(decode(&run, &twice).is_err());
+        // a run of examples of an Interface, a revision of 0, a digest that is none
+        let kind = RunRow {
+            subject_kind: "interface".to_string(),
+            ..run.clone()
+        };
+        assert!(decode(&kind, &items).is_err());
+        let mut stamp = run.clone();
+        stamp.inputs = stamp.inputs.replacen("\"harness\":2", "\"harness\":0", 1);
+        assert_ne!(stamp.inputs, run.inputs);
+        assert!(decode(&stamp, &items).is_err());
+        let mut pin = run.clone();
+        pin.inputs = pin
+            .inputs
+            .replacen(&Digest::of(b"code").to_string(), "nothex", 1);
+        assert!(decode(&pin, &items).is_err());
     }
 
     #[test]

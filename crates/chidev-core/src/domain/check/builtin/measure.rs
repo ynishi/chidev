@@ -286,6 +286,7 @@ mod tests {
                 measurements,
                 measure_settings: settings,
                 sim_settings: &BTreeMap::new(),
+                examples_settings: &BTreeMap::new(),
                 resolving: None,
             },
             &Params::default(),

@@ -15,7 +15,8 @@ use chidev_core::app::ports::external::{
     ExecutionEvidence, ExternalAttempt, ExternalCall, ExternalExecutor, ExternalFailure,
 };
 use chidev_core::app::ports::measure::{
-    BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
+    BoxFuture, ExamplesReport, ExamplesRequest, MutateReport, MutateRequest, Runner, RunnerError,
+    SimulateReport, SimulateRequest,
 };
 use chidev_core::app::ports::{
     AssetKind, AssetNames, IdSource, JudgedReport, JudgedRepository, Store, StoreRevision,
@@ -971,6 +972,13 @@ impl Store for Flaky {
         self.inner.latest_measurements().await
     }
 
+    async fn latest_measurements_of(
+        &self,
+        kind: chidev_core::domain::vo::measure::MeasureKind,
+    ) -> Result<Vec<Measurement>, StoreError> {
+        self.inner.latest_measurements_of(kind).await
+    }
+
     async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
         self.inner.measurements().await
     }
@@ -1066,6 +1074,22 @@ impl Runner for Quiet {
         &'a self,
         _: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn examples_settings<'a>(
+        &'a self,
+        _: &'a ContextName,
+        _: &'a AssetName,
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        _: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 }

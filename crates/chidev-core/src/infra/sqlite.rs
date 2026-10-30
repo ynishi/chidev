@@ -47,6 +47,7 @@ use crate::domain::repository::{
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
 use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
+use crate::domain::vo::measure::MeasureKind;
 use crate::domain::vo::name::AssetName;
 
 /// The layout of the tables this code creates and reads. Layout 2 is layout 1 with the Cruxes in a table of their
@@ -457,7 +458,13 @@ impl SqliteStore {
 
     /// The measurements of the runs `filter` selects (a `WHERE` clause, or nothing for every run), in the order the runs
     /// were made, each with its items.
-    async fn runs_where(&self, filter: &'static str) -> Result<Vec<Measurement>, StoreError> {
+    ///
+    /// `kind` is the one parameter of the filter (`?1`), a kind's word; none when the filter has no parameter.
+    async fn runs_where(
+        &self,
+        filter: &'static str,
+        kind: Option<String>,
+    ) -> Result<Vec<Measurement>, StoreError> {
         let sql = format!(
             "SELECT id, kind, subject_kind, subject_id, stamp, inputs, started_at, outcome, failure, evidence, summary, corrections
              FROM measure_runs {filter} ORDER BY seq"
@@ -467,7 +474,7 @@ impl SqliteStore {
             .call(move |c| {
                 let mut runs = c.prepare(&sql)?;
                 let rows: Vec<RunRow> = runs
-                    .query_map([], |r| {
+                    .query_map(rusqlite::params_from_iter(kind.iter()), |r| {
                         Ok(RunRow {
                             id: r.get(0)?,
                             kind: r.get(1)?,
@@ -783,12 +790,25 @@ impl Store for SqliteStore {
     async fn latest_measurements(&self) -> Result<Vec<Measurement>, StoreError> {
         self.runs_where(
             "WHERE seq IN (SELECT MAX(seq) FROM measure_runs GROUP BY kind, subject_id)",
+            None,
+        )
+        .await
+    }
+
+    async fn latest_measurements_of(
+        &self,
+        kind: MeasureKind,
+    ) -> Result<Vec<Measurement>, StoreError> {
+        // only the rows of the kind are selected, and so only they are decoded
+        self.runs_where(
+            "WHERE kind = ?1 AND seq IN (SELECT MAX(seq) FROM measure_runs WHERE kind = ?1 GROUP BY subject_id)",
+            Some(kind.word().to_string()),
         )
         .await
     }
 
     async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
-        self.runs_where("").await
+        self.runs_where("", None).await
     }
 
     async fn invocations(&self) -> Result<Vec<(InvocationSeq, Invocation)>, StoreError> {
@@ -2455,6 +2475,108 @@ mod tests {
         drop(conn);
         let store = SqliteStore::open(&path).await.unwrap();
         assert_eq!(store.latest_measurements().await.unwrap(), [second, other]);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_latest_measurements_of_a_kind_are_those_of_that_kind_alone_and_the_others_are_not_read()
+     {
+        use crate::domain::entity::measurement::fixture::{examples_draft, result, sim_draft};
+        use crate::domain::vo::examples_run::{
+            ExampleRecord, ExampleResult, ExamplesBasis, ExamplesOutcome,
+        };
+        use crate::domain::vo::id::{CaseId, HarnessId};
+        use crate::domain::vo::measure::{MeasureKind, MutantOutcome};
+        use crate::domain::vo::revision::Revision;
+        use crate::domain::vo::sim::{SimBasis, SimOutcome};
+        let path = temp_db("measure-of-kind");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let harness = HarnessId::from_uuid(fixture::id(40));
+        let examples = |n: u128| {
+            Measurement::new(examples_draft(
+                n,
+                harness,
+                ExamplesBasis {
+                    harness: Revision::first(),
+                    builds: Default::default(),
+                },
+                ExamplesOutcome::new(vec![ExampleRecord {
+                    case: CaseId::from_uuid(fixture::id(41)),
+                    result: ExampleResult::Passed,
+                }])
+                .unwrap(),
+            ))
+            .unwrap()
+        };
+        let sim = Measurement::new(sim_draft(
+            9,
+            harness,
+            SimBasis {
+                harness: Revision::first(),
+                contracts: Default::default(),
+                interfaces: Default::default(),
+            },
+            SimOutcome::default(),
+        ))
+        .unwrap();
+        let (older, newer) = (examples(1), examples(2));
+        let mutation = run_of(
+            3,
+            31,
+            vec![result("f/rel/1/aaaa", 7, MutantOutcome::Killed)],
+        );
+        let at = store.revision().await.unwrap();
+        store
+            .write(
+                at,
+                Changes {
+                    measurements: vec![older, mutation.clone(), sim.clone(), newer.clone()],
+                    ..Changes::default()
+                },
+            )
+            .await
+            .unwrap();
+        // the newest run of the kind, of each subject; the Harness has a simulation too, and it is not here
+        assert_eq!(
+            store
+                .latest_measurements_of(MeasureKind::Examples)
+                .await
+                .unwrap(),
+            std::slice::from_ref(&newer)
+        );
+        assert_eq!(
+            store
+                .latest_measurements_of(MeasureKind::Simulate)
+                .await
+                .unwrap(),
+            [sim]
+        );
+        assert_eq!(
+            store
+                .latest_measurements_of(MeasureKind::Mutate)
+                .await
+                .unwrap(),
+            [mutation]
+        );
+        store.close().await.unwrap();
+
+        // the rows of the other kinds are not read at all: a mutation row that cannot be decoded does not stop it
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE measure_runs SET inputs = '{' WHERE kind = 'mutate'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert!(store.latest_measurements().await.is_err());
+        assert_eq!(
+            store
+                .latest_measurements_of(MeasureKind::Examples)
+                .await
+                .unwrap(),
+            [newer]
+        );
         store.close().await.unwrap();
     }
 

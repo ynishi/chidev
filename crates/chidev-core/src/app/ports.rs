@@ -27,6 +27,7 @@ use crate::domain::vo::correction::{
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::{ContextId, InterfaceId, PinId};
+use crate::domain::vo::measure::MeasureKind;
 use crate::domain::vo::name::AssetName;
 use crate::domain::vo::timestamp::Timestamp;
 
@@ -366,6 +367,13 @@ pub trait Store:
     /// The newest measurement of each kind and Interface that has one, in the order they were made.
     fn latest_measurements(
         &self,
+    ) -> impl Future<Output = Result<Vec<Measurement>, StoreError>> + Send;
+
+    /// As [`Store::latest_measurements`], for the runs of `kind` alone. The runs of the other kinds are not read, so
+    /// a use case that needs one kind does not pay for decoding the others.
+    fn latest_measurements_of(
+        &self,
+        kind: MeasureKind,
     ) -> impl Future<Output = Result<Vec<Measurement>, StoreError>> + Send;
 
     /// Every measurement, in the order they were made: the newest of a kind and subject and the runs before it. A

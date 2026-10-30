@@ -305,57 +305,19 @@ impl Job<'_> {
         tag: &str,
         out: &mut SimProgress,
     ) -> Result<Command, MeasureFailure> {
-        let (root, tree, exclude) = (
-            self.root.to_path_buf(),
-            self.dirs.tree.clone(),
-            self.copy.excluded(),
-        );
-        tokio::task::spawn_blocking(move || super::copy_tree(&root, &tree, &exclude))
-            .await
-            .map_err(|e| io("the copy of the project", e))?
-            .map_err(|e| io("cannot copy the project", e))?;
-        for (path, i) in &plan.interfaces {
-            self.write(path, &i.code).await?;
-        }
-        self.write(plan.settings.harness.path(), &plan.request.script)
-            .await?;
-        // Every program of the copy is the one the settings were digested with, as the copy is made. The build runs
-        // after that and may write an executable (the interpreter, say): that is the run's, not a moved setting.
-        self.verify(&self.copy.build).await?;
-        self.verify(&plan.settings.interpreter).await?;
-        let env = self.env();
-        let build = self.command(&self.copy.build).await?;
-        let started = Instant::now();
-        let result = self.exec(&build, &env, self.copy.baseline_timeout).await;
-        let (exit_code, stderr) = match &result {
-            Ok((ran, _)) => (ran.exit_code, provider::tail(&ran.stderr, TAIL)),
-            Err(_) => (None, String::new()),
-        };
-        out.evidence.push(StepEvidence {
-            step: format!("{tag}-build"),
-            command: build.line(),
-            command_digest: Some(build.digest.clone()),
-            exit_code,
-            duration_ms: millis(started),
-            stderr,
-        });
-        let (ran, _) = result.map_err(|f| self.fail(f))?;
-        if !ran.success {
-            let said = [
-                provider::tail(&ran.stderr, TAIL / 2),
-                provider::tail(&ran.stdout, TAIL / 2),
-            ]
-            .join("\n");
-            return Err(MeasureFailure::of(
-                FailureKind::NoBuild,
-                format!(
-                    "the program does not build (exit {}): {}",
-                    ran.exit_code
-                        .map_or_else(|| "by a signal".to_string(), |c| c.to_string()),
-                    said.trim()
-                ),
-            ));
-        }
+        let mut written: Vec<(&Path, &str)> = plan
+            .interfaces
+            .iter()
+            .map(|(path, i)| (*path, i.code.as_str()))
+            .collect();
+        written.push((plan.settings.harness.path(), plan.request.script.as_str()));
+        self.prepare(
+            tag,
+            &written,
+            &[&plan.settings.interpreter],
+            &mut out.evidence,
+        )
+        .await?;
         self.command(&plan.settings.interpreter).await
     }
 

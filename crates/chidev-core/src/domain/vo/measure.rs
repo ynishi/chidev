@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use thiserror::Error;
 
 use super::digest::Digest;
+use super::examples_run::ExamplesStamp;
 use super::id::{ContractId, HarnessId, InterfaceId};
 use super::pin_basis::{PinBasis, StaleReason};
 use super::sim::SimStamp;
@@ -57,9 +58,12 @@ pub enum MeasureError {
     /// A failure has no message.
     #[error("a failure says what failed")]
     BlankFailure,
+    /// Two records of one run are of one Case.
+    #[error("the example of the case {0} is recorded twice")]
+    DuplicateExample(String),
 }
 
-/// What a measure measures: mutation testing and simulation.
+/// What a measure measures: mutation testing, simulation and the examples of a Harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MeasureKind {
     /// Single-site mutants of the code of an Interface, run against the Harnesses that check it.
@@ -67,17 +71,25 @@ pub enum MeasureKind {
     /// A sim Harness (a script written blind from the Contracts), run as a driver of the program built from the
     /// code of the Pins it cites.
     Simulate,
+    /// A Harness of examples, each Case run as one example against the program built from the code of the Pins of
+    /// the Interfaces it builds.
+    Examples,
 }
 
 impl MeasureKind {
     /// Every kind.
-    pub const ALL: [MeasureKind; 2] = [MeasureKind::Mutate, MeasureKind::Simulate];
+    pub const ALL: [MeasureKind; 3] = [
+        MeasureKind::Mutate,
+        MeasureKind::Simulate,
+        MeasureKind::Examples,
+    ];
 
     /// The word for it.
     pub fn word(self) -> &'static str {
         match self {
             MeasureKind::Mutate => "mutate",
             MeasureKind::Simulate => "simulate",
+            MeasureKind::Examples => "examples",
         }
     }
 
@@ -557,9 +569,12 @@ pub enum StampPart {
     /// A simulation: the revision of the sim Harness itself (its script and its Cases). The basis of a simulation
     /// has no id for it, for the Harness is the subject.
     Script,
+    /// A run of examples: the revision of the Harness itself (its examples). Like [`StampPart::Script`] it has no
+    /// id, for the Harness is the subject.
+    Examples,
     /// A simulation: a Contract that its Cases cite a Clause of changed, is gone, or is newly cited.
     Contract(ContractId),
-    /// A simulation: an Interface that it builds moved in the way the part says.
+    /// A simulation or a run of examples: an Interface that it builds moved in the way the part says.
     Built(InterfaceId, BuiltPart),
     /// The settings the run was made under, as they are now.
     Settings(SettingsGap),
@@ -569,7 +584,7 @@ pub enum StampPart {
 }
 
 impl StampPart {
-    /// The word for it, one of `code`, `interface`, `harness`, `contract`, `used-interface`, `script`,
+    /// The word for it, one of `code`, `interface`, `harness`, `contract`, `used-interface`, `script`, `examples`,
     /// `built-revision`, `built-code`, `builds`, `settings`, `settings-unconfigured`, `settings-unreadable` and
     /// `gone`: the one place that names the parts in words, for the status. A Contract a Pin stood on and a Contract
     /// a simulation cites both say `contract`: each is a cited Contract that moved. The settings say apart whether
@@ -584,6 +599,7 @@ impl StampPart {
             StampPart::Pin(StaleReason::Contract(_)) | StampPart::Contract(_) => "contract",
             StampPart::Pin(StaleReason::UsedInterface(_)) => "used-interface",
             StampPart::Script => "script",
+            StampPart::Examples => "examples",
             StampPart::Built(_, BuiltPart::Revision) => "built-revision",
             StampPart::Built(_, BuiltPart::PinnedCode) => "built-code",
             StampPart::Built(_, BuiltPart::Membership) => "builds",
@@ -610,6 +626,7 @@ impl StampPart {
             StampPart::Pin(_)
             | StampPart::Code
             | StampPart::Script
+            | StampPart::Examples
             | StampPart::Contract(_)
             | StampPart::Built(..)
             | StampPart::Settings(SettingsGap::Differ | SettingsGap::Unconfigured)
@@ -631,6 +648,7 @@ impl StampPart {
             StampPart::Pin(StaleReason::Interface)
             | StampPart::Code
             | StampPart::Script
+            | StampPart::Examples
             | StampPart::Settings(_)
             | StampPart::Gone => None,
         }
@@ -739,13 +757,16 @@ impl MeasureSubject {
 }
 
 /// What a measurement stands on, seen without taking it from the measurement: the stamp its body holds, which is
-/// the code of a Pin for a mutation run and the sim Harness with what it cites for a simulation.
+/// the code of a Pin for a mutation run, the sim Harness with what it cites for a simulation, and the Harness of
+/// examples with the code pinned for what it builds for a run of examples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StampRef<'a> {
     /// Of a mutation run.
     Code(&'a MeasureStamp),
     /// Of a simulation.
     Sim(&'a SimStamp),
+    /// Of a run of examples.
+    Examples(&'a ExamplesStamp),
 }
 
 impl<'a> StampRef<'a> {
@@ -754,6 +775,7 @@ impl<'a> StampRef<'a> {
         match self {
             StampRef::Code(s) => s.fingerprint(),
             StampRef::Sim(s) => s.fingerprint(),
+            StampRef::Examples(s) => s.fingerprint(),
         }
     }
 
@@ -762,6 +784,7 @@ impl<'a> StampRef<'a> {
         match self {
             StampRef::Code(s) => s.settings(),
             StampRef::Sim(s) => s.settings(),
+            StampRef::Examples(s) => s.settings(),
         }
     }
 
@@ -769,7 +792,7 @@ impl<'a> StampRef<'a> {
     pub fn code(&self) -> Option<&'a MeasureStamp> {
         match self {
             StampRef::Code(s) => Some(s),
-            StampRef::Sim(_) => None,
+            StampRef::Sim(_) | StampRef::Examples(_) => None,
         }
     }
 
@@ -777,7 +800,15 @@ impl<'a> StampRef<'a> {
     pub fn sim(&self) -> Option<&'a SimStamp> {
         match self {
             StampRef::Sim(s) => Some(s),
-            StampRef::Code(_) => None,
+            StampRef::Code(_) | StampRef::Examples(_) => None,
+        }
+    }
+
+    /// The stamp of a run of examples, if it is one.
+    pub fn examples(&self) -> Option<&'a ExamplesStamp> {
+        match self {
+            StampRef::Examples(s) => Some(s),
+            StampRef::Code(_) | StampRef::Sim(_) => None,
         }
     }
 }
@@ -1024,6 +1055,7 @@ mod tests {
                 Some(AssetRef::Interface(i)),
             ),
             (StampPart::Script, "script", None),
+            (StampPart::Examples, "examples", None),
             (
                 StampPart::Contract(c),
                 "contract",

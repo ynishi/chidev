@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chidev_core::app::commit::{CorrectTrigger, Trigger};
 use chidev_core::app::ports::measure::{
-    BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
+    BoxFuture, ExamplesReport, ExamplesRequest, MutateReport, MutateRequest, Runner, RunnerError,
+    SimulateReport, SimulateRequest,
 };
 use chidev_core::app::ports::{IdSource, InvocationField, Store};
 use chidev_core::app::{
@@ -659,6 +660,22 @@ impl Runner for Leaky {
         &'a self,
         _: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn examples_settings<'a>(
+        &'a self,
+        _: &'a ContextName,
+        _: &'a AssetName,
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        _: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 }

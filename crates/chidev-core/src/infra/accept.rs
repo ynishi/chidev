@@ -2,30 +2,24 @@
 //!
 //! An example is a name `<name>` for which a directory holds `<name>.args`, `<name>.stdin`, `<name>.expected` and,
 //! optionally, `<name>.stderr`; [`crate::domain::vo::example`] says what each file holds and how an answer is
-//! judged. This module reads the directory, runs the program once per example, and gives the verdicts in two faces:
-//! lines for a person ([`lines`]) and the reply of an external check ([`reply`]).
+//! judged. This module reads the directory, runs the program once per example, and gives the verdicts as lines for a
+//! person ([`lines`]).
 //!
 //! The program runs through [`crate::infra::process`]: without a shell, in a process group of its own that is killed
 //! when the run ends (so a descendant is not left running), under a deadline, with a cap on what it may write to each
 //! pipe. A program that gave no answer (it could not start, it did not end in time, it wrote too much, a signal ended
 //! it) is a failure of the example with one reason, never an answer to compare.
 //!
-//! This is the program on the far side of an external check (README, "External checks"). It reads the request with
-//! types of its own, which hold only what it needs and ignore the rest, so a field added to the request does not
-//! reach it (an anti-corruption layer); and it answers with the wire types of [`crate::app::ports::external`]. The
-//! examples of such a check are the ones a Harness of kind `examples` holds in the model sent, run as they are held
-//! (the model holds them as text; the files are only how a person writes them, and [`load`] reads them for a put).
+//! The examples a Harness of kind `examples` holds in the model are run by `measure`, which runs each by
+//! [`run_resolved`], the code this module runs a directory with (the model holds them as text; the files are only how
+//! a person writes them, and [`load`] reads them for a put).
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
 use thiserror::Error;
 
-use crate::app::ports::external::{
-    ExternalFinding, ExternalReply, ExternalSubject, REQUEST_PROTOCOL,
-};
 use crate::domain::vo::example::{
     self, Answer, Example as Held, ExampleError, ExampleName, Expected, Verdict, Why, judge,
 };
@@ -89,8 +83,8 @@ impl FileKind {
     }
 }
 
-/// Why the examples could not be run at all, or the request of an external check could not be answered: the
-/// failures of usage, as opposed to a failure of one example, which is its [`Verdict`].
+/// Why the examples could not be run at all: the failures of usage, as opposed to a failure of one example, which is
+/// its [`Verdict`].
 #[derive(Debug, Error)]
 pub enum AcceptError {
     /// The directory of the examples cannot be read.
@@ -132,54 +126,6 @@ pub enum AcceptError {
     /// A file of an example is not text: the model holds text.
     #[error("{0} is not UTF-8")]
     FileNotUtf8(String),
-    /// The request is not a JSON document of the shape of an external check's request.
-    #[error("the request is not an external-check request: {0}")]
-    Request(String),
-    /// The request is of a protocol this runner does not read.
-    #[error("the request is of protocol {got}, not {want}")]
-    Protocol {
-        /// The protocol the request says.
-        got: u64,
-        /// The protocol this runner reads.
-        want: u32,
-    },
-    /// The request asks for a number of rules other than one.
-    #[error("the request has {0} rules, not exactly one")]
-    Rules(usize),
-    /// The model sent has no harnesses, so the check was not registered to read them.
-    #[error(
-        "the model sent has no harnesses: register the check with `reads = [\"contracts\", \"harnesses\"]`"
-    )]
-    NoHarnesses,
-    /// The model sent has no Context of this name.
-    #[error("the model sent has no context `{0}`")]
-    NoContext(String),
-    /// The Context has no Harness of this name.
-    #[error("the context `{context}` has no harness `{harness}`")]
-    NoHarness {
-        /// The Context.
-        context: String,
-        /// The Harness asked for.
-        harness: String,
-    },
-    /// The Harness is of a kind that holds no examples.
-    #[error("the harness `{harness}` is of {kind}, not examples")]
-    NotExamples {
-        /// The Harness.
-        harness: String,
-        /// Its kind, as the model sent says.
-        kind: String,
-    },
-    /// A Clause a Case cites is not in the model sent, so a finding could not be about it.
-    #[error(
-        "the clause {clause}, which the case `{case}` cites, is not in the model sent: register the check with `reads = [\"contracts\", \"harnesses\"]`"
-    )]
-    ClauseNotSent {
-        /// The Case.
-        case: String,
-        /// The id of the Clause.
-        clause: String,
-    },
 }
 
 /// One example as its files give it. A file that is missing, cannot be read or is malformed does not stop the
@@ -458,10 +404,9 @@ pub(crate) async fn run(
     cwd: &Path,
     timeout: Duration,
 ) -> Verdict {
-    let expected = match &example.expected {
-        Ok(expected) => expected,
-        Err(reasons) => return Verdict::Fail(reasons.clone()),
-    };
+    if let Err(reasons) = &example.expected {
+        return Verdict::Fail(reasons.clone());
+    }
     let Some((program, fixed)) = command.split_first() else {
         return Verdict::fail(Why::Abnormal("cannot start: no command".to_string()));
     };
@@ -470,20 +415,60 @@ pub(crate) async fn run(
         Ok(executable) => executable,
         Err(failure) => return Verdict::fail(abnormal(&failure, timeout)),
     };
+    run_resolved(
+        example,
+        &Resolved {
+            executable: &executable,
+            fixed,
+            env: &[],
+            cwd,
+        },
+        timeout,
+    )
+    .await
+}
+
+/// A program that is already found: the file to start, the words that come before the example's own arguments, the
+/// variables added to the environment, and the directory it runs in. What [`run`] finds from a command line and the
+/// runner of a measure finds in its copy of the project, so that one example is run and judged by one code path.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Resolved<'a> {
+    /// The file to start.
+    pub executable: &'a Path,
+    /// The arguments before those of the example.
+    pub fixed: &'a [String],
+    /// Variables added to the environment the runner inherits.
+    pub env: &'a [(String, String)],
+    /// The directory it runs in.
+    pub cwd: &'a Path,
+}
+
+/// Runs the program `program` for `example` and judges what it answered, as [`run`] does once it has found the
+/// program. The arguments of the example follow `program.fixed`; its standard input is the example's; `timeout`
+/// bounds the one example. An example that could not be read fails without running anything.
+pub(crate) async fn run_resolved(
+    example: &Example,
+    program: &Resolved<'_>,
+    timeout: Duration,
+) -> Verdict {
+    let expected = match &example.expected {
+        Ok(expected) => expected,
+        Err(reasons) => return Verdict::Fail(reasons.clone()),
+    };
     let deadline = match process::deadline_in(timeout) {
         Ok(deadline) => deadline,
         Err(failure) => return Verdict::fail(abnormal(&failure, timeout)),
     };
-    let args: Vec<String> = fixed.iter().chain(&example.args).cloned().collect();
+    let args: Vec<String> = program.fixed.iter().chain(&example.args).cloned().collect();
     let pipe = Pipe {
         limit: LIMIT,
         over: Over::Fail,
     };
     let spec = Spec {
-        executable: &executable,
+        executable: program.executable,
         args: &args,
-        cwd,
-        env: &[],
+        cwd: program.cwd,
+        env: program.env,
         stdin: Some(example.stdin.as_slice()),
         deadline,
         stdout: pipe,
@@ -545,255 +530,12 @@ pub fn lines(results: &[(ExampleName, Verdict)]) -> String {
     text
 }
 
-/// What the runner reads of the request of an external check; the rest is ignored.
-#[derive(Debug, Deserialize)]
-struct Request {
-    protocol: u64,
-    #[serde(default)]
-    rules: Vec<String>,
-    #[serde(default)]
-    model: Model,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Model {
-    #[serde(default)]
-    contexts: Vec<Context>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Context {
-    #[serde(default)]
-    name: String,
-    /// Present only when the check reads `contracts`.
-    #[serde(default)]
-    contracts: Option<Vec<Contract>>,
-    /// Present only when the check reads `harnesses`.
-    #[serde(default)]
-    harnesses: Option<Vec<HarnessIn>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Contract {
-    #[serde(default)]
-    clauses: Vec<ClauseIn>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClauseIn {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct HarnessIn {
-    name: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    cases: Vec<CaseIn>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CaseIn {
-    name: String,
-    #[serde(default)]
-    example: Option<ExampleIn>,
-    #[serde(default)]
-    cites: CitesIn,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CitesIn {
-    #[serde(default)]
-    clauses: Vec<ClauseIn>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExampleIn {
-    args: String,
-    stdin: String,
-    expected: String,
-    #[serde(default)]
-    stderr: Option<String>,
-}
-
-/// One example of the Harness a check is about, as the model sent holds it, with the ids of the Clauses its Case
-/// cites.
-#[derive(Debug)]
-struct Run {
-    example: Example,
-    clauses: Vec<String>,
-}
-
-/// The request of an external check as the runner needs it: the one rule it is asked for, and the examples of the
-/// Harness it is about, with the Clauses each one's Case cites. It is read, and everything that could make it
-/// unanswerable is found, before any example runs, so a request that cannot be answered runs nothing.
-#[derive(Debug)]
-pub struct Call {
-    rule: String,
-    runs: Vec<Run>,
-}
-
-impl Call {
-    /// Reads `request`, the document the check was sent, for the Harness `harness` of the Context `context`. A
-    /// request that is not JSON, is not protocol 2 or does not ask for exactly one rule is an error, and so is one
-    /// whose model has no harnesses, has no such Context or Harness, has a Harness that is not of kind `examples`,
-    /// or lacks a Clause one of its Cases cites.
-    pub fn read(request: &[u8], context: &str, harness: &str) -> Result<Call, AcceptError> {
-        let request: Request =
-            serde_json::from_slice(request).map_err(|e| AcceptError::Request(e.to_string()))?;
-        if request.protocol != u64::from(REQUEST_PROTOCOL) {
-            return Err(AcceptError::Protocol {
-                got: request.protocol,
-                want: REQUEST_PROTOCOL,
-            });
-        }
-        let [rule] = request.rules.as_slice() else {
-            return Err(AcceptError::Rules(request.rules.len()));
-        };
-        let rule = rule.clone();
-        let contexts = request.model.contexts;
-        if contexts.iter().all(|c| c.harnesses.is_none()) {
-            return Err(AcceptError::NoHarnesses);
-        }
-        let known: BTreeSet<&str> = contexts
-            .iter()
-            .flat_map(|c| c.contracts.iter().flatten())
-            .flat_map(|contract| &contract.clauses)
-            .map(|clause| clause.id.as_str())
-            .collect();
-        let owner = contexts
-            .iter()
-            .find(|c| c.name == context)
-            .ok_or_else(|| AcceptError::NoContext(context.to_string()))?;
-        let found = owner
-            .harnesses
-            .iter()
-            .flatten()
-            .find(|h| h.name == harness)
-            .ok_or_else(|| AcceptError::NoHarness {
-                context: context.to_string(),
-                harness: harness.to_string(),
-            })?;
-        if found.kind != "examples" {
-            return Err(AcceptError::NotExamples {
-                harness: harness.to_string(),
-                kind: found.kind.clone(),
-            });
-        }
-        let mut runs = Vec::with_capacity(found.cases.len());
-        for case in &found.cases {
-            let malformed =
-                |what: String| AcceptError::Request(format!("the case `{}` {what}", case.name));
-            let name = ExampleName::new(&case.name).map_err(|e| malformed(e.to_string()))?;
-            let Some(e) = &case.example else {
-                return Err(malformed("holds no example".to_string()));
-            };
-            let held = Held::new(
-                e.args.clone(),
-                e.stdin.clone(),
-                e.expected.clone(),
-                e.stderr.clone(),
-            )
-            .map_err(|err| malformed(format!("has an expected output that {err}")))?;
-            let mut clauses = Vec::with_capacity(case.cites.clauses.len());
-            for clause in &case.cites.clauses {
-                if !known.contains(clause.id.as_str()) {
-                    return Err(AcceptError::ClauseNotSent {
-                        case: case.name.clone(),
-                        clause: clause.id.clone(),
-                    });
-                }
-                clauses.push(clause.id.clone());
-            }
-            runs.push(Run {
-                example: Example::from((name, &held)),
-                clauses,
-            });
-        }
-        Ok(Call { rule, runs })
-    }
-
-    /// Runs every example of the Harness against `command`, one after another, and gives the verdicts in the order
-    /// of the Harness's Cases. Each is run as the model holds it, by the code [`run_all`] runs a directory with.
-    pub async fn run(
-        &self,
-        command: &[String],
-        cwd: &Path,
-        timeout: Duration,
-    ) -> Vec<(ExampleName, Verdict)> {
-        let mut results = Vec::with_capacity(self.runs.len());
-        for r in &self.runs {
-            let verdict = run(&r.example, command, cwd, timeout).await;
-            results.push((r.example.name.clone(), verdict));
-        }
-        results
-    }
-
-    /// The reply for `results`, the verdicts of the examples of the Harness.
-    ///
-    /// A failing example gives a finding for each Clause its Case cites (`<name>: <reasons>`), so a finding is about
-    /// the Clauses the example is an example of, found by their ids and not by what a Clause says. A passing example
-    /// gives nothing.
-    pub fn reply(&self, results: &[(ExampleName, Verdict)]) -> ExternalReply {
-        let mut findings = Vec::new();
-        for (name, verdict) in results {
-            if verdict.is_ok() {
-                continue;
-            }
-            let message = format!("{name}: {verdict}");
-            let cited: &[String] = self
-                .runs
-                .iter()
-                .find(|r| r.example.name == *name)
-                .map_or(&[], |r| r.clauses.as_slice());
-            let subjects: Vec<Option<ExternalSubject>> = if cited.is_empty() {
-                // a Case cites a Clause at least, but a failure is never dropped for want of one to be about
-                vec![None]
-            } else {
-                cited
-                    .iter()
-                    .map(|id| {
-                        Some(ExternalSubject {
-                            kind: "clause".to_string(),
-                            id: id.clone(),
-                        })
-                    })
-                    .collect()
-            };
-            for subject in subjects {
-                findings.push(ExternalFinding {
-                    rule: self.rule.clone(),
-                    subject,
-                    message: message.clone(),
-                    level: None,
-                });
-            }
-        }
-        ExternalReply {
-            protocol: REQUEST_PROTOCOL,
-            findings,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn name(name: &str) -> ExampleName {
         ExampleName::new(name).unwrap()
-    }
-
-    fn failing(name_: &str) -> (ExampleName, Verdict) {
-        (
-            name(name_),
-            Verdict::fail(Why::Exit {
-                expected: 0,
-                got: 3,
-            }),
-        )
     }
 
     fn passing(name_: &str) -> (ExampleName, Verdict) {
@@ -809,122 +551,8 @@ mod tests {
         assert_eq!(FileKind::of_ext("txt"), None);
     }
 
-    /// A case of a Harness of examples as the view shows it: one example, citing these Clauses.
-    fn case(name: &str, expected: &str, clauses: &[&str]) -> serde_json::Value {
-        json!({
-            "id": format!("case-{name}"), "name": name, "lines": null, "revision": 1,
-            "example": {"args":"","stdin":"","expected":expected},
-            "cites": {"items": [],
-                      "clauses": clauses.iter().map(|id| json!({"id":id,"revision":1})).collect::<Vec<_>>()}
-        })
-    }
-
-    /// A request of protocol 2 whose model has the Context `x`, with one Contract holding the Clauses `c1`, `c2` and
-    /// `c3`, and a Harness `acceptance` of kind `kind` with these `cases`.
-    fn request_of(kind: &str, cases: &[serde_json::Value]) -> Vec<u8> {
-        let clauses: Vec<_> = ["c1", "c2", "c3"]
-            .iter()
-            .map(|id| json!({"id":id,"label":"C","revision":1,"text":"t"}))
-            .collect();
-        serde_json::to_vec(&json!({
-            "protocol":2,"moment":"check","rules":["ext.accept"],"read_at":0,"params":{},
-            "model":{"version":5,"contexts":[{"id":"c","name":"x","basis":"contract","uses":[],
-                "contracts":[{"id":"k","name":"k","title":"t","revision":1,"clauses":clauses}],
-                "harnesses":[{"id":"h","name":"acceptance","revision":1,"kind":kind,"cases":cases}]}]}
-        }))
-        .unwrap()
-    }
-
-    fn request(cases: &[serde_json::Value]) -> Vec<u8> {
-        request_of("examples", cases)
-    }
-
-    fn call(request: &[u8]) -> Result<Call, AcceptError> {
-        Call::read(request, "x", "acceptance")
-    }
-
-    fn subject(id: &str) -> Option<ExternalSubject> {
-        Some(ExternalSubject {
-            kind: "clause".to_string(),
-            id: id.to_string(),
-        })
-    }
-
     #[test]
-    fn a_failing_example_is_a_finding_about_each_clause_its_case_cites() {
-        let request = request(&[
-            case("a1", "#exit 0\n", &["c1", "c3"]),
-            case("a2", "#exit 0\n", &["c2"]),
-        ]);
-        let call = call(&request).unwrap();
-        let reply = call.reply(&[failing("a1")]);
-        assert_eq!(reply.protocol, 2);
-        assert_eq!(
-            reply.findings,
-            ["c1", "c3"].map(|clause| ExternalFinding {
-                rule: "ext.accept".to_string(),
-                subject: subject(clause),
-                message: "a1: exit code: expected 0, got 3".to_string(),
-                level: None,
-            })
-        );
-    }
-
-    #[test]
-    fn findings_follow_the_results_and_a_passing_example_gives_nothing() {
-        let request = request(&[
-            case("a1", "#exit 0\n", &["c1"]),
-            case("a2", "#exit 0\n", &["c2"]),
-            case("a3", "#exit 0\n", &["c3"]),
-        ]);
-        let call = call(&request).unwrap();
-        let reply = call.reply(&[failing("a3"), passing("a2"), failing("a1")]);
-        let found: Vec<_> = reply
-            .findings
-            .iter()
-            .map(|f| (f.subject.clone(), f.message.clone()))
-            .collect();
-        assert_eq!(
-            found,
-            [
-                (
-                    subject("c3"),
-                    "a3: exit code: expected 0, got 3".to_string()
-                ),
-                (
-                    subject("c1"),
-                    "a1: exit code: expected 0, got 3".to_string()
-                ),
-            ]
-        );
-        let none = call.reply(&[passing("a1")]);
-        assert_eq!(
-            serde_json::to_string(&none).unwrap(),
-            r#"{"protocol":2,"findings":[]}"#
-        );
-    }
-
-    #[test]
-    fn a_failure_whose_case_cites_nothing_is_about_the_project_and_not_dropped() {
-        let request = request(&[case("a1", "#exit 0\n", &[])]);
-        let reply = call(&request).unwrap().reply(&[failing("a1")]);
-        assert_eq!(reply.findings.len(), 1);
-        assert_eq!(reply.findings[0].subject, None);
-    }
-
-    #[test]
-    fn the_examples_to_run_are_the_ones_the_model_holds_in_the_order_of_its_cases() {
-        let request = request(&[
-            case("b", "#exit 0\n", &["c1"]),
-            case("a", "#exit 0\n", &["c1"]),
-        ]);
-        let call = call(&request).unwrap();
-        let names: Vec<_> = call
-            .runs
-            .iter()
-            .map(|r| r.example.name.to_string())
-            .collect();
-        assert_eq!(names, ["b", "a"]);
+    fn an_example_the_model_holds_is_run_as_the_files_would_give_it() {
         // the same example as the files would give: its arguments, input and expectation
         let held = Held::new(
             "-n 3".to_string(),
@@ -942,113 +570,6 @@ mod tests {
         assert_eq!(expected.output(), b"out\n");
         assert_eq!(expected.exit(), 2);
         assert_eq!(expected.errors(), Some(&b"err\n"[..]));
-    }
-
-    #[test]
-    fn a_request_that_cannot_be_answered_is_an_error() {
-        let one = case("a1", "#exit 0\n", &["c1"]);
-        let other = |value: serde_json::Value| serde_json::to_vec(&value).unwrap();
-        assert!(matches!(
-            call(&other(json!({"protocol":1,"rules":["r"]}))),
-            Err(AcceptError::Protocol { got: 1, want: 2 })
-        ));
-        assert!(matches!(
-            call(&other(json!({"protocol":2,"rules":["r","s"]}))),
-            Err(AcceptError::Rules(2))
-        ));
-        assert!(matches!(
-            call(&other(json!({"protocol":2,"rules":[]}))),
-            Err(AcceptError::Rules(0))
-        ));
-        assert!(matches!(
-            call(&other(json!({"protocol":2}))),
-            Err(AcceptError::Rules(0))
-        ));
-        assert!(matches!(call(b"not json"), Err(AcceptError::Request(_))));
-        assert!(matches!(call(b""), Err(AcceptError::Request(_))));
-        assert!(matches!(
-            call(&other(json!({"rules":["r"]}))),
-            Err(AcceptError::Request(_))
-        ));
-        // a case that holds no example, or an example no program could be judged by
-        let mut bare = one.clone();
-        bare["example"] = serde_json::Value::Null;
-        assert!(matches!(
-            call(&request(&[bare])),
-            Err(AcceptError::Request(_))
-        ));
-        assert!(matches!(
-            call(&request(&[case("a1", "no exit line\n", &["c1"])])),
-            Err(AcceptError::Request(_))
-        ));
-        assert!(matches!(
-            call(&request(&[case("a/1", "#exit 0\n", &["c1"])])),
-            Err(AcceptError::Request(_))
-        ));
-    }
-
-    #[test]
-    fn a_request_without_what_the_check_reads_is_a_usage_error_found_before_anything_runs() {
-        let one = case("a1", "#exit 0\n", &["c1"]);
-        // no harnesses in the model: no context has them, or there is no context at all
-        for bare in [
-            json!({"protocol":2,"rules":["r"],"model":{"version":5,"contexts":[
-                {"id":"c","name":"x","basis":"contract","uses":[]}]}}),
-            json!({"protocol":2,"rules":["r"],"model":{"version":5}}),
-            json!({"protocol":2,"rules":["r"]}),
-        ] {
-            let bare = serde_json::to_vec(&bare).unwrap();
-            assert!(matches!(call(&bare), Err(AcceptError::NoHarnesses)));
-        }
-        let sent = request(&[one]);
-        assert!(matches!(
-            Call::read(&sent, "y", "acceptance"),
-            Err(AcceptError::NoContext(c)) if c == "y"
-        ));
-        assert!(matches!(
-            Call::read(&sent, "x", "other"),
-            Err(AcceptError::NoHarness { context, harness }) if context == "x" && harness == "other"
-        ));
-        let sim = request_of("sim", &[]);
-        assert!(matches!(
-            call(&sim),
-            Err(AcceptError::NotExamples { harness, kind }) if harness == "acceptance" && kind == "sim"
-        ));
-        // a Clause the model sent lacks: the Harness is there, the Contracts were not read
-        let no_contracts = serde_json::to_vec(&json!({
-            "protocol":2,"rules":["r"],
-            "model":{"version":5,"contexts":[{"id":"c","name":"x","basis":"contract","uses":[],
-                "harnesses":[{"id":"h","name":"acceptance","revision":1,"kind":"examples",
-                    "cases":[case("a1", "#exit 0\n", &["c1"])]}]}]}
-        }))
-        .unwrap();
-        assert!(matches!(
-            call(&no_contracts),
-            Err(AcceptError::ClauseNotSent { case, clause }) if case == "a1" && clause == "c1"
-        ));
-        let elsewhere = request(&[case("a1", "#exit 0\n", &["c9"])]);
-        assert!(matches!(
-            call(&elsewhere),
-            Err(AcceptError::ClauseNotSent { clause, .. }) if clause == "c9"
-        ));
-    }
-
-    #[test]
-    fn a_clause_of_a_context_the_harness_is_not_in_is_one_the_model_sent() {
-        // the Clause a Case cites may be in a Context its own uses: the model sent has it
-        let request = serde_json::to_vec(&json!({
-            "protocol":2,"rules":["r"],
-            "model":{"version":5,"contexts":[
-                {"id":"b","name":"base","basis":"contract","uses":[],
-                 "contracts":[{"id":"k","name":"k","title":"t","revision":1,
-                     "clauses":[{"id":"c7","label":"C","revision":1,"text":"t"}]}],
-                 "harnesses":[]},
-                {"id":"c","name":"x","basis":"contract","uses":["base"],"contracts":[],
-                 "harnesses":[{"id":"h","name":"acceptance","revision":1,"kind":"examples",
-                    "cases":[case("a1", "#exit 0\n", &["c7"])]}]}]}
-        }))
-        .unwrap();
-        assert!(call(&request).is_ok());
     }
 
     mod files {

@@ -1,8 +1,9 @@
 //! The Measurement: the record of one run of a measure. It is a fact, not a judgment: it says what was run and what
 //! became of it, tied by a stamp to what it measured. What a run holds is its [`MeasureBody`], one shape for each
 //! kind: a mutation run is of one Interface's code and says what became of each mutant; a simulation is of one sim
-//! Harness and says what each case of the script found. The rules read it and say what is worth a person's
-//! attention; a newer run of the same measure replaces it as the current one, and the older ones stay as history.
+//! Harness and says what each case of the script found; a run of examples is of one Harness of examples and says
+//! what became of each example. The rules read it and say what is worth a person's attention; a newer run of the
+//! same measure replaces it as the current one, and the older ones stay as history.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -10,6 +11,7 @@ use std::fmt;
 use crate::domain::vo::correction::{
     Correctable, Correction, CorrectionError, SoughtText, check_places, masked,
 };
+use crate::domain::vo::examples_run::{ExampleResult, ExamplesOutcome, ExamplesStamp};
 use crate::domain::vo::id::{HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
     MeasureError, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantOutcome,
@@ -58,6 +60,15 @@ pub enum MeasureBody {
         /// What each case of the script found, and how the second runs compared.
         outcome: SimOutcome,
     },
+    /// A Harness of examples run against the program built from the code of the Pins of the Interfaces it builds.
+    Examples {
+        /// The Harness of examples that was run.
+        harness: HarnessId,
+        /// The Harness as the run stood on it, with the code pinned for what it builds, and the settings.
+        stamp: ExamplesStamp,
+        /// What became of each example.
+        outcome: ExamplesOutcome,
+    },
 }
 
 /// What a run gave, before it is checked.
@@ -91,7 +102,8 @@ pub struct Measurement {
 impl Measurement {
     /// The run `draft` describes. A mutation run has mutants with different keys, no more than the provider gave,
     /// and the provider gave no more than there were sites; a run that did not fail evaluated every mutant it was
-    /// given. A simulation has no value to check here.
+    /// given. A simulation and a run of examples have no value to check here (an outcome of examples refuses a Case
+    /// twice when it is made).
     pub fn new(draft: MeasurementDraft) -> Result<Measurement, MeasureError> {
         if let MeasureBody::Mutation {
             sites,
@@ -165,6 +177,7 @@ impl Measurement {
         match self.body {
             MeasureBody::Mutation { .. } => MeasureKind::Mutate,
             MeasureBody::Simulation { .. } => MeasureKind::Simulate,
+            MeasureBody::Examples { .. } => MeasureKind::Examples,
         }
     }
 
@@ -172,11 +185,13 @@ impl Measurement {
     pub fn subject(&self) -> MeasureSubject {
         match &self.body {
             MeasureBody::Mutation { interface, .. } => MeasureSubject::Interface(*interface),
-            MeasureBody::Simulation { harness, .. } => MeasureSubject::Harness(*harness),
+            MeasureBody::Simulation { harness, .. } | MeasureBody::Examples { harness, .. } => {
+                MeasureSubject::Harness(*harness)
+            }
         }
     }
 
-    /// The Interface whose code it measured; none for a simulation.
+    /// The Interface whose code it measured; none for a run of a Harness.
     pub fn interface(&self) -> Option<InterfaceId> {
         match self.subject() {
             MeasureSubject::Interface(i) => Some(i),
@@ -184,7 +199,7 @@ impl Measurement {
         }
     }
 
-    /// The sim Harness it ran; none for a mutation run.
+    /// The Harness it ran, a sim Harness or a Harness of examples; none for a mutation run.
     pub fn harness(&self) -> Option<HarnessId> {
         match self.subject() {
             MeasureSubject::Harness(h) => Some(h),
@@ -197,10 +212,11 @@ impl Measurement {
         match &self.body {
             MeasureBody::Mutation { stamp, .. } => StampRef::Code(stamp),
             MeasureBody::Simulation { stamp, .. } => StampRef::Sim(stamp),
+            MeasureBody::Examples { stamp, .. } => StampRef::Examples(stamp),
         }
     }
 
-    /// It as a mutation run; none for a simulation.
+    /// It as a mutation run; none for any other kind.
     pub fn as_mutation(&self) -> Option<MutationRun<'_>> {
         match &self.body {
             MeasureBody::Mutation {
@@ -210,11 +226,11 @@ impl Measurement {
                 stamp,
                 measurement: self,
             }),
-            MeasureBody::Simulation { .. } => None,
+            MeasureBody::Simulation { .. } | MeasureBody::Examples { .. } => None,
         }
     }
 
-    /// It as a simulation; none for a mutation run.
+    /// It as a simulation; none for any other kind.
     pub fn as_simulation(&self) -> Option<SimulationRun<'_>> {
         match &self.body {
             MeasureBody::Simulation { harness, stamp, .. } => Some(SimulationRun {
@@ -222,7 +238,19 @@ impl Measurement {
                 stamp,
                 measurement: self,
             }),
-            MeasureBody::Mutation { .. } => None,
+            MeasureBody::Mutation { .. } | MeasureBody::Examples { .. } => None,
+        }
+    }
+
+    /// It as a run of examples; none for any other kind.
+    pub fn as_examples(&self) -> Option<ExamplesRun<'_>> {
+        match &self.body {
+            MeasureBody::Examples { harness, stamp, .. } => Some(ExamplesRun {
+                harness: *harness,
+                stamp,
+                measurement: self,
+            }),
+            MeasureBody::Mutation { .. } | MeasureBody::Simulation { .. } => None,
         }
     }
 
@@ -231,19 +259,20 @@ impl Measurement {
         self.at
     }
 
-    /// How many places the provider found to change; 0 for a simulation.
+    /// How many places the provider found to change; 0 for any run but a mutation run.
     pub fn sites(&self) -> u32 {
         match &self.body {
             MeasureBody::Mutation { sites, .. } => *sites,
-            MeasureBody::Simulation { .. } => 0,
+            MeasureBody::Simulation { .. } | MeasureBody::Examples { .. } => 0,
         }
     }
 
-    /// How many mutants the provider gave to run (at most `max_mutants` of the sites); 0 for a simulation.
+    /// How many mutants the provider gave to run (at most `max_mutants` of the sites); 0 for any run but a mutation
+    /// run.
     pub fn planned(&self) -> u32 {
         match &self.body {
             MeasureBody::Mutation { planned, .. } => *planned,
-            MeasureBody::Simulation { .. } => 0,
+            MeasureBody::Simulation { .. } | MeasureBody::Examples { .. } => 0,
         }
     }
 
@@ -259,19 +288,27 @@ impl Measurement {
         self.failure.is_none() && self.planned() < self.sites()
     }
 
-    /// The mutants it ran, in the order the provider gave them; none for a simulation.
+    /// The mutants it ran, in the order the provider gave them; none for any run but a mutation run.
     pub fn mutants(&self) -> &[MutantResult] {
         match &self.body {
             MeasureBody::Mutation { mutants, .. } => mutants,
-            MeasureBody::Simulation { .. } => &[],
+            MeasureBody::Simulation { .. } | MeasureBody::Examples { .. } => &[],
         }
     }
 
-    /// What the cases of the script gave; none for a mutation run.
+    /// What the cases of the script gave; none for any other kind.
     pub fn sim(&self) -> Option<&SimOutcome> {
         match &self.body {
             MeasureBody::Simulation { outcome, .. } => Some(outcome),
-            MeasureBody::Mutation { .. } => None,
+            MeasureBody::Mutation { .. } | MeasureBody::Examples { .. } => None,
+        }
+    }
+
+    /// What became of each example; none for any other kind.
+    pub fn examples(&self) -> Option<&ExamplesOutcome> {
+        match &self.body {
+            MeasureBody::Examples { outcome, .. } => Some(outcome),
+            MeasureBody::Mutation { .. } | MeasureBody::Simulation { .. } => None,
         }
     }
 
@@ -362,9 +399,36 @@ impl<'a> SimulationRun<'a> {
     }
 }
 
+/// A measurement seen as the run of examples it is: the Harness of examples that was run and the stamp it stands on,
+/// with the measurement itself for what else a caller reads of it (the failure, the outcome). The kind is chosen
+/// once, by [`Measurement::as_examples`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExamplesRun<'a> {
+    harness: HarnessId,
+    stamp: &'a ExamplesStamp,
+    measurement: &'a Measurement,
+}
+
+impl<'a> ExamplesRun<'a> {
+    /// The Harness of examples that was run.
+    pub fn harness(&self) -> HarnessId {
+        self.harness
+    }
+
+    /// What the run stands on.
+    pub fn stamp(&self) -> &'a ExamplesStamp {
+        self.stamp
+    }
+
+    /// The measurement.
+    pub fn measurement(&self) -> &'a Measurement {
+        self.measurement
+    }
+}
+
 /// A place of text in a measurement, for a correction. An index counts from 0 in the list it is of. The settings and
-/// the names that key a row (a mutant's key, the name of a case) are not fields: they are part of what the run
-/// stands on.
+/// the names that key a row (a mutant's key, the name of a case, the Case an example is of) are not fields: they are
+/// part of what the run stands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MeasurementField {
     /// The command of a step.
@@ -416,6 +480,14 @@ pub enum MeasurementField {
         /// The case, in the order they were run.
         case: usize,
     },
+    /// The text of a reason an example of a run failed: what the program gave, or why it could not be run. Only a
+    /// reason that holds a text has it; the others (an exit code, a final line feed) hold none.
+    ExampleReason {
+        /// The example, in the order they were run.
+        example: usize,
+        /// The reason, in the order the judge told them.
+        reason: usize,
+    },
 }
 
 impl MeasurementField {
@@ -438,6 +510,9 @@ impl MeasurementField {
                 format!("case[{case}].undecided[{undecided}]")
             }
             MeasurementField::CaseExit { case } => format!("case[{case}].exit"),
+            MeasurementField::ExampleReason { example, reason } => {
+                format!("example[{example}].reason[{reason}]")
+            }
         }
     }
 }
@@ -490,6 +565,18 @@ impl Correctable for Measurement {
                 }
                 if let CaseExit::CannotStart(why) = &run.exit {
                     out.push((MeasurementField::CaseExit { case }, why.as_str()));
+                }
+            }
+        }
+        if let Some(examples) = self.examples() {
+            for (example, record) in examples.records().iter().enumerate() {
+                let ExampleResult::Failed(reasons) = &record.result else {
+                    continue;
+                };
+                for (reason, r) in reasons.iter().enumerate() {
+                    if let Some(text) = r.text() {
+                        out.push((MeasurementField::ExampleReason { example, reason }, text));
+                    }
                 }
             }
         }
@@ -584,6 +671,18 @@ impl Measurement {
                 }
                 run.exit = CaseExit::CannotStart(new);
             }
+            MeasurementField::ExampleReason { example, reason } => {
+                let MeasureBody::Examples { outcome, .. } = &mut self.body else {
+                    return Err(no_such());
+                };
+                let record = outcome.records_mut().get_mut(example).ok_or_else(no_such)?;
+                let ExampleResult::Failed(reasons) = &mut record.result else {
+                    return Err(no_such());
+                };
+                let slot = reasons.get_mut(reason).ok_or_else(no_such)?;
+                // a reason that holds no text is no place
+                *slot = slot.with_text(new).ok_or_else(no_such)?;
+            }
         }
         Ok(())
     }
@@ -592,7 +691,7 @@ impl Measurement {
     fn case_mut(&mut self, case: usize) -> Option<&mut CaseRun> {
         match &mut self.body {
             MeasureBody::Simulation { outcome, .. } => outcome.cases.get_mut(case),
-            MeasureBody::Mutation { .. } => None,
+            MeasureBody::Mutation { .. } | MeasureBody::Examples { .. } => None,
         }
     }
 }
@@ -605,6 +704,7 @@ pub(crate) mod fixture {
 
     use super::*;
     use crate::domain::vo::digest::Digest;
+    use crate::domain::vo::examples_run::ExamplesBasis;
     use crate::domain::vo::id::test_uuid;
     use crate::domain::vo::measure::{
         MeasureStamp, Mutant, MutantKey, Operator, SettingsDigest, SettingsNow, Site,
@@ -685,7 +785,29 @@ pub(crate) mod fixture {
                 *s = sites;
                 *p = planned;
             }
-            MeasureBody::Simulation { .. } => panic!("a simulation has no sites"),
+            MeasureBody::Simulation { .. } | MeasureBody::Examples { .. } => {
+                panic!("only a mutation run has sites")
+            }
+        }
+    }
+
+    /// A run of the examples of `harness` that stood on `basis`, with this outcome.
+    pub(crate) fn examples_draft(
+        n: u128,
+        harness: HarnessId,
+        basis: ExamplesBasis,
+        outcome: ExamplesOutcome,
+    ) -> MeasurementDraft {
+        MeasurementDraft {
+            id: MeasurementId::from_uuid(test_uuid(n)),
+            at: Timestamp::from_millis(n as u64),
+            body: MeasureBody::Examples {
+                harness,
+                stamp: ExamplesStamp::new(basis, settings()),
+                outcome,
+            },
+            failure: None,
+            evidence: evidence(),
         }
     }
 
@@ -1240,5 +1362,199 @@ mod tests {
             .unwrap();
         let kept = leaky_run().with_corrections(m.corrections().to_vec());
         assert_eq!(kept.corrections(), m.corrections());
+    }
+
+    // --- a run of examples
+
+    use crate::domain::vo::examples_run::{
+        ExampleRecord, ExampleResult, ExamplesBasis, ExamplesOutcome, Got, Reason,
+    };
+
+    fn examples_basis() -> ExamplesBasis {
+        ExamplesBasis {
+            harness: crate::domain::vo::revision::Revision::first(),
+            builds: Default::default(),
+        }
+    }
+
+    /// A run of examples: the first failed with the token in several reasons, the second passed, the third failed
+    /// with reasons that hold no text.
+    fn leaky_examples() -> Measurement {
+        use crate::domain::vo::id::CaseId;
+        let line = |got: &str| Got::Line {
+            line: 2,
+            got: Some(got.to_string()),
+        };
+        let records = vec![
+            ExampleRecord {
+                case: CaseId::from_uuid(test_uuid(1)),
+                result: ExampleResult::Failed(vec![
+                    Reason::Output(line(&format!("secret {TOKEN}"))),
+                    Reason::Exit { got: 2 },
+                    Reason::Errors(line("plain")),
+                    Reason::Abnormal(format!("cannot start {TOKEN}")),
+                ]),
+            },
+            ExampleRecord {
+                case: CaseId::from_uuid(test_uuid(2)),
+                result: ExampleResult::Passed,
+            },
+            ExampleRecord {
+                case: CaseId::from_uuid(test_uuid(3)),
+                result: ExampleResult::Failed(vec![
+                    Reason::Output(Got::Line { line: 1, got: None }),
+                    Reason::Unreadable(format!("missing {TOKEN}.args")),
+                ]),
+            },
+        ];
+        Measurement::new(examples_draft(
+            4,
+            HarnessId::from_uuid(test_uuid(400)),
+            examples_basis(),
+            ExamplesOutcome::new(records).unwrap(),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_run_of_examples_reads_its_body_and_has_no_mutants_or_cases() {
+        let harness = HarnessId::from_uuid(test_uuid(400));
+        let m = leaky_examples();
+        assert_eq!(m.kind(), MeasureKind::Examples);
+        assert_eq!(m.subject(), MeasureSubject::Harness(harness));
+        assert_eq!(m.harness(), Some(harness));
+        assert_eq!(m.interface(), None);
+        assert!(m.mutants().is_empty() && m.sim().is_none());
+        assert_eq!((m.sites(), m.planned(), m.evaluated()), (0, 0, 0));
+        assert_eq!(m.counts(), Counts::default());
+        assert_eq!(m.examples().unwrap().records().len(), 3);
+        assert!(m.stamp().examples().is_some());
+        assert!(m.stamp().sim().is_none() && m.stamp().code().is_none());
+        let run = m.as_examples().expect("a run of examples");
+        assert_eq!(run.harness(), harness);
+        assert_eq!(StampRef::Examples(run.stamp()), m.stamp());
+        assert_eq!(run.measurement(), &m);
+        assert!(m.as_mutation().is_none() && m.as_simulation().is_none());
+        // and no other kind is a run of examples
+        assert!(leaky_run().as_examples().is_none() && leaky_run().examples().is_none());
+        assert!(leaky_sim().as_examples().is_none() && leaky_sim().examples().is_none());
+    }
+
+    #[test]
+    fn an_example_in_a_run_twice_is_refused_when_the_outcome_is_made() {
+        use crate::domain::vo::id::CaseId;
+        let record = ExampleRecord {
+            case: CaseId::from_uuid(test_uuid(1)),
+            result: ExampleResult::Passed,
+        };
+        assert!(ExamplesOutcome::new(vec![record.clone(), record]).is_err());
+    }
+
+    #[test]
+    fn only_the_reasons_that_hold_a_text_are_places_of_an_example() {
+        let words: Vec<String> = every_field(&leaky_examples())
+            .iter()
+            .map(Field::word)
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "step[0].command",
+                "example[0].reason[0]",
+                "example[0].reason[2]",
+                "example[0].reason[3]",
+                "example[2].reason[1]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_correction_replaces_the_text_of_a_reason_and_keeps_what_the_run_stands_on() {
+        let before = leaky_examples();
+        let mut m = before.clone();
+        let fields: Vec<Field> = m
+            .texts()
+            .into_iter()
+            .filter(|(_, t)| t.contains(TOKEN))
+            .map(|(f, _)| f)
+            .collect();
+        assert_eq!(fields.len(), 3);
+        m.correct(&sought(), correction(fields), &free).unwrap();
+        assert!(m.texts().iter().all(|(_, t)| !t.contains(TOKEN)));
+        let records = m.examples().unwrap().records();
+        assert_eq!(
+            records[0].result,
+            ExampleResult::Failed(vec![
+                Reason::Output(Got::Line {
+                    line: 2,
+                    got: Some("secret [redacted]".to_string())
+                }),
+                Reason::Exit { got: 2 },
+                Reason::Errors(Got::Line {
+                    line: 2,
+                    got: Some("plain".to_string())
+                }),
+                Reason::Abnormal("cannot start [redacted]".to_string()),
+            ])
+        );
+        assert_eq!(
+            records[2].result,
+            ExampleResult::Failed(vec![
+                Reason::Output(Got::Line { line: 1, got: None }),
+                Reason::Unreadable("missing [redacted].args".to_string()),
+            ])
+        );
+        assert_eq!(m.stamp(), before.stamp());
+        assert_eq!(
+            m.examples().unwrap().records()[1],
+            before.examples().unwrap().records()[1]
+        );
+        assert_eq!(m.corrections().len(), 1);
+        assert!(!format!("{:?}", m.corrections()).contains("SECRET"));
+    }
+
+    #[test]
+    fn a_correction_of_a_place_that_an_example_does_not_have_is_refused_and_changes_nothing() {
+        let mut m = leaky_examples();
+        let before = m.clone();
+        for field in [
+            // a reason that holds no text
+            Field::ExampleReason {
+                example: 0,
+                reason: 1,
+            },
+            // a reason that is not there
+            Field::ExampleReason {
+                example: 0,
+                reason: 9,
+            },
+            // an example that passed has no reason
+            Field::ExampleReason {
+                example: 1,
+                reason: 0,
+            },
+            // an example that is not there
+            Field::ExampleReason {
+                example: 7,
+                reason: 0,
+            },
+        ] {
+            assert_eq!(
+                m.correct(&sought(), correction(vec![field]), &free),
+                Err(CorrectionError::NoSuchField(field.word())),
+                "{field}"
+            );
+            assert_eq!(m, before);
+        }
+        // a run of another kind has no examples
+        let mut run = leaky_run();
+        let field = Field::ExampleReason {
+            example: 0,
+            reason: 0,
+        };
+        assert_eq!(
+            run.correct(&sought(), correction(vec![field]), &free),
+            Err(CorrectionError::NoSuchField("example[0].reason[0]".into()))
+        );
     }
 }

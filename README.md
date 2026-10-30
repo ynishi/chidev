@@ -400,8 +400,8 @@ kinds, and a use case belongs to one of them for good:
 - A **question** asks for every check on the model as it stands: `check_run` (moment
   `check`). It keeps what the checks said, external programs included, and refuses
   nothing, since it changes no asset.
-- A **record** keeps a fact and runs no check: `init`, `measure`, `simulate` and
-  `finding_report`.
+- A **record** keeps a fact and runs no check: `init`, `measure`, `simulate`, `examples`
+  (`measure` of kind `examples`) and `finding_report`.
 - A **correction** replaces a text that must not stay with a mark, in the records
   nothing else changes: `record_correct` (see "Correcting a record"). It is forced:
   it runs no check and nothing refuses it for what a check would find
@@ -680,38 +680,15 @@ it is longer; `end of output` stands for a side with no such line; `expected a f
 that only the last line feed differs), `exit code: expected <e>, got <g>`, and, with a `.stderr`, `standard error
 differs ...` in the same form as the first.
 
-Plain mode prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for each example, then
+It prints `ok <name>` or `fail <name>: <reasons, joined by "; ">` for each example, then
 `<p> passed, <f> failed`. The exit code is 0 when every example passed, 1 when one failed, and 2 when nothing could be
 run (a usage error, a directory that cannot be read or has no example), with `chidev accept: <what>` on standard error
 and nothing on standard output.
 
-`chidev accept [--timeout <seconds>] --external --context <context> --harness <harness> -- <command> [<arg>...]` is
-an external check of the examples the model holds: those of a Harness of `examples` (see "Acceptance examples as a
-Harness"). It takes no `<dir>`. It reads the request (protocol 2) on standard input, finds the Harness `<harness>` of
-the Context `<context>` in the model sent, runs the example of each of its Cases as the plain mode runs a file of a
-directory, and writes one reply, `{"protocol":2,"findings":[...]}`, on standard output; it exits 0 whether or not an
-example failed. Register it like any external check, reading the Contracts and the Harnesses:
-
-```toml
-[external."ext.accept"]
-command = "chidev"
-args = ["accept", "--external", "--context", "tally", "--harness", "acceptance", "--", "./prog"]
-moments = ["pin", "resolve", "check"]
-timeout = 120
-reads = ["contracts", "harnesses"]
-gate = true
-```
-
-The registration's `timeout` bounds the whole run, and `--timeout` one example. A failing example gives one finding,
-`<name>: <reasons>`, about each Clause its Case cites; passing examples give nothing. A Clause is named by the
-citation, so its words do not have to name the example. These are usage errors, found before any example runs (exit
-2, nothing on standard output), which `chidev` records as a failed run: a request that is not JSON, is not protocol 2
-or asks for other than one rule; a model sent without `harnesses`; no Harness `<harness>` in the Context `<context>`;
-a Harness that is not of `examples`; and a cited Clause that is not in the model sent (`reads` without `contracts`).
-
-The examples are part of the model sent, so a change of one example (put again) makes the saved result `stale` in
-`status.external`, and the check runs again where it is registered. The program is still outside the model: re-run
-the check after changing it, as the paragraph on the recorded SHA-256 says.
+`chidev accept` is a runner for a person and keeps nothing. The examples the model holds, those of a Harness of
+`examples` (see "Acceptance examples as a Harness"), are run against the pinned program by `measure` of kind `examples`
+(see "Examples"), which keeps the run and has the checks judge it. Both judge one example by the same code, so they
+cannot differ on what a program that ended answered.
 
 ### Acceptance examples as a Harness
 
@@ -752,7 +729,8 @@ names the Interfaces whose pinned code the program is built from, as for a sim.
   (`examples.kind-content`), so it does not become a Harness of tests unsaid. A put with `kind` `tests` or `sim` and
   code makes it one, and a put with `kind` `examples` makes a Harness of code one of examples: a change of kind is a
   new revision.
-- chidev does not run the examples itself at any moment; `chidev accept --external` runs them as an external check.
+- chidev runs the examples of a Harness at no moment of the checks. `measure` of kind `examples` runs them and keeps
+  the run (see "Examples"); `chidev accept <dir>` runs the files of a directory for a person and keeps nothing.
 
 ## Measurements
 
@@ -1236,6 +1214,82 @@ and not the implementation. Therefore:
   schedule that reaches the situations the Clauses need (print `UNREACHED` when a
   case does not), keeping a `regress-<name>` Case for each situation that is hard to
   reach by chance or was once a finding.
+
+### Examples (a Harness of examples, run against the pinned program)
+
+The examples a Harness of `examples` holds (see "Acceptance examples as a Harness") are run by `measure`, and the
+run is kept like a simulation is, so that the Clauses the examples cite are judged by a run and a change of an
+expected output makes the last run stale:
+
+```text
+{"op":"measure","kind":"examples","context":"tally","harness":"acceptance"}
+```
+
+It copies the project under `.chidev/measure/<run>/`, writes the code the Pins of the Interfaces the Harness builds
+accepted over the copy, and runs `build` (a program that does not build is a failed run, `no_build`, and no example is
+run). It then starts the program once per example, in the order of the Cases, with the example's arguments after the
+words of `program`, its input on standard input, the copy as the working directory and the `env` of the table. The
+answer is judged as `chidev accept` judges it (see "Acceptance examples: `chidev accept`", which gives the
+reasons): a program that gave no
+answer (it cannot be started, it does not end within `timeout`, it writes over 4 MiB, a signal ends it) fails that
+example with one reason, and the run goes on. The run fails, keeping the examples it got through, when `build` fails or
+`budget` is used up. The Harness's own Cases are the examples: the working tree's example files are not read.
+
+```toml
+[measure]
+build = ["sh", "-c", "cargo build --quiet"]
+
+[measure.examples.tally]
+program = ["./run.sh", "--plain"]   # the words that start the program; an example's arguments follow
+timeout = 10     # seconds, one example (default 10)
+budget = 600     # seconds, the whole run (default 600, at most 3600)
+
+[[measure.layout]]
+context = "tally"
+interface = "tally"         # the code of each built Interface is written here
+path = "src/tally.rs"
+```
+
+`program` is the command that starts the program under test. Its first word is a program found, as `build` is, at the
+project's root for the settings and in the copy for the run, and it has to be the same file in both (a copy in which it
+is another file fails the run before anything is started, `settings_moved`); it is the file that the settings digest
+holds, so it cannot be a path the build makes, and a launcher the project keeps (`./run.sh`, which starts what the
+build made) or an interpreter (`python3`, with `{tree}/prog.py` as the next word) is what to write there. The words
+after the first may hold `{tree}` and `{run}` (see "Placeholders"). Every Interface the Harness builds needs a layout
+entry and a Pin; the Harness needs no layout entry, for it has no file and the run reads and writes nothing at a place
+of it. The settings digest of a run of examples covers `copy_exclude`, `env`, `build`, `baseline_timeout`, the
+Context's `[measure.examples.<context>]`, the layout of the Interfaces it builds, and the executables of `build` and of
+the first word of `program`; the other settings (the layout of any Harness among them) are not in it.
+
+A run stands on the revision of the Harness (its examples are in it, so a changed text, a Case added, dropped or
+renamed, or another `builds` moves it), the digest of the code pinned for each Interface the Harness builds, and the
+settings.
+It does not stand on a Contract or an Interface revision: what a program answers does not depend on them, and a Clause
+that moves is the Case's own business (`cite.stale`). The record keeps each example by its Case's id and what became of
+it, and keeps of a failed example only what the program gave (the expected side is the Case's, in the model, and is not
+copied): a Case that is named otherwise afterwards is still the example the record is of, and the checks show the name
+the Case has now. `status.measurements` lists the latest run per Harness with `harness`, `examples` counts (`passed`,
+`failed`), `outcome` and `state` (`current`, `stale`, `retired` or `unpinned`, with `moved` as for any run; the word
+for the Harness itself is `examples`, and a built Interface is `built-code` or `builds`). The result of `measure` lists
+each example with its name, whether it `passed` and its `reasons`. A correction can replace the text of a reason (the
+field `example_reason`, see "Correcting a record").
+
+The checks read the record and run nothing (they are builtin):
+
+<!-- checks: examples -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `examples.unrun` | warning | check | a harness of examples that was never run |
+| `examples.stale` | warning | pin, resolve, check | a run of examples after which an example of the harness, an interface it builds, the code pinned for it, or the settings moved; a run that failed is told by examples.error |
+| `examples.error` | warning | pin, resolve, check | a run of examples that failed (no_build, budget, io, settings_moved, ...): no example was judged |
+| `examples.failed` | error | pin, resolve, check | an example that failed in the latest run, one per clause its case cites, with the example's name and why; it refuses no change, and a stale run or a run that failed is not judged for it |
+<!-- /checks -->
+
+None of these is mandatory, so none refuses anything, and a failing example is reported at `pin` and `resolve` and
+does not stop either. A builtin check's `mandatory` is fixed by the check and a policy cannot raise it, so a project
+that wants a confirmation refused for a failing example registers an external gate of its own (see "External checks").
+A run that is stale is not judged for its failing examples, and a run that failed is not either: it is reported by
+`examples.error` alone, whether or not the model has moved since.
 
 ## Change requests
 

@@ -9,6 +9,7 @@ use std::pin::Pin;
 
 use thiserror::Error;
 
+use crate::domain::vo::example::{Example, ExampleName, Verdict};
 use crate::domain::vo::measure::{MeasureFailure, MutantResult, SettingsDigest, StepEvidence};
 use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{CaseRun, CitedClause, RegressName, Rerun};
@@ -104,6 +105,35 @@ pub struct SimulateReport {
     pub evidence: Vec<StepEvidence>,
 }
 
+/// One request to run the examples of a Harness of examples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExamplesRequest {
+    /// An id of this run, unique, for the directory the run works in.
+    pub run: String,
+    /// The Context's name.
+    pub context: ContextName,
+    /// The Harness of examples' name.
+    pub harness: AssetName,
+    /// The code the Pins accepted for the Interfaces the Harness builds.
+    pub interfaces: Vec<InterfaceText>,
+    /// The examples, each by the name of its Case, in the order they are to be run, as the model holds them now.
+    /// The report names an example by the same name, and the use case resolves it back to the Case.
+    pub examples: Vec<(ExampleName, Example)>,
+}
+
+/// What a run of examples observed. A run that failed carries the failure and what it got through before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExamplesReport {
+    /// The digest of the settings the run resolved and ran under; the measurement is stamped with it.
+    pub settings: SettingsDigest,
+    /// The verdict of each example that was run, by its name, in the order they were run.
+    pub examples: Vec<(ExampleName, Verdict)>,
+    /// Why the run did not finish; none when it did.
+    pub failure: Option<MeasureFailure>,
+    /// What the commands did.
+    pub evidence: Vec<StepEvidence>,
+}
+
 /// What a layout entry places: the code of an Interface, or the source of a Harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutPlace {
@@ -136,6 +166,8 @@ pub enum CommandRole {
     },
     /// The interpreter a sim script runs under.
     Interpreter,
+    /// The program the examples of a Harness are run against.
+    Program,
 }
 
 impl fmt::Display for CommandRole {
@@ -145,6 +177,7 @@ impl fmt::Display for CommandRole {
             CommandRole::Test => f.write_str("the test command"),
             CommandRole::Provider { lang } => write!(f, "the provider for `{lang}`"),
             CommandRole::Interpreter => f.write_str("the interpreter"),
+            CommandRole::Program => f.write_str("the program"),
         }
     }
 }
@@ -185,6 +218,14 @@ pub enum RunnerError {
     /// `[measure.sim.<context>]` is not there.
     #[error("[measure.sim.{context}] is not configured; it gives the interpreter and the program")]
     NoSimConfig {
+        /// The Context that has no table.
+        context: ContextName,
+    },
+    /// `[measure.examples.<context>]` is not there.
+    #[error(
+        "[measure.examples.{context}] is not configured; it gives the program the examples are run against"
+    )]
+    NoExamplesConfig {
         /// The Context that has no table.
         context: ContextName,
     },
@@ -250,6 +291,22 @@ pub trait Runner: fmt::Debug + Send + Sync {
         &'a self,
         request: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>>;
+
+    /// The digest of what a run of the examples of the Harness `harness` of `context` reads of the configuration,
+    /// if the Interfaces `builds` are the ones it builds. An error when the configuration cannot run it.
+    fn examples_settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        harness: &'a AssetName,
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>>;
+
+    /// Builds the program from the pinned code and runs each example against it, one after another, each in the
+    /// copy as the build left it. The verdict of an example is the domain's judge of what the program answered.
+    fn run_examples<'a>(
+        &'a self,
+        request: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>>;
 }
 
 /// The runner of an application that has no measure configured.
@@ -288,6 +345,22 @@ impl Runner for NoRunner {
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
+
+    fn examples_settings<'a>(
+        &'a self,
+        _: &'a ContextName,
+        _: &'a AssetName,
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        _: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
+        Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
 }
 
 #[cfg(test)]
@@ -313,6 +386,24 @@ mod tests {
                 .unwrap_err(),
             RunnerError::Unconfigured
         );
+        assert_eq!(
+            NoRunner
+                .examples_settings(&context, &name, &[])
+                .await
+                .unwrap_err(),
+            RunnerError::Unconfigured
+        );
+        let request = ExamplesRequest {
+            run: "run".to_string(),
+            context,
+            harness: name,
+            interfaces: Vec::new(),
+            examples: Vec::new(),
+        };
+        assert_eq!(
+            NoRunner.run_examples(&request).await.unwrap_err(),
+            RunnerError::Unconfigured
+        );
     }
 
     #[test]
@@ -320,6 +411,7 @@ mod tests {
         assert_eq!(CommandRole::Build.to_string(), "the build command");
         assert_eq!(CommandRole::Test.to_string(), "the test command");
         assert_eq!(CommandRole::Interpreter.to_string(), "the interpreter");
+        assert_eq!(CommandRole::Program.to_string(), "the program");
         assert_eq!(
             CommandRole::Provider {
                 lang: "rust".to_string()

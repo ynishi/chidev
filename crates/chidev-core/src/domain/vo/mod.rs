@@ -12,6 +12,7 @@ pub mod correction;
 pub mod crux;
 pub mod digest;
 pub mod example;
+pub mod examples_run;
 pub mod finding;
 pub mod footprint;
 pub mod frame;

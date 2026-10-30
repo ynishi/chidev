@@ -13,12 +13,12 @@ use chidev_core::app::{
     ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
     DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
     ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
-    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasurementState, ModelSlice,
-    ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput,
-    PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining,
-    RenameInput, ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput,
-    RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
-    TargetRef, TransitionStatus, ViewInput,
+    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasureSummary,
+    MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue,
+    PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
+    RecommendationInput, RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding,
+    ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
@@ -215,8 +215,9 @@ enum Op {
     /// Measures, in a copy of the project made under `.chidev/measure/`, and keeps what was observed. `kind`
     /// `mutate` (with `interface`) runs the code the Pin of the Interface accepted against the Harnesses as the
     /// model holds them, once per mutant. `kind` `simulate` (with `harness`, a sim Harness) builds the program from
-    /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. Either takes as
-    /// long as the project's build and tests or script take.
+    /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. `kind` `examples`
+    /// (with `harness`, a Harness of examples) builds the program the same way and runs each example of the Harness
+    /// against it. Any of them takes as long as the project's build and tests, script or program take.
     Measure {
         kind: MeasureKindDto,
         context: String,
@@ -912,6 +913,7 @@ impl From<SectionDto> for ModelSection {
 enum MeasureKindDto {
     Mutate,
     Simulate,
+    Examples,
 }
 
 impl From<MeasureKindDto> for MeasureKind {
@@ -919,6 +921,7 @@ impl From<MeasureKindDto> for MeasureKind {
         match k {
             MeasureKindDto::Mutate => MeasureKind::Mutate,
             MeasureKindDto::Simulate => MeasureKind::Simulate,
+            MeasureKindDto::Examples => MeasureKind::Examples,
         }
     }
 }
@@ -968,6 +971,103 @@ struct SimSummaryOut {
     differing: u32,
 }
 
+/// An example of a run of examples, in the result of `measure`: the name of its Case, whether the program answered
+/// as it expects, and the reasons it did not.
+#[derive(Debug, Serialize)]
+struct ExampleOut<'a> {
+    example: &'a str,
+    passed: bool,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    reasons: &'a [String],
+}
+
+/// What a run of examples found, in numbers, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct ExamplesSummaryOut {
+    passed: u32,
+    failed: u32,
+}
+
+/// How many mutants ended each way, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct CountsOut {
+    killed: u32,
+    survived: u32,
+    stillborn: u32,
+    timeout: u32,
+}
+
+/// What a run found, by its kind, in the result of `status`: each kind has its own keys, flattened into the entry.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum SummaryOut {
+    /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
+    /// out of a run that ended.
+    Mutation {
+        sites: u32,
+        evaluated: u32,
+        capped: bool,
+    },
+    /// A simulation.
+    Simulation { sim: SimSummaryOut },
+    /// A run of examples.
+    Examples { examples: ExamplesSummaryOut },
+}
+
+impl SummaryOut {
+    /// The keys of what a run found, and how many mutants ended each way (none did, for a run that is not a mutation
+    /// run).
+    fn of(summary: &MeasureSummary) -> (CountsOut, SummaryOut) {
+        match *summary {
+            MeasureSummary::Mutation { coverage, counts } => (
+                CountsOut {
+                    killed: counts.killed,
+                    survived: counts.survived,
+                    stillborn: counts.stillborn,
+                    timeout: counts.timeout,
+                },
+                SummaryOut::Mutation {
+                    sites: coverage.sites,
+                    evaluated: coverage.evaluated,
+                    capped: coverage.capped,
+                },
+            ),
+            MeasureSummary::Simulation(x) => (
+                CountsOut {
+                    killed: 0,
+                    survived: 0,
+                    stillborn: 0,
+                    timeout: 0,
+                },
+                SummaryOut::Simulation {
+                    sim: SimSummaryOut {
+                        cases: x.cases,
+                        findings: x.findings,
+                        unreached: x.unreached,
+                        abnormal: x.abnormal,
+                        reruns: x.reruns,
+                        differing: x.differing,
+                    },
+                },
+            ),
+            MeasureSummary::Examples(x) => (
+                CountsOut {
+                    killed: 0,
+                    survived: 0,
+                    stillborn: 0,
+                    timeout: 0,
+                },
+                SummaryOut::Examples {
+                    examples: ExamplesSummaryOut {
+                        passed: x.passed,
+                        failed: x.failed,
+                    },
+                },
+            ),
+        }
+    }
+}
+
 /// A mutant in the result of `measure`.
 #[derive(Debug, Serialize)]
 struct MutantOut<'a> {
@@ -1009,6 +1109,8 @@ struct MeasureOut<'a> {
     cases: Vec<CaseOut<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reruns: Vec<RerunOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    examples: Vec<ExampleOut<'a>>,
     evidence: Vec<StepOut<'a>>,
 }
 
@@ -1039,7 +1141,7 @@ impl<'a> From<&'a MovedPart> for MovedOut<'a> {
     }
 }
 
-/// The latest measurement of an Interface or a sim Harness, in the result of `status`.
+/// The latest measurement of an Interface or a Harness, in the result of `status`.
 #[derive(Debug, Serialize)]
 struct MeasurementOut<'a> {
     context: &'a str,
@@ -1057,20 +1159,12 @@ struct MeasurementOut<'a> {
     moved: Vec<MovedOut<'a>>,
     outcome: &'static str,
     failure: Option<&'a str>,
-    /// A mutation run: the places the provider found, the mutants evaluated, and whether `max_mutants` left sites
-    /// out of a run that ended.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sites: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    evaluated: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    capped: Option<bool>,
-    killed: u32,
-    survived: u32,
-    stillborn: u32,
-    timeout: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sim: Option<SimSummaryOut>,
+    /// How many mutants ended each way: all zero for a run that is not a mutation run.
+    #[serde(flatten)]
+    counts: CountsOut,
+    /// What the run found, by its kind.
+    #[serde(flatten)]
+    summary: SummaryOut,
     at: u64,
     /// The corrections made of its texts, in the order they were made; left out when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1381,6 +1475,8 @@ enum CruxFieldDto {
 
 /// A field of a measurement. An index counts from 0 in the list it is of; a case is an index into the cases of a
 /// simulation, in the order they were run. `case_exit` is the reason a case could not start the program.
+/// `example_reason` is the text of a reason an example of a run of examples failed (`example` is an index into the
+/// examples in the order they were run, `reason` into its reasons).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum MeasurementFieldDto {
@@ -1393,6 +1489,7 @@ enum MeasurementFieldDto {
     CaseUnreached { case: usize, unreached: usize },
     CaseUndecided { case: usize, undecided: usize },
     CaseExit(usize),
+    ExampleReason { example: usize, reason: usize },
 }
 
 /// A field of a row of the record of check runs.
@@ -1505,6 +1602,9 @@ impl From<MeasurementFieldDto> for MeasurementField {
                 MeasurementField::CaseUndecided { case, undecided }
             }
             MeasurementFieldDto::CaseExit(case) => MeasurementField::CaseExit { case },
+            MeasurementFieldDto::ExampleReason { example, reason } => {
+                MeasurementField::ExampleReason { example, reason }
+            }
         }
     }
 }
@@ -1605,6 +1705,9 @@ impl From<&MeasurementField> for MeasurementFieldDto {
                 MeasurementFieldDto::CaseUndecided { case, undecided }
             }
             MeasurementField::CaseExit { case } => MeasurementFieldDto::CaseExit(case),
+            MeasurementField::ExampleReason { example, reason } => {
+                MeasurementFieldDto::ExampleReason { example, reason }
+            }
         }
     }
 }
@@ -3211,6 +3314,9 @@ where
                 (MeasureKind::Simulate, None, Some(harness)) => {
                     app.simulate(&context, &harness).await?
                 }
+                (MeasureKind::Examples, None, Some(harness)) => {
+                    app.run_examples(&context, &harness).await?
+                }
                 (MeasureKind::Mutate, _, _) => {
                     return Err(AppError::Input(
                         "a `mutate` measure takes an `interface` and no `harness`".to_string(),
@@ -3219,6 +3325,12 @@ where
                 (MeasureKind::Simulate, _, _) => {
                     return Err(AppError::Input(
                         "a `simulate` measure takes a `harness` (a sim harness) and no `interface`"
+                            .to_string(),
+                    ));
+                }
+                (MeasureKind::Examples, _, _) => {
+                    return Err(AppError::Input(
+                        "an `examples` measure takes a `harness` (a harness of examples) and no `interface`"
                             .to_string(),
                     ));
                 }
@@ -3285,6 +3397,15 @@ where
                     .map(|r| RerunOut {
                         case: &r.case,
                         result: r.result,
+                    })
+                    .collect(),
+                examples: done
+                    .examples
+                    .iter()
+                    .map(|e| ExampleOut {
+                        example: &e.example,
+                        passed: e.passed,
+                        reasons: &e.reasons,
                     })
                     .collect(),
                 evidence: done
@@ -3775,41 +3896,31 @@ where
                 measurements: s
                     .measurements
                     .iter()
-                    .map(|m| MeasurementOut {
-                        context: &m.context,
-                        interface: m.interface.as_deref(),
-                        harness: m.harness.as_deref(),
-                        kind: m.kind,
-                        id: &m.id,
-                        stamp: &m.stamp,
-                        state: m.state.word(),
-                        moved: match &m.state {
-                            MeasurementState::Stale(parts) => {
-                                parts.iter().map(MovedOut::from).collect()
-                            }
-                            MeasurementState::Current
-                            | MeasurementState::Retired
-                            | MeasurementState::Unpinned => Vec::new(),
-                        },
-                        outcome: m.outcome,
-                        failure: m.failure.as_deref(),
-                        sites: m.coverage.map(|c| c.sites),
-                        evaluated: m.coverage.map(|c| c.evaluated),
-                        capped: m.coverage.map(|c| c.capped),
-                        killed: m.counts.killed,
-                        survived: m.counts.survived,
-                        stillborn: m.counts.stillborn,
-                        timeout: m.counts.timeout,
-                        sim: m.sim.map(|x| SimSummaryOut {
-                            cases: x.cases,
-                            findings: x.findings,
-                            unreached: x.unreached,
-                            abnormal: x.abnormal,
-                            reruns: x.reruns,
-                            differing: x.differing,
-                        }),
-                        at: m.at,
-                        corrections: m.corrections.iter().map(CorrectionOut::from).collect(),
+                    .map(|m| {
+                        let (counts, summary) = SummaryOut::of(&m.summary);
+                        MeasurementOut {
+                            context: &m.context,
+                            interface: m.interface.as_deref(),
+                            harness: m.harness.as_deref(),
+                            kind: m.kind,
+                            id: &m.id,
+                            stamp: &m.stamp,
+                            state: m.state.word(),
+                            moved: match &m.state {
+                                MeasurementState::Stale(parts) => {
+                                    parts.iter().map(MovedOut::from).collect()
+                                }
+                                MeasurementState::Current
+                                | MeasurementState::Retired
+                                | MeasurementState::Unpinned => Vec::new(),
+                            },
+                            outcome: m.outcome,
+                            failure: m.failure.as_deref(),
+                            counts,
+                            summary,
+                            at: m.at,
+                            corrections: m.corrections.iter().map(CorrectionOut::from).collect(),
+                        }
                     })
                     .collect(),
             })?

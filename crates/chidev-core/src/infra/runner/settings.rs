@@ -1,6 +1,6 @@
 //! What a run reads of the `[measure]` table, resolved: the values with their defaults applied, the places the
 //! run writes code to, and the programs it starts with the digests of their executables. There is one struct per
-//! kind of run ([`MutationSettings`], [`SimSettings`]), and the run is made from it and from nothing else of the
+//! kind of run ([`MutationSettings`], [`SimSettings`], [`ExamplesSettings`]), and the run is made from it and from nothing else of the
 //! table, so a setting the run does not read is not in the struct, and the digest of the struct, which is the
 //! settings digest of the measurement, cannot move for it. A setting the run reads is a field of the struct, and
 //! the digest moves with it.
@@ -388,6 +388,73 @@ impl SimSettings {
             timeout: sim.timeout,
             budget: sim.budget,
             harness: Placed::of(harness, script),
+            builds: placed,
+        })
+    }
+
+    /// The digest of the settings; an error when they cannot be written down to be digested.
+    pub(super) fn digest(&self) -> Result<SettingsDigest, RunnerError> {
+        digest_of(self)
+    }
+
+    /// Where the code of the Interface `name` is written; none for one the settings were not made for.
+    pub(super) fn build_path(&self, name: &AssetName) -> Option<&Path> {
+        place_of(&self.builds, name)
+    }
+}
+
+/// What a run of the examples of a Harness of examples reads: how it copies and builds, the program the examples are
+/// run against (the program its first word names is the one digested, the words as written), the limits, and where
+/// the code of the Interfaces it builds is written. The examples are not here: they are the model's, and a change of
+/// one moves the Harness's revision and not the settings. Nor is the Harness: a Harness of examples has no file, the
+/// run reads and writes nothing at a place of it, and so it needs no entry of the layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct ExamplesSettings {
+    pub copy: CopySettings,
+    /// Starts the program under test; the arguments of an example follow its own, each word as written.
+    pub program: Program,
+    /// For one example.
+    pub timeout: Duration,
+    /// For the whole run.
+    pub budget: Duration,
+    /// Where the code of each Interface the Harness builds is written, sorted by name.
+    pub builds: Vec<Placed>,
+}
+
+impl ExamplesSettings {
+    /// The settings of a run of the examples of a Harness of `context` that builds the Interfaces `builds`, from
+    /// `config`, its programs found at the project's root `root`. An error when the table cannot run it.
+    pub(super) async fn resolve(
+        config: &Config,
+        root: &Path,
+        context: &ContextName,
+        builds: &[AssetName],
+    ) -> Result<Self, RunnerError> {
+        let examples =
+            config
+                .examples
+                .get(context)
+                .ok_or_else(|| RunnerError::NoExamplesConfig {
+                    context: context.clone(),
+                })?;
+        let mut placed = Vec::with_capacity(builds.len());
+        for name in builds {
+            let (layout, _) = config
+                .interface(context, name)
+                .ok_or_else(|| no_layout(LayoutPlace::Interface, context, name))?;
+            placed.push(Placed::of(name, layout));
+        }
+        placed.sort();
+        let words: Vec<String> = examples
+            .program
+            .iter()
+            .map(|w| w.as_str().to_string())
+            .collect();
+        Ok(Self {
+            copy: CopySettings::resolve(config, root).await?,
+            program: Program::resolve(root, CommandRole::Program, &words).await?,
+            timeout: examples.timeout,
+            budget: examples.budget,
             builds: placed,
         })
     }
