@@ -14,15 +14,27 @@ and this project adheres to
   `<name>.expected` ending with `#exit <code>`, and an optional `<name>.stderr`):
   it runs a command for each example under a time limit, compares the standard
   output, the exit code and the standard error, and prints `ok <name>` or
-  `fail <name>: <why>`. With `--external --context <c> --harness <h>` it
-  answers the external-check protocol 2 for the examples of a Harness of
-  `examples` in the model sent, one finding per failing example about each
-  Clause its Case cites, so it can be registered as a gate at `pin` and
-  `resolve` (with `reads = ["contracts", "harnesses"]`).
+  `fail <name>: <why>`. It is a runner for a person and keeps nothing; the
+  examples of the model are run by `measure` of kind `examples` (below).
   In Rust, `chidev_core::domain::vo::example` and `chidev_core::infra::accept`
   (see #45). [ADR 0009](docs/adr/0009-environments-are-assets-and-examples-are-a-kind-of-harness.md)
   records how verification environments and acceptance examples enter the model
   in the next steps (see #42).
+- `measure` of kind `examples`: chidev runs the examples of a Harness of
+  `examples` against the program built from the code pinned for the Interfaces
+  it `builds`, configured by `[measure.examples.<context>]` (`program`,
+  `timeout` per example, `budget`), and records the run: its stamp is the
+  Harness's revision, the pinned code of what it builds and the settings, and
+  each example is kept by its Case with the reasons it failed (without what it
+  expected). `examples.unrun`, `examples.stale`, `examples.error` and
+  `examples.failed` (one finding per Clause a failing example cites) judge the
+  latest run; all but `examples.unrun` also run at `pin` and `resolve`, and
+  none of them refuses. `status.measurements` lists examples runs, and a
+  correction can name a reason (`example[N].reason[M]`). In Rust,
+  `MeasureKind::Examples`, `MeasureBody::Examples`, `ExamplesStamp`,
+  `ExampleRecord`, `Runner::examples_settings` and `Runner::run_examples`,
+  `Store::latest_measurements_of`, and `MeasurementStanding::summary` (a
+  `MeasureSummary`) in place of its `coverage`, `sim` and counts (#45).
 - A Harness of `kind` `examples`: each Case holds one acceptance example (its
   arguments, standard input, expected output with `#exit <code>`, and optional
   standard error) and cites the Clauses it shows, so a change of one example
