@@ -26,6 +26,7 @@ use chidev_core::domain::repository::{ChangeRequestRepository, CruxRepository};
 use chidev_core::domain::vo::id::{ChangeRequestId, CruxId};
 use chidev_core::domain::vo::measure::{MeasureKind, StepEvidence};
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::judged;
@@ -609,8 +610,8 @@ struct Leaky;
 impl Runner for Leaky {
     fn settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Ok("settings".to_string()) })
     }
@@ -639,8 +640,8 @@ impl Runner for Leaky {
 
     fn sim_settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
@@ -698,12 +699,12 @@ async fn a_measurement_is_found_corrected_and_shown_with_its_corrections_by_stat
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "api".into(),
+                interface: AssetName::try_from("api").unwrap(),
                 key: "push".into(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
-                contract: "stack".into(),
+                contract: AssetName::try_from("stack").unwrap(),
                 label: "C1".into(),
             }],
         }],

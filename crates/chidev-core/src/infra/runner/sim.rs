@@ -30,7 +30,7 @@
 //! `cannot_start`: it has no findings and says nothing of the Clauses. When *every* case that was run could not
 //! start the program, the run is a failure of kind `no_start` and the second runs are not made.
 //!
-//! A Clause is named `<contract>:<label>`: the Contract's name (as chidev knows it, without white space) and the
+//! A Clause is named `<contract>:<label>`: the Contract's name (as chidev knows it: `a-z`, `0-9`, `-` and `_`) and the
 //! label (`C<n>`) of the Clause in it. Labels are unique only within a Contract, so a sim Harness that checks
 //! Clauses of several Contracts names each by its Contract. chidev resolves each name to the Clause's id when it
 //! records the run, against the Clauses the sweep Case cites; the record holds ids, not names.
@@ -56,6 +56,7 @@ use crate::app::ports::measure::{InterfaceText, RunnerError, SimulateReport, Sim
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::ClauseId;
 use crate::domain::vo::measure::{FailureKind, MeasureFailure, StepEvidence};
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{
     CaseExit, CaseFinding, CaseRun, CaseUnreached, CitedClause, ClauseName, Rerun, SimCase,
     reproduction, rerun_cases, resolve,
@@ -85,7 +86,7 @@ fn shown(line: &str) -> String {
 }
 
 /// `<contract>:<label>: <text>`: the name of a Clause the sweep cites, resolved to the Clause's id, and the text.
-/// The name is the first word and ends in a colon; a Contract's name has no white space.
+/// The name is the first word and ends in a colon; a Contract's name has no white space and no colon.
 fn named<'a>(rest: &'a str, cited: &[CitedClause]) -> Result<(ClauseId, &'a str), String> {
     let shape = || "no `<contract>:<label>: <text>`".to_string();
     let (word, text) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
@@ -233,8 +234,8 @@ impl ProcessRunner {
     /// interpreter's executable, so that a new interpreter is a new run.
     pub(super) async fn sim_settings_of(
         &self,
-        context: &str,
-        harness: &str,
+        context: &ContextName,
+        harness: &AssetName,
     ) -> Result<String, RunnerError> {
         let cfg = self.sim_config(context)?;
         self.config.harness(context, harness).ok_or_else(|| {
@@ -258,7 +259,7 @@ impl ProcessRunner {
         .to_string())
     }
 
-    fn sim_config(&self, context: &str) -> Result<&SimConfig, RunnerError> {
+    fn sim_config(&self, context: &ContextName) -> Result<&SimConfig, RunnerError> {
         self.config.sim.get(context).ok_or_else(|| {
             config_error(format!(
                 "[measure.sim.{context}] is not configured; it gives the interpreter and the program"
@@ -600,7 +601,10 @@ mod tests {
         [("stock", "C1", 11), ("stock", "C4", 14), ("cli", "C1", 21)]
             .iter()
             .map(|(contract, label, id)| CitedClause {
-                name: ClauseName::new(contract, ClauseLabel::try_from(*label).unwrap()).unwrap(),
+                name: ClauseName::new(
+                    AssetName::try_from(*contract).unwrap(),
+                    ClauseLabel::try_from(*label).unwrap(),
+                ),
                 id: clause(*id),
             })
             .collect()

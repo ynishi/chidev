@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::model_view::{ModelSlice, ModelView, ViewSelection};
 use super::ports::external::ExternalExecutor;
-use super::ports::{AssetName, IdSource, Store, StoreRevision};
+use super::ports::{IdSource, NamedAsset, Store, StoreRevision};
 use super::{App, AppError, context_ids};
 use crate::domain::entity::context::Context;
 use crate::domain::vo::model_section::ModelSection;
@@ -75,7 +75,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub(super) async fn names_in_model<'a>(
         &self,
         contexts: impl Iterator<Item = &'a Context>,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<BTreeMap<Uuid, String>, AppError> {
         let mut names = BTreeMap::new();
         for c in contexts {
@@ -86,9 +86,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .chain(c.harnesses().map(|x| x.id().as_uuid()));
             for id in ids {
                 if let Some(n) = pending.iter().find(|n| n.id == id) {
-                    names.insert(id, n.name.clone());
+                    names.insert(id, n.name.to_string());
                 } else if let Some(n) = self.store.asset_name(id).await? {
-                    names.insert(id, n);
+                    names.insert(id, n.to_string());
                 }
             }
         }

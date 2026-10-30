@@ -20,6 +20,7 @@ use chidev_core::domain::repository::{
     ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
 };
 use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -106,12 +107,12 @@ impl AssetNames for FlakyStore {
         &self,
         context: ContextId,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<Option<Uuid>, StoreError> {
         self.inner.asset_id(context, kind, name).await
     }
 
-    async fn asset_name(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+    async fn asset_name(&self, id: Uuid) -> Result<Option<AssetName>, StoreError> {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(StoreError::Failed("cannot read asset name".to_string()));
         }
@@ -220,7 +221,7 @@ async fn near_names_unread_reported_when_store_fails() {
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "api".to_string(),
+                interface: AssetName::try_from("api").unwrap(),
                 key: "item1".to_string(),
             }],
             clauses: vec![],
@@ -261,26 +262,30 @@ async fn near_names_unread_reported_when_store_fails() {
         .await
         .unwrap();
 
+    let (context, asset) = (
+        |s: &str| ContextName::try_from(s).unwrap(),
+        |s: &str| AssetName::try_from(s).unwrap(),
+    );
     let errors = [
-        AppError::UnknownContext("cor".to_string()),
+        AppError::UnknownContext(context("cor")),
         AppError::UnknownAsset {
-            context: "core".to_string(),
+            context: context("core"),
             kind: "contract",
-            name: "billin".to_string(),
+            name: asset("billin"),
         },
         AppError::UnknownItem {
-            context: "core".to_string(),
-            interface: "api".to_string(),
+            context: context("core"),
+            interface: asset("api"),
             key: "item".to_string(),
         },
         AppError::UnknownClause {
-            context: "core".to_string(),
-            contract: "billing".to_string(),
+            context: context("core"),
+            contract: asset("billing"),
             label: "C".to_string(),
         },
         AppError::UnknownCase {
-            context: "core".to_string(),
-            harness: "harness1".to_string(),
+            context: context("core"),
+            harness: asset("harness1"),
             name: "case".to_string(),
         },
         AppError::UnknownChangeRequest("Round halve".to_string()),

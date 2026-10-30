@@ -375,6 +375,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::vo::name::ContextName;
 
     #[test]
     fn the_reason_a_search_failed_is_fixed_and_holds_no_text_of_the_store() {
@@ -393,7 +394,7 @@ mod tests {
                 "the store could not be read",
             ),
             (
-                AppError::UnknownContext(quoted.clone()),
+                AppError::UnknownContext(ContextName::try_from(quoted.as_str()).unwrap()),
                 "the store could not be searched",
             ),
         ] {

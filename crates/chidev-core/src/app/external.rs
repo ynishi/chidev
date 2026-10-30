@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::commit::AskTrigger;
 use super::model_view::{ModelView, ViewSelection};
 use super::ports::external::*;
-use super::ports::{AssetName, IdSource, Invocation, Outcome, Store, StoreRevision};
+use super::ports::{IdSource, Invocation, NamedAsset, Outcome, Store, StoreRevision};
 use super::{App, AppError, Found, input};
 use crate::domain::check::external::ExternalRule;
 use crate::domain::check::{
@@ -98,7 +98,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         p: &Project,
         crs: &[ChangeRequest],
         cruxes: &[Crux],
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<ExternalModelView, AppError> {
         let names = self.names_in_model(p.contexts(), pending).await?;
         let selection = ViewSelection {
@@ -144,7 +144,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         moment: Moment,
         at: StoreRevision,
         view: &CheckView<'_>,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<Vec<ExternalReport>, AppError> {
         let mut reports = Vec::new();
         for rule in self.registry.external() {
@@ -377,7 +377,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         reports: &[ExternalReport],
         p: &Project,
         crs: &[ChangeRequest],
-        pending: &[AssetName],
+        pending: &[NamedAsset],
         stale: bool,
     ) -> Result<Vec<Found>, AppError> {
         let mut out = Vec::new();

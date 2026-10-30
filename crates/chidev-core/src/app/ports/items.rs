@@ -8,6 +8,7 @@ use std::fmt;
 use thiserror::Error;
 
 use super::measure::BoxFuture;
+use crate::domain::vo::name::{AssetName, ContextName};
 
 /// One declaration a provider found: its key and the first and last line of it, from 1. The adapter has checked
 /// that the key is a key and that the lines are in the code; it has not checked that the declarations are apart
@@ -42,7 +43,7 @@ pub enum ItemsError {
 /// provider it is configured with, changes no file of the project, and bounds the run by a deadline.
 pub trait ItemSource: fmt::Debug + Send + Sync {
     /// The language of the Interface `interface` of `context`, as the project's configuration lays it out.
-    fn language(&self, context: &str, interface: &str) -> Result<String, ItemsError>;
+    fn language(&self, context: &ContextName, interface: &AssetName) -> Result<String, ItemsError>;
 
     /// The Items of `source`, the code of an Interface of `lang`, in the order the provider gave them.
     fn items<'a>(
@@ -57,7 +58,7 @@ pub trait ItemSource: fmt::Debug + Send + Sync {
 pub struct NoItems;
 
 impl ItemSource for NoItems {
-    fn language(&self, _: &str, _: &str) -> Result<String, ItemsError> {
+    fn language(&self, _: &ContextName, _: &AssetName) -> Result<String, ItemsError> {
         Err(ItemsError::NoProvider)
     }
 

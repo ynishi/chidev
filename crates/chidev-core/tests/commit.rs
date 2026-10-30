@@ -43,6 +43,7 @@ use chidev_core::domain::vo::finding::{RuleId, Subject};
 use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::resolution::Transition;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
@@ -690,8 +691,8 @@ async fn a_pin_leaves_the_revision_of_the_model_and_a_report_made_before_it_is_n
             read_at: read.store_revision.0,
             findings: vec![ReportedFinding {
                 subject: Some(SubjectInput::Clause(ClauseRef {
-                    context: Some("core".into()),
-                    contract: "stack".into(),
+                    context: Some(ContextName::try_from("core").unwrap()),
+                    contract: AssetName::try_from("stack").unwrap(),
                     label: "C1".into(),
                 })),
                 message: "vague".into(),
@@ -942,12 +943,12 @@ impl AssetNames for Flaky {
         &self,
         context: ContextId,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<Option<Uuid>, StoreError> {
         self.inner.asset_id(context, kind, name).await
     }
 
-    async fn asset_name(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+    async fn asset_name(&self, id: Uuid) -> Result<Option<AssetName>, StoreError> {
         self.inner.asset_name(id).await
     }
 }
@@ -1023,8 +1024,8 @@ struct Quiet;
 impl Runner for Quiet {
     fn settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Ok("settings".to_string()) })
     }
@@ -1046,8 +1047,8 @@ impl Runner for Quiet {
 
     fn sim_settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
@@ -1092,12 +1093,12 @@ async fn harness<S: Store>(app: &mut App<S, Counter>) {
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "api".into(),
+                interface: AssetName::try_from("api").unwrap(),
                 key: "push".into(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
-                contract: "stack".into(),
+                contract: AssetName::try_from("stack").unwrap(),
                 label: "C1".into(),
             }],
         }],

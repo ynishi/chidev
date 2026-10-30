@@ -27,6 +27,7 @@ use crate::domain::vo::correction::{
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::{ContextId, InterfaceId, PinId};
+use crate::domain::vo::name::AssetName;
 use crate::domain::vo::timestamp::Timestamp;
 
 /// Gives a fresh id each time. The domain makes no ids; the use cases take them from here.
@@ -64,15 +65,15 @@ impl AssetKind {
     }
 }
 
-/// The name a person gives an asset: one per asset within its Context and kind.
+/// The name a person gives an asset, with the asset it names: one name per asset within its Context and kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetName {
+pub struct NamedAsset {
     /// The Context the asset is in.
     pub context: ContextId,
     /// What kind of asset it is.
     pub kind: AssetKind,
     /// The name.
-    pub name: String,
+    pub name: AssetName,
     /// The asset's id.
     pub id: Uuid,
 }
@@ -85,14 +86,15 @@ pub trait AssetNames {
         &self,
         context: ContextId,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> impl Future<Output = Result<Option<Uuid>, StoreError>> + Send;
 
-    /// The name of the asset with this id.
+    /// The name of the asset with this id. A name the store keeps that breaks the rule of a name is
+    /// [`StoreError::Corrupt`].
     fn asset_name(
         &self,
         id: Uuid,
-    ) -> impl Future<Output = Result<Option<String>, StoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<AssetName>, StoreError>> + Send;
 }
 
 /// How a check run ended.
@@ -319,7 +321,7 @@ pub struct Changes {
     /// Cruxes raised or decided.
     pub cruxes: Vec<Crux>,
     /// Asset names given.
-    pub names: Vec<AssetName>,
+    pub names: Vec<NamedAsset>,
     /// The checks the use case ran, appended to the record of runs.
     pub invocations: Vec<Invocation>,
     /// Reports of judged rules (each replaces the report of its rule).

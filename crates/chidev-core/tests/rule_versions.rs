@@ -8,6 +8,7 @@ use chidev_core::app::{
     App, ClauseInput, ClauseRef, JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
 };
 use chidev_core::domain::check::{Executor, FindingState, Level, Origin};
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::{judged, policy, sqlite::SqliteStore};
@@ -106,8 +107,8 @@ async fn report(app: &App<SqliteStore, Counter>, labels: &[&str]) -> ReportInput
             .iter()
             .map(|label| ReportedFinding {
                 subject: Some(SubjectInput::Clause(ClauseRef {
-                    context: Some("core".into()),
-                    contract: "rules".into(),
+                    context: Some(ContextName::try_from("core").unwrap()),
+                    contract: AssetName::try_from("rules").unwrap(),
                     label: (*label).into(),
                 })),
                 message: format!("review {label}"),

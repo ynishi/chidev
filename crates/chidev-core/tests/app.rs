@@ -10,6 +10,7 @@ use chidev_core::app::{
 use chidev_core::domain::entity::contract::Clause;
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::finding::Subject;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -82,8 +83,8 @@ async fn put_sim(
             lines: (1, 1),
             items: Vec::new(),
             clauses: vec![ClauseRef {
-                context: context.map(str::to_string),
-                contract: contract.to_string(),
+                context: context.map(|c| ContextName::try_from(c).unwrap()),
+                contract: AssetName::try_from(contract).unwrap(),
                 label: label.to_string(),
             }],
         }],
@@ -242,13 +243,64 @@ async fn an_asset_and_its_name_are_kept_together() {
     let store = app.store();
     assert_eq!(
         store
-            .asset_id(ctx, AssetKind::Contract, "stack")
+            .asset_id(
+                ctx,
+                AssetKind::Contract,
+                &AssetName::try_from("stack").unwrap()
+            )
             .await
             .unwrap(),
         Some(put.value.id.as_uuid())
     );
     let p = store.project().await.unwrap().unwrap();
     assert!(p.context(ctx).unwrap().contract(put.value.id).is_some());
+}
+
+#[tokio::test]
+async fn a_name_that_breaks_the_rule_is_refused_with_the_error_of_the_rule_as_its_source() {
+    use chidev_core::domain::vo::name::{NameError, NameOf};
+
+    let mut app = app("bad-name").await;
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    let revision = app.store().revision().await.unwrap();
+    let bad = app
+        .put_contract("core", "Stack", "Stack", &clauses(&["C1"]))
+        .await
+        .unwrap_err();
+    let rule = NameError::BadChar {
+        of: NameOf::Asset,
+        name: "Stack".to_string(),
+        ch: 'S',
+    };
+    assert_eq!(bad, AppError::BadName(rule.clone()));
+    let source = std::error::Error::source(&bad).expect("the error of the rule is the source");
+    assert_eq!(source.to_string(), rule.to_string());
+    // a Context's name is refused by the same rule, as its own kind of name
+    assert_eq!(
+        app.put_contract("Core", "stack", "Stack", &clauses(&["C1"]))
+            .await,
+        Err(AppError::BadName(NameError::BadChar {
+            of: NameOf::Context,
+            name: "Core".to_string(),
+            ch: 'C',
+        }))
+    );
+    for refused in [
+        app.put_interface("core", "a b", "fn f()\n", &[])
+            .await
+            .map(|_| ()),
+        app.put_harness("core", "a.b", "", &[]).await.map(|_| ()),
+        app.retire_contract("core", "a:b").await.map(|_| ()),
+        app.pin("core", "a/b", "").await.map(|_| ()),
+    ] {
+        assert!(matches!(refused, Err(AppError::BadName(_))), "{refused:?}");
+    }
+    // the diagnostic says what the rule refuses
+    let said = said(&app, &bad).await;
+    assert!(said.contains("an asset name"), "{said}");
+    assert!(said.contains("`S`"), "{said}");
+    assert_eq!(app.store().revision().await.unwrap(), revision);
 }
 
 /// `stock` with Clauses C1 and C7, its Interface with the Items `reserve` and `release`, and a Harness `stock-tests`
@@ -313,12 +365,12 @@ fn cases(words: &[&str]) -> Vec<CaseInput> {
             lines: (k + 1, k + 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "stock".to_string(),
+                interface: AssetName::try_from("stock").unwrap(),
                 key: (*w).to_string(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
-                contract: "stock".to_string(),
+                contract: AssetName::try_from("stock").unwrap(),
                 label: if *w == "reserve" { "C1" } else { "C7" }.to_string(),
             }],
         })
@@ -332,19 +384,19 @@ fn removal() -> ChangeSetInput {
         puts: vec![
             PutInput::Contract(ContractPut {
                 context: "core".to_string(),
-                name: "stock".to_string(),
+                name: AssetName::try_from("stock").unwrap(),
                 title: "Stock".to_string(),
                 clauses: clauses(&["C1"]),
             }),
             PutInput::Interface(InterfacePut {
                 context: "core".to_string(),
-                name: "stock".to_string(),
+                name: AssetName::try_from("stock").unwrap(),
                 source: "fn reserve()\n".to_string(),
                 items: ItemsInput::Written(vec![item("reserve", 1)]),
             }),
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
-                name: "stock-tests".to_string(),
+                name: AssetName::try_from("stock-tests").unwrap(),
                 builds: Vec::new(),
                 content: HarnessPutContent::Code {
                     kind: None,
@@ -479,7 +531,7 @@ async fn a_rename_alone_keeps_the_id_the_citation_and_every_revision() {
             CaseInput {
                 items: vec![ItemRef {
                     context: None,
-                    interface: "stock".to_string(),
+                    interface: AssetName::try_from("stock").unwrap(),
                     key: "Stock::reserve".to_string(),
                 }],
                 ..cases(&["reserve"]).remove(0)
@@ -646,7 +698,7 @@ async fn a_citation_of_a_key_the_interface_does_not_have_is_an_unknown_name_with
             &[CaseInput {
                 items: vec![ItemRef {
                     context: None,
-                    interface: "stock".to_string(),
+                    interface: AssetName::try_from("stock").unwrap(),
                     key: "reserv".to_string(),
                 }],
                 ..cases(&["reserve"]).remove(0)
@@ -687,7 +739,7 @@ async fn a_retirement_and_a_put_are_one_change_set() {
     set.puts.pop();
     set.retires.push(RetireInput::Harness {
         context: "core".to_string(),
-        harness: "stock-tests".to_string(),
+        harness: AssetName::try_from("stock-tests").unwrap(),
     });
     let done = app.apply_change_set(&set).await.unwrap();
     assert_eq!(app.store().revision().await.unwrap().0, before.0 + 1);
@@ -715,13 +767,13 @@ async fn a_change_set_adds_a_context_with_its_first_contract_and_interface() {
             },
             PutInput::Contract(ContractPut {
                 context: "ledger".to_string(),
-                name: "entries".to_string(),
+                name: AssetName::try_from("entries").unwrap(),
                 title: "Entries".to_string(),
                 clauses: clauses(&["C1"]),
             }),
             PutInput::Interface(InterfacePut {
                 context: "billing".to_string(),
-                name: "invoice".to_string(),
+                name: AssetName::try_from("invoice").unwrap(),
                 source: "fn total()\n".to_string(),
                 items: ItemsInput::Written(vec![item("total", 1)]),
             }),
@@ -793,6 +845,7 @@ mod checks {
         Check, CheckView, Descriptor, Executor, Finding, FindingState, Level, Moment, Params,
     };
     use chidev_core::domain::vo::finding::{RuleId, Subject};
+    use chidev_core::domain::vo::name::{AssetName, ContextName};
     use chidev_core::domain::vo::timestamp::Timestamp;
     use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::sqlite::SqliteStore;
@@ -996,8 +1049,8 @@ mod checks {
             .unwrap();
         let clause = |context: &str, contract: &str| {
             TargetInput::Clause(ClauseRef {
-                context: Some(context.to_string()),
-                contract: contract.to_string(),
+                context: Some(ContextName::try_from(context).unwrap()),
+                contract: AssetName::try_from(contract).unwrap(),
                 label: "C1".to_string(),
             })
         };
@@ -1112,7 +1165,9 @@ mod checks {
         // A name that is no Context's is refused.
         assert_eq!(
             app.check(Some("nowhere")).await,
-            Err(AppError::UnknownContext("nowhere".to_string()))
+            Err(AppError::UnknownContext(
+                ContextName::try_from("nowhere").unwrap()
+            ))
         );
     }
 
@@ -1136,8 +1191,8 @@ mod checks {
             addresses: vec![FindingInput {
                 rule: "cite.uncited-clause".to_string(),
                 subject: Some(SubjectInput::Clause(ClauseRef {
-                    context: Some("core".to_string()),
-                    contract: "stack".to_string(),
+                    context: Some(ContextName::try_from("core").unwrap()),
+                    contract: AssetName::try_from("stack").unwrap(),
                     label: "C1".to_string(),
                 })),
             }],
@@ -1276,7 +1331,11 @@ mod checks {
             .id();
         assert_eq!(
             app.store()
-                .asset_id(ctx, AssetKind::Contract, "stack")
+                .asset_id(
+                    ctx,
+                    AssetKind::Contract,
+                    &AssetName::try_from("stack").unwrap()
+                )
                 .await
                 .unwrap(),
             None
@@ -1292,6 +1351,7 @@ mod judged {
         JudgedState, Registry, ReportInput, ReportedFinding, SubjectInput,
     };
     use chidev_core::domain::check::{Executor, FindingState, Level, Moment};
+    use chidev_core::domain::vo::name::{AssetName, ContextName};
     use chidev_core::domain::vo::timestamp::Timestamp;
     use chidev_core::infra::clock::FixedClock;
     use chidev_core::infra::judged::parse;
@@ -1347,8 +1407,8 @@ mod judged {
 
     fn clause(label: &str) -> Option<SubjectInput> {
         Some(SubjectInput::Clause(ClauseRef {
-            context: Some("core".to_string()),
-            contract: "stack".to_string(),
+            context: Some(ContextName::try_from("core").unwrap()),
+            contract: AssetName::try_from("stack").unwrap(),
             label: label.to_string(),
         }))
     }
@@ -1467,7 +1527,9 @@ mod judged {
         ));
         // a context where a clause is judged, a project finding, a missing clause, a clause given twice
         let wrong = vec![finding(
-            Some(SubjectInput::Context("core".to_string())),
+            Some(SubjectInput::Context(
+                ContextName::try_from("core").unwrap(),
+            )),
             "m",
         )];
         assert!(matches!(
@@ -1770,8 +1832,8 @@ mod judged {
             addresses: vec![FindingInput {
                 rule: "judged.vague".to_string(),
                 subject: Some(SubjectInput::Clause(ClauseRef {
-                    context: Some("core".to_string()),
-                    contract: "stack".to_string(),
+                    context: Some(ContextName::try_from("core").unwrap()),
+                    contract: AssetName::try_from("stack").unwrap(),
                     label: "C1".to_string(),
                 })),
             }],
@@ -1803,13 +1865,13 @@ mod judged {
             name: "pushes".to_string(),
             lines: (1, 1),
             items: vec![chidev_core::app::ItemRef {
-                context: Some("core".to_string()),
-                interface: "stack-api".to_string(),
+                context: Some(ContextName::try_from("core").unwrap()),
+                interface: AssetName::try_from("stack-api").unwrap(),
                 key: "push".to_string(),
             }],
             clauses: vec![ClauseRef {
-                context: Some("core".to_string()),
-                contract: "stack".to_string(),
+                context: Some(ContextName::try_from("core").unwrap()),
+                contract: AssetName::try_from("stack").unwrap(),
                 label: "C1".to_string(),
             }],
         };
@@ -1839,6 +1901,7 @@ mod diagnostics {
         Mend, PutInput, ResolutionInput, SuggestedOp, TargetInput,
     };
     use chidev_core::domain::violation::Applicability;
+    use chidev_core::domain::vo::name::{AssetName, ContextName};
     use chidev_core::infra::sqlite::SqliteStore;
 
     use super::{Counter, app, clauses};
@@ -1945,9 +2008,9 @@ mod diagnostics {
 
         let err = app.status().await.and_then(|_| {
             Err::<(), _>(chidev_core::app::AppError::UnknownAsset {
-                context: "core".to_string(),
+                context: ContextName::try_from("core").unwrap(),
                 kind: "contract",
-                name: "stok".to_string(),
+                name: AssetName::try_from("stok").unwrap(),
             })
         });
         let d = only(&app, err.unwrap_err()).await;
@@ -1955,8 +2018,8 @@ mod diagnostics {
         assert_eq!(d.subjects[0].name, "core");
 
         let target = TargetInput::Clause(ClauseRef {
-            context: Some("core".to_string()),
-            contract: "stock".to_string(),
+            context: Some(ContextName::try_from("core").unwrap()),
+            contract: AssetName::try_from("stock").unwrap(),
             label: "C2".to_string(),
         });
         let mut wants = open("Needs a clause", None);
@@ -2073,7 +2136,7 @@ fn example_case(name: &str, expected: &str, label: &str) -> ExampleInput {
         name: name.to_string(),
         clauses: vec![ClauseRef {
             context: None,
-            contract: "stock".to_string(),
+            contract: AssetName::try_from("stock").unwrap(),
             label: label.to_string(),
         }],
         example: ExampleTexts {
@@ -2097,7 +2160,11 @@ async fn harness_state(
         .unwrap();
     let id = app
         .store()
-        .asset_id(ctx.id(), AssetKind::Harness, name)
+        .asset_id(
+            ctx.id(),
+            AssetKind::Harness,
+            &AssetName::try_from(name).unwrap(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -2308,14 +2375,14 @@ async fn a_change_set_makes_a_contract_and_a_harness_of_examples_that_cites_its_
         puts: vec![
             PutInput::Contract(ContractPut {
                 context: "core".to_string(),
-                name: "stock".to_string(),
+                name: AssetName::try_from("stock").unwrap(),
                 title: "Stock".to_string(),
                 clauses: clauses(&["C1"]),
             }),
             PutInput::Harness(HarnessPut {
                 context: "core".to_string(),
-                name: "acceptance".to_string(),
-                builds: vec!["stock".to_string()],
+                name: AssetName::try_from("acceptance").unwrap(),
+                builds: vec![AssetName::try_from("stock").unwrap()],
                 content: HarnessPutContent::Examples(vec![example_case(
                     "a1",
                     "1\n#exit 0\n",

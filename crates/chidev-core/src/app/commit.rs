@@ -24,8 +24,8 @@ use super::correct::{Place, RecordKind, refusal, unknown_record};
 use super::external::ExternalChecked;
 use super::ports::external::{ExternalExecutor, ExternalReport};
 use super::ports::{
-    AssetKind, AssetName, Changes, IdSource, Invocation, InvocationField, InvocationSeq,
-    JudgedReport, PinCode, Store, StoreRevision,
+    AssetKind, Changes, IdSource, Invocation, InvocationField, InvocationSeq, JudgedReport,
+    NamedAsset, PinCode, Store, StoreRevision,
 };
 use super::{App, AppError, Found, view};
 use crate::domain::check::{Change, CheckView, Finding, Moment, introduced};
@@ -38,6 +38,7 @@ use crate::domain::repository::StoreError;
 use crate::domain::vo::answer::DecisionMaker;
 use crate::domain::vo::correction::{Correctable, Correction, CorrectionError, SoughtText};
 use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, MeasurementId};
+use crate::domain::vo::name::AssetName;
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::timestamp::Timestamp;
 
@@ -401,7 +402,7 @@ impl CorrectionOrder {
 struct NameKey {
     context: ContextId,
     kind: AssetKind,
-    name: String,
+    name: AssetName,
 }
 
 /// The part of the model a use case changes: the Project (whole), and the Pins, change requests, Cruxes and asset
@@ -419,7 +420,7 @@ pub(super) struct ModelDelta {
     pins: BTreeMap<InterfaceId, (Pin, PinCode)>,
     change_requests: BTreeMap<ChangeRequestId, ChangeRequest>,
     cruxes: BTreeMap<CruxId, Crux>,
-    names: BTreeMap<NameKey, AssetName>,
+    names: BTreeMap<NameKey, NamedAsset>,
 }
 
 impl ModelDelta {
@@ -458,7 +459,7 @@ impl ModelDelta {
     }
 
     /// Names given to the assets a use case makes.
-    pub(super) fn with_names(mut self, names: impl IntoIterator<Item = AssetName>) -> ModelDelta {
+    pub(super) fn with_names(mut self, names: impl IntoIterator<Item = NamedAsset>) -> ModelDelta {
         for name in names {
             let key = NameKey {
                 context: name.context,
@@ -471,7 +472,7 @@ impl ModelDelta {
     }
 
     /// The names the use case gives, which the store does not have yet.
-    fn pending(&self) -> Vec<AssetName> {
+    fn pending(&self) -> Vec<NamedAsset> {
         self.names.values().cloned().collect()
     }
 
@@ -857,7 +858,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         gating: &Gating<'_>,
         mut run: Run,
         reported: Vec<Finding>,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<Gate, AppError> {
         let (moment, at, after) = (gating.moment(), gating.at(), gating.after());
         let (project, crs) = (after.project, after.change_requests);
@@ -1087,10 +1088,10 @@ mod tests {
 
     #[test]
     fn a_name_given_twice_in_a_delta_is_kept_once_under_its_key() {
-        let name = |n: u128| AssetName {
+        let name = |n: u128| NamedAsset {
             context: ContextId::from_uuid(id(1)),
             kind: AssetKind::Contract,
-            name: "stack".to_string(),
+            name: AssetName::try_from("stack").unwrap(),
             id: id(n),
         };
         let delta = ModelDelta::new().with_names([name(5), name(6)]);

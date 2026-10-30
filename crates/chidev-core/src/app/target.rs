@@ -4,10 +4,11 @@
 use serde::Serialize;
 
 use super::ports::external::ExternalExecutor;
-use super::ports::{AssetKind, AssetName, IdSource, Store};
-use super::{App, AppError, ClauseRef, ItemRef, context_id};
+use super::ports::{AssetKind, IdSource, NamedAsset, Store};
+use super::{App, AppError, ClauseRef, ItemRef, context_named};
 use crate::domain::entity::project::Project;
 use crate::domain::vo::id::{ContractId, HarnessId, InterfaceId};
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::retired::Retired;
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::target::{ExpectKind, Target};
@@ -19,27 +20,27 @@ pub enum TargetInput {
     /// The Project.
     Project,
     /// A Context, by name.
-    Context(String),
+    Context(ContextName),
     /// A Contract of a Context.
     Contract {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
     },
     /// An Interface of a Context.
     Interface {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// A Harness of a Context.
     Harness {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Harness.
-        harness: String,
+        harness: AssetName,
     },
     /// An Item, by the Interface's name and the key.
     Item(ItemRef),
@@ -48,9 +49,9 @@ pub enum TargetInput {
     /// A Case of a Harness.
     Case {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Harness.
-        harness: String,
+        harness: AssetName,
         /// The Case's name.
         name: String,
     },
@@ -121,22 +122,27 @@ impl From<TargetInput> for TargetRef {
     fn from(t: TargetInput) -> TargetRef {
         match t {
             TargetInput::Project => TargetRef::Project(true),
-            TargetInput::Context(name) => TargetRef::Context(name),
-            TargetInput::Contract { context, contract } => {
-                TargetRef::Contract { context, contract }
-            }
-            TargetInput::Interface { context, interface } => {
-                TargetRef::Interface { context, interface }
-            }
-            TargetInput::Harness { context, harness } => TargetRef::Harness { context, harness },
+            TargetInput::Context(name) => TargetRef::Context(name.to_string()),
+            TargetInput::Contract { context, contract } => TargetRef::Contract {
+                context: context.to_string(),
+                contract: contract.to_string(),
+            },
+            TargetInput::Interface { context, interface } => TargetRef::Interface {
+                context: context.to_string(),
+                interface: interface.to_string(),
+            },
+            TargetInput::Harness { context, harness } => TargetRef::Harness {
+                context: context.to_string(),
+                harness: harness.to_string(),
+            },
             TargetInput::Item(r) => TargetRef::Item {
-                context: r.context,
-                interface: r.interface,
+                context: r.context.map(|c| c.to_string()),
+                interface: r.interface.to_string(),
                 key: r.key,
             },
             TargetInput::Clause(r) => TargetRef::Clause {
-                context: r.context,
-                contract: r.contract,
+                context: r.context.map(|c| c.to_string()),
+                contract: r.contract.to_string(),
                 label: r.label,
             },
             TargetInput::Case {
@@ -144,8 +150,8 @@ impl From<TargetInput> for TargetRef {
                 harness,
                 name,
             } => TargetRef::Case {
-                context,
-                harness,
+                context: context.to_string(),
+                harness: harness.to_string(),
                 name,
             },
         }
@@ -168,9 +174,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub(super) async fn target_of(&self, p: &Project, t: &TargetInput) -> Result<Target, AppError> {
         Ok(match t {
             TargetInput::Project => Target::Project,
-            TargetInput::Context(name) => Target::Context(context_id(p, name)?),
+            TargetInput::Context(name) => Target::Context(context_named(p, name)?),
             TargetInput::Contract { context, contract } => {
-                let ctx = context_id(p, context)?;
+                let ctx = context_named(p, context)?;
                 let id = ContractId::from_uuid(
                     self.asset(ctx, context, AssetKind::Contract, contract)
                         .await?,
@@ -187,7 +193,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Target::Contract(id)
             }
             TargetInput::Interface { context, interface } => {
-                let ctx = context_id(p, context)?;
+                let ctx = context_named(p, context)?;
                 let id = InterfaceId::from_uuid(
                     self.asset(ctx, context, AssetKind::Interface, interface)
                         .await?,
@@ -204,7 +210,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Target::Interface(id)
             }
             TargetInput::Harness { context, harness } => {
-                let ctx = context_id(p, context)?;
+                let ctx = context_named(p, context)?;
                 let id = HarnessId::from_uuid(
                     self.asset(ctx, context, AssetKind::Harness, harness)
                         .await?,
@@ -241,24 +247,24 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Target::Project => Some(TargetInput::Project),
             Target::Context(id) => p
                 .context(id)
-                .map(|c| TargetInput::Context(c.name().to_string())),
+                .map(|c| TargetInput::Context(c.name().clone())),
             Target::Contract(id) => match p.contexts().find(|c| c.contract(id).is_some()) {
                 Some(c) => Some(TargetInput::Contract {
-                    context: c.name().to_string(),
+                    context: c.name().clone(),
                     contract: asset(id.as_uuid()).await?,
                 }),
                 None => None,
             },
             Target::Interface(id) => match p.contexts().find(|c| c.interface(id).is_some()) {
                 Some(c) => Some(TargetInput::Interface {
-                    context: c.name().to_string(),
+                    context: c.name().clone(),
                     interface: asset(id.as_uuid()).await?,
                 }),
                 None => None,
             },
             Target::Harness(id) => match p.contexts().find(|c| c.harness(id).is_some()) {
                 Some(c) => Some(TargetInput::Harness {
-                    context: c.name().to_string(),
+                    context: c.name().clone(),
                     harness: asset(id.as_uuid()).await?,
                 }),
                 None => None,
@@ -267,7 +273,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let i = c.interface_of(id)?;
                     let it = i.item(id)?;
-                    Some((c.name().to_string(), i.id(), it.key().to_string()))
+                    Some((c.name().clone(), i.id(), it.key().to_string()))
                 });
                 match found {
                     Some((context, interface, key)) => Some(TargetInput::Item(ItemRef {
@@ -282,7 +288,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let k = c.contract_of(id)?;
                     let cl = k.clause(id)?;
-                    Some((c.name().to_string(), k.id(), cl.label().to_string()))
+                    Some((c.name().clone(), k.id(), cl.label().to_string()))
                 });
                 match found {
                     Some((context, contract, label)) => Some(TargetInput::Clause(ClauseRef {
@@ -297,7 +303,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let found = p.contexts().find_map(|c| {
                     let h = c.harness_of(id)?;
                     let k = h.case(id)?;
-                    Some((c.name().to_string(), h.id(), k.name().to_string()))
+                    Some((c.name().clone(), h.id(), k.name().to_string()))
                 });
                 match found {
                     Some((context, harness, name)) => Some(TargetInput::Case {
@@ -317,7 +323,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self,
         p: &Project,
         target: Target,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<String, AppError> {
         if let Some(r) = p.retired_of(target) {
             return self.retired_words(r, pending).await;
@@ -387,7 +393,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// A retired target in words, as a live one is worded and marked `(retired)`: the kind and name of a Context or
     /// an asset, the asset's name and the label, key or name for a part.
-    async fn retired_words(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
+    async fn retired_words(&self, r: &Retired, pending: &[NamedAsset]) -> Result<String, AppError> {
         let target = r.target();
         Ok(match (r.holder(), r.label(), target.as_uuid()) {
             (Some(holder), Some(label), _) => {
@@ -414,7 +420,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         kind: &str,
         id: uuid::Uuid,
         here: bool,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<String, AppError> {
         let name = self.name_in(id, pending).await?;
         Ok(if here {
@@ -426,17 +432,23 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 }
 
 /// Why the asset `target` named `name` cannot be pointed at: it was retired, or the Context never had it.
-fn missing(p: &Project, target: Target, context: &str, kind: AssetKind, name: &str) -> AppError {
+fn missing(
+    p: &Project,
+    target: Target,
+    context: &ContextName,
+    kind: AssetKind,
+    name: &AssetName,
+) -> AppError {
     if p.retired_of(target).is_some() {
         return AppError::AssetRetired {
-            context: context.to_string(),
+            context: context.clone(),
             kind: kind.word(),
-            name: name.to_string(),
+            name: name.clone(),
         };
     }
     AppError::UnknownAsset {
-        context: context.to_string(),
+        context: context.clone(),
         kind: kind.word(),
-        name: name.to_string(),
+        name: name.clone(),
     }
 }

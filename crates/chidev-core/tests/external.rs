@@ -21,6 +21,7 @@ use chidev_core::domain::repository::{
 };
 use chidev_core::domain::vo::finding::RuleId;
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -677,7 +678,7 @@ async fn the_pin_hook_refuses_then_commits_the_pin_and_its_check_together() {
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "api".into(),
+                interface: AssetName::try_from("api").unwrap(),
                 key: "push".into(),
             }],
             clauses: vec![],
@@ -1070,12 +1071,12 @@ async fn populate(app: &mut App<SqliteStore, Counter, FakeExecutor>) {
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "stack".into(),
+                interface: AssetName::try_from("stack").unwrap(),
                 key: "push".into(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
-                contract: "rules".into(),
+                contract: AssetName::try_from("rules").unwrap(),
                 label: "C1".into(),
             }],
         }],
@@ -1090,16 +1091,16 @@ async fn populate(app: &mut App<SqliteStore, Counter, FakeExecutor>) {
         issuer: None,
         targets: vec![],
         keep: vec![TargetInput::Item(ItemRef {
-            context: Some("core".into()),
-            interface: "stack".into(),
+            context: Some(ContextName::try_from("core").unwrap()),
+            interface: AssetName::try_from("stack").unwrap(),
             key: "push".into(),
         })],
         assumptions: vec![],
         addresses: vec![FindingInput {
             rule: "cite.uncited-clause".into(),
             subject: Some(SubjectInput::Clause(ClauseRef {
-                context: Some("core".into()),
-                contract: "rules".into(),
+                context: Some(ContextName::try_from("core").unwrap()),
+                contract: AssetName::try_from("rules").unwrap(),
                 label: "C2".into(),
             })),
         }],
@@ -1113,8 +1114,8 @@ async fn populate(app: &mut App<SqliteStore, Counter, FakeExecutor>) {
         parent: None,
         issuer: Some("alice".into()),
         targets: vec![TargetInput::Clause(ClauseRef {
-            context: Some("core".into()),
-            contract: "rules".into(),
+            context: Some(ContextName::try_from("core").unwrap()),
+            contract: AssetName::try_from("rules").unwrap(),
             label: "C2".into(),
         })],
         keep: vec![],

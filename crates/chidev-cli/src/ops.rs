@@ -27,6 +27,7 @@ use chidev_core::domain::entity::measurement::MeasurementField;
 use chidev_core::domain::vo::id::{ChangeRequestId, CruxId, CruxOptionId, MeasurementId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::infra::accept;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -388,7 +389,16 @@ async fn put_inputs(root: &Path, puts: Vec<PutDto>) -> Result<Vec<PutInput>, App
     }
 }
 
-/// An entry of the `puts` of a change set as the input of the use case; the text of a `source_file` is read here.
+/// The names of assets that a list of texts are.
+fn asset_names(names: &[String]) -> Result<Vec<AssetName>, AppError> {
+    names
+        .iter()
+        .map(|n| AssetName::try_from(n.as_str()).map_err(AppError::from))
+        .collect()
+}
+
+/// An entry of the `puts` of a change set as the input of the use case; the text of a `source_file` is read here, and
+/// the name of an asset is read as one (a text that breaks the rule of a name is refused, naming the character).
 async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
     Ok(match d {
         PutDto::Context { name, uses } => PutInput::Context { name, uses },
@@ -401,7 +411,7 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             clauses,
         } => PutInput::Contract(ContractPut {
             context,
-            name,
+            name: AssetName::try_from(name)?,
             title,
             clauses: clause_inputs(clauses),
         }),
@@ -412,7 +422,7 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             remove,
         } => PutInput::Clauses(ClausesPut {
             context,
-            contract,
+            contract: AssetName::try_from(contract)?,
             clauses: clause_inputs(clauses),
             remove,
         }),
@@ -424,6 +434,7 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             items,
             renames,
         } => {
+            let name = AssetName::try_from(name)?;
             let label = format!("the put of the interface `{name}`");
             let source = text_of(
                 root,
@@ -432,7 +443,7 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
                 ("source_file", source_file),
             )
             .await?;
-            let items = items_input(&context, &name, items, renames)?;
+            let items = items_input(&context, name.as_str(), items, renames)?;
             PutInput::Interface(InterfacePut {
                 context,
                 name,
@@ -450,6 +461,8 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             examples_dir,
             cases,
         } => {
+            let name = AssetName::try_from(name)?;
+            let builds = asset_names(&builds)?;
             let label = format!("the put of the harness `{name}`");
             let content = harness_content(
                 root,
@@ -566,7 +579,11 @@ async fn harness_content(
             };
             examples.push(ExampleInput {
                 name: c.name,
-                clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+                clauses: c
+                    .clauses
+                    .into_iter()
+                    .map(ClauseRef::try_from)
+                    .collect::<Result<_, _>>()?,
                 example,
             });
         }
@@ -732,18 +749,25 @@ fn relative_path(file: &str) -> Result<&Path, &'static str> {
     Ok(path)
 }
 
-impl From<RetireDto> for RetireInput {
-    fn from(d: RetireDto) -> RetireInput {
-        match d {
+impl TryFrom<RetireDto> for RetireInput {
+    type Error = AppError;
+
+    fn try_from(d: RetireDto) -> Result<RetireInput, AppError> {
+        Ok(match d {
             RetireDto::Context { context } => RetireInput::Context(context),
-            RetireDto::Contract { context, contract } => {
-                RetireInput::Contract { context, contract }
-            }
-            RetireDto::Interface { context, interface } => {
-                RetireInput::Interface { context, interface }
-            }
-            RetireDto::Harness { context, harness } => RetireInput::Harness { context, harness },
-        }
+            RetireDto::Contract { context, contract } => RetireInput::Contract {
+                context,
+                contract: AssetName::try_from(contract)?,
+            },
+            RetireDto::Interface { context, interface } => RetireInput::Interface {
+                context,
+                interface: AssetName::try_from(interface)?,
+            },
+            RetireDto::Harness { context, harness } => RetireInput::Harness {
+                context,
+                harness: AssetName::try_from(harness)?,
+            },
+        })
     }
 }
 
@@ -779,8 +803,8 @@ fn items_input(
 ) -> Result<ItemsInput, AppError> {
     match items {
         Some(_) if !renames.is_empty() => Err(AppError::RenamesWithItems {
-            context: context.to_string(),
-            interface: interface.to_string(),
+            context: ContextName::try_from(context)?,
+            interface: AssetName::try_from(interface)?,
         }),
         Some(items) => Ok(ItemsInput::Written(item_inputs(items))),
         None => Ok(ItemsInput::Found {
@@ -811,8 +835,16 @@ fn case_inputs(cases: Vec<CaseDto>) -> Result<Vec<CaseInput>, AppError> {
             Ok(CaseInput {
                 name: c.name,
                 lines: (first, last),
-                items: c.items.into_iter().map(ItemRef::from).collect(),
-                clauses: c.clauses.into_iter().map(ClauseRef::from).collect(),
+                items: c
+                    .items
+                    .into_iter()
+                    .map(ItemRef::try_from)
+                    .collect::<Result<_, _>>()?,
+                clauses: c
+                    .clauses
+                    .into_iter()
+                    .map(ClauseRef::try_from)
+                    .collect::<Result<_, _>>()?,
             })
         })
         .collect()
@@ -1065,26 +1097,29 @@ enum SubjectDto {
     ChangeRequest(String),
 }
 
-impl From<SubjectDto> for SubjectInput {
-    fn from(s: SubjectDto) -> SubjectInput {
-        match s {
-            SubjectDto::Context(name) => SubjectInput::Context(name),
-            SubjectDto::Interface { context, interface } => {
-                SubjectInput::Interface { context, interface }
-            }
-            SubjectDto::Item(r) => SubjectInput::Item(ItemRef::from(r)),
-            SubjectDto::Clause(r) => SubjectInput::Clause(ClauseRef::from(r)),
+impl TryFrom<SubjectDto> for SubjectInput {
+    type Error = AppError;
+
+    fn try_from(s: SubjectDto) -> Result<SubjectInput, AppError> {
+        Ok(match s {
+            SubjectDto::Context(name) => SubjectInput::Context(ContextName::try_from(name)?),
+            SubjectDto::Interface { context, interface } => SubjectInput::Interface {
+                context: ContextName::try_from(context)?,
+                interface: AssetName::try_from(interface)?,
+            },
+            SubjectDto::Item(r) => SubjectInput::Item(ItemRef::try_from(r)?),
+            SubjectDto::Clause(r) => SubjectInput::Clause(ClauseRef::try_from(r)?),
             SubjectDto::Case {
                 context,
                 harness,
                 name,
             } => SubjectInput::Case {
-                context,
-                harness,
+                context: ContextName::try_from(context)?,
+                harness: AssetName::try_from(harness)?,
                 name,
             },
             SubjectDto::ChangeRequest(title) => SubjectInput::ChangeRequest(title),
-        }
+        })
     }
 }
 
@@ -1111,7 +1146,7 @@ impl TryFrom<ReportDto> for ReportInput {
                 .into_iter()
                 .map(|f| {
                     Ok(ReportedFinding {
-                        subject: f.subject.map(SubjectInput::from),
+                        subject: f.subject.map(SubjectInput::try_from).transpose()?,
                         message: f.message,
                         level: f.level.as_deref().map(level_of).transpose()?,
                     })
@@ -1696,12 +1731,14 @@ impl TryFrom<AddressWire> for AddressDto {
     }
 }
 
-impl From<AddressDto> for FindingInput {
-    fn from(a: AddressDto) -> FindingInput {
-        FindingInput {
+impl TryFrom<AddressDto> for FindingInput {
+    type Error = AppError;
+
+    fn try_from(a: AddressDto) -> Result<FindingInput, AppError> {
+        Ok(FindingInput {
             rule: a.rule,
-            subject: a.subject.map(SubjectInput::from),
-        }
+            subject: a.subject.map(SubjectInput::try_from).transpose()?,
+        })
     }
 }
 
@@ -2587,7 +2624,11 @@ impl TryFrom<RaiseDto> for RaiseCruxInput {
             cr: d.cr,
             kind: d.kind.into(),
             question: d.question,
-            findings: d.findings.into_iter().map(FindingInput::from).collect(),
+            findings: d
+                .findings
+                .into_iter()
+                .map(FindingInput::try_from)
+                .collect::<Result<_, _>>()?,
             options: d
                 .options
                 .into_iter()
@@ -2827,24 +2868,24 @@ impl TryFrom<RefDto> for TargetInput {
                     "`{\"project\": false}` names nothing; write `{\"project\": true}`".to_string(),
                 ));
             }
-            RefDto::Context(name) => TargetInput::Context(name),
+            RefDto::Context(name) => TargetInput::Context(ContextName::try_from(name)?),
             RefDto::Contract(c) => TargetInput::Contract {
-                context: c.context,
-                contract: c.contract,
+                context: ContextName::try_from(c.context)?,
+                contract: AssetName::try_from(c.contract)?,
             },
             RefDto::Interface(i) => TargetInput::Interface {
-                context: i.context,
-                interface: i.interface,
+                context: ContextName::try_from(i.context)?,
+                interface: AssetName::try_from(i.interface)?,
             },
             RefDto::Harness(h) => TargetInput::Harness {
-                context: h.context,
-                harness: h.harness,
+                context: ContextName::try_from(h.context)?,
+                harness: AssetName::try_from(h.harness)?,
             },
-            RefDto::Item(i) => TargetInput::Item(ItemRef::from(i)),
-            RefDto::Clause(c) => TargetInput::Clause(ClauseRef::from(c)),
+            RefDto::Item(i) => TargetInput::Item(ItemRef::try_from(i)?),
+            RefDto::Clause(c) => TargetInput::Clause(ClauseRef::try_from(c)?),
             RefDto::Case(c) => TargetInput::Case {
-                context: c.context,
-                harness: c.harness,
+                context: ContextName::try_from(c.context)?,
+                harness: AssetName::try_from(c.harness)?,
                 name: c.name,
             },
         })
@@ -2931,23 +2972,27 @@ struct ExampleDto {
     stderr: Option<String>,
 }
 
-impl From<ItemRefDto> for ItemRef {
-    fn from(d: ItemRefDto) -> ItemRef {
-        ItemRef {
-            context: d.context,
-            interface: d.interface,
+impl TryFrom<ItemRefDto> for ItemRef {
+    type Error = AppError;
+
+    fn try_from(d: ItemRefDto) -> Result<ItemRef, AppError> {
+        Ok(ItemRef {
+            context: d.context.map(ContextName::try_from).transpose()?,
+            interface: AssetName::try_from(d.interface)?,
             key: d.key,
-        }
+        })
     }
 }
 
-impl From<ClauseRefDto> for ClauseRef {
-    fn from(d: ClauseRefDto) -> ClauseRef {
-        ClauseRef {
-            context: d.context,
-            contract: d.contract,
+impl TryFrom<ClauseRefDto> for ClauseRef {
+    type Error = AppError;
+
+    fn try_from(d: ClauseRefDto) -> Result<ClauseRef, AppError> {
+        Ok(ClauseRef {
+            context: d.context.map(ContextName::try_from).transpose()?,
+            contract: AssetName::try_from(d.contract)?,
             label: d.label,
-        }
+        })
     }
 }
 
@@ -3258,7 +3303,10 @@ where
             let set = ChangeSetInput {
                 change_request: for_change_request,
                 puts: put_inputs(root, puts).await?,
-                retires: retires.into_iter().map(RetireInput::from).collect(),
+                retires: retires
+                    .into_iter()
+                    .map(RetireInput::try_from)
+                    .collect::<Result<_, _>>()?,
             };
             let done = app.apply_change_set(&set).await?;
             to_value(&ChangeSetOut {
@@ -3451,7 +3499,10 @@ where
                 targets: targets_of(targets)?,
                 keep: targets_of(keep)?,
                 assumptions: assumptions.into_iter().map(AssumptionInput::from).collect(),
-                addresses: addresses.into_iter().map(FindingInput::from).collect(),
+                addresses: addresses
+                    .into_iter()
+                    .map(FindingInput::try_from)
+                    .collect::<Result<_, _>>()?,
             };
             let done = app.open_change_request(&input).await?;
             to_value(&CrOpenOut {

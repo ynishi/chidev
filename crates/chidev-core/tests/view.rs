@@ -9,6 +9,7 @@ use chidev_core::app::{
     ItemRef, OptionInput, RaiseCruxInput, RecommendationInput, TargetInput, ViewInput,
 };
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -75,12 +76,12 @@ async fn project(name: &str) -> App<SqliteStore, Counter> {
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "api".into(),
+                interface: AssetName::try_from("api").unwrap(),
                 key: "price".into(),
             }],
             clauses: vec![ClauseRef {
                 context: None,
-                contract: "stock".into(),
+                contract: AssetName::try_from("stock").unwrap(),
                 label: "C1".into(),
             }],
         }],
@@ -95,8 +96,8 @@ async fn project(name: &str) -> App<SqliteStore, Counter> {
         issuer: None,
         targets: vec![],
         keep: vec![TargetInput::Item(ItemRef {
-            context: Some("core".into()),
-            interface: "api".into(),
+            context: Some(ContextName::try_from("core").unwrap()),
+            interface: AssetName::try_from("api").unwrap(),
             key: "price".into(),
         })],
         assumptions: vec![],
@@ -125,8 +126,8 @@ async fn project(name: &str) -> App<SqliteStore, Counter> {
                 choice: "no".into(),
                 change: None,
                 targets: vec![TargetInput::Clause(ClauseRef {
-                    context: Some("core".into()),
-                    contract: "stock".into(),
+                    context: Some(ContextName::try_from("core").unwrap()),
+                    contract: AssetName::try_from("stock").unwrap(),
                     label: "C1".into(),
                 })],
                 keep: vec![],
@@ -253,7 +254,7 @@ async fn the_view_is_version_5_and_shows_the_kind_of_a_harness_and_the_examples_
                 name: "a1".into(),
                 clauses: vec![ClauseRef {
                     context: None,
-                    contract: "stock".into(),
+                    contract: AssetName::try_from("stock").unwrap(),
                     label: "C1".into(),
                 }],
                 example: ExampleTexts {
@@ -267,7 +268,7 @@ async fn the_view_is_version_5_and_shows_the_kind_of_a_harness_and_the_examples_
                 name: "a2".into(),
                 clauses: vec![ClauseRef {
                     context: None,
-                    contract: "stock".into(),
+                    contract: AssetName::try_from("stock").unwrap(),
                     label: "C1".into(),
                 }],
                 example: ExampleTexts {
@@ -359,7 +360,10 @@ async fn a_view_that_names_no_section_or_an_unknown_context_is_refused_by_its_ru
         })
         .await
         .unwrap_err();
-    assert_eq!(err, AppError::UnknownContext("cor".into()));
+    assert_eq!(
+        err,
+        AppError::UnknownContext(ContextName::try_from("cor").unwrap())
+    );
     let diagnostics = app.diagnose(&err).await;
     assert_eq!(diagnostics[0].code, "input.unknown-name");
     assert_eq!(diagnostics[0].did_you_mean, ["core"]);
