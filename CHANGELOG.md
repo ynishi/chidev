@@ -10,6 +10,20 @@ and this project adheres to
 
 ### Added
 
+- `chidev check [RULE...] [--context NAME] [--store PATH]` runs every check as
+  the operation `check` does and prints its result, narrowed to the rules given:
+  a rule's id, or a family written as a key of the policy file is (`examples.`).
+  A selector that names no rule is refused with the names near it. It exits 0,
+  1 when an `error` finding no change request deals with is left (or the
+  operation was refused), and 2 when it could not run. `chidev measure mutate
+  --context C --interface I`, `chidev measure simulate --context C --harness H`
+  and `chidev measure examples --context C --harness H` run a measure as the
+  operation `measure` does; 1 is a run that failed or a refusal. Both read a
+  store that exists and never create one. The operation `check` takes `rules`.
+  In Rust, `App::check(context, rules)` with the policy's `Selector`,
+  `AppError::UnknownRuleSelector`, `CheckResult::owed` and
+  `SqliteStore::open_existing` (#45).
+
 - `chidev accept`, a runner of acceptance examples (`<name>.args`, `<name>.stdin`,
   `<name>.expected` ending with `#exit <code>`, and an optional `<name>.stderr`):
   it runs a command for each example under a time limit, compares the standard
