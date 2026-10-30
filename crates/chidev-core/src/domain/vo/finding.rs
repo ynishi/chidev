@@ -91,6 +91,83 @@ impl fmt::Display for RuleId {
     }
 }
 
+/// Why a text is not a rule selector.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RuleSelectorError {
+    /// It is empty.
+    #[error("a rule selector is empty")]
+    Empty,
+    /// It has a character other than a lower-case letter, a digit, `-`, `_` or `.`.
+    #[error(
+        "the rule selector `{selector}` has `{ch}`; only a-z, 0-9, `-`, `_` and `.` are allowed"
+    )]
+    BadChar {
+        /// The text refused.
+        selector: String,
+        /// The first character not allowed.
+        ch: char,
+    },
+    /// It starts or ends with a `.`, or has two in a row: a segment between dots is empty.
+    #[error(
+        "the rule selector `{selector}` has an empty segment; write whole segments joined by `.`, such as `examples.failed`"
+    )]
+    EmptySegment {
+        /// The text refused.
+        selector: String,
+    },
+}
+
+/// Which rules a person means: one rule id (`examples.failed`), or the rules whose ids begin with a `.`-separated
+/// prefix (`examples` is `examples.failed`, `examples.unrun` and the rest of the family). A prefix is whole
+/// segments: `exam` is no prefix of `examples.failed`. Whether a selector names a rule that exists is for whoever
+/// holds the rules to say; the selector only says what it matches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RuleSelector(String);
+
+impl RuleSelector {
+    /// The selector as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the rule `id` is the one selected, or is in the family selected, by whole segments.
+    pub fn matches(&self, id: &RuleId) -> bool {
+        id.as_str()
+            .strip_prefix(self.0.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+}
+
+impl TryFrom<&str> for RuleSelector {
+    type Error = RuleSelectorError;
+
+    fn try_from(text: &str) -> Result<RuleSelector, RuleSelectorError> {
+        if text.is_empty() {
+            return Err(RuleSelectorError::Empty);
+        }
+        if let Some(at) = first_bad_byte(text)
+            && let Some(ch) = text[at..].chars().next()
+        {
+            return Err(RuleSelectorError::BadChar {
+                selector: text.to_string(),
+                ch,
+            });
+        }
+        if text.split('.').any(str::is_empty) {
+            return Err(RuleSelectorError::EmptySegment {
+                selector: text.to_string(),
+            });
+        }
+        Ok(RuleSelector(text.to_string()))
+    }
+}
+
+impl fmt::Display for RuleSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// What a finding is about, by id. It has the kinds a finding needs (an Interface with no Pin, a Context with no
 /// Harness, a Case behind its citations, a change request); it is not a `Target`, which is what a citation or a
 /// change request points at.
@@ -246,6 +323,64 @@ mod tests {
             RuleId::try_from("Uncited"),
             Err(RuleIdError::BadChar { ch: 'U', .. })
         ));
+    }
+
+    fn selector(text: &str) -> RuleSelector {
+        RuleSelector::try_from(text).unwrap()
+    }
+
+    fn id(text: &str) -> RuleId {
+        RuleId::try_from(text).unwrap()
+    }
+
+    #[test]
+    fn a_selector_matches_the_rule_it_names() {
+        assert!(selector("examples.failed").matches(&id("examples.failed")));
+        assert!(!selector("examples.failed").matches(&id("examples.unrun")));
+        assert_eq!(selector("examples.failed").as_str(), "examples.failed");
+        assert_eq!(selector("examples.failed").to_string(), "examples.failed");
+    }
+
+    #[test]
+    fn a_selector_matches_the_family_it_is_a_prefix_of() {
+        assert!(selector("examples").matches(&id("examples.failed")));
+        assert!(selector("examples").matches(&id("examples.unrun")));
+        assert!(selector("examples").matches(&id("examples")));
+        assert!(!selector("examples").matches(&id("measure.failed")));
+        // a family is by its leading segments, not by any segment
+        assert!(!selector("failed").matches(&id("examples.failed")));
+        assert!(selector("a.b").matches(&id("a.b.c.d")));
+    }
+
+    #[test]
+    fn a_selector_is_whole_segments() {
+        assert!(!selector("exam").matches(&id("examples.failed")));
+        assert!(!selector("examples.fail").matches(&id("examples.failed")));
+        assert!(!selector("examples.failed").matches(&id("examples")));
+        assert!(!selector("cite").matches(&id("cite-stale")));
+        assert!(!selector("a").matches(&id("a-b.c")));
+    }
+
+    #[test]
+    fn a_malformed_selector_is_refused() {
+        assert_eq!(RuleSelector::try_from(""), Err(RuleSelectorError::Empty));
+        assert!(matches!(
+            RuleSelector::try_from("Examples"),
+            Err(RuleSelectorError::BadChar { ch: 'E', .. })
+        ));
+        assert!(matches!(
+            RuleSelector::try_from("examples failed"),
+            Err(RuleSelectorError::BadChar { ch: ' ', .. })
+        ));
+        for empty in [".", ".examples", "examples.", "examples..failed"] {
+            assert_eq!(
+                RuleSelector::try_from(empty),
+                Err(RuleSelectorError::EmptySegment {
+                    selector: empty.to_string()
+                }),
+                "{empty}"
+            );
+        }
     }
 
     #[test]

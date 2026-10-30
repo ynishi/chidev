@@ -223,7 +223,7 @@ async fn a_new_label_by_replaces_keeps_the_id_the_place_and_every_revision() {
     // the Case that cites it by id stays current
     assert_eq!(stale(&put.findings), 0, "{:?}", put.findings);
     assert_eq!(
-        stale(&app.check(None).await.unwrap().findings),
+        stale(&app.check(None, &[]).await.unwrap().findings),
         0,
         "no citation went stale"
     );

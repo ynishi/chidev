@@ -300,6 +300,27 @@ impl SqliteStore {
             std::fs::create_dir_all(dir)
                 .map_err(|e| StoreError::Failed(format!("{}: {e}", dir.display())))?;
         }
+        Self::connect(path).await
+    }
+
+    /// Opens the database at `path` only if the file is there, as [`SqliteStore::open`] does then. A missing file
+    /// is refused, naming the path, and neither it nor its directory is made: a command that only reads or measures
+    /// a project must not make an empty store of a mistyped path, which `init` is for.
+    pub async fn open_existing(path: impl AsRef<Path>) -> Result<SqliteStore, StoreError> {
+        let path = path.as_ref();
+        // Once, before the connection exists, as in `open`.
+        if !path.is_file() {
+            return Err(StoreError::Failed(format!(
+                "no store file at {}",
+                path.display()
+            )));
+        }
+        Self::connect(path).await
+    }
+
+    /// Connects to the database file `path` (SQLite makes the file if it is not there, in a directory that is),
+    /// makes or brings up to date its tables, and checks its layout.
+    async fn connect(path: &Path) -> Result<SqliteStore, StoreError> {
         let (isle, driver) = AsyncIsle::builder()
             .busy_timeout(BUSY_TIMEOUT)
             .spawn(path, prepare)

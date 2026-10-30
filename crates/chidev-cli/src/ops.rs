@@ -24,6 +24,7 @@ use chidev_core::domain::check::{Level, Moment, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
 use chidev_core::domain::entity::crux::CruxField;
 use chidev_core::domain::entity::measurement::MeasurementField;
+use chidev_core::domain::vo::finding::RuleSelector;
 use chidev_core::domain::vo::id::{ChangeRequestId, CruxId, CruxOptionId, MeasurementId};
 use chidev_core::domain::vo::measure::MeasureKind;
 use chidev_core::domain::vo::model_section::ModelSection;
@@ -218,6 +219,7 @@ enum Op {
     /// the code of the Pins of the Interfaces the Harness cites and runs its script once per case. `kind` `examples`
     /// (with `harness`, a Harness of examples) builds the program the same way and runs each example of the Harness
     /// against it. Any of them takes as long as the project's build and tests, script or program take.
+    /// `chidev measure` runs it as a command.
     Measure {
         kind: MeasureKindDto,
         context: String,
@@ -237,10 +239,15 @@ enum Op {
     /// Runs every check on the project as it is; nothing is kept. With a `context`, the findings are those about
     /// that Context (what it holds, and the change requests that revise, retire or keep something in it), and
     /// `outside` is how many findings were left out (the Project's own, and change requests that name nothing of
-    /// the Context). The whole run is made either way.
+    /// the Context). With `rules`, the findings are those of a rule one of them matches, each a rule id
+    /// (`examples.failed`) or a prefix of whole segments (`examples`); a selector that matches no check is refused,
+    /// and what is left out by either is counted in `outside`. The whole run is made either way. `chidev check`
+    /// runs it as a command.
     Check {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<String>,
     },
     /// Explicitly executes external check-moment programs and records this run.
     CheckRun,
@@ -2567,7 +2574,7 @@ struct StatusOut<'a> {
 #[derive(Debug, Serialize)]
 struct CheckOut<'a> {
     findings: Vec<FindingOut<'a>>,
-    /// How many findings the `context` asked for left out; only when one was asked for.
+    /// How many findings the `context` or the `rules` asked for left out; only when either was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     outside: Option<usize>,
 }
@@ -3165,34 +3172,138 @@ where
                 raw.as_ref(),
             ))),
         };
-        let mut result = match result {
-            Ok(Value::Object(mut fields)) => {
-                fields.insert("ok".to_string(), json!(true));
-                // serde matched raw["op"] against the variant's tag when reading Op,
-                // so raw["op"] is that variant's tag, derived once and never hand-written in replies.
-                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
-                    fields.insert("op".to_string(), op.clone());
-                }
-                Value::Object(fields)
-            }
-            Ok(other) => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("ok".to_string(), json!(true));
-                if let Some(op) = raw.as_ref().and_then(|r| r.get("op")) {
-                    obj.insert("op".to_string(), op.clone());
-                }
-                obj.insert("result".to_string(), other);
-                Value::Object(obj)
-            }
-            Err(refusal) => {
-                all_ok = false;
-                refused_out(app, refusal, raw.as_ref()).await
-            }
-        };
-        result["line"] = json!(k + 1);
+        let (result, ok) = result_line(app, result, raw.as_ref(), k + 1).await;
+        all_ok &= ok;
         writeln!(out, "{result}")?;
     }
     Ok(all_ok)
+}
+
+/// The line `exec` prints for the `line`th line of its input, whose outcome is `result` and which was read as `raw`
+/// (the JSON of the operation, to say where a refusal is about), and whether the operation was accepted.
+async fn result_line<S, G, E>(
+    app: &App<S, G, E>,
+    result: Result<Value, Refusal>,
+    raw: Option<&Value>,
+    line: usize,
+) -> (Value, bool)
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (mut result, ok) = match result {
+        Ok(Value::Object(mut fields)) => {
+            fields.insert("ok".to_string(), json!(true));
+            // serde matched raw["op"] against the variant's tag when reading Op,
+            // so raw["op"] is that variant's tag, derived once and never hand-written in replies.
+            if let Some(op) = raw.and_then(|r| r.get("op")) {
+                fields.insert("op".to_string(), op.clone());
+            }
+            (Value::Object(fields), true)
+        }
+        Ok(other) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("ok".to_string(), json!(true));
+            if let Some(op) = raw.and_then(|r| r.get("op")) {
+                obj.insert("op".to_string(), op.clone());
+            }
+            obj.insert("result".to_string(), other);
+            (Value::Object(obj), true)
+        }
+        Err(refusal) => (refused_out(app, refusal, raw).await, false),
+    };
+    result["line"] = json!(line);
+    (result, ok)
+}
+
+/// What `chidev measure` is asked to measure: the kind, and the one asset of the Context it takes (an Interface to
+/// mutate, a Harness to run).
+#[derive(Debug, Clone)]
+pub enum Measuring {
+    /// The code of an Interface against its Harnesses, once per mutant.
+    Mutate {
+        /// The Interface.
+        interface: String,
+    },
+    /// A sim Harness against the program built from the Pins it cites.
+    Simulate {
+        /// The Harness.
+        harness: String,
+    },
+    /// A Harness of examples against the program built from the Pins it cites.
+    Examples {
+        /// The Harness.
+        harness: String,
+    },
+}
+
+/// Runs `op` as the first line of an `exec` would, and returns the line that would be printed and whether the
+/// operation was accepted.
+async fn run_one<S, G, E>(app: &mut App<S, G, E>, root: &Path, op: Op) -> (Value, bool)
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    // the tag of the operation is what `exec` reads it by, so it is what the line says
+    let raw = serde_json::to_value(&op).ok();
+    let result = apply(app, root, op).await.map_err(Refusal::Refused);
+    result_line(app, result, raw.as_ref(), 1).await
+}
+
+/// `chidev check`: runs the operation `check` and writes its result line to `out`, the line `exec` would print for
+/// the same operation. Returns whether the command succeeded: the operation was accepted and no finding it returned is
+/// at `error`. An error is only a failure to write.
+pub async fn check<S, G, E>(
+    app: &mut App<S, G, E>,
+    root: &Path,
+    context: Option<String>,
+    rules: Vec<String>,
+    out: &mut impl Write,
+) -> io::Result<bool>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (line, accepted) = run_one(app, root, Op::Check { context, rules }).await;
+    writeln!(out, "{line}")?;
+    let erred = line["findings"]
+        .as_array()
+        .is_some_and(|found| found.iter().any(|f| f["level"] == Level::Error.word()));
+    Ok(accepted && !erred)
+}
+
+/// `chidev measure`: runs the operation `measure` of the kind `what` says in the Context `context` and writes its
+/// result line to `out`, the line `exec` would print for the same operation. Returns whether the command succeeded:
+/// the operation was accepted and the run it recorded did not fail. An error is only a failure to write.
+pub async fn measure<S, G, E>(
+    app: &mut App<S, G, E>,
+    root: &Path,
+    context: String,
+    what: Measuring,
+    out: &mut impl Write,
+) -> io::Result<bool>
+where
+    S: Store,
+    G: IdSource,
+    E: ExternalExecutor,
+{
+    let (kind, interface, harness) = match what {
+        Measuring::Mutate { interface } => (MeasureKindDto::Mutate, Some(interface), None),
+        Measuring::Simulate { harness } => (MeasureKindDto::Simulate, None, Some(harness)),
+        Measuring::Examples { harness } => (MeasureKindDto::Examples, None, Some(harness)),
+    };
+    let op = Op::Measure {
+        kind,
+        context,
+        interface,
+        harness,
+    };
+    let (line, accepted) = run_one(app, root, op).await;
+    writeln!(out, "{line}")?;
+    Ok(accepted && line["outcome"] == "ok")
 }
 
 /// Why a line gave no result: it could not be read as an operation, or the use case refused it.
@@ -3925,11 +4036,16 @@ where
                     .collect(),
             })?
         }
-        Op::Check { context } => {
-            let checked = app.check(context.as_deref()).await?;
+        Op::Check { context, rules } => {
+            let selectors = rules
+                .iter()
+                .map(|r| RuleSelector::try_from(r.as_str()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Input(e.to_string()))?;
+            let checked = app.check(context.as_deref(), &selectors).await?;
             to_value(&CheckOut {
                 findings: findings_out(&checked.findings),
-                outside: context.as_ref().map(|_| checked.outside),
+                outside: (context.is_some() || !selectors.is_empty()).then_some(checked.outside),
             })?
         }
         Op::CheckRules { moment, hook, rule } => {

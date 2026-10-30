@@ -178,7 +178,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
     let mut app = open(1_000).await;
 
     // the store is read, and `check` reports the shape by the Clause, once, by name and not by id
-    let found = app.check(None).await.unwrap().findings;
+    let found = app.check(None, &[]).await.unwrap().findings;
     let kept: Vec<_> = found
         .iter()
         .filter(|f| f.rule.as_str() == "sim.shape-kept")
@@ -215,7 +215,7 @@ async fn a_sim_harness_a_store_kept_in_a_shape_a_put_is_refused_for_is_read_repo
     assert_eq!(refused[0].suggestions.len(), 1, "{refused:#?}");
     // and a put in the shape the protocol runs mends it
     put_sim(&mut app, None, "stock", "C1").await.unwrap();
-    let found = app.check(None).await.unwrap().findings;
+    let found = app.check(None, &[]).await.unwrap().findings;
     assert!(
         found.iter().all(|f| f.rule.as_str() != "sim.shape-kept"),
         "{found:#?}"
@@ -544,7 +544,7 @@ async fn a_rename_alone_keeps_the_id_the_citation_and_every_revision() {
     )
     .await
     .unwrap();
-    let found = app.check(None).await.unwrap().findings;
+    let found = app.check(None, &[]).await.unwrap().findings;
     assert!(found.iter().all(|f| f.rule.as_str() != "cite.stale"));
 }
 
@@ -939,7 +939,7 @@ mod checks {
         assert_eq!(stale.moment, Moment::Edit);
         assert_eq!((stale.warnings, stale.outcome), (0, Outcome::Ok));
         // Where the whole is judged, it is said.
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         let said = rules(&found);
         assert!(said.contains(&"cite.uncited-clause"), "{said:?}");
         assert!(said.contains(&"context.no-interface"), "{said:?}");
@@ -998,7 +998,7 @@ mod checks {
             .unwrap();
         assert_eq!((recorded.warnings, recorded.outcome), (1, Outcome::Found));
         // Where the whole is judged, it is still there.
-        assert!(rules(&app.check(None).await.unwrap().findings).contains(&"cite.stale"));
+        assert!(rules(&app.check(None, &[]).await.unwrap().findings).contains(&"cite.stale"));
         // A put of the same Clause again moves the Case's target on again: that is this put's.
         let again = app
             .put_contract("core", "stock", "Stock", &stock("C1 holds, again"))
@@ -1019,7 +1019,7 @@ mod checks {
         let revision = chidev_core::app::ports::Store::revision(app.store())
             .await
             .unwrap();
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         assert!(
             found
                 .iter()
@@ -1116,7 +1116,7 @@ mod checks {
         })
         .await
         .unwrap();
-        let all = app.check(None).await.unwrap();
+        let all = app.check(None, &[]).await.unwrap();
         assert_eq!(all.outside, 0);
         let abouts = |found: &[chidev_core::app::Found], rule: &str| -> Vec<String> {
             found
@@ -1133,7 +1133,7 @@ mod checks {
             ("core", "billing", "Keeps wrongly"),
             ("billing", "core", "Keeps billing"),
         ] {
-            let one = app.check(Some(context)).await.unwrap();
+            let one = app.check(Some(context), &[]).await.unwrap();
             let mut said = rules(&one.findings);
             said.sort_unstable();
             assert_eq!(
@@ -1164,7 +1164,7 @@ mod checks {
         }
         // A name that is no Context's is refused.
         assert_eq!(
-            app.check(Some("nowhere")).await,
+            app.check(Some("nowhere"), &[]).await,
             Err(AppError::UnknownContext(
                 ContextName::try_from("nowhere").unwrap()
             ))
@@ -1204,14 +1204,14 @@ mod checks {
                 .map(|f| f.state)
         };
         assert_eq!(
-            state(&app.check(None).await.unwrap().findings),
+            state(&app.check(None, &[]).await.unwrap().findings),
             Some(FindingState::Open)
         );
         app.open_change_request(&open("leave C1 unchecked"))
             .await
             .unwrap();
         assert_eq!(
-            state(&app.check(None).await.unwrap().findings),
+            state(&app.check(None, &[]).await.unwrap().findings),
             Some(FindingState::Addressed)
         );
         app.resolve_change_request(
@@ -1223,7 +1223,7 @@ mod checks {
         .await
         .unwrap();
         assert_eq!(
-            state(&app.check(None).await.unwrap().findings),
+            state(&app.check(None, &[]).await.unwrap().findings),
             Some(FindingState::Decided)
         );
         // Naming a rule that is no rule id is refused.
@@ -1589,7 +1589,7 @@ mod judged {
             AppError::Input(_)
         ));
         assert!(
-            app.check(None)
+            app.check(None, &[])
                 .await
                 .unwrap()
                 .findings
@@ -1632,7 +1632,7 @@ mod judged {
         ))
         .await
         .unwrap();
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         let mine = judged_findings(&found);
         assert_eq!(mine.len(), 3);
         let vague: Vec<_> = mine
@@ -1653,7 +1653,7 @@ mod judged {
             .await
             .unwrap();
         assert_eq!((done.findings, done.replaced), (1, 2));
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         let vague: Vec<_> = judged_findings(&found)
             .into_iter()
             .filter(|f| f.rule.as_str() == "judged.vague")
@@ -1669,7 +1669,7 @@ mod judged {
         app.finding_report(&report("judged.vague", now(&app).await, Vec::new()))
             .await
             .unwrap();
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         assert_eq!(judged_findings(&found).len(), 1);
         let view = app.check_rules(None, Some("judged.vague")).await.unwrap();
         assert_eq!(view.rules[0].state, JudgedState::Current);
@@ -1715,7 +1715,7 @@ mod judged {
         let stale_of =
             |found: &[chidev_core::app::Found]| judged_findings(found).first().map(|f| f.stale);
         assert_eq!(
-            stale_of(&app.check(None).await.unwrap().findings),
+            stale_of(&app.check(None, &[]).await.unwrap().findings),
             Some(false)
         );
         assert!(app.status().await.unwrap().judged.is_empty());
@@ -1724,7 +1724,7 @@ mod judged {
         // finding about C1 stands
         put_stack(&mut app, "push then pop", "an empty stack pops nothing").await;
         assert_eq!(
-            stale_of(&app.check(None).await.unwrap().findings),
+            stale_of(&app.check(None, &[]).await.unwrap().findings),
             Some(false)
         );
         let pending = app.status().await.unwrap().judged;
@@ -1741,7 +1741,7 @@ mod judged {
             "an empty stack pops nothing",
         )
         .await;
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         assert_eq!(stale_of(&found), Some(true));
         assert_eq!(app.status().await.unwrap().findings, found);
 
@@ -1755,7 +1755,7 @@ mod judged {
         .await
         .unwrap();
         assert_eq!(
-            stale_of(&app.check(None).await.unwrap().findings),
+            stale_of(&app.check(None, &[]).await.unwrap().findings),
             Some(false)
         );
         assert!(app.status().await.unwrap().judged.is_empty());
@@ -1793,7 +1793,7 @@ mod judged {
             .await
             .unwrap();
         assert!(done.on_older_revision);
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         let vague = judged_findings(&found)
             .into_iter()
             .find(|f| f.rule.as_str() == "judged.vague")
@@ -1817,7 +1817,7 @@ mod judged {
         .unwrap();
         let state = |found: &[chidev_core::app::Found]| judged_findings(found)[0].state;
         assert_eq!(
-            state(&app.check(None).await.unwrap().findings),
+            state(&app.check(None, &[]).await.unwrap().findings),
             FindingState::Open
         );
         app.open_change_request(&ChangeRequestInput {
@@ -1841,7 +1841,7 @@ mod judged {
         .await
         .unwrap();
         assert_eq!(
-            state(&app.check(None).await.unwrap().findings),
+            state(&app.check(None, &[]).await.unwrap().findings),
             FindingState::Addressed
         );
     }
@@ -1880,7 +1880,7 @@ mod judged {
             .unwrap();
         app.pin("core", "stack-api", "code").await.unwrap();
         put_stack(&mut app, "push then pop, in order", "x").await;
-        let found = app.check(None).await.unwrap().findings;
+        let found = app.check(None, &[]).await.unwrap().findings;
         let pin = found
             .iter()
             .find(|f| f.rule.as_str() == "pin.stale")

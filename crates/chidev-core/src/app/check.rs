@@ -175,6 +175,17 @@ impl Registry {
             .collect()
     }
 
+    /// The id of every registered check, builtin, judged and external: the ids a finding of a run can carry.
+    pub fn ids(&self) -> Vec<&RuleId> {
+        self.checks
+            .iter()
+            .map(|c| c.descriptor())
+            .chain(self.judged.iter().map(JudgedRule::descriptor))
+            .chain(self.external.iter().map(ExternalRule::descriptor))
+            .map(|d| &d.id)
+            .collect()
+    }
+
     /// External rules, in configured order.
     pub fn external(&self) -> &[ExternalRule] {
         &self.external
@@ -327,13 +338,14 @@ pub struct Judgment {
     pub rule_digest: Option<crate::domain::vo::digest::Digest>,
 }
 
-/// What a check of the whole state found, perhaps narrowed to one Context.
+/// What a check of the whole state found, perhaps narrowed to one Context and to some rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckResult {
-    /// The findings: all of them, or those about the Context asked for.
+    /// The findings: all of them, or those about the Context and of the rules asked for.
     pub findings: Vec<Found>,
-    /// How many findings the Context asked for left out; 0 when none was asked for. A finding about the Project as
-    /// a whole, or about a change request that names nothing of the Context, is about no Context in particular.
+    /// How many findings the Context or the rules asked for left out; 0 when neither was asked for. A finding about
+    /// the Project as a whole, or about a change request that names nothing of the Context, is about no Context in
+    /// particular.
     pub outside: usize,
 }
 

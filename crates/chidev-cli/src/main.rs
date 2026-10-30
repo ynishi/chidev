@@ -11,7 +11,7 @@ mod schema;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -19,14 +19,14 @@ use chidev_core::app::{App, Registry};
 use chidev_core::domain::check::builtin;
 use chidev_core::infra::accept;
 use chidev_core::infra::clock::SystemClock;
-use chidev_core::infra::external;
+use chidev_core::infra::external::{self, ProcessExecutor};
 use chidev_core::infra::ids::UuidV7;
 use chidev_core::infra::judged;
 use chidev_core::infra::policy;
 use chidev_core::infra::project;
 use chidev_core::infra::runner;
 use chidev_core::infra::sqlite::SqliteStore;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Contract, Interface and Harness as the assets of a codebase; the code is a cache pinned to them.
 #[derive(Debug, Parser)]
@@ -43,10 +43,33 @@ enum Command {
     Exec {
         /// The JSON lines to run; stdin when not given.
         file: Option<PathBuf>,
-        /// The database that keeps the project, relative to the current directory. Without it, the project's
-        /// settings say (`[store]` in `chidev.toml`), and else it is `.chidev/chidev.db` under the project's root.
-        #[arg(long, value_name = "PATH")]
-        store: Option<PathBuf>,
+        #[command(flatten)]
+        store: StoreArg,
+    },
+    /// Runs every check on the project kept in the store as it is, and prints the result of the operation `check`
+    /// (a JSON object: the `findings`, and `outside` when RULE or `--context` left some out). Nothing is kept. Each
+    /// RULE is a rule id (`examples.failed`) or a prefix of whole segments (`examples`); the findings are those of
+    /// the rules selected, all when none is given. A RULE that matches no check is refused. The exit code is 0 when
+    /// no finding is at `error`, 1 when one is or the operation was refused (an unknown rule or context), and 2
+    /// when it could not be run (bad arguments, no project, no store).
+    Check {
+        /// The context to narrow the findings to.
+        #[arg(long, value_name = "C")]
+        context: Option<String>,
+        #[command(flatten)]
+        store: StoreArg,
+        /// The rules to report, each an id or a prefix of whole segments.
+        #[arg(value_name = "RULE")]
+        rules: Vec<String>,
+    },
+    /// Measures, in a copy of the project, and keeps what was observed: prints the result of the operation `measure`
+    /// (a JSON object). It takes as long as the project's build, tests, script or program take. The exit code is 0
+    /// when the run was recorded and did not fail, 1 when it was recorded and failed or the operation was refused
+    /// (no Pin, an unknown name, no `[measure]` table), and 2 when it could not be run (bad arguments, no project,
+    /// no store).
+    Measure {
+        #[command(subcommand)]
+        measure: Measure,
     },
     /// Prints a JSON Schema (2020-12): `ops` for a line of `exec`, `view` for the `view` an operation of that name
     /// returns. Without a name, lists the schemas. A schema says what a document must look like to be read; a rule
@@ -86,6 +109,81 @@ enum Command {
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<String>,
     },
+}
+
+/// Where the project is kept, for the commands that run on it.
+#[derive(Debug, Args)]
+struct StoreArg {
+    /// The database that keeps the project, relative to the current directory. Without it, the project's settings
+    /// say (`[store]` in `chidev.toml`), and else it is `.chidev/chidev.db` under the project's root. `check` and
+    /// `measure` open a database that is there and stop with status 2 when it is not; `exec` makes it.
+    #[arg(long, value_name = "PATH")]
+    store: Option<PathBuf>,
+}
+
+/// What `chidev measure` measures: a subcommand of each kind, so that the asset the kind takes is the only one that
+/// can be given.
+#[derive(Debug, Subcommand)]
+enum Measure {
+    /// Runs the code the Pin of an Interface accepted against the Harnesses as the model holds them, once per
+    /// mutant (`measure` of kind `mutate`).
+    Mutate {
+        /// The Context.
+        #[arg(long, value_name = "C")]
+        context: String,
+        /// The Interface whose pinned code is mutated.
+        #[arg(long, value_name = "I")]
+        interface: String,
+        #[command(flatten)]
+        store: StoreArg,
+    },
+    /// Builds the program from the code of the Pins of the Interfaces a sim Harness cites and runs its script once
+    /// per case (`measure` of kind `simulate`).
+    Simulate {
+        /// The Context.
+        #[arg(long, value_name = "C")]
+        context: String,
+        /// The sim Harness.
+        #[arg(long, value_name = "H")]
+        harness: String,
+        #[command(flatten)]
+        store: StoreArg,
+    },
+    /// Builds the program the same way and runs each example of a Harness of examples against it (`measure` of kind
+    /// `examples`).
+    Examples {
+        /// The Context.
+        #[arg(long, value_name = "C")]
+        context: String,
+        /// The Harness of examples.
+        #[arg(long, value_name = "H")]
+        harness: String,
+        #[command(flatten)]
+        store: StoreArg,
+    },
+}
+
+impl Measure {
+    /// The store, the Context, and what to measure in it.
+    fn parts(self) -> (StoreArg, String, ops::Measuring) {
+        match self {
+            Measure::Mutate {
+                context,
+                interface,
+                store,
+            } => (store, context, ops::Measuring::Mutate { interface }),
+            Measure::Simulate {
+                context,
+                harness,
+                store,
+            } => (store, context, ops::Measuring::Simulate { harness }),
+            Measure::Examples {
+                context,
+                harness,
+                store,
+            } => (store, context, ops::Measuring::Examples { harness }),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -199,68 +297,125 @@ async fn main() -> ExitCode {
                 },
                 None => Box::new(BufReader::new(io::stdin())),
             };
-            // The project's root is the nearest directory, from the one the command runs in, that has a `chidev.toml`;
-            // the settings and the judged rules are read from there, and so are the files a `source_file` or a
-            // `code_file` names. No root, or either being unreadable, stops the run before any operation.
-            let project = match std::env::current_dir()
-                .map_err(|e| e.to_string())
-                .and_then(|cwd| project::find(&cwd).map_err(|e| e.to_string()))
-            {
-                Ok(project) => project,
-                Err(e) => {
-                    eprintln!("chidev: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            let root = project.root();
-            // the flag is relative to the current directory, as a path on the command line is; the setting is not
-            let store = store.unwrap_or_else(|| project.store().to_path_buf());
-            let registry = match (|| -> Result<_, String> {
-                let layers = policy::load(&project).map_err(|e| format!("policy: {e}"))?;
-                let rules = judged::load(root).map_err(|e| format!("rules: {e}"))?;
-                let (external_rules, executor) =
-                    external::load(&project).map_err(|e| format!("external: {e}"))?;
-                let registry =
-                    Registry::with_external(builtin::all(), rules, external_rules, &layers)
-                        .map_err(|e| format!("policy: {e}"))?;
-                let measure = runner::load(&project).map_err(|e| format!("measure: {e}"))?;
-                Ok((registry, executor, measure))
-            })() {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("chidev: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            let sqlite = match SqliteStore::open(&store).await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("chidev: {}: {e}", store.display());
-                    return ExitCode::from(2);
-                }
-            };
-            let (registry, executor, measure) = registry;
-            let mut app =
-                App::with_registry(sqlite, UuidV7, registry, SystemClock).with_external(executor);
-            if let Some(measure) = measure {
-                // one table answers both: how to measure, and how to find the Items of an Interface
-                app = app.with_items(measure.clone()).with_runner(measure);
-            }
-            let mut out = io::stdout().lock();
-            let code = match ops::run(&mut app, root, reader, &mut out).await {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => ExitCode::from(1),
-                Err(e) => {
-                    let _ = out.flush();
-                    eprintln!("chidev: {e}");
-                    ExitCode::from(2)
-                }
-            };
-            if let Err(e) = app.into_store().close().await {
-                eprintln!("chidev: {}: {e}", store.display());
-                return ExitCode::from(2);
-            }
-            code
+            with_app(store, Opening::Create, async move |app, root| {
+                let mut out = io::stdout().lock();
+                let done = ops::run(app, root, reader, &mut out).await;
+                exit_code(done, &mut out)
+            })
+            .await
+        }
+        Command::Check {
+            context,
+            store,
+            rules,
+        } => {
+            with_app(store, Opening::Existing, async move |app, root| {
+                let mut out = io::stdout().lock();
+                let done = ops::check(app, root, context, rules, &mut out).await;
+                exit_code(done, &mut out)
+            })
+            .await
+        }
+        Command::Measure { measure } => {
+            let (store, context, what) = measure.parts();
+            with_app(store, Opening::Existing, async move |app, root| {
+                let mut out = io::stdout().lock();
+                let done = ops::measure(app, root, context, what, &mut out).await;
+                exit_code(done, &mut out)
+            })
+            .await
+        }
+    }
+}
+
+/// How a command opens the store of the project.
+#[derive(Debug, Clone, Copy)]
+enum Opening {
+    /// Makes the store when it is not there: the first operation of a project is `init`, which `exec` runs.
+    Create,
+    /// Opens a store that is there and refuses one that is not, so that a mistyped path or a project never started
+    /// does not leave an empty store behind.
+    Existing,
+}
+
+/// The use cases over the project kept in the store, as every command that runs on a project has them.
+type ProjectApp = App<SqliteStore, UuidV7, ProcessExecutor>;
+
+/// Runs `body` on the project the command runs in, and returns its exit code. The one place that sets a project up:
+/// the project's root is the nearest directory, from the one the command runs in, that has a `chidev.toml`; the
+/// settings, the judged and external rules and the measure table are read from there, and so are the files a
+/// `source_file` or a `code_file` names. No root, any of them being unreadable, or the store not opening stops the
+/// run with status 2 before `body` runs. The store is closed after `body`, always and explicitly, never on drop (a
+/// close that fails is status 2 too).
+async fn with_app(
+    store: StoreArg,
+    opening: Opening,
+    body: impl AsyncFnOnce(&mut ProjectApp, &Path) -> ExitCode,
+) -> ExitCode {
+    let project = match std::env::current_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|cwd| project::find(&cwd).map_err(|e| e.to_string()))
+    {
+        Ok(project) => project,
+        Err(e) => {
+            eprintln!("chidev: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = project.root();
+    // the flag is relative to the current directory, as a path on the command line is; the setting is not
+    let store = store.store.unwrap_or_else(|| project.store().to_path_buf());
+    let registry = match (|| -> Result<_, String> {
+        let layers = policy::load(&project).map_err(|e| format!("policy: {e}"))?;
+        let rules = judged::load(root).map_err(|e| format!("rules: {e}"))?;
+        let (external_rules, executor) =
+            external::load(&project).map_err(|e| format!("external: {e}"))?;
+        let registry = Registry::with_external(builtin::all(), rules, external_rules, &layers)
+            .map_err(|e| format!("policy: {e}"))?;
+        let measure = runner::load(&project).map_err(|e| format!("measure: {e}"))?;
+        Ok((registry, executor, measure))
+    })() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("chidev: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let sqlite = match opening {
+        Opening::Create => SqliteStore::open(&store).await,
+        Opening::Existing => SqliteStore::open_existing(&store).await,
+    };
+    let sqlite = match sqlite {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("chidev: {}: {e}", store.display());
+            return ExitCode::from(2);
+        }
+    };
+    let (registry, executor, measure) = registry;
+    let mut app = App::with_registry(sqlite, UuidV7, registry, SystemClock).with_external(executor);
+    if let Some(measure) = measure {
+        // one table answers both: how to measure, and how to find the Items of an Interface
+        app = app.with_items(measure.clone()).with_runner(measure);
+    }
+    let code = body(&mut app, root).await;
+    if let Err(e) = app.into_store().close().await {
+        eprintln!("chidev: {}: {e}", store.display());
+        return ExitCode::from(2);
+    }
+    code
+}
+
+/// The exit code of a command that wrote its result to `out`: 0 when it succeeded, 1 when it did not, and 2 when it
+/// could not read its input or write its result.
+fn exit_code(done: io::Result<bool>, out: &mut impl Write) -> ExitCode {
+    match done {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            let _ = out.flush();
+            eprintln!("chidev: {e}");
+            ExitCode::from(2)
         }
     }
 }

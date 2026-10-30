@@ -298,7 +298,7 @@ async fn status_and_check_do_not_run_a_program_but_explicit_check_run_does() {
         app.status().await.unwrap().external[0].state.word(),
         "unrun"
     );
-    assert!(app.check(None).await.unwrap().findings.is_empty());
+    assert!(app.check(None, &[]).await.unwrap().findings.is_empty());
     assert_eq!(executor.count(), 0);
     let model_revision = app.store().model_revision().await.unwrap();
     let checked = app.check_run().await.unwrap();
@@ -310,7 +310,7 @@ async fn status_and_check_do_not_run_a_program_but_explicit_check_run_does() {
         app.status().await.unwrap().external[0].state.word(),
         "current"
     );
-    assert!(app.check(None).await.unwrap().findings.is_empty());
+    assert!(app.check(None, &[]).await.unwrap().findings.is_empty());
     assert_eq!(executor.count(), 1);
 }
 
@@ -528,10 +528,10 @@ async fn a_valid_clause_finding_is_kept_and_an_empty_success_replaces_it() {
     assert!(checked.external[0].failure.is_none());
     assert_eq!(checked.findings.len(), 1);
     assert!(checked.findings[0].subject.is_some());
-    assert_eq!(app.check(None).await.unwrap().findings.len(), 1);
+    assert_eq!(app.check(None, &[]).await.unwrap().findings.len(), 1);
     let checked = app.check_run().await.unwrap();
     assert!(checked.findings.is_empty());
-    assert!(app.check(None).await.unwrap().findings.is_empty());
+    assert!(app.check(None, &[]).await.unwrap().findings.is_empty());
     let reports = app.store().external_reports().await.unwrap();
     assert_eq!(reports.len(), 1);
     assert!(reports[0].findings.is_empty());
