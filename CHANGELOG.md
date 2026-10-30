@@ -41,6 +41,28 @@ and this project adheres to
 
 ### Changed
 
+- A measurement's settings are compared by what its run resolved, kind by kind:
+  a mutation run by the copy, build, test, provider and limits it ran with and
+  the layout of its Interface and the Harnesses it ran; a simulation by the
+  copy, build, its `[measure.sim.<context>]` table and the layout of its Harness
+  and the Interfaces it builds. Defaults count as written, and the executable
+  of the first word of each command is part of it. Another setting no longer
+  makes a run stale (an `items` command, another Context's sim table, another
+  Interface's layout). A run whose settings cannot be compared is stale, saying
+  why: `[measure]` is not configured, or the settings cannot be read (with the
+  runner's reason). A program that differs from the settings when the copy is
+  made, or a provider that differs when it is asked, fails the run as
+  `settings_moved`. Every earlier run is stale once, as its settings were
+  digested the old way. Asking for a mutation run's settings now fails when
+  the `test` command is missing or a program cannot be found or read. In Rust,
+  `SettingsDigest`, `SettingsNow`, `FailureKind::SettingsMoved`; `RunnerError`
+  is split into kinds (`NoLayout` with `LayoutPlace`, `NoLang`, `NoProvider`,
+  `NoTestCommand`, `NoSimConfig`, `Locate` and `Fingerprint` with
+  `CommandRole`, `BadRunName`, `Deadline`, `Digest`); `Runner::settings` and
+  `sim_settings` take the Harnesses the run runs or builds, and
+  `MutateReport` and `SimulateReport` carry the digest the run ran under
+  (#45).
+
 - The name of a Contract, an Interface or a Harness follows the rule of a
   Context's name: not empty, and only lower-case letters, digits, `-` and `_`.
   A put, a change set or a reference with a name outside the rule is refused

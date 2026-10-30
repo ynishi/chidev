@@ -19,7 +19,7 @@ use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::{ClauseId, ContractId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MeasureKind, MeasureStamp, MeasureSubject, Mutant, MutantKey,
-    MutantOutcome, MutantResult, Operator, Site, StepEvidence,
+    MutantOutcome, MutantResult, Operator, SettingsDigest, Site, StepEvidence,
 };
 use crate::domain::vo::pin_basis::PinBasis;
 use crate::domain::vo::revision::Revision;
@@ -220,6 +220,13 @@ fn unrevs<K: Ord>(
 
 fn digest_of(text: &str) -> Result<Digest, StoreError> {
     Digest::restore(text).ok_or_else(|| corrupt(format!("`{text}` is not a digest")))
+}
+
+/// The settings digest a stamp row keeps, as the text of a digest; a value that is not one is corrupt.
+fn settings_of(text: &str) -> Result<SettingsDigest, StoreError> {
+    Digest::restore(text)
+        .map(SettingsDigest::new)
+        .ok_or_else(|| corrupt(format!("`{text}` is not a settings digest")))
 }
 
 fn clause_of(text: &str) -> Result<ClauseId, StoreError> {
@@ -490,7 +497,7 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
                 unrevs(&stamp.used_interfaces, InterfaceId::from_uuid)?,
             );
             let code = Digest::restore(&stamp.code).ok_or_else(|| corrupt("a code digest"))?;
-            let stamp = MeasureStamp::new(code, basis, stamp.settings).map_err(corrupt)?;
+            let stamp = MeasureStamp::new(code, basis, settings_of(&stamp.settings)?);
             let summary: SummaryDoc = read(&run.summary, "its summary")?;
             MeasureBody::Mutation {
                 interface,
@@ -522,7 +529,7 @@ pub(crate) fn decode(run: &RunRow, items: &[ItemRow]) -> Result<Measurement, Sto
                 contracts: unrevs(&stamp.contracts, ContractId::from_uuid)?,
                 interfaces,
             };
-            let stamp = SimStamp::new(basis, stamp.settings).map_err(corrupt)?;
+            let stamp = SimStamp::new(basis, settings_of(&stamp.settings)?);
             let summary: SimSummaryDoc = read(&run.summary, "its summary")?;
             MeasureBody::Simulation {
                 harness,
@@ -1005,12 +1012,80 @@ mod tests {
         labelled[0].detail = labelled[0].detail.replace(&id, "C4");
         assert_ne!(labelled[0].detail, items[0].detail);
         assert!(decode(&run, &labelled).is_err());
+        // a revision of 0 is no revision, though the settings are a digest
         let mut stamp = run.clone();
-        stamp.inputs =
-            "{\"harness\":0,\"contracts\":[],\"interfaces\":[],\"settings\":\"s\"}".into();
+        stamp.inputs = format!(
+            "{{\"harness\":0,\"contracts\":[],\"interfaces\":[],\"settings\":\"{}\"}}",
+            Digest::of(b"settings")
+        );
         assert!(decode(&stamp, &items).is_err());
         let mut summary = run.clone();
         summary.summary = summary.summary.replace("trace-differs", "other");
         assert!(decode(&summary, &items).is_err());
+    }
+
+    #[test]
+    fn the_settings_digest_of_a_stamp_survives_the_rows_and_a_value_that_is_not_one_is_corrupt() {
+        use crate::domain::entity::measurement::fixture::{draft, empty_basis, settings};
+        let shown = settings().to_string();
+        let mutation = Measurement::new(draft(
+            9,
+            InterfaceId::from_uuid(test_uuid(100)),
+            Digest::of(b"code"),
+            empty_basis(),
+            Vec::new(),
+        ))
+        .unwrap();
+        let sim = sim_measurement();
+        for m in [mutation, sim] {
+            let (run, items) = encode(&m).unwrap();
+            // it is kept as the text of a digest
+            assert!(run.inputs.contains(&format!("\"settings\":\"{shown}\"")));
+            assert_eq!(decode(&run, &items).unwrap(), m);
+            // and nothing else is read as one: a word, a digest in upper case, one that is cut short, a blank
+            for bad in ["s", &shown.to_uppercase(), &shown[1..], ""] {
+                let mut odd = run.clone();
+                odd.inputs = odd.inputs.replace(&shown, bad);
+                assert_ne!(odd.inputs, run.inputs);
+                let error = decode(&odd, &items).unwrap_err();
+                assert!(
+                    matches!(&error, StoreError::Corrupt(m) if m.contains("not a settings digest")),
+                    "{bad:?}: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_that_failed_because_its_settings_moved_survives_the_rows_by_its_word() {
+        assert_eq!(FailureKind::SettingsMoved.word(), "settings_moved");
+        use crate::domain::entity::measurement::fixture::{draft, empty_basis};
+        let mut d = draft(
+            9,
+            InterfaceId::from_uuid(test_uuid(100)),
+            Digest::of(b"code"),
+            empty_basis(),
+            Vec::new(),
+        );
+        d.failure = Some(MeasureFailure::of(
+            FailureKind::SettingsMoved,
+            "the build command is not the one the settings were digested with",
+        ));
+        let m = Measurement::new(d).unwrap();
+        let (run, items) = encode(&m).unwrap();
+        assert_eq!(run.outcome, "failed");
+        assert!(
+            run.failure
+                .as_deref()
+                .is_some_and(|f| f.contains("\"kind\":\"settings_moved\"")),
+            "{:?}",
+            run.failure
+        );
+        let back = decode(&run, &items).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(
+            back.failure().map(MeasureFailure::kind),
+            Some(FailureKind::SettingsMoved)
+        );
     }
 }

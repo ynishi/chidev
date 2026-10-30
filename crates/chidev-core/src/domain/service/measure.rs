@@ -10,7 +10,7 @@ use crate::domain::entity::project::Project;
 use crate::domain::service::pin::current_basis;
 use crate::domain::service::sim::basis_of;
 use crate::domain::vo::id::{HarnessId, InterfaceId};
-use crate::domain::vo::measure::MeasureKind;
+use crate::domain::vo::measure::{MeasureKind, SettingsNow};
 
 /// Whether a measurement still describes the Project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,8 @@ pub enum Standing {
     /// What it stood on and the settings are as they were measured.
     Current,
     /// Something it stood on has moved: the Pin was made again with other code, the Interface, a Harness or a
-    /// Contract changed, the subject is gone, or the settings differ.
+    /// Contract changed, the subject is gone, the settings differ, or the settings cannot be read now (there is
+    /// no `[measure]` table, or the runner cannot say them for this subject).
     Stale,
 }
 
@@ -33,12 +34,13 @@ impl Standing {
 }
 
 /// Whether the mutation run `measurement` still describes `project` and the Pin of its Interface. `settings` is
-/// what the settings digest is now, when the runner can say; without it the settings are not compared.
+/// what the settings are now; a run whose settings are not known (`Unconfigured`, `Unreadable`) is stale, for there
+/// is nothing to show it was made under them.
 pub fn standing(
     measurement: &Measurement,
     project: &Project,
     pin: &Pin,
-    settings: Option<&str>,
+    settings: &SettingsNow,
 ) -> Standing {
     let (Some(stamp), Some(interface)) = (measurement.stamp().code(), measurement.interface())
     else {
@@ -51,12 +53,12 @@ pub fn standing(
 }
 
 /// Whether the simulation `measurement` still describes `project`, given the Pins as they are now. A sim Harness
-/// that is gone, or no longer of the kind, has no basis to hold.
+/// that is gone, or no longer of the kind, has no basis to hold. The settings are judged as [`standing`] judges them.
 pub fn sim_standing(
     measurement: &Measurement,
     project: &Project,
     pins: &[Pin],
-    settings: Option<&str>,
+    settings: &SettingsNow,
 ) -> Standing {
     let (Some(stamp), Some(harness)) = (measurement.stamp().sim(), measurement.harness()) else {
         return Standing::Stale;

@@ -9,6 +9,10 @@
 //! `chidev.toml` ([`load`]). Every command is a program started without a shell, in a process group of its own,
 //! under a deadline ([`crate::infra::process`]); the whole run has a time budget.
 //!
+//! A run does not read the table as written. It first resolves what its kind reads of it into the settings of that
+//! kind (`settings.rs`: defaults applied, programs found, their executables digested), and runs from those and from
+//! nothing else; the digest of the same settings is the settings digest the measurement is stamped with.
+//!
 //! A run that cannot measure (the baseline fails, a command or the provider fails, the budget is used up) still
 //! reports what it observed: the failure, the commands' evidence and the mutants it got through. Only a
 //! configuration that cannot measure this Interface at all is an error, and then nothing was run.
@@ -26,6 +30,7 @@
 mod config;
 mod items;
 mod provider;
+mod settings;
 mod sim;
 
 use std::collections::BTreeSet;
@@ -35,15 +40,16 @@ use std::time::Instant;
 use thiserror::Error;
 
 use self::config::{Config, RunDirs, WORK_DIR};
+use self::settings::{CopySettings, MutationSettings, NotFound, Program, find};
 use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
-    BoxFuture, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport, SimulateRequest,
+    BoxFuture, LayoutPlace, MutateReport, MutateRequest, Runner, RunnerError, SimulateReport,
+    SimulateRequest,
 };
-use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::{
-    FailureKind, MeasureFailure, MutantOutcome, MutantResult, StepEvidence,
+    FailureKind, MeasureFailure, MutantOutcome, MutantResult, SettingsDigest, StepEvidence,
 };
 use crate::domain::vo::name::{AssetName, ContextName};
 
@@ -92,8 +98,9 @@ impl Runner for ProcessRunner {
         &'a self,
         context: &'a ContextName,
         interface: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
-        Box::pin(self.settings_of(context, interface))
+        harnesses: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(self.settings_of(context, interface, harnesses))
     }
 
     fn mutate<'a>(
@@ -107,8 +114,9 @@ impl Runner for ProcessRunner {
         &'a self,
         context: &'a ContextName,
         harness: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
-        Box::pin(self.sim_settings_of(context, harness))
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(self.sim_settings_of(context, harness, builds))
     }
 
     fn simulate<'a>(
@@ -136,16 +144,6 @@ impl ItemSource for ProcessRunner {
     }
 }
 
-fn config_error(message: String) -> RunnerError {
-    RunnerError::Config(message)
-}
-
-fn needs_lang(interface: &AssetName) -> RunnerError {
-    config_error(format!(
-        "the layout of interface `{interface}` has no `lang`, which mutating its code needs"
-    ))
-}
-
 /// A failure of a run, from one of the process module's.
 fn from_process(f: process::Failure, over_budget: bool) -> MeasureFailure {
     match f.kind {
@@ -168,37 +166,16 @@ fn millis(since: Instant) -> u64 {
 }
 
 impl ProcessRunner {
+    /// The digest of the settings of a mutation run of `interface` that runs the tests `harnesses`.
     async fn settings_of(
         &self,
         context: &ContextName,
         interface: &AssetName,
-    ) -> Result<String, RunnerError> {
-        let (_, lang) = self.config.interface(context, interface).ok_or_else(|| {
-            config_error(format!(
-                "[[measure.layout]] has no entry for the interface `{interface}` of `{context}`"
-            ))
-        })?;
-        let lang = lang.ok_or_else(|| needs_lang(interface))?;
-        let command = self.provider_command(lang)?;
-        let executable = process::locate(&self.root, &command[0])
-            .await
-            .map_err(|f| config_error(format!("the provider for `{lang}`: {}", f.message)))?;
-        let provider = process::file_digest(&executable)
-            .await
-            .map_err(|f| config_error(format!("the provider for `{lang}`: {}", f.message)))?;
-        Ok(
-            Digest::of(format!("config={};provider={provider}", self.config.digest).as_bytes())
-                .to_string(),
-        )
-    }
-
-    fn provider_command(&self, lang: &str) -> Result<&[String], RunnerError> {
-        self.config
-            .mutants
-            .get(lang)
-            .map(Vec::as_slice)
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| config_error(format!("`mutants` has no command for `{lang}`")))
+        harnesses: &[AssetName],
+    ) -> Result<SettingsDigest, RunnerError> {
+        MutationSettings::resolve(&self.config, &self.root, context, interface, harnesses)
+            .await?
+            .digest()
     }
 
     /// The Items the provider of `lang` finds in `source`.
@@ -220,62 +197,53 @@ impl ProcessRunner {
     fn run_dirs(&self, run: &str) -> Result<RunDirs, RunnerError> {
         let safe = !run.is_empty() && run.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
         if !safe {
-            return Err(config_error(format!(
-                "`{run}` is not a name for a run's directory"
-            )));
+            return Err(RunnerError::BadRunName(run.to_string()));
         }
         Ok(RunDirs::of(self.root.join(WORK_DIR).join(run)))
     }
 
     async fn mutate_run(&self, request: &MutateRequest) -> Result<MutateReport, RunnerError> {
-        let (place, lang) = self
-            .config
-            .interface(&request.context, &request.interface)
-            .ok_or_else(|| {
-                config_error(format!(
-                    "[[measure.layout]] has no entry for the interface `{}` of `{}`",
-                    request.interface, request.context
-                ))
-            })?;
-        let lang = lang.ok_or_else(|| needs_lang(&request.interface))?;
-        let mutants_command = self.provider_command(lang)?;
-        let test =
-            self.config.test.as_deref().ok_or_else(|| {
-                config_error("[measure] has no `test` command to mutate with".into())
-            })?;
+        let names: Vec<AssetName> = request.harnesses.iter().map(|h| h.name.clone()).collect();
+        let settings = MutationSettings::resolve(
+            &self.config,
+            &self.root,
+            &request.context,
+            &request.interface,
+            &names,
+        )
+        .await?;
+        let digest = settings.digest()?;
         let mut harnesses = Vec::with_capacity(request.harnesses.len());
         for h in &request.harnesses {
-            let place = self
-                .config
-                .harness(&request.context, &h.name)
-                .ok_or_else(|| {
-                    config_error(format!(
-                        "[[measure.layout]] has no entry for the harness `{}` of `{}`",
-                        h.name, request.context
-                    ))
+            let path = settings
+                .harness_path(&h.name)
+                .ok_or_else(|| RunnerError::NoLayout {
+                    place: LayoutPlace::Harness,
+                    context: request.context.clone(),
+                    name: h.name.clone(),
                 })?;
-            harnesses.push((place.path.as_path(), h.source.as_str()));
+            harnesses.push((path, h.source.as_str()));
         }
         let dirs = self.run_dirs(&request.run)?;
         let job = Job {
-            runner: self,
+            root: &self.root,
+            copy: &settings.copy,
             dirs,
-            deadline: match process::deadline_in(self.config.budget) {
-                Ok(d) => d,
-                Err(f) => return Err(config_error(f.message)),
-            },
+            deadline: process::deadline_in(settings.budget)
+                .map_err(|f| RunnerError::Deadline(f.message))?,
         };
         let mut progress = Progress::default();
         let finished = job
             .steps(
-                (place.path.as_path(), &request.code),
+                &settings,
+                (settings.interface.path(), &request.code),
                 &harnesses,
-                (mutants_command, test),
                 &mut progress,
             )
             .await;
         job.clean().await;
         Ok(MutateReport {
+            settings: digest,
             sites: progress.sites,
             planned: progress.planned,
             mutants: progress.mutants,
@@ -318,9 +286,14 @@ struct Ran {
     stderr: Vec<u8>,
 }
 
-/// One run in its directory.
+/// One run in its directory. It holds the project's root and the part of the settings every kind of run shares, and
+/// nothing of the table or of the runner: what else a run reads is handed to the steps that read it, from the
+/// settings of its kind ([`MutationSettings`], [`SimSettings`]).
 struct Job<'a> {
-    runner: &'a ProcessRunner,
+    /// The project's root: what is copied, and where the provider is started.
+    root: &'a Path,
+    /// How the project is copied and built, and the environment the commands run in.
+    copy: &'a CopySettings,
     dirs: RunDirs,
     deadline: tokio::time::Instant,
 }
@@ -336,28 +309,50 @@ impl Job<'_> {
 
     /// The environment of the commands, with `{run}` made the run's directory and `{tree}` the root of the copy.
     fn env(&self) -> Vec<(String, String)> {
-        self.runner
-            .config
+        self.copy
             .env
             .iter()
             .map(|(k, v)| (k.clone(), self.dirs.expand(v)))
             .collect()
     }
 
-    async fn command(&self, words: &[String]) -> Result<Command, MeasureFailure> {
-        let (program, args) = words
-            .split_first()
-            .ok_or_else(|| MeasureFailure::of(FailureKind::Io, "a command is empty"))?;
-        let executable = process::locate(&self.dirs.tree, program)
+    /// Checks that `program` is, in the copy as it is made, the executable the settings were digested with. A copy
+    /// where the same name is another file (the code or a Harness written over it, say) would be a run under other
+    /// settings than the ones it is stamped with. It is asked once, after the copy is made and before any command
+    /// runs: what a command (the build) writes afterwards is part of the run and not a change of the settings. A
+    /// program the copy does not have yet is not asked about; [`Job::command`] stops the run if it is still not
+    /// there when it is started.
+    async fn verify(&self, program: &Program) -> Result<(), MeasureFailure> {
+        let found = match find(&self.dirs.tree, program.program()).await {
+            Ok(found) => found,
+            Err(NotFound::Locate(_)) => return Ok(()),
+            Err(e) => return Err(self.fail(e.failure())),
+        };
+        let expected = program.executable().digest();
+        if found.digest != expected {
+            return Err(MeasureFailure::of(
+                FailureKind::SettingsMoved,
+                format!(
+                    "`{}` is another file in the copy (sha256 {}) than at the project's root (sha256 {}), where the settings were digested",
+                    program.program(),
+                    found.digest,
+                    expected
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The command `program` in the copy: the file it names there now, which is the one the run starts. Its digest
+    /// is the evidence of what ran.
+    async fn command(&self, program: &Program) -> Result<Command, MeasureFailure> {
+        let found = find(&self.dirs.tree, program.program())
             .await
-            .map_err(|f| self.fail(f))?;
-        let digest = process::file_digest(&executable)
-            .await
-            .map_err(|f| self.fail(f))?;
+            .map_err(|e| self.fail(e.failure()))?;
         Ok(Command {
-            executable,
-            args: args.to_vec(),
-            digest,
+            executable: found.executable,
+            args: program.args().to_vec(),
+            digest: found.digest,
         })
     }
 
@@ -408,9 +403,7 @@ impl Job<'_> {
         out: &mut Progress,
     ) -> Result<(), MeasureFailure> {
         let started = Instant::now();
-        let result = self
-            .exec(command, env, self.runner.config.baseline_timeout)
-            .await;
+        let result = self.exec(command, env, self.copy.baseline_timeout).await;
         let (exit_code, stderr) = match &result {
             Ok((ran, _)) => (ran.exit_code, provider::tail(&ran.stderr, TAIL)),
             Err(_) => (None, String::new()),
@@ -443,15 +436,15 @@ impl Job<'_> {
         ))
     }
 
-    /// What became of the code in the copy as it is now: built, then tested.
+    /// What became of the code in the copy as it is now: built, then tested, each for at most `timeout`.
     async fn judge(
         &self,
         build: &Command,
         test: &Command,
         env: &[(String, String)],
+        timeout: std::time::Duration,
     ) -> Result<MutantOutcome, MeasureFailure> {
-        let config = &self.runner.config;
-        match self.exec(build, env, config.timeout).await {
+        match self.exec(build, env, timeout).await {
             Ok((ran, _)) if !ran.success => return Ok(MutantOutcome::Stillborn),
             Ok(_) => {}
             Err(f) if f.kind == process::FailureKind::Timeout && !self.over_budget() => {
@@ -459,7 +452,7 @@ impl Job<'_> {
             }
             Err(f) => return Err(self.fail(f)),
         }
-        match self.exec(test, env, config.timeout).await {
+        match self.exec(test, env, timeout).await {
             Ok((ran, _)) if ran.success => Ok(MutantOutcome::Survived),
             Ok(_) => Ok(MutantOutcome::Killed),
             Err(f) if f.kind == process::FailureKind::Timeout && !self.over_budget() => {
@@ -483,17 +476,15 @@ impl Job<'_> {
 
     async fn steps(
         &self,
+        settings: &MutationSettings,
         code: (&Path, &str),
         harnesses: &[(&Path, &str)],
-        commands: (&[String], &[String]),
         out: &mut Progress,
     ) -> Result<(), MeasureFailure> {
-        let (mutants_command, test_words) = commands;
-        let config = &self.runner.config;
         let (root, tree, exclude) = (
-            self.runner.root.clone(),
+            self.root.to_path_buf(),
             self.dirs.tree.clone(),
-            config.copy_exclude.clone(),
+            self.copy.excluded(),
         );
         tokio::task::spawn_blocking(move || copy_tree(&root, &tree, &exclude))
             .await
@@ -504,24 +495,40 @@ impl Job<'_> {
         for (path, source) in harnesses {
             self.write(path, source).await?;
         }
+        self.verify(&self.copy.build).await?;
+        self.verify(&settings.test).await?;
         let env = self.env();
-        let build = self.command(&config.build).await?;
-        let test = self.command(test_words).await?;
+        let build = self.command(&self.copy.build).await?;
+        let test = self.command(&settings.test).await?;
         self.baseline("baseline-build", &build, &env, out).await?;
         self.baseline("baseline-test", &test, &env, out).await?;
 
         let (asked, evidence) = provider::ask(
-            &self.runner.root,
-            mutants_command,
+            self.root,
+            &settings.provider.words(),
             &path.to_string_lossy(),
             code,
-            config.max_mutants,
-            config.seed,
-            config.operators.as_deref(),
+            settings.max_mutants,
+            settings.seed,
+            settings.operators.as_deref(),
             self.deadline,
         )
         .await;
+        // The provider is started at the project's root, not in the copy, and after the baseline, which can take
+        // long: the file it started has to be the one the settings were digested with, or the run would be kept
+        // under a stamp that names another provider.
+        let ran = evidence.command_digest.clone();
         out.evidence.push(evidence);
+        let expected = settings.provider.executable().digest();
+        if let Some(ran) = ran.filter(|ran| ran != expected) {
+            return Err(MeasureFailure::of(
+                FailureKind::SettingsMoved,
+                format!(
+                    "`{}` is another file at the project's root (sha256 {ran}) than when the settings were digested (sha256 {expected})",
+                    settings.provider.program(),
+                ),
+            ));
+        }
         let mutants = asked?;
         out.sites = mutants.sites;
         // What the provider gave is what the run owes; the sites it did not give (the cap) are told apart from the
@@ -540,7 +547,7 @@ impl Job<'_> {
             let (start, end) = planned.span;
             let edited = format!("{}{}{}", &code[..start], planned.mutant.to(), &code[end..]);
             self.write(path, &edited).await?;
-            let outcome = self.judge(&build, &test, &env).await;
+            let outcome = self.judge(&build, &test, &env, settings.timeout).await;
             // The code goes back whatever became of the mutant, so the next one is a change of the original.
             self.write(path, code).await?;
             out.mutants.push(MutantResult {
@@ -593,7 +600,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::app::ports::measure::HarnessText;
+    use crate::app::ports::measure::{CommandRole, HarnessText};
     use crate::infra::project::{self, FILE};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -871,32 +878,570 @@ path = "check.txt"
         assert!(!project.0.join(WORK_DIR).exists());
     }
 
+    /// The digest of the settings of a mutation run of `api` that runs the tests `checks`.
+    async fn digest(project: &Project) -> SettingsDigest {
+        project
+            .runner()
+            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .await
+            .unwrap()
+    }
+
+    /// [`TABLE`] with the top-level keys `keys` before its first table.
+    fn with(keys: &str) -> String {
+        format!("{keys}\n{TABLE}")
+    }
+
+    /// [`TABLE`] with `text` after its last layout entry.
+    fn plus(text: &str) -> String {
+        format!("{TABLE}{text}")
+    }
+
     #[tokio::test]
-    async fn the_settings_follow_the_table_and_the_provider_program() {
+    async fn a_setting_a_mutation_run_does_not_read_leaves_its_digest_as_it_was() {
         let project = Project::new(TABLE);
-        let (ctx, api) = (context("ctx"), asset("api"));
-        let one = project.runner().settings_of(&ctx, &api).await.unwrap();
-        assert_eq!(one, project.runner().settings_of(&ctx, &api).await.unwrap());
-        // another table is other settings
-        project.table(&TABLE.replace("timeout = 5", "timeout = 6"));
-        let two = project.runner().settings_of(&ctx, &api).await.unwrap();
-        assert_ne!(one, two);
-        // so is another provider program under the same table
-        std::fs::write(
-            project.0.join("provider.sh"),
-            format!("{PROVIDER}# changed\n"),
-        )
-        .unwrap();
-        let three = project.runner().settings_of(&ctx, &api).await.unwrap();
-        assert_ne!(two, three);
-        // an interface with no layout has none
-        assert!(
-            project
-                .runner()
-                .settings_of(&ctx, &asset("other"))
+        let before = digest(&project).await;
+        assert_eq!(before, digest(&project).await);
+        // the layout entries in the other order
+        let mut parts: Vec<&str> = TABLE.split("[[layout]]").collect();
+        parts.swap(1, 2);
+        let swapped = parts.join("[[layout]]");
+        assert_ne!(swapped, TABLE);
+        for (what, table) in [
+            (
+                "a provider of items",
+                TABLE.replace("[mutants]", "[items]\ntext = [\"./items.sh\"]\n[mutants]"),
+            ),
+            (
+                "a sim of the context",
+                plus("[measure.sim.ctx]\ninterpreter = [\"sh\"]\nprogram = [\"x\"]\n"),
+            ),
+            (
+                "a provider of another language",
+                TABLE.replace(
+                    "text = [\"./provider.sh\"]",
+                    "text = [\"./provider.sh\"]\ngo = [\"./other.sh\"]",
+                ),
+            ),
+            (
+                "another interface laid out",
+                plus(
+                    "[[layout]]\ncontext = \"ctx\"\ninterface = \"elsewhere\"\nlang = \"text\"\npath = \"else.txt\"\n",
+                ),
+            ),
+            (
+                "a harness the run does not run",
+                plus("[[layout]]\ncontext = \"ctx\"\nharness = \"unrun\"\npath = \"unrun.txt\"\n"),
+            ),
+            (
+                "the layout of another context",
+                plus("[[layout]]\ncontext = \"other\"\ninterface = \"api\"\npath = \"o.txt\"\n"),
+            ),
+            ("the layout in another order", swapped),
+        ] {
+            project.table(&table);
+            assert_eq!(digest(&project).await, before, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_setting_a_mutation_run_reads_moves_its_digest() {
+        let project = Project::new(TABLE);
+        let before = digest(&project).await;
+        let mut seen = vec![before];
+        for (what, table) in [
+            ("copy_exclude", with("copy_exclude = [\".git\"]")),
+            ("env", TABLE.replace("env = {}", "env = { A = \"1\" }")),
+            (
+                "build",
+                TABLE.replace("! grep -q BROKEN", "! grep -q BROKEN2"),
+            ),
+            ("baseline_timeout", with("baseline_timeout = 7")),
+            ("test", TABLE.replace("grep -q HARNESS", "grep -q HARNESS2")),
+            ("timeout", TABLE.replace("timeout = 5", "timeout = 6")),
+            ("budget", with("budget = 800")),
+            ("max_mutants", with("max_mutants = 3")),
+            ("seed", with("seed = 9")),
+            ("operators", with("operators = [\"rel\"]")),
+            (
+                "the provider's command",
+                TABLE.replace(
+                    "text = [\"./provider.sh\"]",
+                    "text = [\"./provider.sh\", \"--x\"]",
+                ),
+            ),
+            (
+                "the path of the interface",
+                TABLE.replace("path = \"code.txt\"", "path = \"code2.txt\""),
+            ),
+            (
+                "the path of the harness",
+                TABLE.replace("path = \"check.txt\"", "path = \"check2.txt\""),
+            ),
+            (
+                "the language of the interface",
+                TABLE
+                    .replace(
+                        "text = [\"./provider.sh\"]",
+                        "text = [\"./provider.sh\"]\ntext2 = [\"./provider.sh\"]",
+                    )
+                    .replace("lang = \"text\"", "lang = \"text2\""),
+            ),
+        ] {
+            project.table(&table);
+            let now = digest(&project).await;
+            assert!(!seen.contains(&now), "{what} moves the digest");
+            seen.push(now);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tests_a_run_runs_are_in_its_digest_in_whatever_order_they_are_given() {
+        let table =
+            plus("[[layout]]\ncontext = \"ctx\"\nharness = \"more\"\npath = \"more.txt\"\n");
+        let project = Project::new(&table);
+        let runner = project.runner();
+        async fn of(runner: &ProcessRunner, names: &[&str]) -> SettingsDigest {
+            let names: Vec<AssetName> = names.iter().map(|n| asset(n)).collect();
+            runner
+                .settings_of(&context("ctx"), &asset("api"), &names)
                 .await
-                .is_err()
+                .unwrap()
+        }
+        let both = of(&runner, &["checks", "more"]).await;
+        assert_eq!(both, of(&runner, &["more", "checks"]).await);
+        assert_ne!(both, of(&runner, &["checks"]).await);
+        assert_ne!(of(&runner, &["checks"]).await, of(&runner, &["more"]).await);
+        assert_ne!(of(&runner, &["checks"]).await, of(&runner, &[]).await);
+    }
+
+    #[tokio::test]
+    async fn a_table_with_its_defaults_written_out_and_one_without_have_one_digest() {
+        // `TABLE` says `env = {}`, which is no variable at all and not the default one
+        let bare = TABLE.replace("env = {}\n", "");
+        let project = Project::new(&bare);
+        let before = digest(&project).await;
+        let written = format!(
+            "copy_exclude = [\"target\", \".chidev\", \".git\"]\nenv = {{ CARGO_TARGET_DIR = \"{{run}}/target\" }}\nbaseline_timeout = 600\nbudget = 900\nmax_mutants = 40\nseed = 0\n{bare}"
         );
+        project.table(&written);
+        assert_eq!(digest(&project).await, before);
+        // and the default is not the table that says there is no variable
+        project.table(TABLE);
+        assert_ne!(digest(&project).await, before);
+    }
+
+    impl Project {
+        /// Writes the executable `name` of the project.
+        fn script(&self, name: &str, text: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(self.0.join(name), text).unwrap();
+            std::fs::set_permissions(self.0.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+
+    /// [`TABLE`] with the build and the test commands scripts of the project.
+    fn scripted() -> String {
+        TABLE
+            .replace(
+                "build = [\"sh\", \"-c\", \"! grep -q BROKEN code.txt\"]",
+                "build = [\"./build.sh\"]",
+            )
+            .replace(
+                "test = [\"sh\", \"-c\", \"grep -q 'a <= ' code.txt && grep -q HARNESS check.txt\"]",
+                "test = [\"./test.sh\"]",
+            )
+    }
+
+    #[tokio::test]
+    async fn the_programs_a_run_starts_are_in_its_digest_by_their_files_and_not_by_where_the_project_is()
+     {
+        assert_ne!(scripted(), TABLE);
+        let project = Project::new(&scripted());
+        project.script("build.sh", "#!/bin/sh\ntrue\n");
+        project.script("test.sh", "#!/bin/sh\ntrue\n");
+        let before = digest(&project).await;
+        // the same project somewhere else
+        let elsewhere = Project::new(&scripted());
+        elsewhere.script("build.sh", "#!/bin/sh\ntrue\n");
+        elsewhere.script("test.sh", "#!/bin/sh\ntrue\n");
+        assert_ne!(project.0, elsewhere.0);
+        assert_eq!(digest(&elsewhere).await, before);
+        // each program, changed in its file under the same table
+        let mut seen = vec![before];
+        for (what, name, text) in [
+            (
+                "the build program",
+                "build.sh",
+                "#!/bin/sh\ntrue # changed\n",
+            ),
+            ("the test program", "test.sh", "#!/bin/sh\ntrue # changed\n"),
+            ("the provider", "provider.sh", "#!/bin/sh\n# changed\n"),
+        ] {
+            project.script(name, text);
+            let now = digest(&project).await;
+            assert!(!seen.contains(&now), "{what} moves the digest");
+            seen.push(now);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_report_carries_the_digest_of_the_settings_the_run_resolved_and_ran_under() {
+        let project = Project::new(TABLE);
+        let report = project
+            .runner()
+            .mutate_run(&request("run-digest"))
+            .await
+            .unwrap();
+        assert_eq!(report.failure, None, "{report:#?}");
+        assert_eq!(report.settings, digest(&project).await);
+        // the run resolved the table again: another table gives another digest in the report
+        project.table(&TABLE.replace("timeout = 5", "timeout = 6"));
+        let other = project
+            .runner()
+            .mutate_run(&request("run-digest-2"))
+            .await
+            .unwrap();
+        assert_ne!(other.settings, report.settings);
+        assert_eq!(other.settings, digest(&project).await);
+    }
+
+    #[tokio::test]
+    async fn a_program_that_is_another_file_in_the_copy_than_at_the_root_fails_the_run_as_settings_moved()
+     {
+        // the Harness is written over `build.sh` in the copy, where the build command finds the Harness's text
+        // under the name of the program the settings were digested with
+        let table = scripted().replace("path = \"check.txt\"", "path = \"build.sh\"");
+        let project = Project::new(&table);
+        project.script("build.sh", "#!/bin/sh\ntrue\n");
+        project.script("test.sh", "#!/bin/sh\ntrue\n");
+        let report = project
+            .runner()
+            .mutate_run(&request("run-moved"))
+            .await
+            .unwrap();
+        let failure = report.failure.expect("a failure");
+        assert_eq!(failure.kind(), FailureKind::SettingsMoved, "{failure}");
+        assert!(failure.message().contains("`./build.sh`"), "{failure}");
+        // nothing was run: no command, no provider
+        assert!(report.evidence.is_empty() && report.mutants.is_empty());
+        assert!(!project.0.join("provider-called").exists());
+        assert!(!project.0.join(WORK_DIR).join("run-moved").exists());
+        // the same table with the Harness elsewhere is a run
+        let elsewhere = Project::new(&scripted());
+        elsewhere.script("build.sh", "#!/bin/sh\ntrue\n");
+        elsewhere.script("test.sh", "#!/bin/sh\ntrue\n");
+        let report = elsewhere
+            .runner()
+            .mutate_run(&request("run-fine"))
+            .await
+            .unwrap();
+        assert_eq!(report.failure, None, "{report:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_is_another_file_when_it_is_started_fails_the_run_as_settings_moved() {
+        // the baseline build changes the provider at the project's root after the settings were digested
+        let project = Project::new(TABLE);
+        let table = TABLE
+            .replace(
+                "env = {}",
+                &format!(
+                    "env = {{ PROVIDER = \"{}\" }}",
+                    project.0.join("provider.sh").display()
+                ),
+            )
+            .replace(
+                "build = [\"sh\", \"-c\", \"! grep -q BROKEN code.txt\"]",
+                "build = [\"sh\", \"-c\", \"echo '# moved' >> \\\"$PROVIDER\\\"\"]",
+            );
+        assert_ne!(table, TABLE);
+        project.table(&table);
+        let report = project
+            .runner()
+            .mutate_run(&request("run-provider-moved"))
+            .await
+            .unwrap();
+        let failure = report.failure.expect("a failure");
+        assert_eq!(failure.kind(), FailureKind::SettingsMoved, "{failure}");
+        assert!(failure.message().contains("`./provider.sh`"), "{failure}");
+        assert!(report.mutants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_program_the_build_rewrites_in_the_copy_is_the_runs_and_not_a_moved_setting() {
+        // the build writes `test.sh` in the copy, after the copy is made and its programs were found as digested
+        let project = Project::new(&scripted());
+        project.script(
+            "build.sh",
+            "#!/bin/sh\nprintf '#!/bin/sh\\ntrue # rebuilt\\n' > test.sh\n",
+        );
+        project.script("test.sh", "#!/bin/sh\ntrue\n");
+        let report = project
+            .runner()
+            .mutate_run(&request("run-rebuilt"))
+            .await
+            .unwrap();
+        assert_eq!(report.failure, None, "{report:#?}");
+        assert_eq!(report.mutants.len(), 3);
+    }
+
+    #[test]
+    fn a_job_holds_the_root_the_shared_settings_and_its_places_and_not_the_runner_or_the_table() {
+        // Every field is named, so a field added (the runner, the table) does not compile until it is named here.
+        fn fields(job: Job<'_>) {
+            let Job {
+                root,
+                copy,
+                dirs,
+                deadline,
+            } = job;
+            let _: &Path = root;
+            let _: &CopySettings = copy;
+            let _: RunDirs = dirs;
+            let _: tokio::time::Instant = deadline;
+        }
+        let _ = fields;
+    }
+
+    /// The error that the settings of a mutation run of `api` that runs `checks` give for `table`.
+    async fn refused(table: &str) -> RunnerError {
+        Project::new(table)
+            .runner()
+            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .await
+            .unwrap_err()
+    }
+
+    /// The program no table names, so that it is not found.
+    const MISSING: &str = "chidev-no-such-program";
+
+    #[tokio::test]
+    async fn an_interface_with_no_layout_entry_has_no_layout() {
+        let project = Project::new(TABLE);
+        let error = project
+            .runner()
+            .settings_of(&context("ctx"), &asset("other"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RunnerError::NoLayout {
+                place: LayoutPlace::Interface,
+                context: context("ctx"),
+                name: asset("other"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "[[measure.layout]] has no entry for the interface `other` of `ctx`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_harness_with_no_layout_entry_has_no_layout() {
+        let project = Project::new(TABLE);
+        let error = project
+            .runner()
+            .settings_of(&context("ctx"), &asset("api"), &[asset("elsewhere")])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RunnerError::NoLayout {
+                place: LayoutPlace::Harness,
+                context: context("ctx"),
+                name: asset("elsewhere"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "[[measure.layout]] has no entry for the harness `elsewhere` of `ctx`"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interface_laid_out_without_a_language_has_no_lang() {
+        let project = Project::new(ITEMS_TABLE);
+        let error = project
+            .runner()
+            .settings_of(&context("ctx"), &asset("bare"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RunnerError::NoLang {
+                interface: asset("bare")
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "the layout of interface `bare` has no `lang`, which mutating its code needs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_language_with_no_command_in_mutants_has_no_provider() {
+        // `ITEMS_TABLE` has a command for `text` in `items` alone
+        let project = Project::new(ITEMS_TABLE);
+        let error = project
+            .runner()
+            .settings_of(&context("ctx"), &asset("api"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RunnerError::NoProvider {
+                lang: "text".to_string()
+            }
+        );
+        assert_eq!(error.to_string(), "`mutants` has no command for `text`");
+    }
+
+    #[tokio::test]
+    async fn a_table_with_no_test_has_no_test_command_for_a_mutation_run() {
+        let table = TABLE.replace(
+            "test = [\"sh\", \"-c\", \"grep -q 'a <= ' code.txt && grep -q HARNESS check.txt\"]\n",
+            "",
+        );
+        assert_ne!(table, TABLE);
+        let error = refused(&table).await;
+        assert_eq!(error, RunnerError::NoTestCommand);
+        assert_eq!(
+            error.to_string(),
+            "[measure] has no `test` command to mutate with"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_context_with_no_sim_table_has_no_sim_config() {
+        let project = Project::new(TABLE);
+        let error = project
+            .runner()
+            .sim_settings_of(&context("ctx"), &asset("checks"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RunnerError::NoSimConfig {
+                context: context("ctx")
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "[measure.sim.ctx] is not configured; it gives the interpreter and the program"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_program_that_is_not_found_is_not_located_and_says_whose_it_is() {
+        let build = r#"build = ["sh", "-c", "! grep -q BROKEN code.txt"]"#;
+        let test =
+            r#"test = ["sh", "-c", "grep -q 'a <= ' code.txt && grep -q HARNESS check.txt"]"#;
+        for (what, table) in [
+            (
+                CommandRole::Build,
+                TABLE.replace(build, &format!("build = [\"{MISSING}\"]")),
+            ),
+            (
+                CommandRole::Test,
+                TABLE.replace(test, &format!("test = [\"{MISSING}\"]")),
+            ),
+            (
+                CommandRole::Provider {
+                    lang: "text".to_string(),
+                },
+                TABLE.replace("./provider.sh", MISSING),
+            ),
+        ] {
+            assert_ne!(table, TABLE);
+            let error = refused(&table).await;
+            let said = format!("executable `{MISSING}` not found in PATH");
+            assert_eq!(
+                error,
+                RunnerError::Locate {
+                    what: what.clone(),
+                    reason: said.clone()
+                }
+            );
+            assert_eq!(error.to_string(), format!("{what}: {said}"));
+        }
+        // the provider's message names the language, as it always has
+        let error = refused(&TABLE.replace("./provider.sh", MISSING)).await;
+        assert_eq!(
+            error.to_string(),
+            format!("the provider for `text`: executable `{MISSING}` not found in PATH")
+        );
+        // the interpreter of a sim
+        let sim = plus(&format!(
+            "[measure.sim.ctx]\ninterpreter = [\"{MISSING}\"]\nprogram = [\"x\"]\n"
+        ));
+        let project = Project::new(&sim);
+        let error = project
+            .runner()
+            .sim_settings_of(&context("ctx"), &asset("checks"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("the interpreter: executable `{MISSING}` not found in PATH")
+        );
+        assert!(matches!(
+            error,
+            RunnerError::Locate {
+                what: CommandRole::Interpreter,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_program_that_is_found_and_is_not_a_file_cannot_be_fingerprinted() {
+        let table = TABLE.replace(
+            r#"build = ["sh", "-c", "! grep -q BROKEN code.txt"]"#,
+            "build = [\"./adir\"]",
+        );
+        let project = Project::new(&table);
+        std::fs::create_dir(project.0.join("adir")).unwrap();
+        let error = project
+            .runner()
+            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .await
+            .unwrap_err();
+        let said = "the configured executable is not a regular file";
+        assert_eq!(
+            error,
+            RunnerError::Fingerprint {
+                what: CommandRole::Build,
+                reason: said.to_string()
+            }
+        );
+        assert_eq!(error.to_string(), format!("the build command: {said}"));
+    }
+
+    #[tokio::test]
+    async fn a_name_that_leads_out_of_the_runs_directory_is_a_bad_run_name() {
+        let project = Project::new(TABLE);
+        let error = project
+            .runner()
+            .mutate_run(&request("../escape"))
+            .await
+            .unwrap_err();
+        assert_eq!(error, RunnerError::BadRunName("../escape".to_string()));
+        assert_eq!(
+            error.to_string(),
+            "`../escape` is not a name for a run's directory"
+        );
+        assert!(!project.0.join(WORK_DIR).exists());
+    }
+
+    #[test]
+    fn a_limit_the_clock_cannot_count_says_so() {
+        // `budget` is capped at an hour by the table, so no table gives this; the error is the clock's own word
+        let failure = process::deadline_in(std::time::Duration::MAX).unwrap_err();
+        let error = RunnerError::Deadline(failure.message);
+        assert_eq!(error.to_string(), "the timeout exceeds the clock's range");
     }
 
     /// A table whose `api` is a text laid out with a language that only `items` has a command for, and whose
@@ -1032,7 +1577,7 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         );
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"))
+            .settings_of(&context("ctx"), &asset("api"), &[])
             .await
             .unwrap_err();
         assert!(

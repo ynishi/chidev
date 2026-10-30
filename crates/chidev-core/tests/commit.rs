@@ -39,9 +39,10 @@ use chidev_core::domain::repository::{
     ChangeRequestRepository, CruxRepository, PinRepository, ProjectRepository, StoreError,
 };
 use chidev_core::domain::service::change_request::raised_in;
+use chidev_core::domain::vo::digest::Digest;
 use chidev_core::domain::vo::finding::{RuleId, Subject};
 use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
-use chidev_core::domain::vo::measure::MeasureKind;
+use chidev_core::domain::vo::measure::{MeasureKind, SettingsDigest};
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::resolution::Transition;
@@ -1017,6 +1018,11 @@ impl Store for Flaky {
     }
 }
 
+/// The settings every run of [`Quiet`] is made under, and that it says they are.
+fn quiet_settings() -> SettingsDigest {
+    SettingsDigest::new(Digest::of(b"settings"))
+}
+
 /// A runner that measures nothing and finds it fine.
 #[derive(Debug)]
 struct Quiet;
@@ -1026,8 +1032,9 @@ impl Runner for Quiet {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
-        Box::pin(async { Ok("settings".to_string()) })
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Ok(quiet_settings()) })
     }
 
     fn mutate<'a>(
@@ -1036,6 +1043,7 @@ impl Runner for Quiet {
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>> {
         Box::pin(async {
             Ok(MutateReport {
+                settings: quiet_settings(),
                 sites: 0,
                 planned: 0,
                 mutants: Vec::new(),
@@ -1049,7 +1057,8 @@ impl Runner for Quiet {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 

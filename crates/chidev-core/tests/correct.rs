@@ -23,8 +23,9 @@ use chidev_core::domain::entity::change_request::ChangeRequestField;
 use chidev_core::domain::entity::crux::CruxField;
 use chidev_core::domain::entity::measurement::MeasurementField;
 use chidev_core::domain::repository::{ChangeRequestRepository, CruxRepository};
+use chidev_core::domain::vo::digest::Digest;
 use chidev_core::domain::vo::id::{ChangeRequestId, CruxId};
-use chidev_core::domain::vo::measure::{MeasureKind, StepEvidence};
+use chidev_core::domain::vo::measure::{MeasureKind, SettingsDigest, StepEvidence};
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -603,6 +604,11 @@ async fn a_refusal_carries_its_rule_and_never_a_text_of_a_record() {
     assert!(files_of(&path).iter().any(|(_, bytes)| holds_token(bytes)));
 }
 
+/// The settings every run of [`Leaky`] is made under, and that it says they are.
+fn leaky_settings() -> SettingsDigest {
+    SettingsDigest::new(Digest::of(b"settings"))
+}
+
 /// A runner whose one command wrote the token on standard error.
 #[derive(Debug)]
 struct Leaky;
@@ -612,8 +618,9 @@ impl Runner for Leaky {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
-        Box::pin(async { Ok("settings".to_string()) })
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        Box::pin(async { Ok(leaky_settings()) })
     }
 
     fn mutate<'a>(
@@ -622,6 +629,7 @@ impl Runner for Leaky {
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>> {
         Box::pin(async {
             Ok(MutateReport {
+                settings: leaky_settings(),
                 sites: 0,
                 planned: 0,
                 mutants: Vec::new(),
@@ -642,7 +650,8 @@ impl Runner for Leaky {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 

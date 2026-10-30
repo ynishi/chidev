@@ -57,9 +57,6 @@ pub enum MeasureError {
     /// A failure has no message.
     #[error("a failure says what failed")]
     BlankFailure,
-    /// A stamp has no settings.
-    #[error("a stamp names the settings the run was made with")]
-    BlankSettings,
 }
 
 /// What a measure measures: mutation testing and simulation.
@@ -315,11 +312,15 @@ pub enum FailureKind {
     /// The program a simulation drives was built, but the script could not start it in any case: nothing was
     /// checked, and the cases say nothing of the Contracts.
     NoStart,
+    /// A program the run started from the copy of the project is not the one the settings were digested with: its
+    /// digest in the copy differs from the one taken at the project's root, so the run would have been made under
+    /// other settings than the stamp it is kept with names.
+    SettingsMoved,
 }
 
 impl FailureKind {
     /// Every kind.
-    pub const ALL: [FailureKind; 8] = [
+    pub const ALL: [FailureKind; 9] = [
         FailureKind::Baseline,
         FailureKind::Provider,
         FailureKind::Protocol,
@@ -328,6 +329,7 @@ impl FailureKind {
         FailureKind::Io,
         FailureKind::NoBuild,
         FailureKind::NoStart,
+        FailureKind::SettingsMoved,
     ];
 
     /// The word for it.
@@ -341,6 +343,7 @@ impl FailureKind {
             FailureKind::Io => "io",
             FailureKind::NoBuild => "no_build",
             FailureKind::NoStart => "no_start",
+            FailureKind::SettingsMoved => "settings_moved",
         }
     }
 
@@ -417,6 +420,63 @@ pub struct StepEvidence {
     pub stderr: String,
 }
 
+/// The digest of what a run read of the settings (the commands it started and the programs they start, the limits it
+/// kept to, where the code it ran lives), as the runner made it. It is opaque: the runner makes one from a
+/// [`Digest`], and all anyone else does with it is compare two and show one. That it is a digest of something, and
+/// not a blank or a made-up word, is therefore the type's guarantee and not a check made where it is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsDigest(Digest);
+
+impl SettingsDigest {
+    /// The settings whose digest is `digest`.
+    pub fn new(digest: Digest) -> SettingsDigest {
+        SettingsDigest(digest)
+    }
+}
+
+/// The digest as [`Digest`] writes it (64 lower-case hex digits), which is also how a store keeps it.
+impl std::fmt::Display for SettingsDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// What the settings are now for the subject of a measurement, as far as the runner can say. There is no state in
+/// which they are "not compared": a run whose settings cannot be compared with what it was made with cannot be
+/// shown to describe the settings, so it is stale, and the two ways of not being comparable are told apart so that
+/// a person is told which to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsNow {
+    /// The project has no `[measure]` table: there is no runner to say anything.
+    Unconfigured,
+    /// The settings read as this digest.
+    Known(SettingsDigest),
+    /// The project has a runner, and it cannot read the settings for this subject (no layout for it, no command to
+    /// find, a program that is gone). The text says why, in the words of the runner.
+    Unreadable(String),
+}
+
+impl SettingsNow {
+    /// The settings of `subject` among `settings`. A subject that is not in them has none that can be read: a
+    /// measurement of it cannot be compared on its settings, so it is stale, and not current by default. This is
+    /// the one place that says so.
+    pub fn of<K: Ord>(settings: &BTreeMap<K, SettingsNow>, subject: &K) -> SettingsNow {
+        settings
+            .get(subject)
+            .cloned()
+            .unwrap_or_else(|| SettingsNow::Unreadable("its settings were not read".to_string()))
+    }
+
+    /// Why a run cannot be compared on its settings; none when they are known.
+    pub fn why_not_compared(&self) -> Option<String> {
+        match self {
+            SettingsNow::Unconfigured => Some("measure is not configured".to_string()),
+            SettingsNow::Known(_) => None,
+            SettingsNow::Unreadable(why) => Some(format!("the settings cannot be read: {why}")),
+        }
+    }
+}
+
 /// What a measurement stands on: the code that was measured, what the Pin of that code stood on, and the settings
 /// (commands, layout, provider) it was made with. A measurement is *current* while the Project's Pin and the
 /// settings still give this stamp; once any part moves, it measured something else.
@@ -424,26 +484,18 @@ pub struct StepEvidence {
 pub struct MeasureStamp {
     code: Digest,
     basis: PinBasis,
-    settings: String,
+    settings: SettingsDigest,
 }
 
 impl MeasureStamp {
     /// The stamp of measuring the code `code`, standing on `basis`, with the settings `settings` (a digest the
-    /// runner makes of its configuration and its provider).
-    pub fn new(
-        code: Digest,
-        basis: PinBasis,
-        settings: impl Into<String>,
-    ) -> Result<MeasureStamp, MeasureError> {
-        let settings = settings.into();
-        if settings.trim().is_empty() {
-            return Err(MeasureError::BlankSettings);
-        }
-        Ok(MeasureStamp {
+    /// runner makes of what the run reads of its configuration).
+    pub fn new(code: Digest, basis: PinBasis, settings: SettingsDigest) -> MeasureStamp {
+        MeasureStamp {
             code,
             basis,
             settings,
-        })
+        }
     }
 
     /// The digest of the code measured.
@@ -457,14 +509,17 @@ impl MeasureStamp {
     }
 
     /// The settings digest.
-    pub fn settings(&self) -> &str {
+    pub fn settings(&self) -> &SettingsDigest {
         &self.settings
     }
 
-    /// Whether this is the stamp of measuring `code` standing on `basis`; with `settings` given, also with them.
-    /// Without them the settings are not compared (nothing could say what they are now).
-    pub fn holds(&self, code: Digest, basis: &PinBasis, settings: Option<&str>) -> bool {
-        self.code == code && self.basis == *basis && settings.is_none_or(|s| s == self.settings)
+    /// Whether this is the stamp of measuring `code` standing on `basis` under the settings that are `settings`
+    /// now. Only settings that are known are compared; settings that are not (`Unconfigured`, `Unreadable`) hold
+    /// for nothing.
+    pub fn holds(&self, code: Digest, basis: &PinBasis, settings: &SettingsNow) -> bool {
+        self.code == code
+            && self.basis == *basis
+            && matches!(settings, SettingsNow::Known(s) if *s == self.settings)
     }
 
     /// One digest of the whole stamp, for a person to compare two stamps by eye.
@@ -531,7 +586,7 @@ impl<'a> StampRef<'a> {
     }
 
     /// The settings digest.
-    pub fn settings(&self) -> &'a str {
+    pub fn settings(&self) -> &'a SettingsDigest {
         match self {
             StampRef::Code(s) => s.settings(),
             StampRef::Sim(s) => s.settings(),
@@ -631,27 +686,73 @@ mod tests {
         )
     }
 
+    /// Settings that read as the digest of `word`.
+    fn settings(word: &str) -> SettingsDigest {
+        SettingsDigest::new(Digest::of(word.as_bytes()))
+    }
+
+    fn known(word: &str) -> SettingsNow {
+        SettingsNow::Known(settings(word))
+    }
+
     #[test]
     fn a_stamp_holds_for_what_it_measured_and_not_for_a_moved_part() {
         let code = Digest::of(b"code");
-        let stamp = MeasureStamp::new(code, basis(Revision::first()), "settings-1").unwrap();
-        assert!(stamp.holds(code, &basis(Revision::first()), Some("settings-1")));
-        // settings are compared only when known
-        assert!(stamp.holds(code, &basis(Revision::first()), None));
-        assert!(!stamp.holds(code, &basis(Revision::first()), Some("settings-2")));
-        assert!(!stamp.holds(Digest::of(b"other"), &basis(Revision::first()), None));
-        assert!(!stamp.holds(code, &basis(Revision::first().next()), None));
+        let stamp = MeasureStamp::new(code, basis(Revision::first()), settings("settings-1"));
+        let now = known("settings-1");
+        assert!(stamp.holds(code, &basis(Revision::first()), &now));
+        assert!(!stamp.holds(code, &basis(Revision::first()), &known("settings-2")));
+        assert!(!stamp.holds(Digest::of(b"other"), &basis(Revision::first()), &now));
+        assert!(!stamp.holds(code, &basis(Revision::first().next()), &now));
+    }
+
+    #[test]
+    fn settings_that_cannot_be_compared_hold_for_nothing_and_say_why() {
+        let code = Digest::of(b"code");
+        let stamp = MeasureStamp::new(code, basis(Revision::first()), settings("s"));
+        // everything else is as measured, and still the stamp does not hold
+        let unreadable = SettingsNow::Unreadable("no layout".to_string());
+        for now in [SettingsNow::Unconfigured, unreadable.clone()] {
+            assert!(
+                !stamp.holds(code, &basis(Revision::first()), &now),
+                "{now:?}"
+            );
+        }
         assert_eq!(
-            MeasureStamp::new(code, basis(Revision::first()), " "),
-            Err(MeasureError::BlankSettings)
+            SettingsNow::Unconfigured.why_not_compared().as_deref(),
+            Some("measure is not configured")
         );
+        assert_eq!(
+            unreadable.why_not_compared().as_deref(),
+            Some("the settings cannot be read: no layout")
+        );
+        assert_eq!(known("s").why_not_compared(), None);
+    }
+
+    #[test]
+    fn a_subject_with_no_settings_among_them_has_settings_that_were_not_read() {
+        let among = BTreeMap::from([(1u8, known("s"))]);
+        assert_eq!(SettingsNow::of(&among, &1), known("s"));
+        let missing = SettingsNow::of(&among, &2);
+        assert_eq!(
+            missing.why_not_compared().as_deref(),
+            Some("the settings cannot be read: its settings were not read")
+        );
+    }
+
+    #[test]
+    fn a_settings_digest_shows_as_the_digest_it_was_made_from() {
+        let digest = Digest::of(b"s");
+        assert_eq!(SettingsDigest::new(digest).to_string(), digest.to_string());
+        assert_eq!(settings("s"), settings("s"));
+        assert_ne!(settings("s"), settings("t"));
     }
 
     #[test]
     fn the_fingerprint_follows_every_part_of_the_stamp() {
         let code = Digest::of(b"code");
         let print = |c: Digest, r: Revision, s: &str| {
-            MeasureStamp::new(c, basis(r), s).unwrap().fingerprint()
+            MeasureStamp::new(c, basis(r), settings(s)).fingerprint()
         };
         let base = print(code, Revision::first(), "s");
         assert_eq!(base, print(code, Revision::first(), "s"));

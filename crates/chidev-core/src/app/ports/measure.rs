@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use thiserror::Error;
 
-use crate::domain::vo::measure::{MeasureFailure, MutantResult, StepEvidence};
+use crate::domain::vo::measure::{MeasureFailure, MutantResult, SettingsDigest, StepEvidence};
 use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{CaseRun, CitedClause, RegressName, Rerun};
 
@@ -44,6 +44,9 @@ pub struct MutateRequest {
 /// What a run observed. A run that failed carries the failure and what it got through before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutateReport {
+    /// The digest of the settings the run resolved and ran under. The measurement is stamped with this one, and not
+    /// with a digest asked for before the run, which another resolution could have differed from.
+    pub settings: SettingsDigest,
     /// How many places the provider found to change.
     pub sites: u32,
     /// How many mutants the provider gave to run (at most `max_mutants` of the sites); the mutants below are fewer
@@ -89,6 +92,8 @@ pub struct SimulateRequest {
 /// What a simulation observed. A run that failed carries the failure and what it got through before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimulateReport {
+    /// The digest of the settings the run resolved and ran under; the measurement is stamped with it.
+    pub settings: SettingsDigest,
     /// Each case that was run, in order: the seeds, then the regress cases.
     pub cases: Vec<CaseRun>,
     /// The sampled cases, run a second time in a fresh copy, and how they compared.
@@ -99,28 +104,130 @@ pub struct SimulateReport {
     pub evidence: Vec<StepEvidence>,
 }
 
-/// Why a run could not even be set up: nothing was run, so nothing is kept.
+/// What a layout entry places: the code of an Interface, or the source of a Harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutPlace {
+    /// An Interface's code.
+    Interface,
+    /// A Harness's source.
+    Harness,
+}
+
+impl fmt::Display for LayoutPlace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LayoutPlace::Interface => "interface",
+            LayoutPlace::Harness => "harness",
+        })
+    }
+}
+
+/// Which command of a run a program belongs to, for a message about the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandRole {
+    /// The command that builds the copy.
+    Build,
+    /// The command that runs the tests.
+    Test,
+    /// The provider that makes the mutants of a language.
+    Provider {
+        /// The language of the Interface the provider is for.
+        lang: String,
+    },
+    /// The interpreter a sim script runs under.
+    Interpreter,
+}
+
+impl fmt::Display for CommandRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandRole::Build => f.write_str("the build command"),
+            CommandRole::Test => f.write_str("the test command"),
+            CommandRole::Provider { lang } => write!(f, "the provider for `{lang}`"),
+            CommandRole::Interpreter => f.write_str("the interpreter"),
+        }
+    }
+}
+
+/// Why a run could not even be set up, or why the settings of one cannot be read: nothing was run, so nothing is
+/// kept. Each way is its own variant, for a caller has to tell a project with no `[measure]` from one whose table
+/// cannot measure this.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RunnerError {
     /// The program was started without a measure configuration.
     #[error("no measure is configured; add a [measure] table to the project's settings")]
     Unconfigured,
-    /// The configuration cannot measure this: no layout for the Interface or a Harness, no provider for its
-    /// language, a provider that cannot be found.
+    /// `[[measure.layout]]` has no entry for the Interface or the Harness.
+    #[error("[[measure.layout]] has no entry for the {place} `{name}` of `{context}`")]
+    NoLayout {
+        /// Whether it is an Interface or a Harness that is not laid out.
+        place: LayoutPlace,
+        /// The Context it is of.
+        context: ContextName,
+        /// Its name.
+        name: AssetName,
+    },
+    /// The layout of the Interface has no `lang`, which picks the provider that mutates its code.
+    #[error("the layout of interface `{interface}` has no `lang`, which mutating its code needs")]
+    NoLang {
+        /// The Interface.
+        interface: AssetName,
+    },
+    /// `mutants` has no command for the language.
+    #[error("`mutants` has no command for `{lang}`")]
+    NoProvider {
+        /// The language of the Interface.
+        lang: String,
+    },
+    /// `[measure]` has no `test` command, which a mutation run needs.
+    #[error("[measure] has no `test` command to mutate with")]
+    NoTestCommand,
+    /// `[measure.sim.<context>]` is not there.
+    #[error("[measure.sim.{context}] is not configured; it gives the interpreter and the program")]
+    NoSimConfig {
+        /// The Context that has no table.
+        context: ContextName,
+    },
+    /// The program of a command cannot be found.
+    #[error("{what}: {reason}")]
+    Locate {
+        /// Whose program it is.
+        what: CommandRole,
+        /// Why it is not found.
+        reason: String,
+    },
+    /// The program of a command is found, but its digest cannot be read.
+    #[error("{what}: {reason}")]
+    Fingerprint {
+        /// Whose program it is.
+        what: CommandRole,
+        /// Why its bytes cannot be read.
+        reason: String,
+    },
+    /// The name of a run is not one for a directory: it could lead out of the directory the runs work in.
+    #[error("`{0}` is not a name for a run's directory")]
+    BadRunName(String),
+    /// The settings cannot be written down to be digested.
+    #[error("the settings cannot be digested: {0}")]
+    Digest(String),
+    /// A time limit of the configuration is more than the clock can count.
     #[error("{0}")]
-    Config(String),
+    Deadline(String),
 }
 
 /// Consumer-owned port to run a measure. An implementation copies the project, never touches the project's own
 /// files, bounds what it runs by deadlines, and removes what it made.
 pub trait Runner: fmt::Debug + Send + Sync {
-    /// A digest of everything the configuration contributes to a run of `interface` of `context` (commands, layout,
-    /// provider and its executable): a measurement made with another one is made under other settings.
+    /// The digest of what a mutation run of `interface` of `context` that runs the tests `harnesses` reads of the
+    /// configuration: a measurement made with another digest is made under other settings. It covers the settings
+    /// that run reads and no others. It says what the settings are now; the stamp of a run is the digest in its
+    /// [`MutateReport`].
     fn settings<'a>(
         &'a self,
         context: &'a ContextName,
         interface: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>>;
+        harnesses: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>>;
 
     /// Mutates the code of an Interface and runs the Harnesses against each mutant.
     fn mutate<'a>(
@@ -128,14 +235,14 @@ pub trait Runner: fmt::Debug + Send + Sync {
         request: &'a MutateRequest,
     ) -> BoxFuture<'a, Result<MutateReport, RunnerError>>;
 
-    /// A digest of everything the configuration contributes to a simulation of the sim Harness `harness` of
-    /// `context` (the commands, the layout of the script and of the Interfaces, the limits, the interpreter and
-    /// its executable). An error when the configuration cannot simulate it.
+    /// The digest of what a simulation of the sim Harness `harness` of `context` reads of the configuration, if
+    /// the Interfaces `builds` are the ones it builds. An error when the configuration cannot simulate it.
     fn sim_settings<'a>(
         &'a self,
         context: &'a ContextName,
         harness: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>>;
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>>;
 
     /// Builds the program from the pinned code and runs the script for each case, then again for a sample of the
     /// cases in a fresh copy, to see that the same case gives the same schedule and trace.
@@ -154,7 +261,8 @@ impl Runner for NoRunner {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 
@@ -169,7 +277,8 @@ impl Runner for NoRunner {
         &'a self,
         _: &'a ContextName,
         _: &'a AssetName,
-    ) -> BoxFuture<'a, Result<String, RunnerError>> {
+        _: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
 
@@ -178,5 +287,45 @@ impl Runner for NoRunner {
         _: &'a SimulateRequest,
     ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_application_with_no_measure_configured_can_read_no_settings() {
+        let (context, name) = (
+            ContextName::try_from("core").unwrap(),
+            AssetName::try_from("api").unwrap(),
+        );
+        let error = NoRunner.settings(&context, &name, &[]).await.unwrap_err();
+        assert_eq!(error, RunnerError::Unconfigured);
+        assert_eq!(
+            error.to_string(),
+            "no measure is configured; add a [measure] table to the project's settings"
+        );
+        assert_eq!(
+            NoRunner
+                .sim_settings(&context, &name, &[])
+                .await
+                .unwrap_err(),
+            RunnerError::Unconfigured
+        );
+    }
+
+    #[test]
+    fn the_role_of_a_command_is_named_in_a_message_and_the_provider_by_its_language() {
+        assert_eq!(CommandRole::Build.to_string(), "the build command");
+        assert_eq!(CommandRole::Test.to_string(), "the test command");
+        assert_eq!(CommandRole::Interpreter.to_string(), "the interpreter");
+        assert_eq!(
+            CommandRole::Provider {
+                lang: "rust".to_string()
+            }
+            .to_string(),
+            "the provider for `rust`"
+        );
     }
 }

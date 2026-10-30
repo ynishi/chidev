@@ -13,6 +13,7 @@ use thiserror::Error;
 use super::clause::ClauseLabel;
 use super::digest::Digest;
 use super::id::{ClauseId, ContractId, InterfaceId};
+use super::measure::{SettingsDigest, SettingsNow};
 use super::name::AssetName;
 use super::revision::Revision;
 
@@ -31,9 +32,6 @@ pub enum SimError {
     /// A case is not `seed-<n>` or `regress-<name>`.
     #[error("a case is `seed-<n>` or `regress-<name>`: `{0}`")]
     BadCase(String),
-    /// A stamp has no settings.
-    #[error("a stamp names the settings the run was made with")]
-    BlankSettings,
     /// A text is not `<contract>:<label>`.
     #[error(
         "`{0}` is not a clause name (`<contract>:C<n>`, with the contract's name of a-z, 0-9, `-` and `_`)"
@@ -510,17 +508,13 @@ pub struct SimBasis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimStamp {
     basis: SimBasis,
-    settings: String,
+    settings: SettingsDigest,
 }
 
 impl SimStamp {
     /// The stamp of a simulation that stood on `basis` and ran under `settings`.
-    pub fn new(basis: SimBasis, settings: impl Into<String>) -> Result<SimStamp, SimError> {
-        let settings = settings.into();
-        if settings.trim().is_empty() {
-            return Err(SimError::BlankSettings);
-        }
-        Ok(SimStamp { basis, settings })
+    pub fn new(basis: SimBasis, settings: SettingsDigest) -> SimStamp {
+        SimStamp { basis, settings }
     }
 
     /// What it stood on.
@@ -529,14 +523,15 @@ impl SimStamp {
     }
 
     /// The settings digest.
-    pub fn settings(&self) -> &str {
+    pub fn settings(&self) -> &SettingsDigest {
         &self.settings
     }
 
-    /// Whether this is the stamp of a simulation that stood on `basis`; with `settings` given, also under them.
-    /// Without them the settings are not compared (nothing could say what they are now).
-    pub fn holds(&self, basis: &SimBasis, settings: Option<&str>) -> bool {
-        self.basis == *basis && settings.is_none_or(|s| s == self.settings)
+    /// Whether this is the stamp of a simulation that stood on `basis` under the settings that are `settings` now.
+    /// Only settings that are known are compared; settings that are not (`Unconfigured`, `Unreadable`) hold for
+    /// nothing.
+    pub fn holds(&self, basis: &SimBasis, settings: &SettingsNow) -> bool {
+        self.basis == *basis && matches!(settings, SettingsNow::Known(s) if *s == self.settings)
     }
 
     /// One digest of the whole stamp, for a person to compare two stamps by eye.
@@ -911,21 +906,35 @@ mod tests {
         }
     }
 
+    fn settings(word: &str) -> SettingsDigest {
+        SettingsDigest::new(Digest::of(word.as_bytes()))
+    }
+
+    fn known(word: &str) -> SettingsNow {
+        SettingsNow::Known(settings(word))
+    }
+
     #[test]
     fn a_stamp_holds_for_what_it_ran_and_not_for_any_moved_part() {
-        let stamp = SimStamp::new(basis(Revision::first(), Some(b"code")), "s1").unwrap();
-        assert!(stamp.holds(&basis(Revision::first(), Some(b"code")), Some("s1")));
-        assert!(stamp.holds(&basis(Revision::first(), Some(b"code")), None));
-        assert!(!stamp.holds(&basis(Revision::first(), Some(b"code")), Some("s2")));
-        assert!(!stamp.holds(&basis(Revision::first().next(), Some(b"code")), None));
-        assert!(!stamp.holds(&basis(Revision::first(), Some(b"other")), None));
-        assert!(!stamp.holds(&basis(Revision::first(), None), None));
-        assert_eq!(
-            SimStamp::new(basis(Revision::first(), None), " "),
-            Err(SimError::BlankSettings)
-        );
+        let stamp = SimStamp::new(basis(Revision::first(), Some(b"code")), settings("s1"));
+        let now = known("s1");
+        assert!(stamp.holds(&basis(Revision::first(), Some(b"code")), &now));
+        assert!(!stamp.holds(&basis(Revision::first(), Some(b"code")), &known("s2")));
+        assert!(!stamp.holds(&basis(Revision::first().next(), Some(b"code")), &now));
+        assert!(!stamp.holds(&basis(Revision::first(), Some(b"other")), &now));
+        assert!(!stamp.holds(&basis(Revision::first(), None), &now));
+        // settings that cannot be compared hold for nothing, whatever else is as it was
+        for now in [
+            SettingsNow::Unconfigured,
+            SettingsNow::Unreadable("no layout".to_string()),
+        ] {
+            assert!(
+                !stamp.holds(&basis(Revision::first(), Some(b"code")), &now),
+                "{now:?}"
+            );
+        }
         let print = |r: Revision, p: Option<&[u8]>, s: &str| {
-            SimStamp::new(basis(r, p), s).unwrap().fingerprint()
+            SimStamp::new(basis(r, p), settings(s)).fingerprint()
         };
         let base = print(Revision::first(), Some(b"c"), "s");
         assert_eq!(base, print(Revision::first(), Some(b"c"), "s"));

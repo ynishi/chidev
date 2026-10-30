@@ -8,6 +8,7 @@ use crate::domain::entity::measurement::Measurement;
 use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::id::{ChangeRequestId, HarnessId, InterfaceId};
+use crate::domain::vo::measure::SettingsNow;
 
 /// The model a check is run on: one state of it. It is everything a check may look at, so that a check is a
 /// function of it alone. A check never sees two states; what a change introduced is found by running the checks
@@ -27,18 +28,32 @@ pub struct CheckView<'a> {
     /// and kind that has one. The moments of a change give none: a measurement is read by the on-demand moment, and a
     /// change does not move it.
     pub measurements: &'a [Measurement],
-    /// What the settings digest of the measure is now, for each Interface the runner can say it for; an
-    /// Interface it cannot say it for (no runner, or no layout for it) is absent, and its measurements are not
-    /// compared on settings.
-    pub measure_settings: &'a BTreeMap<InterfaceId, String>,
-    /// The same for the sim Harnesses: what the settings digest of a simulation of each is now, when the runner
-    /// can say it (no runner, no layout for the script, or no `[measure.sim]` for the Context: absent).
-    pub sim_settings: &'a BTreeMap<HarnessId, String>,
+    /// What the settings of a mutation run are now, for each Interface that is in the model and whose
+    /// measurements are read. An Interface that is absent (it is no longer in the model, or the moment reads no
+    /// measurements: an edit) is read by [`CheckView::measure_settings_now`] as settings that cannot be read, so
+    /// its measurements are stale.
+    pub measure_settings: &'a BTreeMap<InterfaceId, SettingsNow>,
+    /// The same for the sim Harnesses: what the settings of a simulation of each are now, absent as above.
+    pub sim_settings: &'a BTreeMap<HarnessId, SettingsNow>,
     /// The change request this state is the resolution of: set only when the use case that resolves one runs the
     /// checks, on the state with it already resolved. The checks that judge only unresolved requests judge this one
     /// too, so that the resolution is told what was left (`cr.keep-moved`, `cr.out-of-frame`). None in every other
     /// state.
     pub resolving: Option<ChangeRequestId>,
+}
+
+impl CheckView<'_> {
+    /// What the settings of a mutation run of `interface` are now; settings that were not read when the view has
+    /// none for it.
+    pub fn measure_settings_now(&self, interface: InterfaceId) -> SettingsNow {
+        SettingsNow::of(self.measure_settings, &interface)
+    }
+
+    /// What the settings of a simulation of `harness` are now; settings that were not read when the view has none
+    /// for it.
+    pub fn sim_settings_now(&self, harness: HarnessId) -> SettingsNow {
+        SettingsNow::of(self.sim_settings, &harness)
+    }
 }
 
 /// A change to the model, as the states on either side of it: what the use case read, and what it would keep.
