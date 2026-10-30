@@ -1073,10 +1073,15 @@ mod tests {
         };
         let run = simulated(&p, 1, outcome);
         let runs = std::slice::from_ref(&run);
-        for (now, said) in [
-            (SettingsNow::Unconfigured, "measure is not configured"),
+        for (now, word, said) in [
+            (
+                SettingsNow::Unconfigured,
+                "settings-unconfigured",
+                "measure is not configured",
+            ),
             (
                 SettingsNow::Unreadable("no layout for the script".to_string()),
+                "settings-unreadable",
                 "the settings cannot be read: no layout for the script",
             ),
         ] {
@@ -1085,7 +1090,7 @@ mod tests {
             assert_eq!(stale.len(), 1, "{said}");
             assert_eq!(
                 stale[0].message(),
-                format!("the latest simulation is stale: settings ({said})")
+                format!("the latest simulation is stale: {word} ({said})")
             );
             // a stale run is not judged: its finding is not reported
             assert!(found(&SimFinding, &p, runs, &now).is_empty());
@@ -1102,7 +1107,7 @@ mod tests {
         assert_eq!(both.len(), 1);
         assert_eq!(
             both[0].message(),
-            "the latest simulation is stale: script, settings (measure is not configured)"
+            "the latest simulation is stale: script, settings-unconfigured (measure is not configured)"
         );
         // settings that moved are a change, and say nothing of being unreadable
         let moved = found(

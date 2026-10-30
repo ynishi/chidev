@@ -14,8 +14,8 @@ use chidev_core::app::{
     DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
     ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
     Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasurementState, ModelSlice,
-    ModelView, OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput, PutDone,
-    PutInput, RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining,
+    ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue, PinState, Place, PolicyLineInput,
+    PutDone, PutInput, RaiseCruxInput, Raised, RecommendationInput, RecommendedStatus, Remaining,
     RenameInput, ReportInput, ReportedFinding, ResolutionInput, ResolutionStatus, RetireInput,
     RetiredStatus, Retirement, RuleCard, RuleStanding, RuleToJudge, SubjectInput, TargetInput,
     TargetRef, TransitionStatus, ViewInput,
@@ -1013,15 +1013,30 @@ struct MeasureOut<'a> {
 }
 
 /// A part of what a measurement stands on that moved, in the result of `status`.
+/// Each shape has exactly the fields it says, and none is left out by a flag.
 #[derive(Debug, Serialize)]
-struct MovedOut<'a> {
-    part: &'static str,
-    /// The name of the asset the part is about; left out for a part that is not about one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    /// Why the settings cannot be read, in the runner's words; left out for any other part.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'a str>,
+#[serde(untagged)]
+enum MovedOut<'a> {
+    /// A part about an asset: its word and the asset's name.
+    Asset { part: &'static str, name: &'a str },
+    /// Settings the runner cannot read: the word and the runner's reason.
+    Unreadable { part: &'static str, reason: &'a str },
+    /// Any other part: its word.
+    Plain { part: &'static str },
+}
+
+impl<'a> From<&'a MovedPart> for MovedOut<'a> {
+    fn from(moved: &'a MovedPart) -> MovedOut<'a> {
+        let part = moved.part().word();
+        match (moved.name(), moved.part().reason()) {
+            (Some(name), _) => MovedOut::Asset {
+                part,
+                name: name.as_str(),
+            },
+            (None, Some(reason)) => MovedOut::Unreadable { part, reason },
+            (None, None) => MovedOut::Plain { part },
+        }
+    }
 }
 
 /// The latest measurement of an Interface or a sim Harness, in the result of `status`.
@@ -3769,14 +3784,9 @@ where
                         stamp: &m.stamp,
                         state: m.state.word(),
                         moved: match &m.state {
-                            MeasurementState::Stale(parts) => parts
-                                .iter()
-                                .map(|p| MovedOut {
-                                    part: p.part().word(),
-                                    name: p.name().map(AssetName::as_str),
-                                    reason: p.part().reason(),
-                                })
-                                .collect(),
+                            MeasurementState::Stale(parts) => {
+                                parts.iter().map(MovedOut::from).collect()
+                            }
                             MeasurementState::Current
                             | MeasurementState::Retired
                             | MeasurementState::Unpinned => Vec::new(),

@@ -594,6 +594,15 @@ impl StampPart {
         }
     }
 
+    /// Why settings could not be compared, in a sentence ([`SettingsGap::why`]); none for any other part, and for
+    /// settings that read as another digest.
+    pub fn why(&self) -> Option<String> {
+        match self {
+            StampPart::Settings(gap) => gap.why(),
+            _ => None,
+        }
+    }
+
     /// The reason the runner gave for settings it cannot read, in its own words; none for any other part.
     pub fn reason(&self) -> Option<&str> {
         match self {

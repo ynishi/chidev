@@ -324,7 +324,7 @@ fn the_pinned_code_is_mutated_the_missed_mutant_is_found_and_a_changed_harness_m
     let message = stale[0]["message"].as_str().expect("message");
     assert!(
         message.starts_with(
-            "the latest mutation run is stale: settings (the settings cannot be read: "
+            "the latest mutation run is stale: settings-unreadable (the settings cannot be read: "
         ),
         "{message}"
     );

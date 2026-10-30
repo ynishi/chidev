@@ -24,17 +24,14 @@ impl Moved {
     }
 
     /// What moved, said in a line for a finding: the word of each part ([`StampPart::word`]) once, in the order they
-    /// first come, joined by commas. The settings say `settings` whatever their gap, and when they could not be
-    /// compared they say why: `settings (measure is not configured)`.
+    /// first come, joined by commas. Settings that could not be compared say why beside their word:
+    /// `settings-unconfigured (measure is not configured)`.
     pub fn said(&self) -> String {
         let mut said: Vec<String> = Vec::new();
         for part in &self.0 {
-            let one = match part {
-                StampPart::Settings(gap) => match gap.why() {
-                    Some(why) => format!("settings ({why})"),
-                    None => "settings".to_string(),
-                },
-                other => other.word().to_string(),
+            let one = match part.why() {
+                Some(why) => format!("{} ({why})", part.word()),
+                None => part.word().to_string(),
             };
             if !said.contains(&one) {
                 said.push(one);
@@ -210,11 +207,11 @@ mod tests {
         assert_eq!(said(SettingsGap::Differ), "code, settings");
         assert_eq!(
             said(SettingsGap::Unconfigured),
-            "code, settings (measure is not configured)"
+            "code, settings-unconfigured (measure is not configured)"
         );
         assert_eq!(
             said(SettingsGap::Unreadable("no layout".to_string())),
-            "code, settings (the settings cannot be read: no layout)"
+            "code, settings-unreadable (the settings cannot be read: no layout)"
         );
     }
 }
