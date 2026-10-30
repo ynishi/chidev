@@ -113,7 +113,7 @@ enum Command {
 }
 
 /// Where the project is kept, for the commands that run on it.
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct StoreArg {
     /// The database that keeps the project, relative to the current directory. Without it, the project's settings
     /// say (`[store]` in `chidev.toml`), and else it is `.chidev/chidev.db` under the project's root. `check` and
@@ -165,24 +165,12 @@ enum Measure {
 }
 
 impl Measure {
-    /// The store, the Context, and what to measure in it.
-    fn parts(self) -> (StoreArg, String, ops::Measuring) {
+    /// Where the project is kept.
+    fn store(&self) -> &StoreArg {
         match self {
-            Measure::Mutate {
-                context,
-                interface,
-                store,
-            } => (store, context, ops::Measuring::Mutate { interface }),
-            Measure::Simulate {
-                context,
-                harness,
-                store,
-            } => (store, context, ops::Measuring::Simulate { harness }),
-            Measure::Examples {
-                context,
-                harness,
-                store,
-            } => (store, context, ops::Measuring::Examples { harness }),
+            Measure::Mutate { store, .. }
+            | Measure::Simulate { store, .. }
+            | Measure::Examples { store, .. } => store,
         }
     }
 }
@@ -318,10 +306,10 @@ async fn main() -> ExitCode {
             .await
         }
         Command::Measure { measure } => {
-            let (store, context, what) = measure.parts();
+            let store = measure.store().clone();
             with_app(store, Opening::Existing, async move |app, _root| {
                 let mut out = io::stdout().lock();
-                let done = ops::measure(app, context, what, &mut out).await;
+                let done = ops::measure(app, measure, &mut out).await;
                 exit_code(done, &mut out)
             })
             .await

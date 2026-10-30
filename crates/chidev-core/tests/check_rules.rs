@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use chidev_core::app::ports::IdSource;
 use chidev_core::app::{App, AppError, CheckResult, ClauseInput, Found, Registry};
 use chidev_core::domain::check::external::ExternalRule;
-use chidev_core::domain::check::{Moment, Selector, builtin};
+use chidev_core::domain::check::{FindingState, Level, Moment, Selector, builtin};
 use chidev_core::domain::vo::finding::RuleId;
 use chidev_core::domain::vo::model_section::ModelSection;
 use chidev_core::domain::vo::timestamp::Timestamp;
@@ -242,6 +242,48 @@ async fn a_selector_that_matches_no_check_is_refused_with_the_names_near_it() {
         }
         e => panic!("expected an unknown rule selector, got {e:?}"),
     }
+}
+
+fn found(level: Level, state: FindingState) -> Found {
+    Found {
+        rule: RuleId::from_static(BUILTIN),
+        level,
+        state,
+        message: String::new(),
+        help: String::new(),
+        about: None,
+        subject: None,
+        stale: false,
+        judgment: None,
+    }
+}
+
+#[test]
+fn only_an_error_no_change_request_deals_with_is_owed() {
+    let result = |findings| CheckResult {
+        findings,
+        outside: 0,
+    };
+    assert!(!result(vec![]).owed());
+    assert!(result(vec![found(Level::Error, FindingState::Open)]).owed());
+    for state in [FindingState::Addressed, FindingState::Decided] {
+        assert!(
+            !result(vec![found(Level::Error, state)]).owed(),
+            "{state:?}"
+        );
+    }
+    for level in [Level::Warning, Level::Note] {
+        assert!(!result(vec![found(level, FindingState::Open)]).owed());
+    }
+    // one owed finding among others is enough
+    assert!(
+        result(vec![
+            found(Level::Warning, FindingState::Open),
+            found(Level::Error, FindingState::Decided),
+            found(Level::Error, FindingState::Open),
+        ])
+        .owed()
+    );
 }
 
 #[tokio::test]

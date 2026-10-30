@@ -339,6 +339,17 @@ pub struct CheckResult {
     pub outside: usize,
 }
 
+impl CheckResult {
+    /// Whether a finding of the result is still owed: an `error` that no change request deals with (its state is
+    /// `open`). One a change request addresses, or has decided, is not: it is being dealt with, or was dealt with,
+    /// as the gate of a change counts what is still owed. What a command that answers by exit status exits 1 for.
+    pub fn owed(&self) -> bool {
+        self.findings
+            .iter()
+            .any(|f| f.level == Level::Error && f.state == FindingState::Open)
+    }
+}
+
 /// What a use case did and what the checks found while it did it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked<T> {

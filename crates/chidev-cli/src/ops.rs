@@ -20,7 +20,7 @@ use chidev_core::app::{
     ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
     RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
 };
-use chidev_core::domain::check::{FindingState, Level, Moment, Selector, renamed_key};
+use chidev_core::domain::check::{Level, Moment, Selector, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
 use chidev_core::domain::entity::crux::CruxField;
 use chidev_core::domain::entity::measurement::MeasurementField;
@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod diagnostic;
+use crate::Measure;
 use diagnostic::DiagnosticOut;
 
 /// One operation. `op` names it; the other fields are its arguments.
@@ -3216,27 +3217,6 @@ where
     (result, ok)
 }
 
-/// What `chidev measure` is asked to measure: the kind, and the one asset of the Context it takes (an Interface to
-/// mutate, a Harness to run).
-#[derive(Debug, Clone)]
-pub enum Measuring {
-    /// The code of an Interface against its Harnesses, once per mutant.
-    Mutate {
-        /// The Interface.
-        interface: String,
-    },
-    /// A sim Harness against the program built from the Pins it cites.
-    Simulate {
-        /// The Harness.
-        harness: String,
-    },
-    /// A Harness of examples against the program built from the Pins it cites.
-    Examples {
-        /// The Harness.
-        harness: String,
-    },
-}
-
 /// Writes the line `exec` would print for the operation `op` (its first line) given what the use case answered: the
 /// result and whether the command is to fail on it, or a refusal, which fails it. Returns whether the command
 /// succeeded. An error is only a failure to write.
@@ -3251,13 +3231,14 @@ where
     G: IdSource,
     E: ExternalExecutor,
 {
-    // the tag of the operation is what `exec` reads it by, so it is what the line says
-    let raw = serde_json::to_value(op).ok();
+    // the tag of the operation is what `exec` reads it by, so it is what the line says; an operation that cannot be
+    // written is no line to print, and is said as a failure to write
+    let raw = serde_json::to_value(op).map_err(io::Error::other)?;
     let (result, failed) = match result {
         Ok((value, failed)) => (Ok(value), failed),
         Err(error) => (Err(Refusal::Refused(error)), true),
     };
-    let (line, _) = result_line(app, result, raw.as_ref(), 1).await;
+    let (line, _) = result_line(app, result, Some(&raw), 1).await;
     writeln!(out, "{line}")?;
     Ok(!failed)
 }
@@ -3280,13 +3261,13 @@ where
     command_line(app, &Op::Check { context, rules }, result, out).await
 }
 
-/// `chidev measure`: runs the operation `measure` of the kind `what` says in the Context `context` and writes its
-/// result line to `out`, the line `exec` would print for the same operation. Returns whether the command succeeded:
-/// the operation was accepted and the run it recorded did not fail. An error is only a failure to write.
+/// `chidev measure`: runs the operation `measure` that the command `measure` stands for and writes its result line to
+/// `out`, the line `exec` would print for the same operation. Returns whether the command succeeded: the operation was
+/// accepted and the run it recorded did not fail. An error is only a failure to write. The one place the command is
+/// mapped to the shape of the operation.
 pub async fn measure<S, G, E>(
     app: &mut App<S, G, E>,
-    context: String,
-    what: Measuring,
+    measure: Measure,
     out: &mut impl Write,
 ) -> io::Result<bool>
 where
@@ -3294,12 +3275,25 @@ where
     G: IdSource,
     E: ExternalExecutor,
 {
-    let (kind, interface, harness) = match what {
-        Measuring::Mutate { interface } => (MeasureKindDto::Mutate, Some(interface), None),
-        Measuring::Simulate { harness } => (MeasureKindDto::Simulate, None, Some(harness)),
-        Measuring::Examples { harness } => (MeasureKindDto::Examples, None, Some(harness)),
+    let (kind, context, interface, harness) = match measure {
+        Measure::Mutate {
+            context, interface, ..
+        } => (MeasureKindDto::Mutate, context, Some(interface), None),
+        Measure::Simulate {
+            context, harness, ..
+        } => (MeasureKindDto::Simulate, context, None, Some(harness)),
+        Measure::Examples {
+            context, harness, ..
+        } => (MeasureKindDto::Examples, context, None, Some(harness)),
     };
-    let result = measure_op(app, kind, &context, interface.clone(), harness.clone()).await;
+    let result = measure_op(
+        app,
+        kind,
+        &context,
+        interface.as_deref(),
+        harness.as_deref(),
+    )
+    .await;
     let op = Op::Measure {
         kind,
         context,
@@ -3404,8 +3398,8 @@ async fn measure_op<S, G, E>(
     app: &mut App<S, G, E>,
     kind: MeasureKindDto,
     context: &str,
-    interface: Option<String>,
-    harness: Option<String>,
+    interface: Option<&str>,
+    harness: Option<&str>,
 ) -> Result<(Value, bool), AppError>
 where
     S: Store,
@@ -3414,11 +3408,10 @@ where
 {
     let done = match (MeasureKind::from(kind), interface, harness) {
         (MeasureKind::Mutate, Some(interface), None) => {
-            app.measure(MeasureKind::Mutate, context, &interface)
-                .await?
+            app.measure(MeasureKind::Mutate, context, interface).await?
         }
-        (MeasureKind::Simulate, None, Some(harness)) => app.simulate(context, &harness).await?,
-        (MeasureKind::Examples, None, Some(harness)) => app.run_examples(context, &harness).await?,
+        (MeasureKind::Simulate, None, Some(harness)) => app.simulate(context, harness).await?,
+        (MeasureKind::Examples, None, Some(harness)) => app.run_examples(context, harness).await?,
         (MeasureKind::Mutate, _, _) => {
             return Err(AppError::Input(
                 "a `mutate` measure takes an `interface` and no `harness`".to_string(),
@@ -3525,8 +3518,7 @@ where
 }
 
 /// The operation `check`: the result, and whether a finding in it is still owed (what `chidev check` exits 1 for),
-/// read from the findings and not from the result. A finding at `error` is owed while no change request deals with
-/// it (`open`); one a change request addresses or has decided is not, as the change gate counts what is owed.
+/// as the use case says ([`chidev_core::app::CheckResult::owed`]) and not as the result reads.
 async fn check_op<S, G, E>(
     app: &App<S, G, E>,
     context: Option<&str>,
@@ -3544,15 +3536,11 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     let checked = app.check(context, &selectors).await?;
-    let owed = checked
-        .findings
-        .iter()
-        .any(|f| f.level == Level::Error && f.state == FindingState::Open);
     let out = to_value(&CheckOut {
         findings: findings_out(&checked.findings),
         outside: (context.is_some() || !selectors.is_empty()).then_some(checked.outside),
     })?;
-    Ok((out, owed))
+    Ok((out, checked.owed()))
 }
 
 async fn apply<S, G, E>(app: &mut App<S, G, E>, root: &Path, op: Op) -> Result<Value, AppError>
@@ -3576,7 +3564,17 @@ where
             context,
             interface,
             harness,
-        } => measure_op(app, kind, &context, interface, harness).await?.0,
+        } => {
+            measure_op(
+                app,
+                kind,
+                &context,
+                interface.as_deref(),
+                harness.as_deref(),
+            )
+            .await?
+            .0
+        }
         Op::Init => to_value(&InitOut {
             project: app.init().await?.to_string(),
         })?,
