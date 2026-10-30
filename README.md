@@ -778,7 +778,7 @@ mutants, and for each one applies the edit, builds (a build that fails is
 *stillborn*), tests (a failure *killed* it, a pass lets it *survive*, a deadline is
 a *timeout*) and puts the code back. The result is kept as a measurement: its
 stamp (the Pin's code digest, the revisions the Pin stands on, a digest of the
-settings and of the provider program), each mutant with its site, operator and
+settings the run read, see "`[measure]` in `chidev.toml`"), each mutant with its site, operator and
 outcome, the evidence of the commands (command, executable digest, exit code,
 time), and the failure if there was one. Measurements are appended; the newest per
 kind and Interface is current, the older stay as history
@@ -856,8 +856,19 @@ Interface (the Harnesses of the Pin's basis) needs a layout entry, and the Harne
 must be a file of its own (an in-file `#[cfg(test)]` module cannot be told apart
 from the code). A field that is not known is refused by name. A project with no
 `[measure]` has no runner: `measure` is refused, and the checks still judge what is
-kept. The settings digest covers the whole table and the provider's executable, so
-changing a command or upgrading the provider makes earlier runs stale.
+kept. The settings digest is of one kind of run for one subject, and covers the values
+that run reads, defaults applied, and the executable of the first word of `build`,
+`test`, the provider (of the Interface's `lang`) and, for a sim, the interpreter. A
+mutation run reads `copy_exclude`, `env`, `build`, `baseline_timeout`, `test`, the
+provider command, `operators`, `timeout`, `budget`, `max_mutants`, `seed` and the layout
+of its Interface and of the tests it runs; so changing one, or upgrading the provider,
+makes earlier runs stale. A setting the run does not read (the sim tables, `items`, the
+layout of other things) does not. The host environment and `PATH`, the files of the copy
+other than the pinned code and the Harnesses, and the programs a later word of a command
+starts are not in it (`sh -c "cargo test"` digests `sh`), so a changed toolchain is in
+general not seen. A run whose settings cannot be read now (no `[measure]`, or no layout
+for it) is stale, not current. A run whose program in the copy is not the file digested
+at the project's root fails with kind `settings_moved`.
 
 **Placeholders.** A run has two places, and each has a name of its own that means the
 same wherever it is taken: `{run}` is the run's directory (under `.chidev/measure/`,
@@ -876,8 +887,8 @@ command until it is rewritten.
 
 `operators` limits the classes of mutant the provider is asked for (the bundled one
 makes `rel`, `eq`, `arith`, `logic`, `bool`, `int` and `str`). Leave it out for all of
-them; an empty list is refused. It is part of the settings digest, so changing it
-makes earlier runs stale. Leave `str` out to skip the mutants of string literals.
+them; an empty list is refused. A mutation run reads it, so changing it makes earlier
+runs stale. Leave `str` out to skip the mutants of string literals.
 
 `[measure.items]` is read by the same loader as `[measure.mutants]`: a language and
 the command that finds the Items of an Interface of that language (see "Provider
@@ -891,8 +902,8 @@ has a command for it. Three things follow from the table being `[measure]`'s:
 - A language with a command in `items` alone is valid, and it can be measured by
   nothing: `measure` stops, naming it, with "`mutants` has no command for `<lang>`".
 - The provider is started in the project's root, as the provider of mutants is, and
-  must answer within `timeout`. The settings digest covers the whole table, so a
-  changed `items` command makes earlier runs stale too.
+  must answer within `timeout`. No run reads `items`, so changing it leaves earlier
+  runs as they were.
 
 ### Provider protocol `chidev-mutants 1`
 
@@ -1162,8 +1173,10 @@ path = "sim.py"
 
 Every Interface a sim Harness builds needs a layout entry and a Pin (`pin` keeps
 the code text); the script needs one. `build` runs with `baseline_timeout`. The
-settings digest covers the whole `[measure]` table and the interpreter's
-executable.
+settings digest of a simulation covers `copy_exclude`, `env`, `build`,
+`baseline_timeout`, the Context's `[measure.sim.<context>]`, the layout of the script
+and of the Interfaces it builds, and the executables of `build` and the interpreter;
+the mutation settings are not in it.
 
 #### Rules
 

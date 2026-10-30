@@ -9,9 +9,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::Operator;
 use crate::domain::vo::name::{AssetName, ContextName};
 
@@ -43,8 +42,9 @@ const DEFAULT_ENV: [(&str, &str); 1] = [("CARGO_TARGET_DIR", "{run}/target")];
 /// second copy of a sim, which its second runs are made in, is `rerun-tree` in the same directory, so there `{tree}`
 /// is its root); any other `{...}` stays as it is. Only [`RunDirs::expand`] reads the text, so the fields that are
 /// a `Template` are the ones that are expanded; every other string of the table is a [`Plain`], which refuses a
-/// placeholder. The types of the table are therefore the one statement of where a placeholder is taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// placeholder. The types of the table are therefore the one statement of where a placeholder is taken. It is
+/// written as the text it is, placeholders unexpanded, which is how the settings digest holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Template(String);
 
 impl<'de> Deserialize<'de> for Template {
@@ -276,11 +276,8 @@ pub(super) struct Config {
     pub budget: Duration,
     pub max_mutants: usize,
     pub seed: u64,
-    /// The operator classes the provider is asked for; `None` leaves the choice to it (all it makes). Part of
-    /// the digest, as the whole table is.
+    /// The operator classes the provider is asked for; `None` leaves the choice to it (all it makes).
     pub operators: Option<Vec<String>>,
-    /// Digest of the table as written: any change of it is a change of the settings of a run.
-    pub digest: String,
 }
 
 impl Config {
@@ -512,10 +509,6 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             path,
         });
     }
-    let digest = Digest::of(
-        &serde_json::to_vec(value).map_err(|e| format!("cannot fingerprint the table: {e}"))?,
-    )
-    .to_string();
     Ok(Config {
         copy_exclude,
         env,
@@ -531,7 +524,6 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
         max_mutants,
         seed: raw.seed.unwrap_or(0),
         operators,
-        digest,
     })
 }
 
@@ -654,7 +646,8 @@ path = "tests/stock.rs"
 
     #[test]
     fn a_language_with_a_command_in_items_alone_is_a_language_and_one_in_neither_is_not() {
-        // the provider of items is read by the same loader, and is part of the digest
+        // the provider of items is read by the same loader; no run reads it, so it is not in the settings of one
+        // (`settings.rs` says so in its tests)
         let both = MINIMAL.replacen(
             "[mutants]",
             "[items]\nrust = [\"chidev\", \"provider\", \"items-rust\"]\n[mutants]",
@@ -662,7 +655,6 @@ path = "tests/stock.rs"
         );
         let config = parse(&table(&both)).unwrap();
         assert_eq!(config.items["rust"], ["chidev", "provider", "items-rust"]);
-        assert_ne!(config.digest, parse(&table(MINIMAL)).unwrap().digest);
         assert!(parse(&table(MINIMAL)).unwrap().items.is_empty());
         // a language that only `items` has a command for is a language of a layout
         let only_items = both.replacen(
@@ -683,15 +675,7 @@ path = "tests/stock.rs"
     }
 
     #[test]
-    fn the_digest_follows_the_table_as_written() {
-        let one = parse(&table(MINIMAL)).unwrap().digest;
-        assert_eq!(one, parse(&table(MINIMAL)).unwrap().digest);
-        let other = MINIMAL.replace("\"cargo\", \"test\"", "\"cargo\", \"test\", \"--quiet\"");
-        assert_ne!(one, parse(&table(&other)).unwrap().digest);
-    }
-
-    #[test]
-    fn operators_are_optional_and_part_of_the_digest() {
+    fn operators_are_optional() {
         let one = parse(&table(MINIMAL)).unwrap();
         assert_eq!(one.operators, None);
         let chosen = MINIMAL.replacen("[mutants]", "operators = [\"rel\", \"int\"]\n[mutants]", 1);
@@ -700,7 +684,6 @@ path = "tests/stock.rs"
             two.operators,
             Some(vec!["rel".to_string(), "int".to_string()])
         );
-        assert_ne!(one.digest, two.digest);
     }
 
     #[test]
@@ -841,13 +824,6 @@ path = "sim.py"
             (sim.timeout, sim.budget),
             (Duration::from_secs(5), Duration::from_secs(90))
         );
-    }
-
-    #[test]
-    fn the_sim_table_is_part_of_the_digest() {
-        let one = parse(&table(SIM)).unwrap().digest;
-        let other = SIM.replacen("[sim.inventory]", "[sim.inventory]\nseeds = 9", 1);
-        assert_ne!(one, parse(&table(&other)).unwrap().digest);
     }
 
     fn dirs() -> RunDirs {
@@ -1015,17 +991,6 @@ path = "sim.py"
         )))
         .unwrap_err();
         assert!(error.contains("in `sim`"), "{error}");
-    }
-
-    #[test]
-    fn a_table_without_env_has_the_digest_of_the_table_alone() {
-        // the default env is not in the table, so it is not in the digest either
-        let value = table(MINIMAL);
-        assert!(value.get("env").is_none());
-        assert_eq!(
-            parse(&value).unwrap().digest,
-            Digest::of(&serde_json::to_vec(&value).unwrap()).to_string()
-        );
     }
 
     #[test]

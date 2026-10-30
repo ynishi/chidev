@@ -11,7 +11,7 @@ use chidev_core::app::ports::measure::{InterfaceText, Runner, SimulateReport, Si
 use chidev_core::domain::vo::clause::ClauseLabel;
 use chidev_core::domain::vo::digest::Digest;
 use chidev_core::domain::vo::id::ClauseId;
-use chidev_core::domain::vo::measure::FailureKind;
+use chidev_core::domain::vo::measure::{FailureKind, SettingsDigest};
 use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::sim::{CitedClause, ClauseName, RegressName};
 use chidev_core::infra::project::{self, FILE};
@@ -507,29 +507,231 @@ async fn a_configuration_that_cannot_simulate_is_an_error_and_runs_nothing() {
 }
 
 #[tokio::test]
-async fn the_settings_follow_the_table_and_the_interpreter() {
+async fn the_settings_are_for_a_harness_and_the_interfaces_it_builds() {
     let project = Project::new(GOOD);
-    let (ctx, sim) = (context("ctx"), asset("sim"));
-    let one = project.runner().sim_settings(&ctx, &sim).await.unwrap();
-    assert_eq!(
-        one,
-        project.runner().sim_settings(&ctx, &sim).await.unwrap()
-    );
-    project.edit(|t| t.replace("seeds = 3", "seeds = 4"));
-    let two = project.runner().sim_settings(&ctx, &sim).await.unwrap();
-    assert_ne!(one, two);
-    assert!(
+    let (ctx, sim, prog) = (context("ctx"), asset("sim"), [asset("prog")]);
+    let one = project
+        .runner()
+        .sim_settings(&ctx, &sim, &prog)
+        .await
+        .unwrap();
+    assert_eq!(one, digest(&project).await);
+    // another Harness, another Context, or an Interface that is not laid out has no settings
+    for error in [
         project
             .runner()
-            .sim_settings(&ctx, &asset("other"))
+            .sim_settings(&ctx, &asset("other"), &prog)
             .await
-            .is_err()
-    );
-    assert!(
+            .unwrap_err(),
         project
             .runner()
-            .sim_settings(&context("other"), &sim)
+            .sim_settings(&context("other"), &sim, &prog)
             .await
-            .is_err()
-    );
+            .unwrap_err(),
+        project
+            .runner()
+            .sim_settings(&ctx, &sim, &[asset("gone")])
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(!error.to_string().is_empty());
+    }
+    // what the Harness builds is read by the run, so it is in the digest
+    let none = project
+        .runner()
+        .sim_settings(&ctx, &sim, &[])
+        .await
+        .unwrap();
+    assert_ne!(one, none);
+}
+
+/// The digest of the settings of a simulation of `sim`, which builds `prog`.
+async fn digest(project: &Project) -> SettingsDigest {
+    project
+        .runner()
+        .sim_settings(&context("ctx"), &asset("sim"), &[asset("prog")])
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_setting_a_simulation_does_not_read_leaves_its_digest_as_it_was() {
+    let project = Project::new(GOOD);
+    let before = digest(&project).await;
+    let text = std::fs::read_to_string(project.0.join(FILE)).unwrap();
+    // the layout entries in the other order
+    let mut parts: Vec<&str> = text.split("[[measure.layout]]").collect();
+    parts.swap(1, 2);
+    let swapped = parts.join("[[measure.layout]]");
+    assert_ne!(swapped, text);
+    let top = |keys: &str| text.replacen("[measure]\n", &format!("[measure]\n{keys}\n"), 1);
+    for (what, table) in [
+        ("test", top("test = [\"true\"]")),
+        (
+            "the limits of a mutation run",
+            top("timeout = 9\nbudget = 99\nmax_mutants = 2\nseed = 5\noperators = [\"rel\"]"),
+        ),
+        (
+            "the providers of mutants and of items",
+            format!(
+                "{text}\n[measure.mutants]\ntext = [\"sh\"]\n[measure.items]\ntext = [\"sh\"]\n"
+            ),
+        ),
+        (
+            "the language of a built interface",
+            format!(
+                "{}\n[measure.mutants]\ntext = [\"sh\"]\n",
+                text.replace(
+                    "interface = \"prog\"\n",
+                    "interface = \"prog\"\nlang = \"text\"\n"
+                )
+            ),
+        ),
+        (
+            "the sim of another context",
+            format!("{text}\n[measure.sim.other]\ninterpreter = [\"sh\"]\nprogram = [\"x\"]\n"),
+        ),
+        (
+            "an interface or a harness it does not build or run",
+            format!(
+                "{text}\n[[measure.layout]]\ncontext = \"ctx\"\ninterface = \"else\"\npath = \"else.txt\"\n[[measure.layout]]\ncontext = \"ctx\"\nharness = \"unrun\"\npath = \"unrun.txt\"\n"
+            ),
+        ),
+        ("the layout in another order", swapped),
+    ] {
+        project.edit(|_| table.clone());
+        assert_eq!(digest(&project).await, before, "{what}");
+    }
+}
+
+#[tokio::test]
+async fn each_setting_a_simulation_reads_moves_its_digest() {
+    let project = Project::new(GOOD);
+    let before = digest(&project).await;
+    let text = std::fs::read_to_string(project.0.join(FILE)).unwrap();
+    let top = |keys: &str| text.replacen("[measure]\n", &format!("[measure]\n{keys}\n"), 1);
+    let mut seen = vec![before];
+    for (what, table) in [
+        ("copy_exclude", top("copy_exclude = [\".git\"]")),
+        ("env", text.replace("env = {}", "env = { A = \"1\" }")),
+        (
+            "build",
+            text.replace("grep -q PINNED prog.sh", "grep -q PINNED2 prog.sh"),
+        ),
+        ("baseline_timeout", top("baseline_timeout = 7")),
+        (
+            "the interpreter's command",
+            text.replace("interpreter = [\"sh\"]", "interpreter = [\"sh\", \"-e\"]"),
+        ),
+        (
+            "program",
+            text.replace(
+                "program = [\"{tree}/prog.sh\"]",
+                "program = [\"{tree}/prog.sh\", \"x\"]",
+            ),
+        ),
+        ("seeds", text.replace("seeds = 3", "seeds = 4")),
+        ("sample", text.replace("sample = 2", "sample = 3")),
+        ("timeout", text.replace("timeout = 5", "timeout = 6")),
+        ("budget", text.replace("budget = 60", "budget = 61")),
+        (
+            "the path of the script",
+            text.replace("path = \"script.sh\"", "path = \"script2.sh\""),
+        ),
+        (
+            "the path of a built interface",
+            text.replace("path = \"prog.sh\"", "path = \"prog2.sh\""),
+        ),
+    ] {
+        assert_ne!(table, text, "{what} is in the table");
+        project.edit(|_| table.clone());
+        let now = digest(&project).await;
+        assert!(!seen.contains(&now), "{what} moves the digest");
+        seen.push(now);
+    }
+}
+
+#[tokio::test]
+async fn a_table_with_its_defaults_written_out_and_one_without_have_one_digest_for_a_simulation() {
+    let project = Project::new(GOOD);
+    // the project's table says `env = {}`, which is no variable and not the default one, and its own limits
+    let bare = |t: &str| {
+        t.replace("env = {}\n", "")
+            .replace("seeds = 3\n", "")
+            .replace("sample = 2\n", "")
+            .replace("timeout = 5\n", "")
+            .replace("budget = 60\n", "")
+    };
+    project.edit(bare);
+    let before = digest(&project).await;
+    project.edit(|t| {
+        t.replacen(
+            "[measure]\n",
+            "[measure]\ncopy_exclude = [\"target\", \".chidev\", \".git\"]\nbaseline_timeout = 600\nenv = { CARGO_TARGET_DIR = \"{run}/target\" }\n",
+            1,
+        )
+        .replacen(
+            "program = [\"{tree}/prog.sh\"]\n",
+            "program = [\"{tree}/prog.sh\"]\nseeds = 50\nsample = 6\ntimeout = 60\nbudget = 600\n",
+            1,
+        )
+    });
+    assert_eq!(digest(&project).await, before);
+}
+
+#[tokio::test]
+async fn the_interpreters_file_is_in_the_digest_and_the_report_carries_the_digest_the_run_ran_under()
+ {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::new(GOOD);
+    let script = |text: &str| {
+        std::fs::write(project.0.join("interp.sh"), text).unwrap();
+        std::fs::set_permissions(
+            project.0.join("interp.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    };
+    script("#!/bin/sh\nexec sh \"$@\"\n");
+    project.edit(|t| t.replace("interpreter = [\"sh\"]", "interpreter = [\"./interp.sh\"]"));
+    let before = digest(&project).await;
+    script("#!/bin/sh\nexec sh \"$@\" # changed\n");
+    let after = digest(&project).await;
+    assert_ne!(before, after);
+    // a run reports the digest of the settings it resolved and ran under
+    let report = project
+        .runner()
+        .simulate(&request("run-digest", GOOD))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.settings, after);
+}
+
+#[tokio::test]
+async fn an_interpreter_that_is_another_file_in_the_copy_than_at_the_root_fails_the_run_as_settings_moved()
+ {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::new(GOOD);
+    std::fs::write(project.0.join("interp.sh"), "#!/bin/sh\nexec sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(
+        project.0.join("interp.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    // the script is written over `interp.sh` in the copy
+    project.edit(|t| {
+        t.replace("interpreter = [\"sh\"]", "interpreter = [\"./interp.sh\"]")
+            .replace("path = \"script.sh\"", "path = \"interp.sh\"")
+    });
+    let report = project
+        .runner()
+        .simulate(&request("run-moved", GOOD))
+        .await
+        .unwrap();
+    let failure = report.failure.expect("a failure");
+    assert_eq!(failure.kind(), FailureKind::SettingsMoved, "{failure}");
+    assert!(failure.message().contains("`./interp.sh`"), "{failure}");
+    assert!(report.cases.is_empty());
+    assert!(!project.0.join(WORK_DIR).join("run-moved").exists());
 }

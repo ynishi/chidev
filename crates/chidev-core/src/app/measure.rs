@@ -8,9 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
-use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
+use super::ports::measure::{
+    HarnessText, InterfaceText, MutateRequest, RunnerError, SimulateRequest,
+};
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, CorrectionStatus, context_named, correction_status};
+use crate::domain::entity::harness::Harness;
 use crate::domain::entity::measurement::{Counts, MeasureBody, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
@@ -20,21 +23,53 @@ use crate::domain::service::sim::{basis_of, cited_in, regress_names, sweep};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
-use crate::domain::vo::measure::{MeasureKind, MeasureStamp, MeasureSubject};
+use crate::domain::vo::measure::{
+    MeasureKind, MeasureStamp, MeasureSubject, SettingsDigest, SettingsNow,
+};
 use crate::domain::vo::name::{AssetName, ContextName};
+use crate::domain::vo::pin_basis::PinBasis;
 use crate::domain::vo::sim::{CitedClause, ClauseName, SimOutcome, SimStamp};
+use crate::domain::vo::source::Source;
 use crate::domain::vo::target::Target;
 
 /// How many times a commit that lost a race with another writer is tried again. A measurement stands on a stamp, not
 /// on the store's revision, so a write in between does not make it wrong: it is kept, and a stale stamp would show.
 const COMMIT_TRIES: usize = 5;
 
-/// The latest measurements, and what the settings are now for the subjects the runner can say it for.
+/// The latest measurements, and what the settings are now for the subjects that are in the model.
 #[derive(Debug, Default)]
 pub(super) struct Measured {
     pub(super) measurements: Vec<Measurement>,
-    pub(super) settings: BTreeMap<InterfaceId, String>,
-    pub(super) sim_settings: BTreeMap<HarnessId, String>,
+    pub(super) settings: BTreeMap<InterfaceId, SettingsNow>,
+    pub(super) sim_settings: BTreeMap<HarnessId, SettingsNow>,
+}
+
+/// What the settings are now, from what the runner said of them: no runner is a project that has no `[measure]`
+/// table, and any other error is a runner that cannot read the settings for this subject.
+fn settings_now(said: Result<SettingsDigest, RunnerError>) -> SettingsNow {
+    match said {
+        Ok(digest) => SettingsNow::Known(digest),
+        Err(RunnerError::Unconfigured) => SettingsNow::Unconfigured,
+        Err(_) => SettingsNow::Unreadable,
+    }
+}
+
+/// The Harnesses a mutation run of an Interface runs, which stand in the `basis` of its Pin: the tests that hold a
+/// source. A simulation does not test the code against the Interface (it is run by `simulate`), and examples are
+/// data, not tests, and have no code to read. One rule for the run and for the settings it is stamped with, so that
+/// the settings are those of the Harnesses the run runs.
+fn tests_run<'p>(p: &'p Project, basis: &PinBasis) -> Vec<(&'p Harness, &'p Source)> {
+    basis
+        .harnesses()
+        .keys()
+        .filter_map(|id| {
+            p.contexts()
+                .flat_map(|c| c.harnesses())
+                .find(|h| h.id() == *id)
+        })
+        .filter(|h| h.kind() == HarnessKind::Tests)
+        .filter_map(|h| Some((h, h.source()?)))
+        .collect()
 }
 
 /// A mutant and what became of it, in words.
@@ -227,8 +262,10 @@ fn summary_of(outcome: &SimOutcome) -> SimSummary {
 }
 
 impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
-    /// The latest measurements, and the settings now of the subjects they are of. A subject the runner cannot say
-    /// the settings of (no runner, no layout, a provider that is gone) is absent from the settings.
+    /// The latest measurements, and the settings now of the subjects they are of that are in the model. What the
+    /// runner says is kept as it is: no runner is `Unconfigured`, and any error of a runner that is there is
+    /// `Unreadable`, never a subject left out as if its settings did not matter. A subject that is not in the model
+    /// has no settings here, and the checks read it as settings that cannot be read.
     pub(super) async fn measured(&self, p: &Project) -> Result<Measured, AppError> {
         let measurements = self.store.latest_measurements().await?;
         let mut settings = BTreeMap::new();
@@ -240,18 +277,36 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         continue;
                     };
                     let interface = self.name_of(i.as_uuid()).await?;
-                    if let Ok(s) = self.runner.settings(context.name(), &interface).await {
-                        settings.insert(i, s);
+                    let mut harnesses = Vec::new();
+                    for (h, _) in current_basis(p, i)
+                        .map(|basis| tests_run(p, &basis))
+                        .unwrap_or_default()
+                    {
+                        harnesses.push(self.name_of(h.id().as_uuid()).await?);
                     }
+                    let said = self
+                        .runner
+                        .settings(context.name(), &interface, &harnesses)
+                        .await;
+                    settings.insert(i, settings_now(said));
                 }
                 MeasureSubject::Harness(h) => {
-                    let Some(context) = p.contexts().find(|c| c.harness(h).is_some()) else {
+                    let Some((context, harness_entity)) = p
+                        .contexts()
+                        .find_map(|c| c.harness(h).map(|entity| (c, entity)))
+                    else {
                         continue;
                     };
                     let harness = self.name_of(h.as_uuid()).await?;
-                    if let Ok(s) = self.runner.sim_settings(context.name(), &harness).await {
-                        sim_settings.insert(h, s);
+                    let mut builds = Vec::new();
+                    for iface in harness_entity.builds() {
+                        builds.push(self.name_of(iface.as_uuid()).await?);
                     }
+                    let said = self
+                        .runner
+                        .sim_settings(context.name(), &harness, &builds)
+                        .await;
+                    sim_settings.insert(h, settings_now(said));
                 }
             }
         }
@@ -309,30 +364,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             context: context.clone(),
             interface: interface.clone(),
         })?;
-        let mut harnesses = Vec::with_capacity(basis.harnesses().len());
-        for id in basis.harnesses().keys() {
-            let Some(h) = p
-                .contexts()
-                .flat_map(|c| c.harnesses())
-                .find(|h| h.id() == *id)
-            else {
-                continue;
-            };
-            // A simulation does not test the code against the Interface; it is run by `simulate`. Examples are
-            // data, not tests, and have no code to read.
-            if h.kind() != HarnessKind::Tests {
-                continue;
-            }
-            let Some(source) = h.source() else {
-                continue;
-            };
+        let tests = tests_run(&p, &basis);
+        let mut harnesses = Vec::with_capacity(tests.len());
+        for (h, source) in tests {
             harnesses.push(HarnessText {
-                name: self.name_of(id.as_uuid()).await?,
+                name: self.name_of(h.id().as_uuid()).await?,
                 source: source.as_str().to_string(),
             });
         }
-        let settings = self.runner.settings(&context, &interface).await?;
-        let stamp = MeasureStamp::new(pin.code(), basis, settings)?;
         let id = MeasurementId::from_uuid(self.ids.next_uuid());
         let at = self.clock.now();
         let request = MutateRequest {
@@ -343,6 +382,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             harnesses,
         };
         let report = self.runner.mutate(&request).await?;
+        // The stamp names the settings the run resolved and ran under, not a digest asked for before it.
+        let stamp = MeasureStamp::new(pin.code(), basis, report.settings);
         let measurement = Measurement::new(MeasurementDraft {
             id,
             at,
@@ -445,8 +486,6 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let basis = basis_of(&p, id, &pins).ok_or_else(|| {
             AppError::Input(format!("the sim harness `{harness}` is not in the project"))
         })?;
-        let settings = self.runner.sim_settings(&context, &harness).await?;
-        let stamp = SimStamp::new(basis, settings).map_err(|e| AppError::Input(e.to_string()))?;
         let run_id = MeasurementId::from_uuid(self.ids.next_uuid());
         let at = self.clock.now();
         let request = SimulateRequest {
@@ -459,6 +498,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             regress: regress_names(h),
         };
         let report = self.runner.simulate(&request).await?;
+        // The stamp names the settings the run resolved and ran under, not a digest asked for before it.
+        let stamp = SimStamp::new(basis, report.settings);
         let measurement = Measurement::new(MeasurementDraft {
             id: run_id,
             at,
@@ -629,12 +670,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     .filter(|m| m.interface() == Some(i.id()))
                 {
                     let state = match pins.iter().find(|pin| pin.interface() == i.id()) {
-                        Some(pin) => standing(
-                            m,
-                            p,
-                            pin,
-                            measured.settings.get(&i.id()).map(String::as_str),
-                        ),
+                        Some(pin) => {
+                            standing(m, p, pin, SettingsNow::of(&measured.settings, &i.id()))
+                        }
                         None => Standing::Stale,
                     };
                     out.push(MeasurementStanding {
@@ -669,7 +707,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         m,
                         p,
                         &pins,
-                        measured.sim_settings.get(&h.id()).map(String::as_str),
+                        SettingsNow::of(&measured.sim_settings, &h.id()),
                     );
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),

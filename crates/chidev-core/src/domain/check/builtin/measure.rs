@@ -35,12 +35,6 @@ fn pinned<'a>(
         })
 }
 
-fn settings<'a>(view: &'a CheckView<'a>, m: &Measurement) -> Option<&'a str> {
-    view.measure_settings
-        .get(&m.interface()?)
-        .map(String::as_str)
-}
-
 /// The latest mutation run of an Interface failed.
 #[derive(Debug, Clone, Copy)]
 pub struct MeasureFailed;
@@ -147,15 +141,27 @@ impl Check for Stale {
         pinned(view)
             .filter_map(|(i, pin, m)| {
                 let m = m?;
+                let settings = view.measure_settings_now(i.id());
                 if m.failure().is_some()
-                    || standing(m, view.project, pin, settings(view, m)) == Standing::Current
+                    || standing(m, view.project, pin, settings) == Standing::Current
                 {
                     return None;
                 }
+                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
+                // to configure `[measure]` or to make its settings readable.
+                let message = match settings.why_not_compared() {
+                    Some(why) => format!(
+                        "the latest mutation run cannot be shown to describe the code now: {why}"
+                    ),
+                    None => {
+                        "the code, or what it stands on, has moved since the latest mutation run"
+                            .to_string()
+                    }
+                };
                 Some(Finding::new(
                     &STALE,
                     Some(Subject::Interface(i.id())),
-                    "the code, or what it stands on, has moved since the latest mutation run",
+                    message,
                 ))
             })
             .collect()
@@ -194,7 +200,8 @@ impl Check for Capped {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if !m.capped()
-                    || standing(m, view.project, pin, settings(view, m)) == Standing::Stale
+                    || standing(m, view.project, pin, view.measure_settings_now(i.id()))
+                        == Standing::Stale
                 {
                     return None;
                 }
@@ -239,7 +246,8 @@ impl Check for Survived {
             .filter_map(|(i, pin, m)| {
                 let m = m?;
                 if m.failure().is_some()
-                    || standing(m, view.project, pin, settings(view, m)) == Standing::Stale
+                    || standing(m, view.project, pin, view.measure_settings_now(i.id()))
+                        == Standing::Stale
                 {
                     return None;
                 }
@@ -262,12 +270,14 @@ mod tests {
 
     use super::super::fixture::*;
     use super::*;
-    use crate::domain::entity::measurement::fixture::{draft, result, set_counts};
+    use crate::domain::entity::measurement::fixture::{
+        draft, result, same_settings, set_counts, settings_of,
+    };
     use crate::domain::entity::measurement::{Measurement, MeasurementDraft};
     use crate::domain::service::pin::current_basis;
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::InterfaceId;
-    use crate::domain::vo::measure::{FailureKind, MeasureFailure, MutantOutcome};
+    use crate::domain::vo::measure::{FailureKind, MeasureFailure, MutantOutcome, SettingsNow};
 
     /// Runs `check` over the fixture Project with its Pin and these measurements, the settings being `settings`.
     fn found(
@@ -275,7 +285,7 @@ mod tests {
         p: &crate::domain::entity::project::Project,
         pins: &[Pin],
         measurements: &[Measurement],
-        settings: &BTreeMap<InterfaceId, String>,
+        settings: &BTreeMap<InterfaceId, SettingsNow>,
     ) -> Vec<Finding> {
         check.run(
             &CheckView {
@@ -290,6 +300,11 @@ mod tests {
             },
             &Params::default(),
         )
+    }
+
+    /// The settings of the fixture's Interface as they are now: the ones its runs were made with.
+    fn unchanged() -> BTreeMap<InterfaceId, SettingsNow> {
+        settings_now(same_settings())
     }
 
     /// A run of the pinned code of the fixture Project, standing on what the Project stands on now.
@@ -333,8 +348,8 @@ mod tests {
             ],
         ))
         .unwrap();
-        let none = BTreeMap::new();
-        let all = found(&Survived, &p, &pins, std::slice::from_ref(&run), &none);
+        let now = unchanged();
+        let all = found(&Survived, &p, &pins, std::slice::from_ref(&run), &now);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].subject(), Some(Subject::Interface(iface())));
         assert_eq!(all[0].level(), Level::Note);
@@ -343,7 +358,7 @@ mod tests {
             "f/rel/1/aaaa: line 7, column 5, rel `<` -> `<=`"
         );
         assert!(all[1].message().contains("line 11"));
-        assert!(found(&Stale, &p, &pins, &[run], &none).is_empty());
+        assert!(found(&Stale, &p, &pins, &[run], &now).is_empty());
     }
 
     #[test]
@@ -359,8 +374,8 @@ mod tests {
         ))
         .unwrap();
         let runs = std::slice::from_ref(&run);
-        let none = BTreeMap::new();
-        assert!(found(&Stale, &p, &pins, runs, &none).is_empty());
+        let now = unchanged();
+        assert!(found(&Stale, &p, &pins, runs, &now).is_empty());
 
         // The Harness moves (its revision is what the stamp records).
         let case = |p: &crate::domain::entity::project::Project| {
@@ -372,21 +387,26 @@ mod tests {
         let before = case(&p);
         revise_harness(&mut p);
         assert_ne!(before, case(&p));
-        let stale = found(&Stale, &p, &pins, runs, &none);
+        let stale = found(&Stale, &p, &pins, runs, &now);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].level(), Level::Warning);
         assert_eq!(stale[0].subject(), Some(Subject::Interface(iface())));
         // stale comes before the verdict: the old survivor is not reported for moved code
-        assert!(found(&Survived, &p, &pins, runs, &none).is_empty());
+        assert!(found(&Survived, &p, &pins, runs, &now).is_empty());
 
         // The Interface moves.
         let mut q = project();
         put_interface(&mut q, "fn a(x: u8)");
-        assert_eq!(found(&Stale, &q, &pins, runs, &none).len(), 1);
+        assert_eq!(found(&Stale, &q, &pins, runs, &now).len(), 1);
         // A Contract the Harness cites moves.
         let mut r = project();
         put_contract(&mut r, "a half rounds to even");
-        assert_eq!(found(&Stale, &r, &pins, runs, &none).len(), 1);
+        assert_eq!(found(&Stale, &r, &pins, runs, &now).len(), 1);
+    }
+
+    /// The settings of the fixture's Interface as they are now: `now`.
+    fn settings_now(now: SettingsNow) -> BTreeMap<InterfaceId, SettingsNow> {
+        BTreeMap::from([(iface(), now)])
     }
 
     #[test]
@@ -395,11 +415,10 @@ mod tests {
         let pins = [pin(&p)];
         let run = Measurement::new(run_of(&p, &pins[0], 1, vec![])).unwrap();
         let runs = std::slice::from_ref(&run);
-        // the run recorded the settings "settings"; the runner says the same, or cannot say
-        let same = BTreeMap::from([(iface(), "settings".to_string())]);
-        let other = BTreeMap::from([(iface(), "settings-2".to_string())]);
+        // the run recorded the settings of the fixture; the runner says the same, or others
+        let same = unchanged();
+        let other = settings_now(SettingsNow::Known(settings_of("settings-2")));
         assert!(found(&Stale, &p, &pins, runs, &same).is_empty());
-        assert!(found(&Stale, &p, &pins, runs, &BTreeMap::new()).is_empty());
         assert_eq!(found(&Stale, &p, &pins, runs, &other).len(), 1);
         // pinned again with other code
         let repinned = [crate::domain::service::pin::record(
@@ -410,6 +429,40 @@ mod tests {
         )
         .unwrap()];
         assert_eq!(found(&Stale, &p, &repinned, runs, &same).len(), 1);
+    }
+
+    #[test]
+    fn settings_that_cannot_be_read_make_a_run_stale_and_each_says_which_it_is() {
+        let p = project();
+        let pins = [pin(&p)];
+        let survivor = vec![result("f/rel/1/aaaa", 7, MutantOutcome::Survived)];
+        let run = Measurement::new(run_of(&p, &pins[0], 1, survivor)).unwrap();
+        let runs = std::slice::from_ref(&run);
+        for (now, said) in [
+            (SettingsNow::Unconfigured, "measure is not configured"),
+            (SettingsNow::Unreadable, "the settings cannot be read"),
+        ] {
+            let now = settings_now(now);
+            let stale = found(&Stale, &p, &pins, runs, &now);
+            assert_eq!(stale.len(), 1, "{said}");
+            assert!(stale[0].message().contains(said), "{}", stale[0].message());
+            // a stale run is not judged: its survivor is not reported
+            assert!(found(&Survived, &p, &pins, runs, &now).is_empty());
+        }
+        // settings that moved are a change, and say nothing of being unreadable
+        let moved = found(
+            &Stale,
+            &p,
+            &pins,
+            runs,
+            &settings_now(SettingsNow::Known(settings_of("settings-2"))),
+        );
+        assert_eq!(moved.len(), 1);
+        assert!(moved[0].message().contains("has moved"));
+        // an Interface the view has no settings for is read as settings that cannot be read
+        let missing = found(&Stale, &p, &pins, runs, &BTreeMap::new());
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].message().contains("the settings cannot be read"));
     }
 
     #[test]
@@ -448,7 +501,7 @@ mod tests {
     fn a_run_that_evaluated_fewer_mutants_than_sites_is_capped_once_and_a_whole_one_is_not() {
         let p = project();
         let pins = [pin(&p)];
-        let none = BTreeMap::new();
+        let now = unchanged();
         // 3 sites, 2 given and evaluated
         let mut sampled = run_of(
             &p,
@@ -461,7 +514,7 @@ mod tests {
         );
         set_counts(&mut sampled, 3, 2);
         let run = Measurement::new(sampled).unwrap();
-        let all = found(&Capped, &p, &pins, std::slice::from_ref(&run), &none);
+        let all = found(&Capped, &p, &pins, std::slice::from_ref(&run), &now);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Interface(iface())));
         assert_eq!(all[0].level(), Level::Note);
@@ -475,7 +528,7 @@ mod tests {
         );
         set_counts(&mut whole, 1, 1);
         let whole = Measurement::new(whole).unwrap();
-        assert!(found(&Capped, &p, &pins, &[whole], &none).is_empty());
+        assert!(found(&Capped, &p, &pins, &[whole], &now).is_empty());
         // a run that stopped early failed; it is not also capped
         let mut stopped = run_of(
             &p,
@@ -486,11 +539,11 @@ mod tests {
         set_counts(&mut stopped, 9, 5);
         stopped.failure = Some(MeasureFailure::of(FailureKind::Budget, "used up"));
         let stopped = Measurement::new(stopped).unwrap();
-        assert!(found(&Capped, &p, &pins, &[stopped], &none).is_empty());
+        assert!(found(&Capped, &p, &pins, &[stopped], &now).is_empty());
         // a stale run is not judged: the code it sampled has moved
         let mut moved = project();
         revise_harness(&mut moved);
-        assert!(found(&Capped, &moved, &pins, &[run], &none).is_empty());
+        assert!(found(&Capped, &moved, &pins, &[run], &now).is_empty());
     }
 
     #[test]
@@ -505,7 +558,7 @@ mod tests {
         ))
         .unwrap();
         let newer = Measurement::new(run_of(&p, &pins[0], 2, vec![])).unwrap();
-        let none = BTreeMap::new();
-        assert!(found(&Survived, &p, &pins, &[old, newer], &none).is_empty());
+        let now = unchanged();
+        assert!(found(&Survived, &p, &pins, &[old, newer], &now).is_empty());
     }
 }

@@ -101,7 +101,7 @@ pub use crate::domain::vo::intent::Intent;
 use crate::domain::vo::intent::Issuer;
 use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
-use crate::domain::vo::measure::MeasureError;
+use crate::domain::vo::measure::{MeasureError, SettingsNow};
 use crate::domain::vo::name::{AssetName, ContextName, NameError};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
@@ -491,9 +491,10 @@ fn input(e: impl Display) -> AppError {
     AppError::Input(e.to_string())
 }
 
-/// No settings: what the moments of a change give the checks, which read no measurement.
-static NO_SETTINGS: BTreeMap<InterfaceId, String> = BTreeMap::new();
-static NO_SIM_SETTINGS: BTreeMap<HarnessId, String> = BTreeMap::new();
+/// No settings: what the moments of a change give the checks, which read no measurement. A measurement the checks
+/// were given all the same would find its subject without settings, which they read as settings that cannot be read.
+static NO_SETTINGS: BTreeMap<InterfaceId, SettingsNow> = BTreeMap::new();
+static NO_SIM_SETTINGS: BTreeMap<HarnessId, SettingsNow> = BTreeMap::new();
 
 /// What the checks of a moment read: one state of the model.
 fn view<'a>(

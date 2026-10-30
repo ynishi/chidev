@@ -526,9 +526,26 @@ pub(crate) mod fixture {
     use super::*;
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::test_uuid;
-    use crate::domain::vo::measure::{MeasureStamp, Mutant, MutantKey, Operator, Site};
+    use crate::domain::vo::measure::{
+        MeasureStamp, Mutant, MutantKey, Operator, SettingsDigest, SettingsNow, Site,
+    };
     use crate::domain::vo::pin_basis::PinBasis;
     use crate::domain::vo::sim::{SimBasis, SimStamp};
+
+    /// The settings the runs of this fixture are made with: the digest of the word `settings`.
+    pub(crate) fn settings() -> SettingsDigest {
+        settings_of("settings")
+    }
+
+    /// The settings that are the digest of `word`.
+    pub(crate) fn settings_of(word: &str) -> SettingsDigest {
+        SettingsDigest::new(Digest::of(word.as_bytes()))
+    }
+
+    /// The settings as they are now when they are those the runs of this fixture were made with.
+    pub(crate) fn same_settings() -> SettingsNow {
+        SettingsNow::Known(settings())
+    }
 
     pub(crate) fn result(key: &str, line: u32, outcome: MutantOutcome) -> MutantResult {
         MutantResult {
@@ -567,7 +584,7 @@ pub(crate) mod fixture {
             at: Timestamp::from_millis(n as u64),
             body: MeasureBody::Mutation {
                 interface: subject,
-                stamp: MeasureStamp::new(code, basis, "settings").unwrap(),
+                stamp: MeasureStamp::new(code, basis, settings()),
                 sites: mutants.len() as u32 + 2,
                 planned: mutants.len() as u32,
                 mutants,
@@ -604,7 +621,7 @@ pub(crate) mod fixture {
             at: Timestamp::from_millis(n as u64),
             body: MeasureBody::Simulation {
                 harness,
-                stamp: SimStamp::new(basis, "settings").unwrap(),
+                stamp: SimStamp::new(basis, settings()),
                 outcome,
             },
             failure: None,

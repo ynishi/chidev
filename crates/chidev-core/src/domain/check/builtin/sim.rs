@@ -26,6 +26,7 @@ use crate::domain::service::sim::{sim_harnesses, sweep};
 use crate::domain::vo::clause::ClauseLabel;
 use crate::domain::vo::finding::{RuleId, Subject};
 use crate::domain::vo::id::ClauseId;
+use crate::domain::vo::measure::SettingsNow;
 use crate::domain::vo::sim::{CaseRole, Reproduction, SimCase, role_of};
 
 /// A sim Harness with its sweep Case and the latest simulation of it (if any).
@@ -36,16 +37,19 @@ struct Sim<'a> {
 }
 
 impl Sim<'_> {
-    /// Whether the run still describes the model. A run that cannot be compared is stale.
+    /// What the settings of a simulation of the Harness are now.
+    fn settings<'v>(&self, view: &CheckView<'v>) -> &'v SettingsNow {
+        view.sim_settings_now(self.harness.id())
+    }
+
+    /// Whether the run still describes the model. A run whose settings cannot be compared is stale.
     fn standing(&self, view: &CheckView<'_>) -> Option<Standing> {
         let m = self.run?;
         Some(sim_standing(
             m,
             view.project,
             view.pins,
-            view.sim_settings
-                .get(&self.harness.id())
-                .map(String::as_str),
+            self.settings(view),
         ))
     }
 }
@@ -272,11 +276,15 @@ impl Check for SimStale {
                     && s.standing(view) == Some(Standing::Stale)
             })
             .map(|(_, s)| {
-                Finding::new(
-                    &SIM_STALE,
-                    Some(Subject::Case(s.sweep.id())),
-                    "the script, what it cites, the pinned code or the settings have moved since the latest simulation",
-                )
+                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
+                // to configure `[measure]` or to make its settings readable.
+                let message = match s.settings(view).why_not_compared() {
+                    Some(why) => format!(
+                        "the latest simulation cannot be shown to describe the program now: {why}"
+                    ),
+                    None => "the script, what it cites, the pinned code or the settings have moved since the latest simulation".to_string(),
+                };
+                Finding::new(&SIM_STALE, Some(Subject::Case(s.sweep.id())), message)
             })
             .collect()
     }
@@ -527,7 +535,7 @@ mod tests {
 
     use super::super::fixture::*;
     use super::*;
-    use crate::domain::entity::measurement::fixture::sim_draft;
+    use crate::domain::entity::measurement::fixture::{same_settings, settings_of, sim_draft};
     use crate::domain::service::sim::basis_of;
     use crate::domain::vo::case::{CaseCites, CaseName};
     use crate::domain::vo::clause::{ClauseContent, ClauseText};
@@ -637,7 +645,7 @@ mod tests {
         check: &dyn Check,
         p: &Project,
         runs: &[Measurement],
-        settings: &BTreeMap<HarnessId, String>,
+        settings: &BTreeMap<HarnessId, SettingsNow>,
     ) -> Vec<Finding> {
         check.run(
             &CheckView {
@@ -654,8 +662,14 @@ mod tests {
         )
     }
 
-    fn none() -> BTreeMap<HarnessId, String> {
-        BTreeMap::new()
+    /// The settings of the sim Harness as they are now: `now`.
+    fn settings_now(now: SettingsNow) -> BTreeMap<HarnessId, SettingsNow> {
+        BTreeMap::from([(hid(), now)])
+    }
+
+    /// The settings of the sim Harness as they are now: the ones its runs were made with.
+    fn unchanged() -> BTreeMap<HarnessId, SettingsNow> {
+        settings_now(same_settings())
     }
 
     #[test]
@@ -671,7 +685,7 @@ mod tests {
             &SimNondeterministic,
             &SimError,
         ] {
-            assert!(found(check, &p, &[], &none()).is_empty());
+            assert!(found(check, &p, &[], &unchanged()).is_empty());
         }
     }
 
@@ -701,7 +715,7 @@ mod tests {
     #[test]
     fn a_sim_harness_kept_malformed_is_a_shape_error_on_the_context_or_the_case() {
         let p = project().with_harnesses_kept(ctx(), vec![kept_sim(500, &[(50, "a_test", &[30])])]);
-        let all = found(&SimShapeKept, &p, &[], &none());
+        let all = found(&SimShapeKept, &p, &[], &unchanged());
         let subjects: Vec<_> = all.iter().map(Finding::subject).collect();
         assert_eq!(
             subjects,
@@ -726,7 +740,7 @@ mod tests {
             ]
         );
         // and a well-formed one is quiet
-        assert!(found(&SimShapeKept, &sim_project(), &[], &none()).is_empty());
+        assert!(found(&SimShapeKept, &sim_project(), &[], &unchanged()).is_empty());
     }
 
     #[test]
@@ -738,7 +752,7 @@ mod tests {
                 kept_sim(501, &[(60, "sweep", &[31])]),
             ],
         );
-        let all = found(&SimShapeKept, &p, &[], &none());
+        let all = found(&SimShapeKept, &p, &[], &unchanged());
         assert_eq!(
             all.iter().map(Finding::subject).collect::<Vec<_>>(),
             [Some(Subject::Context(ctx()))]
@@ -771,7 +785,7 @@ mod tests {
                 &[(50, "sweep", &[30, 90]), (51, "regress-a", &[90])],
             )],
         );
-        let all = found(&SimShapeKept, &p, &[], &none());
+        let all = found(&SimShapeKept, &p, &[], &unchanged());
         assert_eq!(
             all.iter().map(Finding::subject).collect::<Vec<_>>(),
             [Some(Subject::Clause(clause(90)))]
@@ -833,8 +847,8 @@ mod tests {
         let mut p = project();
         put_second_contract(&mut p);
         put_sim_citing(&mut p, "script", &[30, 31, 32, 33]);
-        assert!(found(&SimShapeKept, &p, &[], &none()).is_empty());
-        assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
+        assert!(found(&SimShapeKept, &p, &[], &unchanged()).is_empty());
+        assert!(found(&SimUncitedClause, &p, &[], &unchanged()).is_empty());
         let outcome = SimOutcome {
             cases: vec![
                 run_of(SimCase::Seed(0)),
@@ -843,7 +857,7 @@ mod tests {
             reruns: Vec::new(),
         };
         let run = simulated(&p, 1, outcome);
-        let all = found(&SimFinding, &p, std::slice::from_ref(&run), &none());
+        let all = found(&SimFinding, &p, std::slice::from_ref(&run), &unchanged());
         // the finding is on Clause 32, not on 30, though both are labelled C1
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(32))));
@@ -860,7 +874,7 @@ mod tests {
             reruns: Vec::new(),
         };
         let run = simulated(&p, 2, missed);
-        let all = found(&SimUnreached, &p, std::slice::from_ref(&run), &none());
+        let all = found(&SimUnreached, &p, std::slice::from_ref(&run), &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(33))));
     }
@@ -871,17 +885,17 @@ mod tests {
         put_second_contract(&mut p);
         // the sim takes on the first Contract only: the second one's four-way silence is the tests' business
         put_sim_citing(&mut p, "script", &[30]);
-        let all = found(&SimUncitedClause, &p, &[], &none());
+        let all = found(&SimUncitedClause, &p, &[], &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(31))));
         // citing one Clause of the second takes the whole Contract on
         put_sim_citing(&mut p, "script", &[30, 31, 32]);
-        let all = found(&SimUncitedClause, &p, &[], &none());
+        let all = found(&SimUncitedClause, &p, &[], &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(33))));
         // no Clause cited at all (a shape a put is refused for, kept by a store): nothing is taken on
         let kept = p.with_harnesses_kept(ctx(), vec![kept_sim(500, &[(50, "sweep", &[])])]);
-        assert!(found(&SimUncitedClause, &kept, &[], &none()).is_empty());
+        assert!(found(&SimUncitedClause, &kept, &[], &unchanged()).is_empty());
     }
 
     #[test]
@@ -892,7 +906,7 @@ mod tests {
         put_sim_citing(&mut p, "script", &[30, 32]);
         let run = simulated(&p, 1, SimOutcome::default());
         let runs = std::slice::from_ref(&run);
-        assert!(found(&SimStale, &p, runs, &none()).is_empty());
+        assert!(found(&SimStale, &p, runs, &unchanged()).is_empty());
         // the second Contract changes: the sim cites a Clause of it
         let mut q = p.clone();
         q.put_contract(
@@ -908,7 +922,7 @@ mod tests {
             )],
         )
         .unwrap();
-        assert_eq!(found(&SimStale, &q, runs, &none()).len(), 1);
+        assert_eq!(found(&SimStale, &q, runs, &unchanged()).len(), 1);
         // a Contract it does not cite a Clause of moves: the simulation stands
         let mut r = p.clone();
         r.put_contract(
@@ -924,7 +938,7 @@ mod tests {
             )],
         )
         .unwrap();
-        assert!(found(&SimStale, &r, runs, &none()).is_empty());
+        assert!(found(&SimStale, &r, runs, &unchanged()).is_empty());
         // the Pin of the built Interface: pinning it (tests check it) moves the sim, as the code it ran is new
         let pins = [pin(&p)];
         let view = CheckView {
@@ -934,7 +948,7 @@ mod tests {
             cruxes: &[],
             measurements: runs,
             measure_settings: &BTreeMap::new(),
-            sim_settings: &none(),
+            sim_settings: &unchanged(),
             resolving: None,
         };
         assert_eq!(SimStale.run(&view, &Params::default()).len(), 1);
@@ -944,7 +958,7 @@ mod tests {
     fn a_clause_no_sim_case_cites_is_found_only_where_there_is_a_sim_harness() {
         let mut p = project();
         // the Context `core` has Clauses 30 and 31 and a Harness of tests citing 30; `empty` has none
-        assert!(found(&SimUncitedClause, &p, &[], &none()).is_empty());
+        assert!(found(&SimUncitedClause, &p, &[], &unchanged()).is_empty());
         let at = LineRange::new(1, 1).unwrap();
         p.put_harness_as(
             ctx(),
@@ -960,29 +974,29 @@ mod tests {
             )],
         )
         .unwrap();
-        let all = found(&SimUncitedClause, &p, &[], &none());
+        let all = found(&SimUncitedClause, &p, &[], &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(31))));
         assert_eq!(all[0].level(), Level::Warning);
         assert!(all[0].message().contains("C2"));
-        assert!(found(&SimUncitedClause, &sim_project(), &[], &none()).is_empty());
+        assert!(found(&SimUncitedClause, &sim_project(), &[], &unchanged()).is_empty());
     }
 
     #[test]
     fn a_sim_harness_is_unrun_until_a_simulation_exists_and_is_stale_when_the_model_moves() {
         let mut p = sim_project();
-        let unrun = found(&SimUnrun, &p, &[], &none());
+        let unrun = found(&SimUnrun, &p, &[], &unchanged());
         assert_eq!(unrun.len(), 1);
         assert_eq!(unrun[0].subject(), Some(Subject::Case(sweep_id())));
         assert_eq!(unrun[0].level(), Level::Warning);
         let run = simulated(&p, 1, SimOutcome::default());
         let runs = std::slice::from_ref(&run);
-        assert!(found(&SimUnrun, &p, runs, &none()).is_empty());
-        assert!(found(&SimStale, &p, runs, &none()).is_empty());
+        assert!(found(&SimUnrun, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimStale, &p, runs, &unchanged()).is_empty());
 
         // the script moves
         put_sim(&mut p, "script, changed");
-        let stale = found(&SimStale, &p, runs, &none());
+        let stale = found(&SimStale, &p, runs, &unchanged());
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].subject(), Some(Subject::Case(sweep_id())));
         assert_eq!(stale[0].level(), Level::Warning);
@@ -990,11 +1004,11 @@ mod tests {
         // a cited Contract moves
         let mut q = sim_project();
         put_contract(&mut q, "a half rounds to even");
-        assert_eq!(found(&SimStale, &q, runs, &none()).len(), 1);
+        assert_eq!(found(&SimStale, &q, runs, &unchanged()).len(), 1);
         // a cited Interface moves
         let mut r = sim_project();
         put_interface(&mut r, "fn a(x: u8)");
-        assert_eq!(found(&SimStale, &r, runs, &none()).len(), 1);
+        assert_eq!(found(&SimStale, &r, runs, &unchanged()).len(), 1);
     }
 
     #[test]
@@ -1002,10 +1016,9 @@ mod tests {
         let p = sim_project();
         let run = simulated(&p, 1, SimOutcome::default());
         let runs = std::slice::from_ref(&run);
-        let same = BTreeMap::from([(hid(), "settings".to_string())]);
-        let other = BTreeMap::from([(hid(), "settings-2".to_string())]);
+        let same = unchanged();
+        let other = settings_now(SettingsNow::Known(settings_of("settings-2")));
         assert!(found(&SimStale, &p, runs, &same).is_empty());
-        assert!(found(&SimStale, &p, runs, &none()).is_empty());
         assert_eq!(found(&SimStale, &p, runs, &other).len(), 1);
         // the interface is pinned (to other code than the run saw, which saw none)
         let pins = [pin(&p)];
@@ -1023,6 +1036,41 @@ mod tests {
             &Params::default(),
         );
         assert_eq!(with_pin.len(), 1);
+    }
+
+    #[test]
+    fn settings_that_cannot_be_read_make_a_simulation_stale_and_each_says_which_it_is() {
+        let p = sim_project();
+        let outcome = SimOutcome {
+            cases: vec![broke(run_of(SimCase::Seed(0)), 2, 31, "x")],
+            reruns: Vec::new(),
+        };
+        let run = simulated(&p, 1, outcome);
+        let runs = std::slice::from_ref(&run);
+        for (now, said) in [
+            (SettingsNow::Unconfigured, "measure is not configured"),
+            (SettingsNow::Unreadable, "the settings cannot be read"),
+        ] {
+            let now = settings_now(now);
+            let stale = found(&SimStale, &p, runs, &now);
+            assert_eq!(stale.len(), 1, "{said}");
+            assert!(stale[0].message().contains(said), "{}", stale[0].message());
+            // a stale run is not judged: its finding is not reported
+            assert!(found(&SimFinding, &p, runs, &now).is_empty());
+        }
+        // settings that moved are a change, and say nothing of being unreadable
+        let moved = found(
+            &SimStale,
+            &p,
+            runs,
+            &settings_now(SettingsNow::Known(settings_of("settings-2"))),
+        );
+        assert_eq!(moved.len(), 1);
+        assert!(moved[0].message().contains("have moved"));
+        // a Harness the view has no settings for is read as settings that cannot be read
+        let missing = found(&SimStale, &p, runs, &BTreeMap::new());
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].message().contains("the settings cannot be read"));
     }
 
     #[test]
@@ -1044,7 +1092,7 @@ mod tests {
         };
         let run = simulated(&p, 1, outcome);
         let runs = std::slice::from_ref(&run);
-        let all = found(&SimFinding, &p, runs, &none());
+        let all = found(&SimFinding, &p, runs, &unchanged());
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(30))));
         assert_eq!(all[1].subject(), Some(Subject::Clause(clause(31))));
@@ -1056,7 +1104,7 @@ mod tests {
         // judged after staleness: a moved script reports no finding of the old run
         let mut moved = p.clone();
         put_sim(&mut moved, "changed");
-        assert!(found(&SimFinding, &moved, runs, &none()).is_empty());
+        assert!(found(&SimFinding, &moved, runs, &unchanged()).is_empty());
     }
 
     #[test]
@@ -1077,7 +1125,7 @@ mod tests {
             reruns: Vec::new(),
         };
         let run = simulated(&p, 1, outcome);
-        let all = found(&SimUnreached, &p, std::slice::from_ref(&run), &none());
+        let all = found(&SimUnreached, &p, std::slice::from_ref(&run), &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].subject(), Some(Subject::Clause(clause(31))));
         assert_eq!(all[0].level(), Level::Error);
@@ -1088,7 +1136,7 @@ mod tests {
             reruns: Vec::new(),
         };
         let run = simulated(&p, 2, outcome);
-        assert!(found(&SimUnreached, &p, std::slice::from_ref(&run), &none()).is_empty());
+        assert!(found(&SimUnreached, &p, std::slice::from_ref(&run), &unchanged()).is_empty());
     }
 
     #[test]
@@ -1118,7 +1166,7 @@ mod tests {
             &SimNondeterministic,
             &p,
             std::slice::from_ref(&run),
-            &none(),
+            &unchanged(),
         );
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].subject(), Some(Subject::Case(sweep_id())));
@@ -1134,7 +1182,7 @@ mod tests {
                 &SimNondeterministic,
                 &moved,
                 std::slice::from_ref(&run),
-                &none()
+                &unchanged()
             )
             .is_empty()
         );
@@ -1157,7 +1205,7 @@ mod tests {
             Some(MeasureFailure::new(FailureKind::NoBuild, "the program does not build").unwrap());
         let run = Measurement::new(failed).unwrap();
         let runs = std::slice::from_ref(&run);
-        let all = found(&SimError, &p, runs, &none());
+        let all = found(&SimError, &p, runs, &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].level(), Level::Warning);
         assert!(
@@ -1165,9 +1213,9 @@ mod tests {
                 .message()
                 .contains("no_build: the program does not build")
         );
-        assert!(found(&SimFinding, &p, runs, &none()).is_empty());
-        assert!(found(&SimStale, &p, runs, &none()).is_empty());
-        assert!(found(&SimUnrun, &p, runs, &none()).is_empty());
+        assert!(found(&SimFinding, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimStale, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimUnrun, &p, runs, &unchanged()).is_empty());
 
         // a script that crashed for a case
         let crashed = simulated(
@@ -1188,14 +1236,14 @@ mod tests {
                 reruns: Vec::new(),
             },
         );
-        let all = found(&SimError, &p, std::slice::from_ref(&crashed), &none());
+        let all = found(&SimError, &p, std::slice::from_ref(&crashed), &unchanged());
         assert_eq!(all.len(), 1);
         assert_eq!(
             all[0].message(),
             "the script failed in 2 case(s); first: seed-1 ended script:2"
         );
         let clean = simulated(&p, 4, SimOutcome::default());
-        assert!(found(&SimError, &p, &[clean], &none()).is_empty());
+        assert!(found(&SimError, &p, &[clean], &unchanged()).is_empty());
     }
 
     fn unstarted(case: SimCase) -> CaseRun {
@@ -1223,7 +1271,7 @@ mod tests {
             },
         );
         let runs = std::slice::from_ref(&run);
-        let errors = found(&SimError, &p, runs, &none());
+        let errors = found(&SimError, &p, runs, &unchanged());
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0].message(),
@@ -1232,7 +1280,7 @@ mod tests {
              the program could not be started in 2 of them"
         );
         // the one case that drove the program is the only finding; the two that did not add none
-        let findings = found(&SimFinding, &p, runs, &none());
+        let findings = found(&SimFinding, &p, runs, &unchanged());
         assert_eq!(findings.len(), 1);
         assert!(findings[0].message().contains("broke in 1 case(s)"));
     }
@@ -1261,7 +1309,7 @@ mod tests {
         ));
         let run = Measurement::new(failed).unwrap();
         let runs = std::slice::from_ref(&run);
-        let errors = found(&SimError, &p, runs, &none());
+        let errors = found(&SimError, &p, runs, &unchanged());
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].level(), Level::Warning);
         assert!(
@@ -1269,10 +1317,10 @@ mod tests {
                 .message()
                 .contains("no_start: the script could not start")
         );
-        assert!(found(&SimFinding, &p, runs, &none()).is_empty());
-        assert!(found(&SimUnreached, &p, runs, &none()).is_empty());
-        assert!(found(&SimNondeterministic, &p, runs, &none()).is_empty());
-        assert!(found(&SimStale, &p, runs, &none()).is_empty());
+        assert!(found(&SimFinding, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimUnreached, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimNondeterministic, &p, runs, &unchanged()).is_empty());
+        assert!(found(&SimStale, &p, runs, &unchanged()).is_empty());
     }
 
     #[test]
@@ -1287,6 +1335,6 @@ mod tests {
             },
         );
         let newer = simulated(&p, 2, SimOutcome::default());
-        assert!(found(&SimFinding, &p, &[old, newer], &none()).is_empty());
+        assert!(found(&SimFinding, &p, &[old, newer], &unchanged()).is_empty());
     }
 }

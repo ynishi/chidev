@@ -50,12 +50,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::super::process::{self, Capture, Over, Pipe};
-use super::config::SimConfig;
-use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, config_error, io, millis, provider};
-use crate::app::ports::measure::{InterfaceText, RunnerError, SimulateReport, SimulateRequest};
+use super::settings::SimSettings;
+use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, io, millis, provider};
+use crate::app::ports::measure::{
+    InterfaceText, LayoutPlace, RunnerError, SimulateReport, SimulateRequest,
+};
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::ClauseId;
-use crate::domain::vo::measure::{FailureKind, MeasureFailure, StepEvidence};
+use crate::domain::vo::measure::{FailureKind, MeasureFailure, SettingsDigest, StepEvidence};
 use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{
     CaseExit, CaseFinding, CaseRun, CaseUnreached, CitedClause, ClauseName, Rerun, SimCase,
@@ -216,7 +218,7 @@ pub(super) fn parse_report(
 /// What a run of the script is to be, with the paths of the copy it runs in.
 struct Plan<'a> {
     request: &'a SimulateRequest,
-    cfg: &'a SimConfig,
+    settings: &'a SimSettings,
     script: &'a Path,
     interfaces: Vec<(&'a Path, &'a InterfaceText)>,
 }
@@ -230,41 +232,18 @@ struct SimProgress {
 }
 
 impl ProcessRunner {
-    /// A digest of the settings of a simulation of `harness` of `context`: the table as written and the
-    /// interpreter's executable, so that a new interpreter is a new run.
+    /// The digest of the settings of a simulation of `harness` of `context` that builds the Interfaces `builds`.
     pub(super) async fn sim_settings_of(
         &self,
         context: &ContextName,
         harness: &AssetName,
-    ) -> Result<String, RunnerError> {
-        let cfg = self.sim_config(context)?;
-        self.config.harness(context, harness).ok_or_else(|| {
-            config_error(format!(
-                "[[measure.layout]] has no entry for the harness `{harness}` of `{context}`"
-            ))
-        })?;
-        let (program, _) = cfg
-            .interpreter
-            .split_first()
-            .ok_or_else(|| config_error("the interpreter is empty".to_string()))?;
-        let executable = process::locate(&self.root, program)
-            .await
-            .map_err(|f| config_error(format!("the interpreter: {}", f.message)))?;
-        let interpreter = process::file_digest(&executable)
-            .await
-            .map_err(|f| config_error(format!("the interpreter: {}", f.message)))?;
-        Ok(Digest::of(
-            format!("config={};interpreter={interpreter}", self.config.digest).as_bytes(),
+        builds: &[AssetName],
+    ) -> Result<SettingsDigest, RunnerError> {
+        Ok(
+            SimSettings::resolve(&self.config, &self.root, context, harness, builds)
+                .await?
+                .digest(),
         )
-        .to_string())
-    }
-
-    fn sim_config(&self, context: &ContextName) -> Result<&SimConfig, RunnerError> {
-        self.config.sim.get(context).ok_or_else(|| {
-            config_error(format!(
-                "[measure.sim.{context}] is not configured; it gives the interpreter and the program"
-            ))
-        })
     }
 
     /// Runs the simulation `request` asks for.
@@ -272,39 +251,38 @@ impl ProcessRunner {
         &self,
         request: &SimulateRequest,
     ) -> Result<SimulateReport, RunnerError> {
-        let cfg = self.sim_config(&request.context)?;
-        let script = self
-            .config
-            .harness(&request.context, &request.harness)
-            .ok_or_else(|| {
-                config_error(format!(
-                    "[[measure.layout]] has no entry for the harness `{}` of `{}`",
-                    request.harness, request.context
-                ))
-            })?;
+        let builds: Vec<AssetName> = request.interfaces.iter().map(|i| i.name.clone()).collect();
+        let settings = SimSettings::resolve(
+            &self.config,
+            &self.root,
+            &request.context,
+            &request.harness,
+            &builds,
+        )
+        .await?;
         let mut interfaces = Vec::with_capacity(request.interfaces.len());
         for i in &request.interfaces {
-            let (place, _) = self
-                .config
-                .interface(&request.context, &i.name)
-                .ok_or_else(|| {
-                    config_error(format!(
-                        "[[measure.layout]] has no entry for the interface `{}` of `{}`",
-                        i.name, request.context
-                    ))
+            let path = settings
+                .build_path(&i.name)
+                .ok_or_else(|| RunnerError::NoLayout {
+                    place: LayoutPlace::Interface,
+                    context: request.context.clone(),
+                    name: i.name.clone(),
                 })?;
-            interfaces.push((place.path.as_path(), i));
+            interfaces.push((path, i));
         }
         let dirs = self.run_dirs(&request.run)?;
-        let deadline = process::deadline_in(cfg.budget).map_err(|f| config_error(f.message))?;
+        let deadline =
+            process::deadline_in(settings.budget).map_err(|f| RunnerError::Deadline(f.message))?;
         let plan = Plan {
             request,
-            cfg,
-            script: script.path.as_path(),
+            settings: &settings,
+            script: settings.harness.path(),
             interfaces,
         };
         let first = Job {
-            runner: self,
+            root: &self.root,
+            copy: &settings.copy,
             dirs,
             deadline,
         };
@@ -312,6 +290,7 @@ impl ProcessRunner {
         let finished = first.sim_steps(&plan, &mut progress).await;
         first.clean().await;
         Ok(SimulateReport {
+            settings: settings.digest(),
             cases: progress.cases,
             reruns: progress.reruns,
             failure: finished.err(),
@@ -329,11 +308,10 @@ impl Job<'_> {
         tag: &str,
         out: &mut SimProgress,
     ) -> Result<Command, MeasureFailure> {
-        let config = &self.runner.config;
         let (root, tree, exclude) = (
-            self.runner.root.clone(),
+            self.root.to_path_buf(),
             self.dirs.tree.clone(),
-            config.copy_exclude.clone(),
+            self.copy.excluded(),
         );
         tokio::task::spawn_blocking(move || super::copy_tree(&root, &tree, &exclude))
             .await
@@ -344,9 +322,9 @@ impl Job<'_> {
         }
         self.write(plan.script, &plan.request.script).await?;
         let env = self.env();
-        let build = self.command(&config.build).await?;
+        let build = self.command(&self.copy.build).await?;
         let started = Instant::now();
-        let result = self.exec(&build, &env, config.baseline_timeout).await;
+        let result = self.exec(&build, &env, self.copy.baseline_timeout).await;
         let (exit_code, stderr) = match &result {
             Ok((ran, _)) => (ran.exit_code, provider::tail(&ran.stderr, TAIL)),
             Err(_) => (None, String::new()),
@@ -376,7 +354,7 @@ impl Job<'_> {
                 ),
             ));
         }
-        self.command(&plan.cfg.interpreter).await
+        self.command(&plan.settings.interpreter).await
     }
 
     /// Runs the script for `case` and reads what it said and what it wrote.
@@ -414,14 +392,14 @@ impl Job<'_> {
         args.push("--out".to_string());
         args.push(dir.to_string_lossy().into_owned());
         args.push("--".to_string());
-        args.extend(plan.cfg.program.iter().map(|w| self.dirs.expand(w)));
+        args.extend(plan.settings.program.iter().map(|w| self.dirs.expand(w)));
         let command = Command {
             executable: interpreter.executable.clone(),
             args,
             digest: interpreter.digest.clone(),
         };
         let env = self.env();
-        let deadline = process::deadline_in(plan.cfg.timeout)
+        let deadline = process::deadline_in(plan.settings.timeout)
             .map_err(|f| self.fail(f))?
             .min(self.deadline);
         let started = Instant::now();
@@ -525,7 +503,7 @@ impl Job<'_> {
         out: &mut SimProgress,
     ) -> Result<(), MeasureFailure> {
         let interpreter = self.sim_prepare(plan, "sim", out).await?;
-        let mut cases: Vec<SimCase> = (0..plan.cfg.seeds).map(SimCase::Seed).collect();
+        let mut cases: Vec<SimCase> = (0..plan.settings.seeds).map(SimCase::Seed).collect();
         cases.extend(plan.request.regress.iter().cloned().map(SimCase::Regress));
         for case in &cases {
             let run = self.sim_case(plan, &interpreter, case, "sim", out).await?;
@@ -552,13 +530,14 @@ impl Job<'_> {
                 ),
             ));
         }
-        let again = rerun_cases(&out.cases, plan.cfg.sample);
+        let again = rerun_cases(&out.cases, plan.settings.sample);
         if again.is_empty() {
             return Ok(());
         }
         // A second, fresh copy: what the first run left behind (files the program wrote, a cache) is not there.
         let second = Job {
-            runner: self.runner,
+            root: self.root,
+            copy: self.copy,
             dirs: self.dirs.rerun(),
             deadline: self.deadline,
         };

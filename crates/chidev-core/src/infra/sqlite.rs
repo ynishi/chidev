@@ -2387,9 +2387,8 @@ mod tests {
             *stamp = crate::domain::vo::measure::MeasureStamp::new(
                 Digest::of(b"code"),
                 empty_basis(),
-                format!("settings-{n}"),
-            )
-            .unwrap();
+                crate::domain::entity::measurement::fixture::settings_of(&format!("settings-{n}")),
+            );
         }
         Measurement::new(d).unwrap()
     }
