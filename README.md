@@ -102,9 +102,18 @@ from, and its fields). A line that fails gets `"ok":false` and `diagnostics` (se
 "Diagnostics"), and the run goes on; the exit status is 1 if any line failed. Things are named, never
 given by id (except by a correction, which names records by id, because a name can
 hold the text it corrects; see "Correcting a record"): a Context by its name, an asset by its name within its Context, a
-Clause by its label (`C1`), an Item by its key, a Case by its name. These are
-the operations that build the model (the others are described below, where they
-belong):
+Clause by its label (`C1`), an Item by its key, a Case by its name.
+
+The name of a Context and the name of an asset (a Contract, an Interface or a
+Harness) follow one rule: not empty, and only the ASCII lower-case letters `a-z`,
+the digits `0-9`, `-` and `_`, so that a name never holds the `#` or `::` a
+citation ends it with, nor white space. A name that breaks it is refused where it
+is read, and the message says which kind of name it was and names the first
+character that is not allowed. A name kept in a store file that breaks it makes the file
+corrupt.
+
+These are the operations that build the model (the others are described below,
+where they belong):
 
 ```json
 {"op":"init"}
@@ -1076,8 +1085,9 @@ sim: findings=<n>
 ```
 
 - A Clause is named `<contract>:<label>`: the Contract's name as chidev knows it
-  (no white space; the name is read up to the first white space, the label is
-  after its last `:`) and the Clause's label (`C<n>`) in it. Labels are unique only
+  (a name has only `a-z`, `0-9`, `-` and `_`, so it holds no white space and no
+  `:`; the name is read up to the first white space, the label is after the `:`)
+  and the Clause's label (`C<n>`) in it. Labels are unique only
   within a Contract, so a name without the Contract (`C1`, as `chidev-sim 1`
   wrote it) is refused. The script declares nothing else; the version is the
   protocol this document describes. chidev resolves each name to the Clause's id,

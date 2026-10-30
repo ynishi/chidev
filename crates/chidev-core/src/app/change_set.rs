@@ -12,10 +12,10 @@ use uuid::Uuid;
 use super::commit::{EditTrigger, ModelDelta};
 use super::ports::external::ExternalExecutor;
 use super::ports::items::{FoundItem, ItemsError};
-use super::ports::{AssetKind, AssetName, IdSource, Store};
+use super::ports::{AssetKind, IdSource, NamedAsset, Store};
 use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ClauseRef, ItemInput, Names, Put, RenameInput,
-    RetiredStatus, Retirement, context_id, context_ids, input, refuse_retired,
+    RetiredStatus, Retirement, context_id, context_ids, context_of, input, refuse_retired,
 };
 use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::Context;
@@ -38,7 +38,7 @@ use crate::domain::vo::id::{
 };
 use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
-use crate::domain::vo::name::ContextName;
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::revision::Revision;
 use crate::domain::vo::source::Source;
 use crate::domain::vo::target::Target;
@@ -50,7 +50,7 @@ pub struct ContractPut {
     /// The Context's name.
     pub context: String,
     /// The Contract's name.
-    pub name: String,
+    pub name: AssetName,
     /// Its title.
     pub title: String,
     /// All of its Clauses, in order; one keeps its id when its label (or the one it `replaces`) is one the Contract
@@ -65,7 +65,7 @@ pub struct ClausesPut {
     /// The Context's name.
     pub context: String,
     /// The Contract's name.
-    pub contract: String,
+    pub contract: AssetName,
     /// The Clauses to set. One whose label the Contract has gets the sentence given; one that `replaces` a label
     /// the Contract has takes the Clause's place with the new label and the sentence; any other is new, and is
     /// appended after the Clauses the Contract has, in the order given.
@@ -80,7 +80,7 @@ pub struct InterfacePut {
     /// The Context's name.
     pub context: String,
     /// The Interface's name.
-    pub name: String,
+    pub name: AssetName,
     /// Its code.
     pub source: String,
     /// Its Items, written or found.
@@ -108,12 +108,12 @@ pub struct HarnessPut {
     /// The Context's name.
     pub context: String,
     /// The Harness's name.
-    pub name: String,
+    pub name: AssetName,
     /// The Interfaces of its Context, by name, whose pinned code a sim Harness, or a Harness of examples, builds
     /// into the program it runs (one that the same change set makes is fine). It is not a citation: it asks no
     /// Item of them and puts the Harness on no Pin's basis. A Harness of tests builds none. A put states all of
     /// it, as it states the code.
-    pub builds: Vec<String>,
+    pub builds: Vec<AssetName>,
     /// What it holds: code and the Cases in it, or examples. The kind is inside it, so a put cannot say examples
     /// and give code.
     pub content: HarnessPutContent,
@@ -204,21 +204,21 @@ pub enum RetireInput {
         /// The Context.
         context: String,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
     },
     /// An Interface of a Context.
     Interface {
         /// The Context.
         context: String,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// A Harness of a Context.
     Harness {
         /// The Context.
         context: String,
         /// The Harness.
-        harness: String,
+        harness: AssetName,
     },
 }
 
@@ -351,9 +351,9 @@ pub struct ChangeSetDone {
 #[derive(Default)]
 struct Plan {
     /// The id of each asset put, by Context, kind and name.
-    ids: BTreeMap<(ContextId, AssetKind, String), Uuid>,
+    ids: BTreeMap<(ContextId, AssetKind, AssetName), Uuid>,
     /// The names to keep with the Project, one for each asset put.
-    names: Vec<AssetName>,
+    names: Vec<NamedAsset>,
     /// The Items of each Interface put: key and id.
     items: BTreeMap<InterfaceId, Vec<(String, ItemId)>>,
     /// The Clauses of each Contract put: label and id.
@@ -364,10 +364,10 @@ struct Plan {
 
 impl Plan {
     /// Records that the asset under `key` is `id` in this change set, with the name to keep for it; gives `id`.
-    fn name(&mut self, key: (ContextId, AssetKind, String), id: Uuid) -> Uuid {
+    fn name(&mut self, key: (ContextId, AssetKind, AssetName), id: Uuid) -> Uuid {
         let (context, kind, name) = key.clone();
         self.ids.insert(key, id);
-        self.names.push(AssetName {
+        self.names.push(NamedAsset {
             context,
             kind,
             name,
@@ -449,7 +449,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             };
             let id = fresh.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
             let built = ContextName::try_from(name.as_str())
-                .map_err(input)
+                .map_err(AppError::from)
                 .and_then(|n| {
                     let uses = uses
                         .iter()
@@ -643,11 +643,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         p: &Project,
         plan: &mut Plan,
         ctx: ContextId,
-        context: &str,
+        context: &ContextName,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<Uuid, AppError> {
-        let key = (ctx, kind, name.to_string());
+        let key = (ctx, kind, name.clone());
         if let Some(id) = plan.ids.get(&key) {
             return Ok(*id);
         }
@@ -668,11 +668,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         p: &Project,
         plan: &mut Plan,
         ctx: ContextId,
-        context: &str,
+        context: &ContextName,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<Uuid, AppError> {
-        let key = (ctx, kind, name.to_string());
+        let key = (ctx, kind, name.clone());
         if let Some(id) = plan.ids.get(&key) {
             return Ok(*id);
         }
@@ -682,9 +682,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 Ok(plan.name(key, id))
             }
             None => Err(AppError::UnknownAsset {
-                context: context.to_string(),
+                context: context.clone(),
                 kind: kind.word(),
-                name: name.to_string(),
+                name: name.clone(),
             }),
         }
     }
@@ -695,15 +695,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         plan: &mut Plan,
         c: &ContractPut,
     ) -> Result<AssetPut, AppError> {
-        let ctx = context_id(p, &c.context)?;
+        let (ctx, context) = context_of(p, &c.context)?;
         let id = ContractId::from_uuid(
-            self.reserve(p, plan, ctx, &c.context, AssetKind::Contract, &c.name)
+            self.reserve(p, plan, ctx, &context, AssetKind::Contract, &c.name)
                 .await?,
         );
         let old = p.context(ctx).and_then(|x| x.contract(id));
         let read = self.read_clauses(&c.clauses, &[]);
         let found = Contract::clauses_whole(old, &read.edits);
-        let given = read.settle((&c.context, &c.name), found)?;
+        let given = read.settle((&context, &c.name), found)?;
         let title = Title::try_from(c.title.as_str()).map_err(input)?;
         Ok(contract_asset(plan, (ctx, id), &c.name, title, given))
     }
@@ -726,13 +726,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         problems: &mut Vec<AppError>,
     ) -> Option<AssetPut> {
         let ids = async {
-            let ctx = context_id(p, &c.context)?;
+            let (ctx, context) = context_of(p, &c.context)?;
             let id = self
-                .reserved(p, plan, ctx, &c.context, AssetKind::Contract, &c.contract)
+                .reserved(p, plan, ctx, &context, AssetKind::Contract, &c.contract)
                 .await?;
-            Ok::<_, AppError>((ctx, ContractId::from_uuid(id)))
+            Ok::<_, AppError>((ctx, context, ContractId::from_uuid(id)))
         };
-        let (ctx, id) = match ids.await {
+        let (ctx, context, id) = match ids.await {
             Ok(found) => found,
             Err(e) => {
                 problems.push(e);
@@ -742,7 +742,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let read = self.read_clauses(&c.clauses, &c.remove);
         if let Some(old) = p.context(ctx).and_then(|x| x.contract(id)) {
             let found = old.clauses_partial(&read.edits, &read.remove);
-            match read.settle((&c.context, &c.contract), found) {
+            match read.settle((&context, &c.contract), found) {
                 Ok(given) => record_clauses(plan, id, &c.contract, &given),
                 Err(e) => {
                     problems.push(e);
@@ -833,14 +833,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// The Items of `i.source`, from the provider of the language `i` is laid out with.
     async fn find_items(&self, i: &InterfacePut) -> Result<Vec<FoundItem>, AppError> {
+        let context = ContextName::try_from(i.context.as_str())?;
         let lang = self
             .items
-            .language(&i.context, &i.name)
-            .map_err(|e| items_error(&i.context, &i.name, None, e))?;
+            .language(&context, &i.name)
+            .map_err(|e| items_error(&context, &i.name, None, e))?;
         self.items
             .items(&lang, &i.source)
             .await
-            .map_err(|e| items_error(&i.context, &i.name, Some(&lang), e))
+            .map_err(|e| items_error(&context, &i.name, Some(&lang), e))
     }
 
     /// An Interface to put. `found` is what the provider found for it, when it was put with no `items`.
@@ -851,9 +852,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         i: &InterfacePut,
         found: Option<&[FoundItem]>,
     ) -> Result<AssetPut, AppError> {
-        let ctx = context_id(p, &i.context)?;
+        let (ctx, context) = context_of(p, &i.context)?;
         let id = InterfaceId::from_uuid(
-            self.reserve(p, plan, ctx, &i.context, AssetKind::Interface, &i.name)
+            self.reserve(p, plan, ctx, &context, AssetKind::Interface, &i.name)
                 .await?,
         );
         let old = p.context(ctx).and_then(|x| x.interface(id));
@@ -864,7 +865,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let items = match (&i.items, found) {
             (ItemsInput::Written(items), _) => items.clone(),
             (ItemsInput::Found { renames }, Some(found)) => {
-                renamed(i, renames, found, |key| find(key).is_some())?
+                renamed((&context, i), renames, found, |key| find(key).is_some())?
             }
             (ItemsInput::Found { .. }, None) => {
                 return Err(input("the items of the interface were not found"));
@@ -879,7 +880,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             };
             if replaced.contains(&was) {
                 return Err(AppError::RenameConflict {
-                    context: i.context.clone(),
+                    context: context.clone(),
                     interface: i.name.clone(),
                     key: was.to_string(),
                     side: "replaces",
@@ -887,7 +888,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             }
             if it.key != was && items.iter().any(|other| other.key == was) {
                 return Err(AppError::ReplacesKept {
-                    context: i.context.clone(),
+                    context: context.clone(),
                     interface: i.name.clone(),
                     key: was.to_string(),
                 });
@@ -900,7 +901,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             let lines = LineRange::new(it.lines.0, it.lines.1).map_err(input)?;
             let item = match &it.replaces {
                 Some(was) => find(was).ok_or_else(|| AppError::UnknownItem {
-                    context: i.context.clone(),
+                    context: context.clone(),
                     interface: i.name.clone(),
                     key: was.clone(),
                 })?,
@@ -939,15 +940,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         problems: &mut Vec<AppError>,
     ) -> Option<AssetPut> {
         let before = problems.len();
-        let ctx = match context_id(p, &h.context) {
-            Ok(ctx) => ctx,
+        let (ctx, context) = match context_of(p, &h.context) {
+            Ok(found) => found,
             Err(e) => {
                 problems.push(e);
                 return None;
             }
         };
         let id = match self
-            .reserve(p, plan, ctx, &h.context, AssetKind::Harness, &h.name)
+            .reserve(p, plan, ctx, &context, AssetKind::Harness, &h.name)
             .await
         {
             Ok(id) => HarnessId::from_uuid(id),
@@ -990,7 +991,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         let mut builds = BTreeSet::new();
         for name in &h.builds {
-            match self.build_interface(plan, ctx, &h.context, name).await {
+            match self.build_interface(plan, ctx, &context, name).await {
                 Ok(interface) => {
                     builds.insert(interface);
                 }
@@ -1014,10 +1015,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self,
         plan: &Plan,
         ctx: ContextId,
-        context: &str,
-        name: &str,
+        context: &ContextName,
+        name: &AssetName,
     ) -> Result<InterfaceId, AppError> {
-        let id = match plan.ids.get(&(ctx, AssetKind::Interface, name.to_string())) {
+        let id = match plan.ids.get(&(ctx, AssetKind::Interface, name.clone())) {
             Some(id) => *id,
             None => self.asset(ctx, context, AssetKind::Interface, name).await?,
         };
@@ -1213,42 +1214,48 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         match r {
             RetireInput::Context(name) => Ok(AssetRetire::Context(context_id(p, name)?)),
             RetireInput::Contract { context, contract } => {
-                let ctx = context_id(p, context)?;
+                let (ctx, context) = context_of(p, context)?;
                 let id = ContractId::from_uuid(
-                    self.asset(ctx, context, AssetKind::Contract, contract)
+                    self.asset(ctx, &context, AssetKind::Contract, contract)
                         .await?,
                 );
                 refuse_retired(
                     p,
                     Target::Contract(id),
-                    context,
+                    &context,
                     AssetKind::Contract,
                     contract,
                 )?;
                 Ok(AssetRetire::Contract { context: ctx, id })
             }
             RetireInput::Interface { context, interface } => {
-                let ctx = context_id(p, context)?;
+                let (ctx, context) = context_of(p, context)?;
                 let id = InterfaceId::from_uuid(
-                    self.asset(ctx, context, AssetKind::Interface, interface)
+                    self.asset(ctx, &context, AssetKind::Interface, interface)
                         .await?,
                 );
                 refuse_retired(
                     p,
                     Target::Interface(id),
-                    context,
+                    &context,
                     AssetKind::Interface,
                     interface,
                 )?;
                 Ok(AssetRetire::Interface { context: ctx, id })
             }
             RetireInput::Harness { context, harness } => {
-                let ctx = context_id(p, context)?;
+                let (ctx, context) = context_of(p, context)?;
                 let id = HarnessId::from_uuid(
-                    self.asset(ctx, context, AssetKind::Harness, harness)
+                    self.asset(ctx, &context, AssetKind::Harness, harness)
                         .await?,
                 );
-                refuse_retired(p, Target::Harness(id), context, AssetKind::Harness, harness)?;
+                refuse_retired(
+                    p,
+                    Target::Harness(id),
+                    &context,
+                    AssetKind::Harness,
+                    harness,
+                )?;
                 Ok(AssetRetire::Harness { context: ctx, id })
             }
         }
@@ -1298,12 +1305,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 /// The refusal that `e`, from the source of Items, is for the Interface `interface` of `context`; `lang` is its
 /// language once known.
 pub(super) fn items_error(
-    context: &str,
-    interface: &str,
+    context: &ContextName,
+    interface: &AssetName,
     lang: Option<&str>,
     e: ItemsError,
 ) -> AppError {
-    let (context, interface) = (context.to_string(), interface.to_string());
+    let (context, interface) = (context.clone(), interface.clone());
     let language = || lang.unwrap_or("?").to_string();
     match e {
         ItemsError::NoLanguage => AppError::ItemsRequired { context, interface },
@@ -1332,7 +1339,7 @@ pub(super) fn items_error(
 /// A rename that cannot be carried out is named, whichever it is, and none is ignored: a `from` or a `to` named
 /// twice, a `to` the provider did not find, a `from` the Interface did not have, a `from` the provider still finds.
 fn renamed(
-    i: &InterfacePut,
+    (context, i): (&ContextName, &InterfacePut),
     renames: &[RenameInput],
     found: &[FoundItem],
     had: impl Fn(&str) -> bool,
@@ -1340,7 +1347,7 @@ fn renamed(
     let mut problems = Vec::new();
     for (n, r) in renames.iter().enumerate() {
         let earlier = &renames[..n];
-        let (context, interface) = (i.context.clone(), i.name.clone());
+        let (context, interface) = (context.clone(), i.name.clone());
         let conflict = |key: &str, side| AppError::RenameConflict {
             context: context.clone(),
             interface: interface.clone(),
@@ -1403,7 +1410,7 @@ impl ClausesRead {
     /// reading and the ones with the names. `at` is the Context and the Contract's name.
     fn settle(
         &self,
-        at: (&str, &str),
+        at: (&ContextName, &AssetName),
         found: Result<Vec<(ClauseId, ClauseContent)>, Vec<ClauseNameProblem>>,
     ) -> Result<Vec<(ClauseId, ClauseContent)>, AppError> {
         let mut problems = self.problems.clone();
@@ -1418,8 +1425,8 @@ impl ClausesRead {
 
 /// The refusal that a problem with the names of a put is, in the words a person knows. `at` is the Context and the
 /// Contract's name.
-fn name_error(at: (&str, &str), problem: &ClauseNameProblem) -> AppError {
-    let (context, contract) = (at.0.to_string(), at.1.to_string());
+fn name_error(at: (&ContextName, &AssetName), problem: &ClauseNameProblem) -> AppError {
+    let (context, contract) = (at.0.clone(), at.1.clone());
     match problem {
         ClauseNameProblem::Unknown { label, field } => AppError::ClauseUnknown {
             context,
@@ -1446,7 +1453,7 @@ fn name_error(at: (&str, &str), problem: &ClauseNameProblem) -> AppError {
 fn record_clauses(
     plan: &mut Plan,
     id: ContractId,
-    name: &str,
+    name: &AssetName,
     clauses: &[(ClauseId, ClauseContent)],
 ) {
     plan.clauses.insert(
@@ -1468,7 +1475,7 @@ fn record_clauses(
 fn contract_asset(
     plan: &mut Plan,
     (ctx, id): (ContextId, ContractId),
-    name: &str,
+    name: &AssetName,
     title: Title,
     clauses: Vec<(ClauseId, ClauseContent)>,
 ) -> AssetPut {
@@ -1585,7 +1592,7 @@ fn asset_put_done(
     put_kind: AssetPutKind,
     asset_kind: AssetKind,
     context: &str,
-    name: &str,
+    name: &AssetName,
     before: &Project,
     plan: &Plan,
     after: &Project,
@@ -1594,7 +1601,7 @@ fn asset_put_done(
         .map_err(|_| AppError::Defect(format!("context `{context}` not found in before")))?;
     let id = plan
         .ids
-        .get(&(ctx, asset_kind, name.to_string()))
+        .get(&(ctx, asset_kind, name.clone()))
         .copied()
         .ok_or_else(|| {
             AppError::Defect(format!(

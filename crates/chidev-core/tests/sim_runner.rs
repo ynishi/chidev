@@ -12,6 +12,7 @@ use chidev_core::domain::vo::clause::ClauseLabel;
 use chidev_core::domain::vo::digest::Digest;
 use chidev_core::domain::vo::id::ClauseId;
 use chidev_core::domain::vo::measure::FailureKind;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::sim::{CitedClause, ClauseName, RegressName};
 use chidev_core::infra::project::{self, FILE};
 use chidev_core::infra::runner::{self, ProcessRunner};
@@ -97,14 +98,22 @@ fi
 echo "sim: findings=0"
 "#;
 
+fn context(name: &str) -> ContextName {
+    ContextName::try_from(name).unwrap()
+}
+
+fn asset(name: &str) -> AssetName {
+    AssetName::try_from(name).unwrap()
+}
+
 fn request(run: &str, script: &str) -> SimulateRequest {
     SimulateRequest {
         run: run.to_string(),
-        context: "ctx".to_string(),
-        harness: "sim".to_string(),
+        context: context("ctx"),
+        harness: asset("sim"),
         script: script.to_string(),
         interfaces: vec![InterfaceText {
-            name: "prog".to_string(),
+            name: asset("prog"),
             code: "PINNED program text\n".to_string(),
         }],
         // C1 is a Clause of both Contracts the sweep cites: `stock` (id 1) and `cli` (id 2)
@@ -115,7 +124,7 @@ fn request(run: &str, script: &str) -> SimulateRequest {
 
 fn cited(contract: &str, label: &str, id: u128) -> CitedClause {
     CitedClause {
-        name: ClauseName::new(contract, ClauseLabel::try_from(label).unwrap()).unwrap(),
+        name: ClauseName::new(asset(contract), ClauseLabel::try_from(label).unwrap()),
         id: ClauseId::from_uuid(uuid::Uuid::from_u128(id)),
     }
 }
@@ -457,7 +466,7 @@ async fn a_configuration_that_cannot_simulate_is_an_error_and_runs_nothing() {
     let project = Project::new(GOOD);
     let runner = project.runner();
     let mut other_context = request("run-8", GOOD);
-    other_context.context = "other".to_string();
+    other_context.context = context("other");
     assert!(
         runner
             .simulate(&other_context)
@@ -467,7 +476,7 @@ async fn a_configuration_that_cannot_simulate_is_an_error_and_runs_nothing() {
             .contains("[measure.sim.other]")
     );
     let mut no_harness = request("run-9", GOOD);
-    no_harness.harness = "elsewhere".to_string();
+    no_harness.harness = asset("elsewhere");
     assert!(
         runner
             .simulate(&no_harness)
@@ -477,7 +486,7 @@ async fn a_configuration_that_cannot_simulate_is_an_error_and_runs_nothing() {
             .contains("no entry for the harness `elsewhere`")
     );
     let mut no_interface = request("run-10", GOOD);
-    no_interface.interfaces[0].name = "gone".to_string();
+    no_interface.interfaces[0].name = asset("gone");
     assert!(
         runner
             .simulate(&no_interface)
@@ -500,14 +509,27 @@ async fn a_configuration_that_cannot_simulate_is_an_error_and_runs_nothing() {
 #[tokio::test]
 async fn the_settings_follow_the_table_and_the_interpreter() {
     let project = Project::new(GOOD);
-    let one = project.runner().sim_settings("ctx", "sim").await.unwrap();
+    let (ctx, sim) = (context("ctx"), asset("sim"));
+    let one = project.runner().sim_settings(&ctx, &sim).await.unwrap();
     assert_eq!(
         one,
-        project.runner().sim_settings("ctx", "sim").await.unwrap()
+        project.runner().sim_settings(&ctx, &sim).await.unwrap()
     );
     project.edit(|t| t.replace("seeds = 3", "seeds = 4"));
-    let two = project.runner().sim_settings("ctx", "sim").await.unwrap();
+    let two = project.runner().sim_settings(&ctx, &sim).await.unwrap();
     assert_ne!(one, two);
-    assert!(project.runner().sim_settings("ctx", "other").await.is_err());
-    assert!(project.runner().sim_settings("other", "sim").await.is_err());
+    assert!(
+        project
+            .runner()
+            .sim_settings(&ctx, &asset("other"))
+            .await
+            .is_err()
+    );
+    assert!(
+        project
+            .runner()
+            .sim_settings(&context("other"), &sim)
+            .await
+            .is_err()
+    );
 }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::Operator;
+use crate::domain::vo::name::{AssetName, ContextName};
 
 /// The directory under the project root a run works in, and the directories a copy never takes.
 pub(super) const WORK_DIR: &str = ".chidev/measure";
@@ -226,8 +227,8 @@ pub(super) enum Place {
 /// Where one Interface or Harness lives in the working tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Layout {
-    pub context: String,
-    pub name: String,
+    pub context: ContextName,
+    pub name: AssetName,
     pub place: Place,
     /// Relative to the project root, without `..`.
     pub path: PathBuf,
@@ -265,7 +266,7 @@ pub(super) struct Config {
     /// Language to the command that finds the Items of an Interface from its code.
     pub items: BTreeMap<String, Vec<String>>,
     /// Context name to how its sim script is run.
-    pub sim: BTreeMap<String, SimConfig>,
+    pub sim: BTreeMap<ContextName, SimConfig>,
     pub layout: Vec<Layout>,
     /// For one build or one test of a mutant.
     pub timeout: Duration,
@@ -284,9 +285,13 @@ pub(super) struct Config {
 
 impl Config {
     /// The place and language (if any) of the Interface `name` of `context`.
-    pub(super) fn interface(&self, context: &str, name: &str) -> Option<(&Layout, Option<&str>)> {
+    pub(super) fn interface(
+        &self,
+        context: &ContextName,
+        name: &AssetName,
+    ) -> Option<(&Layout, Option<&str>)> {
         self.layout.iter().find_map(|l| match &l.place {
-            Place::Interface { lang } if l.context == context && l.name == name => {
+            Place::Interface { lang } if l.context == *context && l.name == *name => {
                 Some((l, lang.as_deref()))
             }
             _ => None,
@@ -294,10 +299,10 @@ impl Config {
     }
 
     /// The place of the Harness `name` of `context`.
-    pub(super) fn harness(&self, context: &str, name: &str) -> Option<&Layout> {
+    pub(super) fn harness(&self, context: &ContextName, name: &AssetName) -> Option<&Layout> {
         self.layout
             .iter()
-            .find(|l| l.place == Place::Harness && l.context == context && l.name == name)
+            .find(|l| l.place == Place::Harness && l.context == *context && l.name == *name)
     }
 }
 
@@ -418,9 +423,8 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     };
     let mut sim = BTreeMap::new();
     for (Plain(context), s) in raw.sim {
-        if context.trim().is_empty() {
-            return Err("a context in `sim` has a name".to_string());
-        }
+        let context = ContextName::try_from(context.as_str())
+            .map_err(|e| format!("`[measure.sim.<context>]`: {e}"))?;
         let interpreter = strings(s.interpreter);
         command(&format!("sim.{context}.interpreter"), &interpreter)?;
         let program: Vec<String> = s.program.iter().map(|w| w.0.clone()).collect();
@@ -461,12 +465,16 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
     let mut seen = BTreeSet::new();
     for l in raw.layout {
         let path = inside("`layout` path", &l.path.0)?;
-        let context = l.context.0;
-        let (name, place) = match (
-            l.interface.map(|n| n.0),
-            l.harness.map(|n| n.0),
-            l.lang.map(|n| n.0),
-        ) {
+        let context = ContextName::try_from(l.context.0.as_str())
+            .map_err(|e| format!("the `context` of a `layout` entry: {e}"))?;
+        let asset = |n: Option<Plain>| {
+            n.map(|n| {
+                AssetName::try_from(n.0.as_str())
+                    .map_err(|e| format!("the `interface` or `harness` of a `layout` entry: {e}"))
+            })
+            .transpose()
+        };
+        let (name, place) = match (asset(l.interface)?, asset(l.harness)?, l.lang.map(|n| n.0)) {
             (Some(name), None, Some(lang)) => {
                 if !mutants.contains_key(&lang) && !items.contains_key(&lang) {
                     return Err(format!(
@@ -531,6 +539,14 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
 mod tests {
     use super::*;
 
+    fn context(name: &str) -> ContextName {
+        ContextName::try_from(name).unwrap()
+    }
+
+    fn asset(name: &str) -> AssetName {
+        AssetName::try_from(name).unwrap()
+    }
+
     const MINIMAL: &str = r#"
 build = ["cargo", "build", "--tests"]
 test = ["cargo", "test"]
@@ -569,17 +585,71 @@ path = "tests/stock.rs"
                 Template("{run}/target".to_string())
             )]
         );
-        let (place, lang) = config.interface("inventory", "stock").unwrap();
+        let (place, lang) = config
+            .interface(&context("inventory"), &asset("stock"))
+            .unwrap();
         assert_eq!(
             (place.path.as_path(), lang),
             (Path::new("src/stock.rs"), Some("rust"))
         );
         assert_eq!(
-            config.harness("inventory", "stock-tests").unwrap().path,
+            config
+                .harness(&context("inventory"), &asset("stock-tests"))
+                .unwrap()
+                .path,
             Path::new("tests/stock.rs")
         );
-        assert!(config.interface("inventory", "stock-tests").is_none());
-        assert!(config.harness("other", "stock-tests").is_none());
+        assert!(
+            config
+                .interface(&context("inventory"), &asset("stock-tests"))
+                .is_none()
+        );
+        assert!(
+            config
+                .harness(&context("other"), &asset("stock-tests"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_layout_or_a_sim_table_that_names_what_is_not_a_name_is_refused() {
+        for (field, replaced, with) in [
+            (
+                "context",
+                "context = \"inventory\"",
+                "context = \"Inventory\"",
+            ),
+            (
+                "interface",
+                "interface = \"stock\"",
+                "interface = \"st ock\"",
+            ),
+            (
+                "harness",
+                "harness = \"stock-tests\"",
+                "harness = \"stock/tests\"",
+            ),
+        ] {
+            let bad = MINIMAL.replacen(replaced, with, 1);
+            assert_ne!(bad, MINIMAL, "{field} is in the table");
+            let error = parse(&table(&bad)).unwrap_err();
+            assert!(error.contains("layout"), "{field}: {error}");
+            assert!(
+                error.contains(with.split('"').nth(1).unwrap()),
+                "{field}: {error}"
+            );
+        }
+        let with_sim = |key: &str| {
+            format!(
+                "{MINIMAL}\n[sim.\"{key}\"]\ninterpreter = [\"python3\"]\nprogram = [\"{{tree}}/target/debug/inventory\"]\n"
+            )
+        };
+        assert!(parse(&table(&with_sim("inventory"))).is_ok());
+        for key in ["Inventory", "inv entory", "inv:entory", ""] {
+            let error = parse(&table(&with_sim(key))).unwrap_err();
+            assert!(error.contains("[measure.sim.<context>]"), "{key}: {error}");
+            assert!(error.contains("a context name"), "{key}: {error}");
+        }
     }
 
     #[test]
@@ -602,7 +672,9 @@ path = "tests/stock.rs"
         );
         let config = parse(&table(&only_items)).unwrap();
         assert!(config.mutants.is_empty());
-        let (_, lang) = config.interface("inventory", "stock").unwrap();
+        let (_, lang) = config
+            .interface(&context("inventory"), &asset("stock"))
+            .unwrap();
         assert_eq!(lang, Some("rust"));
         // and one that neither has a command for is refused
         let neither = only_items.replace("lang = \"rust\"", "lang = \"go\"");
@@ -697,7 +769,7 @@ path = "sim.py"
      {
         let config = parse(&table(SIM)).unwrap();
         assert!(config.test.is_none());
-        let sim = &config.sim["inventory"];
+        let sim = &config.sim[&context("inventory")];
         assert_eq!(sim.interpreter, ["python3"]);
         assert_eq!(
             sim.program,
@@ -706,10 +778,15 @@ path = "sim.py"
         assert_eq!((sim.seeds, sim.sample), (50, 6));
         assert_eq!(sim.timeout, Duration::from_secs(60));
         assert_eq!(sim.budget, Duration::from_secs(600));
-        let (place, lang) = config.interface("inventory", "prog").unwrap();
+        let (place, lang) = config
+            .interface(&context("inventory"), &asset("prog"))
+            .unwrap();
         assert_eq!((place.path.as_path(), lang), (Path::new("prog.py"), None));
         assert_eq!(
-            config.harness("inventory", "sweep-script").unwrap().path,
+            config
+                .harness(&context("inventory"), &asset("sweep-script"))
+                .unwrap()
+                .path,
             Path::new("sim.py")
         );
     }
@@ -758,7 +835,7 @@ path = "sim.py"
             "[sim.inventory]\nseeds = 8\nsample = 2\ntimeout = 5\nbudget = 90",
             1,
         );
-        let sim = &parse(&table(&tuned)).unwrap().sim["inventory"];
+        let sim = &parse(&table(&tuned)).unwrap().sim[&context("inventory")];
         assert_eq!((sim.seeds, sim.sample), (8, 2));
         assert_eq!(
             (sim.timeout, sim.budget),
@@ -978,7 +1055,7 @@ path = "sim.py"
                 ("TARGET", "/p/.chidev/measure/r1/t".to_string()),
             ]
         );
-        let program: Vec<String> = config.sim["inventory"]
+        let program: Vec<String> = config.sim[&context("inventory")]
             .program
             .iter()
             .map(|w| dirs().expand(w))

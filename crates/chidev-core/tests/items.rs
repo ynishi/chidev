@@ -14,6 +14,7 @@ use chidev_core::app::{
     ItemRef, ItemRevised, ItemsInput, KeyChanged, PutInput, RenameInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -92,8 +93,8 @@ impl Fake {
 }
 
 impl ItemSource for Fake {
-    fn language(&self, context: &str, interface: &str) -> Result<String, ItemsError> {
-        (self.language)(context, interface)
+    fn language(&self, context: &ContextName, interface: &AssetName) -> Result<String, ItemsError> {
+        (self.language)(context.as_str(), interface.as_str())
     }
 
     fn items<'a>(
@@ -563,7 +564,7 @@ async fn a_provider_that_fails_refuses_the_whole_change_set_and_names_each_inter
     let interface = |name: &str, source: &str| {
         PutInput::Interface(InterfacePut {
             context: "core".to_string(),
-            name: name.to_string(),
+            name: AssetName::try_from(name).unwrap(),
             source: source.to_string(),
             items: found(&[]),
         })
@@ -573,7 +574,7 @@ async fn a_provider_that_fails_refuses_the_whole_change_set_and_names_each_inter
         puts: vec![
             PutInput::Contract(ContractPut {
                 context: "core".to_string(),
-                name: "stock".to_string(),
+                name: AssetName::try_from("stock").unwrap(),
                 title: "Stock".to_string(),
                 clauses: Vec::new(),
             }),
@@ -735,7 +736,7 @@ async fn a_rekey_that_revises_an_item_a_case_cites_says_the_citation_is_behind()
             lines: (1, 1),
             items: vec![ItemRef {
                 context: None,
-                interface: "stock".to_string(),
+                interface: AssetName::try_from("stock").unwrap(),
                 key: "reserve".to_string(),
             }],
             clauses: Vec::new(),
@@ -980,7 +981,7 @@ async fn a_store_of_schema_1_comes_to_the_providers_keys_with_the_ids_and_the_ci
                 lines: (1, 1),
                 items: vec![ItemRef {
                     context: None,
-                    interface: "stock".to_string(),
+                    interface: AssetName::try_from("stock").unwrap(),
                     key: "fn reserve()".to_string(),
                 }],
                 clauses: Vec::new(),

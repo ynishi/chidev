@@ -8,11 +8,12 @@ use super::change_set::items_error;
 use super::commit::{EditTrigger, ModelDelta};
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, IdSource, Store};
-use super::{App, AppError, Checked, context_id, input};
+use super::{App, AppError, Checked, context_named, input};
 use crate::domain::service::rekey::pair;
 use crate::domain::vo::id::{InterfaceId, ItemId};
 use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
+use crate::domain::vo::name::{AssetName, ContextName};
 
 /// An Item that was given another key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,27 +70,31 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Rekeyed>, AppError> {
         let at = self.store.revision().await?;
         let mut p = self.project().await?;
-        let ctx = context_id(&p, context)?;
+        let (context, interface) = (
+            ContextName::try_from(context)?,
+            AssetName::try_from(interface)?,
+        );
+        let ctx = context_named(&p, &context)?;
         let id = InterfaceId::from_uuid(
-            self.asset(ctx, context, AssetKind::Interface, interface)
+            self.asset(ctx, &context, AssetKind::Interface, &interface)
                 .await?,
         );
         let Some(old) = p.context(ctx).and_then(|c| c.interface(id)).cloned() else {
             return Err(AppError::AssetRetired {
-                context: context.to_string(),
+                context,
                 kind: AssetKind::Interface.word(),
-                name: interface.to_string(),
+                name: interface,
             });
         };
         let lang = self
             .items
-            .language(context, interface)
-            .map_err(|e| items_error(context, interface, None, e))?;
+            .language(&context, &interface)
+            .map_err(|e| items_error(&context, &interface, None, e))?;
         let found = self
             .items
             .items(&lang, old.source().as_str())
             .await
-            .map_err(|e| items_error(context, interface, Some(&lang), e))?;
+            .map_err(|e| items_error(&context, &interface, Some(&lang), e))?;
         let ranges = found
             .iter()
             .map(|f| LineRange::new(f.lines.0, f.lines.1))

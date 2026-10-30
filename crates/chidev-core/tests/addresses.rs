@@ -19,6 +19,7 @@ use chidev_core::domain::check::{FindingState, Moment};
 use chidev_core::domain::repository::{ChangeRequestRepository, ProjectRepository};
 use chidev_core::domain::vo::finding::{RuleId, SubjectKind};
 use chidev_core::domain::vo::model_section::ModelSection;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::{judged, sqlite::SqliteStore};
@@ -74,28 +75,33 @@ async fn resolve_done<S: Store, G: IdSource, E: ExternalExecutor>(
 
 fn item() -> ItemRef {
     ItemRef {
-        context: Some("core".into()),
-        interface: "stack".into(),
+        context: Some(ContextName::try_from("core").unwrap()),
+        interface: AssetName::try_from("stack").unwrap(),
         key: "push".into(),
     }
 }
 
 fn clause() -> ClauseRef {
     ClauseRef {
-        context: Some("core".into()),
-        contract: "rules".into(),
+        context: Some(ContextName::try_from("core").unwrap()),
+        contract: AssetName::try_from("rules").unwrap(),
         label: "C1".into(),
     }
 }
 
 fn subjects() -> Vec<(&'static str, Option<SubjectInput>)> {
     vec![
-        ("context", Some(SubjectInput::Context("core".into()))),
+        (
+            "context",
+            Some(SubjectInput::Context(
+                ContextName::try_from("core").unwrap(),
+            )),
+        ),
         (
             "interface",
             Some(SubjectInput::Interface {
-                context: "core".into(),
-                interface: "stack".into(),
+                context: ContextName::try_from("core").unwrap(),
+                interface: AssetName::try_from("stack").unwrap(),
             }),
         ),
         ("item", Some(SubjectInput::Item(item()))),
@@ -103,8 +109,8 @@ fn subjects() -> Vec<(&'static str, Option<SubjectInput>)> {
         (
             "case",
             Some(SubjectInput::Case {
-                context: "core".into(),
-                harness: "tests".into(),
+                context: ContextName::try_from("core").unwrap(),
+                harness: AssetName::try_from("tests").unwrap(),
                 name: "pushes".into(),
             }),
         ),
@@ -267,7 +273,9 @@ async fn every_subject_is_addressed_deduplicated_persisted_and_resolved() {
         "review context again",
         vec![FindingInput {
             rule: "judged.context".into(),
-            subject: Some(SubjectInput::Context("core".into())),
+            subject: Some(SubjectInput::Context(
+                ContextName::try_from("core").unwrap(),
+            )),
         }],
     ))
     .await
@@ -295,10 +303,12 @@ async fn every_subject_is_addressed_deduplicated_persisted_and_resolved() {
 async fn nonexistent_targets_and_invalid_rule_ids_keep_nothing() {
     let (mut app, _) = fixture(Registry::defaults()).await;
     let invalid = vec![
-        Some(SubjectInput::Context("missing".into())),
+        Some(SubjectInput::Context(
+            ContextName::try_from("missing").unwrap(),
+        )),
         Some(SubjectInput::Interface {
-            context: "core".into(),
-            interface: "missing".into(),
+            context: ContextName::try_from("core").unwrap(),
+            interface: AssetName::try_from("missing").unwrap(),
         }),
         Some(SubjectInput::Item(ItemRef {
             key: "missing".into(),
@@ -309,8 +319,8 @@ async fn nonexistent_targets_and_invalid_rule_ids_keep_nothing() {
             ..clause()
         })),
         Some(SubjectInput::Case {
-            context: "core".into(),
-            harness: "tests".into(),
+            context: ContextName::try_from("core").unwrap(),
+            harness: AssetName::try_from("tests").unwrap(),
             name: "missing".into(),
         }),
         Some(SubjectInput::ChangeRequest("missing".into())),
@@ -348,7 +358,9 @@ async fn nonexistent_targets_and_invalid_rule_ids_keep_nothing() {
         "historical finding",
         vec![FindingInput {
             rule: "retired.rule".into(),
-            subject: Some(SubjectInput::Context("core".into())),
+            subject: Some(SubjectInput::Context(
+                ContextName::try_from("core").unwrap(),
+            )),
         }],
     ))
     .await
@@ -380,8 +392,8 @@ async fn a_case_name_that_does_not_identify_one_case_is_refused_atomically() {
             vec![FindingInput {
                 rule: "retired.rule".into(),
                 subject: Some(SubjectInput::Case {
-                    context: "core".into(),
-                    harness: "ambiguous".into(),
+                    context: ContextName::try_from("core").unwrap(),
+                    harness: AssetName::try_from("ambiguous").unwrap(),
                     name: "same".into(),
                 }),
             }],
@@ -402,7 +414,9 @@ async fn deciding_a_crux_does_not_resolve_the_addressed_finding() {
         "human review",
         vec![FindingInput {
             rule: "judged.context".into(),
-            subject: Some(SubjectInput::Context("core".into())),
+            subject: Some(SubjectInput::Context(
+                ContextName::try_from("core").unwrap(),
+            )),
         }],
     );
     app.open_change_request(&review).await.unwrap();
@@ -486,7 +500,9 @@ async fn builtin_context_findings_use_the_same_subject_reference() {
         "keep empty",
         vec![FindingInput {
             rule: rule.into(),
-            subject: Some(SubjectInput::Context("empty".into())),
+            subject: Some(SubjectInput::Context(
+                ContextName::try_from("empty").unwrap(),
+            )),
         }],
     ))
     .await
@@ -548,8 +564,8 @@ async fn an_external_case_finding_is_addressed_without_changing_its_staleness() 
         vec![FindingInput {
             rule: "ext.case".into(),
             subject: Some(SubjectInput::Case {
-                context: "core".into(),
-                harness: "tests".into(),
+                context: ContextName::try_from("core").unwrap(),
+                harness: AssetName::try_from("tests").unwrap(),
                 name: "pushes".into(),
             }),
         }],
@@ -576,8 +592,8 @@ async fn removing_a_case_preserves_its_historical_address() {
         vec![FindingInput {
             rule: "retired.case".into(),
             subject: Some(SubjectInput::Case {
-                context: "core".into(),
-                harness: "tests".into(),
+                context: ContextName::try_from("core").unwrap(),
+                harness: AssetName::try_from("tests").unwrap(),
                 name: "pushes".into(),
             }),
         }],

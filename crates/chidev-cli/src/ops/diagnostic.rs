@@ -115,24 +115,31 @@ impl From<TargetInput> for RefDto {
     fn from(t: TargetInput) -> Self {
         match t {
             TargetInput::Project => RefDto::Project(true),
-            TargetInput::Context(name) => RefDto::Context(name),
+            TargetInput::Context(name) => RefDto::Context(name.to_string()),
             TargetInput::Contract { context, contract } => {
-                RefDto::Contract(super::ContractRefDto { context, contract })
+                RefDto::Contract(super::ContractRefDto {
+                    context: context.to_string(),
+                    contract: contract.to_string(),
+                })
             }
             TargetInput::Interface { context, interface } => {
-                RefDto::Interface(super::InterfaceRefDto { context, interface })
+                RefDto::Interface(super::InterfaceRefDto {
+                    context: context.to_string(),
+                    interface: interface.to_string(),
+                })
             }
-            TargetInput::Harness { context, harness } => {
-                RefDto::Harness(super::HarnessRefDto { context, harness })
-            }
+            TargetInput::Harness { context, harness } => RefDto::Harness(super::HarnessRefDto {
+                context: context.to_string(),
+                harness: harness.to_string(),
+            }),
             TargetInput::Item(r) => RefDto::Item(super::ItemRefDto {
-                context: r.context,
-                interface: r.interface,
+                context: r.context.map(|c| c.to_string()),
+                interface: r.interface.to_string(),
                 key: r.key,
             }),
             TargetInput::Clause(r) => RefDto::Clause(super::ClauseRefDto {
-                context: r.context,
-                contract: r.contract,
+                context: r.context.map(|c| c.to_string()),
+                contract: r.contract.to_string(),
                 label: r.label,
             }),
             TargetInput::Case {
@@ -140,8 +147,8 @@ impl From<TargetInput> for RefDto {
                 harness,
                 name,
             } => RefDto::Case(super::CaseRefDto {
-                context,
-                harness,
+                context: context.to_string(),
+                harness: harness.to_string(),
                 name,
             }),
         }
@@ -367,10 +374,19 @@ mod tests {
     use std::collections::BTreeSet;
 
     use chidev_core::app::{Applicability, Beyond, ClauseRef, ItemRef, SuggestedOp, TargetInput};
+    use chidev_core::domain::vo::name::{AssetName, ContextName};
     use serde_json::json;
 
     use super::op_of;
     use crate::ops::Op;
+
+    fn context(name: &str) -> ContextName {
+        ContextName::try_from(name).unwrap()
+    }
+
+    fn asset(name: &str) -> AssetName {
+        AssetName::try_from(name).unwrap()
+    }
 
     fn covered(op: &SuggestedOp) -> usize {
         match op {
@@ -453,32 +469,32 @@ mod tests {
             SuggestedOp::OpenRequestFor {
                 targets: Some(vec![
                     TargetInput::Project,
-                    TargetInput::Context("core".to_string()),
+                    TargetInput::Context(context("core")),
                     TargetInput::Contract {
-                        context: "core".to_string(),
-                        contract: "rounding".to_string(),
+                        context: context("core"),
+                        contract: asset("rounding"),
                     },
                     TargetInput::Interface {
-                        context: "core".to_string(),
-                        interface: "api".to_string(),
+                        context: context("core"),
+                        interface: asset("api"),
                     },
                     TargetInput::Harness {
-                        context: "core".to_string(),
-                        harness: "tests".to_string(),
+                        context: context("core"),
+                        harness: asset("tests"),
                     },
                     TargetInput::Item(ItemRef {
-                        context: Some("core".to_string()),
-                        interface: "api".to_string(),
+                        context: Some(context("core")),
+                        interface: asset("api"),
                         key: "k".to_string(),
                     }),
                     TargetInput::Clause(ClauseRef {
                         context: None,
-                        contract: "rounding".to_string(),
+                        contract: asset("rounding"),
                         label: "C1".to_string(),
                     }),
                     TargetInput::Case {
-                        context: "core".to_string(),
-                        harness: "tests".to_string(),
+                        context: context("core"),
+                        harness: asset("tests"),
                         name: "c1".to_string(),
                     },
                 ]),

@@ -62,7 +62,7 @@ pub use self::judged::{
     JudgedState, ReportInput, Reported, ReportedFinding, RuleStanding, RuleToJudge, RulesView,
 };
 pub use self::model_view::{ModelSlice, ModelView, VIEW_VERSION};
-use self::ports::{AssetKind, AssetName, Clock, IdSource, Store, StoreRevision};
+use self::ports::{AssetKind, Clock, IdSource, NamedAsset, Store, StoreRevision};
 pub use crate::domain::check::ParamValue;
 use crate::domain::check::{CheckView, Finding, Mention, Moment};
 use crate::domain::entity::change_request::{
@@ -102,7 +102,7 @@ use crate::domain::vo::intent::Issuer;
 use crate::domain::vo::item_key::ItemKey;
 use crate::domain::vo::line_range::LineRange;
 use crate::domain::vo::measure::MeasureError;
-use crate::domain::vo::name::ContextName;
+use crate::domain::vo::name::{AssetName, ContextName, NameError};
 use crate::domain::vo::policy::PolicyLineId;
 use crate::domain::vo::prose::Prose;
 use crate::domain::vo::resolution::{Reopening, Resolution, ResolutionKind, Transition};
@@ -123,16 +123,19 @@ pub enum AppError {
     AlreadyInitialized,
     /// No Context has this name.
     #[error("no context is named `{0}`")]
-    UnknownContext(String),
+    UnknownContext(ContextName),
+    /// A name an input gives is not a name: it breaks the rule of names (see [`AssetName`]). The error is the source.
+    #[error("{0}")]
+    BadName(#[from] NameError),
     /// No asset of this kind has this name in the Context.
     #[error("the context `{context}` has no {kind} named `{name}`")]
     UnknownAsset {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The kind of asset.
         kind: &'static str,
         /// The name.
-        name: String,
+        name: AssetName,
     },
     /// The asset was retired: it is out of the model, and its name and id stay reserved.
     #[error(
@@ -140,19 +143,19 @@ pub enum AppError {
     )]
     AssetRetired {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The kind of asset.
         kind: &'static str,
         /// The name.
-        name: String,
+        name: AssetName,
     },
     /// The Interface has no Item with this key.
     #[error("the interface `{interface}` has no item `{key}`")]
     UnknownItem {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The key looked for.
         key: String,
     },
@@ -162,9 +165,9 @@ pub enum AppError {
     )]
     ReplacesKept {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The key replaced.
         key: String,
     },
@@ -172,9 +175,9 @@ pub enum AppError {
     #[error("the interface `{interface}` has `{side}` set to the key `{key}` twice")]
     RenameConflict {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The key named twice.
         key: String,
         /// Where it is named: `replaces` (an Item), `from` or `to` (a rename).
@@ -186,17 +189,17 @@ pub enum AppError {
     )]
     ItemsRequired {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// An Interface is put with no items, and no provider is configured to find them.
     #[error("the items of the interface `{interface}` are left out, and no provider finds them: {}", no_provider(.lang.as_deref()))]
     ItemsNoProvider {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The language its layout gives; none when there is no `[measure]` table to say.
         lang: Option<String>,
     },
@@ -206,9 +209,9 @@ pub enum AppError {
     )]
     ItemsProtocol {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The language.
         lang: String,
         /// What is wrong with the answer.
@@ -220,9 +223,9 @@ pub enum AppError {
     )]
     ItemsFailed {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The language.
         lang: String,
         /// Why it could not.
@@ -232,17 +235,17 @@ pub enum AppError {
     #[error("the interface `{interface}` is put with items and with renames")]
     RenamesWithItems {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// A rename names a key that is not there: a `from` the Interface did not have, a `to` the provider did not find.
     #[error("the interface `{interface}` renames the key `{key}` (`{field}`), which is not there")]
     RenameUnknown {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
         /// The key.
         key: String,
         /// `from` or `to`.
@@ -252,9 +255,9 @@ pub enum AppError {
     #[error("the contract `{contract}` has no clause {label}")]
     UnknownClause {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
         /// The label looked for.
         label: String,
     },
@@ -262,9 +265,9 @@ pub enum AppError {
     #[error("the contract `{contract}` has no clause {label} to {field}")]
     ClauseUnknown {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
         /// The label looked for.
         label: String,
         /// Where it is named: `replaces` or `remove`.
@@ -276,9 +279,9 @@ pub enum AppError {
     )]
     ClauseReplacesKept {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
         /// The label replaced.
         label: String,
     },
@@ -288,9 +291,9 @@ pub enum AppError {
     )]
     ClauseRenameConflict {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Contract.
-        contract: String,
+        contract: AssetName,
         /// The label named twice.
         label: String,
         /// Where it is named: `label` (two Clauses are given it), `replaces` (two Clauses replace it) or `remove`
@@ -301,9 +304,9 @@ pub enum AppError {
     #[error("the harness `{harness}` has no case named `{name}`")]
     UnknownCase {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Harness.
-        harness: String,
+        harness: AssetName,
         /// The name looked for.
         name: String,
     },
@@ -367,15 +370,15 @@ pub enum AppError {
     )]
     NotPinned {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// The Pin was made before the code it accepted was kept.
     #[error("the pin of `{interface}` kept no code text; pin the code again")]
     PinCodeNotKept {
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// The measure runner cannot measure this.
     #[error(transparent)]
@@ -556,9 +559,9 @@ pub struct RenameInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemRef {
     /// The Context; within a Harness, its own when not given.
-    pub context: Option<String>,
+    pub context: Option<ContextName>,
     /// The Interface.
-    pub interface: String,
+    pub interface: AssetName,
     /// The key of the Item.
     pub key: String,
 }
@@ -567,9 +570,9 @@ pub struct ItemRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClauseRef {
     /// The Context; within a Harness, its own when not given.
-    pub context: Option<String>,
+    pub context: Option<ContextName>,
     /// The Contract.
-    pub contract: String,
+    pub contract: AssetName,
     /// The label of the Clause.
     pub label: String,
 }
@@ -1562,7 +1565,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Put<ContractId>>, AppError> {
         let put = PutInput::Contract(ContractPut {
             context: context.to_string(),
-            name: name.to_string(),
+            name: AssetName::try_from(name)?,
             title: title.to_string(),
             clauses: clauses.to_vec(),
         });
@@ -1584,7 +1587,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Put<ContractId>>, AppError> {
         let put = PutInput::Clauses(ClausesPut {
             context: context.to_string(),
-            contract: contract.to_string(),
+            contract: AssetName::try_from(contract)?,
             clauses: clauses.to_vec(),
             remove: remove.to_vec(),
         });
@@ -1617,7 +1620,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Put<InterfaceId>>, AppError> {
         let put = PutInput::Interface(InterfacePut {
             context: context.to_string(),
-            name: name.to_string(),
+            name: AssetName::try_from(name)?,
             source: source.to_string(),
             items,
         });
@@ -1666,8 +1669,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         };
         let put = PutInput::Harness(HarnessPut {
             context: context.to_string(),
-            name: name.to_string(),
-            builds: builds.to_vec(),
+            name: AssetName::try_from(name)?,
+            builds: asset_names(builds)?,
             content: HarnessPutContent::Code {
                 kind,
                 source: source.to_string(),
@@ -1692,8 +1695,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<Put<HarnessId>>, AppError> {
         let put = PutInput::Harness(HarnessPut {
             context: context.to_string(),
-            name: name.to_string(),
-            builds: builds.to_vec(),
+            name: AssetName::try_from(name)?,
+            builds: asset_names(builds)?,
             content: HarnessPutContent::Examples(examples.to_vec()),
         });
         let done = self.apply_one(EditTrigger::PutHarness, put).await?;
@@ -1723,7 +1726,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             EditTrigger::RetireContract,
             RetireInput::Contract {
                 context: context.to_string(),
-                contract: contract.to_string(),
+                contract: AssetName::try_from(contract)?,
             },
         )
         .await
@@ -1740,7 +1743,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             EditTrigger::RetireInterface,
             RetireInput::Interface {
                 context: context.to_string(),
-                interface: interface.to_string(),
+                interface: AssetName::try_from(interface)?,
             },
         )
         .await
@@ -1757,7 +1760,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             EditTrigger::RetireHarness,
             RetireInput::Harness {
                 context: context.to_string(),
-                harness: harness.to_string(),
+                harness: AssetName::try_from(harness)?,
             },
         )
         .await
@@ -1767,7 +1770,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     async fn retired_status(
         &self,
         r: &Retired,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<RetiredStatus, AppError> {
         Ok(RetiredStatus {
             kind: r.target().word(),
@@ -1780,13 +1783,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 
     /// The name of a retired thing: the Context's, the asset's, or the asset's with the label, key or name.
     /// A `pending` asset (named by the use case, not kept yet) is named first.
-    async fn retired_name(&self, r: &Retired, pending: &[AssetName]) -> Result<String, AppError> {
+    async fn retired_name(&self, r: &Retired, pending: &[NamedAsset]) -> Result<String, AppError> {
         match (r.holder(), r.label(), r.target().as_uuid()) {
             (Some(holder), Some(label), _) => {
                 Ok(format!("{} {label}", self.name_in(holder, pending).await?))
             }
             (_, _, Some(id)) if !matches!(r.target(), Target::Context(_)) => {
-                self.name_in(id, pending).await
+                Ok(self.name_in(id, pending).await?.to_string())
             }
             _ => Ok(r.context().to_string()),
         }
@@ -1801,9 +1804,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     ) -> Result<Checked<PinId>, AppError> {
         let at = self.store.revision().await?;
         let p = self.project().await?;
-        let ctx = context_id(&p, context)?;
+        let (context, interface) = (
+            ContextName::try_from(context)?,
+            AssetName::try_from(interface)?,
+        );
+        let ctx = context_named(&p, &context)?;
         let iface = self
-            .asset(ctx, context, AssetKind::Interface, interface)
+            .asset(ctx, &context, AssetKind::Interface, &interface)
             .await?;
         let id = PinId::from_uuid(self.ids.next_uuid());
         let pin = record(
@@ -2413,7 +2420,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 };
                 pins.push(PinStatus {
                     context: c.name().to_string(),
-                    interface: self.name_of(i.id().as_uuid()).await?,
+                    interface: self.name_of(i.id().as_uuid()).await?.to_string(),
                     state,
                 });
             }
@@ -2423,7 +2430,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let name = self.name_of(pin.interface().as_uuid()).await?;
                 let (context, interface) = match p.retired_of(Target::Interface(pin.interface())) {
                     Some(r) => (r.context().to_string(), format!("{name} (retired)")),
-                    None => (String::new(), name),
+                    None => (String::new(), name.to_string()),
                 };
                 pins.push(PinStatus {
                     context,
@@ -2656,7 +2663,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         findings: &[Finding],
         p: &Project,
         crs: &[ChangeRequest],
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<Vec<Found>, AppError> {
         let mut out = Vec::with_capacity(findings.len());
         for f in findings {
@@ -2692,7 +2699,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         f: &Finding,
         p: &Project,
         crs: &[ChangeRequest],
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<String, AppError> {
         let mentions = f.mentions();
         if mentions.is_empty() {
@@ -2729,7 +2736,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         p: &Project,
         crs: &[ChangeRequest],
         subject: Subject,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
     ) -> Result<String, AppError> {
         Ok(match subject {
             Subject::Context(id) => match (p.context(id), p.retired_of(Target::Context(id))) {
@@ -2773,17 +2780,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     async fn asset(
         &self,
         ctx: ContextId,
-        context: &str,
+        context: &ContextName,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<uuid::Uuid, AppError> {
         self.store
             .asset_id(ctx, kind, name)
             .await?
             .ok_or_else(|| AppError::UnknownAsset {
-                context: context.to_string(),
+                context: context.clone(),
                 kind: kind.word(),
-                name: name.to_string(),
+                name: name.clone(),
             })
     }
 
@@ -2791,17 +2798,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     fn cite_context(
         &self,
         p: &Project,
-        named: Option<&String>,
+        named: Option<&ContextName>,
         default: Option<ContextId>,
-    ) -> Result<(ContextId, String), AppError> {
+    ) -> Result<(ContextId, ContextName), AppError> {
         match (named, default) {
-            (Some(n), _) => Ok((context_id(p, n)?, n.clone())),
-            (None, Some(id)) => Ok((
-                id,
-                p.context(id)
-                    .map(|c| c.name().to_string())
-                    .unwrap_or_default(),
-            )),
+            (Some(n), _) => Ok((context_named(p, n)?, n.clone())),
+            (None, Some(id)) => {
+                let name = p.context(id).map(|c| c.name().clone()).ok_or_else(|| {
+                    AppError::Defect(format!("the context {id} is not in the project"))
+                })?;
+                Ok((id, name))
+            }
             (None, None) => Err(AppError::ContextNotGiven),
         }
     }
@@ -2854,21 +2861,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             })
     }
 
-    /// The name of an asset, or its id when it has none.
-    async fn name_of(&self, id: uuid::Uuid) -> Result<String, AppError> {
+    /// The name of an asset. Every asset of the model was named when it was made, so an asset with no name is a store
+    /// that does not agree with its model.
+    async fn name_of(&self, id: uuid::Uuid) -> Result<AssetName, AppError> {
         self.name_in(id, &[]).await
     }
 
     /// The name of an asset, a `pending` one (given by the use case, not kept yet) first.
-    async fn name_in(&self, id: uuid::Uuid, pending: &[AssetName]) -> Result<String, AppError> {
+    async fn name_in(&self, id: uuid::Uuid, pending: &[NamedAsset]) -> Result<AssetName, AppError> {
         if let Some(n) = pending.iter().find(|n| n.id == id) {
             return Ok(n.name.clone());
         }
-        Ok(self
-            .store
-            .asset_name(id)
-            .await?
-            .unwrap_or_else(|| id.to_string()))
+        self.store.asset_name(id).await?.ok_or_else(|| {
+            AppError::Store(StoreError::Corrupt(format!("the asset {id} has no name")))
+        })
     }
 
     /// A Pin's reason, in words.
@@ -2904,26 +2910,46 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
 fn refuse_retired(
     p: &Project,
     target: Target,
-    context: &str,
+    context: &ContextName,
     kind: AssetKind,
-    name: &str,
+    name: &AssetName,
 ) -> Result<(), AppError> {
     if p.retired_of(target).is_some() {
         return Err(AppError::AssetRetired {
-            context: context.to_string(),
+            context: context.clone(),
             kind: kind.word(),
-            name: name.to_string(),
+            name: name.clone(),
         });
     }
     Ok(())
 }
 
+/// The Context named `name`, which a person wrote as text: its id and its name. A text that is not a name is
+/// refused with the rule it breaks.
+fn context_of(p: &Project, name: &str) -> Result<(ContextId, ContextName), AppError> {
+    let n = ContextName::try_from(name)?;
+    let id = context_named(p, &n)?;
+    Ok((id, n))
+}
+
 /// The id of the Context named `name`.
-fn context_id(p: &Project, name: &str) -> Result<ContextId, AppError> {
-    let n = ContextName::try_from(name).map_err(input)?;
-    p.context_by_name(&n)
+fn context_named(p: &Project, name: &ContextName) -> Result<ContextId, AppError> {
+    p.context_by_name(name)
         .map(|c| c.id())
-        .ok_or_else(|| AppError::UnknownContext(name.to_string()))
+        .ok_or_else(|| AppError::UnknownContext(name.clone()))
+}
+
+/// The id of the Context named `name`, which a person wrote as text.
+fn context_id(p: &Project, name: &str) -> Result<ContextId, AppError> {
+    context_of(p, name).map(|(id, _)| id)
+}
+
+/// The asset names `names` are, as text a person wrote.
+fn asset_names(names: &[String]) -> Result<Vec<AssetName>, AppError> {
+    names
+        .iter()
+        .map(|n| AssetName::try_from(n.as_str()).map_err(AppError::from))
+        .collect()
 }
 
 /// The ids of the Contexts named in `names`.

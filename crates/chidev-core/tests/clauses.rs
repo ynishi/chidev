@@ -8,6 +8,7 @@ use chidev_core::app::{
     HarnessPut, HarnessPutContent, ItemInput, ItemRef, PutInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::sqlite::SqliteStore;
@@ -61,12 +62,12 @@ fn case(name: &str, label: &str) -> CaseInput {
         lines: (1, 1),
         items: vec![ItemRef {
             context: None,
-            interface: "api".to_string(),
+            interface: AssetName::try_from("api").unwrap(),
             key: "price".to_string(),
         }],
         clauses: vec![ClauseRef {
             context: None,
-            contract: "stock".to_string(),
+            contract: AssetName::try_from("stock").unwrap(),
             label: label.to_string(),
         }],
     }
@@ -266,14 +267,14 @@ async fn a_name_that_cannot_be_carried_out_is_refused_with_everything_it_found_a
     let mut app = stock("refused").await;
     let before = state(&app).await;
     let unknown = |label: &str, field| AppError::ClauseUnknown {
-        context: "core".to_string(),
-        contract: "stock".to_string(),
+        context: ContextName::try_from("core").unwrap(),
+        contract: AssetName::try_from("stock").unwrap(),
         label: label.to_string(),
         field,
     };
     let conflict = |label: &str, side| AppError::ClauseRenameConflict {
-        context: "core".to_string(),
-        contract: "stock".to_string(),
+        context: ContextName::try_from("core").unwrap(),
+        contract: AssetName::try_from("stock").unwrap(),
         label: label.to_string(),
         side,
     };
@@ -311,8 +312,8 @@ async fn a_name_that_cannot_be_carried_out_is_refused_with_everything_it_found_a
     assert_eq!(
         kept_label,
         AppError::ClauseReplacesKept {
-            context: "core".to_string(),
-            contract: "stock".to_string(),
+            context: ContextName::try_from("core").unwrap(),
+            contract: AssetName::try_from("stock").unwrap(),
             label: "C2".to_string(),
         }
     );
@@ -371,8 +372,8 @@ async fn a_name_that_cannot_be_carried_out_is_refused_with_everything_it_found_a
         many,
         AppError::Many(vec![
             AppError::ClauseReplacesKept {
-                context: "core".to_string(),
-                contract: "stock".to_string(),
+                context: ContextName::try_from("core").unwrap(),
+                contract: AssetName::try_from("stock").unwrap(),
                 label: "C2".to_string(),
             },
             conflict("C3", "label"),
@@ -386,7 +387,7 @@ async fn a_name_that_cannot_be_carried_out_is_refused_with_everything_it_found_a
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name == "nope"),
+        matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name.as_str() == "nope"),
         "{err:?}"
     );
 
@@ -408,8 +409,8 @@ async fn a_whole_put_with_a_replaces_is_refused_by_the_same_rules() {
     assert_eq!(
         err,
         AppError::ClauseUnknown {
-            context: "core".to_string(),
-            contract: "stock".to_string(),
+            context: ContextName::try_from("core").unwrap(),
+            contract: AssetName::try_from("stock").unwrap(),
             label: "C9".to_string(),
             field: "replaces",
         }
@@ -424,8 +425,8 @@ async fn a_whole_put_with_a_replaces_is_refused_by_the_same_rules() {
     assert_eq!(
         err,
         AppError::ClauseRenameConflict {
-            context: "core".to_string(),
-            contract: "stock".to_string(),
+            context: ContextName::try_from("core").unwrap(),
+            contract: AssetName::try_from("stock").unwrap(),
             label: "C1".to_string(),
             side: "label",
         }
@@ -436,7 +437,7 @@ async fn a_whole_put_with_a_replaces_is_refused_by_the_same_rules() {
 fn put_clauses_entry(clauses: Vec<ClauseInput>, remove: &[&str]) -> PutInput {
     PutInput::Clauses(ClausesPut {
         context: "core".to_string(),
-        contract: "stock".to_string(),
+        contract: AssetName::try_from("stock").unwrap(),
         clauses,
         remove: remove.iter().map(|s| (*s).to_string()).collect(),
     })
@@ -445,7 +446,7 @@ fn put_clauses_entry(clauses: Vec<ClauseInput>, remove: &[&str]) -> PutInput {
 fn put_tests(cases: Vec<CaseInput>) -> PutInput {
     PutInput::Harness(HarnessPut {
         context: "core".to_string(),
-        name: "tests".to_string(),
+        name: AssetName::try_from("tests").unwrap(),
         builds: Vec::new(),
         content: HarnessPutContent::Code {
             kind: None,
@@ -496,7 +497,7 @@ async fn a_contract_and_a_clauses_entry_for_one_contract_in_one_set_are_refused(
     let made = || {
         PutInput::Contract(ContractPut {
             context: "core".to_string(),
-            name: "stock".to_string(),
+            name: AssetName::try_from("stock").unwrap(),
             title: "Stock".to_string(),
             clauses: all(),
         })
@@ -520,7 +521,7 @@ fn make_contract(contract: &str) -> PutInput {
 fn make_contract_in(context: &str, contract: &str) -> PutInput {
     PutInput::Contract(ContractPut {
         context: context.to_string(),
-        name: contract.to_string(),
+        name: AssetName::try_from(contract).unwrap(),
         title: "Fresh".to_string(),
         clauses: all(),
     })
@@ -535,7 +536,7 @@ fn clauses_for(contract: &str) -> PutInput {
 fn clauses_for_in(context: &str, contract: &str) -> PutInput {
     PutInput::Clauses(ClausesPut {
         context: context.to_string(),
-        contract: contract.to_string(),
+        contract: AssetName::try_from(contract).unwrap(),
         clauses: vec![clause("C1", "x")],
         remove: Vec::new(),
     })
@@ -604,7 +605,7 @@ async fn a_clauses_entry_for_a_contract_that_exists_nowhere_is_unknown_in_a_set_
     ] {
         let err = app.apply_change_set(&set_of(puts)).await.unwrap_err();
         assert!(
-            matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name == "nope"),
+            matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name.as_str() == "nope"),
             "{err:?}"
         );
     }
@@ -626,7 +627,7 @@ async fn a_clauses_entry_for_a_retired_contract_is_refused_as_retired() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, AppError::AssetRetired { kind: "contract", name, .. } if name == "spare"),
+        matches!(&err, AppError::AssetRetired { kind: "contract", name, .. } if name.as_str() == "spare"),
         "{err:?}"
     );
     assert_eq!(app.store().revision().await.unwrap(), revision);
@@ -658,7 +659,7 @@ async fn in_a_context_the_set_adds_a_clauses_entry_is_named_twice_or_unknown() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name == "nope"),
+        matches!(&err, AppError::UnknownAsset { kind: "contract", name, .. } if name.as_str() == "nope"),
         "{err:?}"
     );
     assert_eq!(app.store().revision().await.unwrap(), revision);
@@ -693,7 +694,7 @@ async fn a_contract_named_twice_and_a_label_that_cannot_be_read_are_both_said() 
     let mut app = stock("clauses-both-said-unreadable").await;
     let entry = PutInput::Clauses(ClausesPut {
         context: "core".to_string(),
-        contract: "fresh".to_string(),
+        contract: AssetName::try_from("fresh").unwrap(),
         clauses: vec![clause("C1", "x"), clause("one", "y")],
         remove: Vec::new(),
     });

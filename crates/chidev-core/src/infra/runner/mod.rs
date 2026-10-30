@@ -45,6 +45,7 @@ use crate::domain::vo::digest::Digest;
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MutantOutcome, MutantResult, StepEvidence,
 };
+use crate::domain::vo::name::{AssetName, ContextName};
 
 /// What a command may write to standard output and standard error before the rest is thrown away.
 const OUTPUT_LIMIT: usize = 256 * 1024;
@@ -89,8 +90,8 @@ pub fn load(project: &Project) -> Result<Option<ProcessRunner>, MeasureConfigErr
 impl Runner for ProcessRunner {
     fn settings<'a>(
         &'a self,
-        context: &'a str,
-        interface: &'a str,
+        context: &'a ContextName,
+        interface: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(self.settings_of(context, interface))
     }
@@ -104,8 +105,8 @@ impl Runner for ProcessRunner {
 
     fn sim_settings<'a>(
         &'a self,
-        context: &'a str,
-        harness: &'a str,
+        context: &'a ContextName,
+        harness: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(self.sim_settings_of(context, harness))
     }
@@ -119,7 +120,7 @@ impl Runner for ProcessRunner {
 }
 
 impl ItemSource for ProcessRunner {
-    fn language(&self, context: &str, interface: &str) -> Result<String, ItemsError> {
+    fn language(&self, context: &ContextName, interface: &AssetName) -> Result<String, ItemsError> {
         match self.config.interface(context, interface) {
             Some((_, Some(lang))) => Ok(lang.to_string()),
             _ => Err(ItemsError::NoLanguage),
@@ -139,7 +140,7 @@ fn config_error(message: String) -> RunnerError {
     RunnerError::Config(message)
 }
 
-fn needs_lang(interface: &str) -> RunnerError {
+fn needs_lang(interface: &AssetName) -> RunnerError {
     config_error(format!(
         "the layout of interface `{interface}` has no `lang`, which mutating its code needs"
     ))
@@ -167,7 +168,11 @@ fn millis(since: Instant) -> u64 {
 }
 
 impl ProcessRunner {
-    async fn settings_of(&self, context: &str, interface: &str) -> Result<String, RunnerError> {
+    async fn settings_of(
+        &self,
+        context: &ContextName,
+        interface: &AssetName,
+    ) -> Result<String, RunnerError> {
         let (_, lang) = self.config.interface(context, interface).ok_or_else(|| {
             config_error(format!(
                 "[[measure.layout]] has no entry for the interface `{interface}` of `{context}`"
@@ -677,14 +682,22 @@ harness = "checks"
 path = "check.txt"
 "#;
 
+    fn context(name: &str) -> ContextName {
+        ContextName::try_from(name).unwrap()
+    }
+
+    fn asset(name: &str) -> AssetName {
+        AssetName::try_from(name).unwrap()
+    }
+
     fn request(run: &str) -> MutateRequest {
         MutateRequest {
             run: run.to_string(),
-            context: "ctx".to_string(),
-            interface: "api".to_string(),
+            context: context("ctx"),
+            interface: asset("api"),
             code: PINNED.to_string(),
             harnesses: vec![HarnessText {
-                name: "checks".to_string(),
+                name: asset("checks"),
                 source: "HARNESS\n".to_string(),
             }],
         }
@@ -838,7 +851,7 @@ path = "check.txt"
         let project = Project::new(TABLE);
         let runner = project.runner();
         let mut unknown = request("run-7");
-        unknown.interface = "other".to_string();
+        unknown.interface = asset("other");
         let error = runner.mutate_run(&unknown).await.unwrap_err();
         assert!(
             error
@@ -846,7 +859,7 @@ path = "check.txt"
                 .contains("no entry for the interface `other`")
         );
         let mut no_harness = request("run-8");
-        no_harness.harnesses[0].name = "elsewhere".to_string();
+        no_harness.harnesses[0].name = asset("elsewhere");
         let error = runner.mutate_run(&no_harness).await.unwrap_err();
         assert!(
             error
@@ -861,14 +874,12 @@ path = "check.txt"
     #[tokio::test]
     async fn the_settings_follow_the_table_and_the_provider_program() {
         let project = Project::new(TABLE);
-        let one = project.runner().settings_of("ctx", "api").await.unwrap();
-        assert_eq!(
-            one,
-            project.runner().settings_of("ctx", "api").await.unwrap()
-        );
+        let (ctx, api) = (context("ctx"), asset("api"));
+        let one = project.runner().settings_of(&ctx, &api).await.unwrap();
+        assert_eq!(one, project.runner().settings_of(&ctx, &api).await.unwrap());
         // another table is other settings
         project.table(&TABLE.replace("timeout = 5", "timeout = 6"));
-        let two = project.runner().settings_of("ctx", "api").await.unwrap();
+        let two = project.runner().settings_of(&ctx, &api).await.unwrap();
         assert_ne!(one, two);
         // so is another provider program under the same table
         std::fs::write(
@@ -876,10 +887,16 @@ path = "check.txt"
             format!("{PROVIDER}# changed\n"),
         )
         .unwrap();
-        let three = project.runner().settings_of("ctx", "api").await.unwrap();
+        let three = project.runner().settings_of(&ctx, &api).await.unwrap();
         assert_ne!(two, three);
         // an interface with no layout has none
-        assert!(project.runner().settings_of("ctx", "other").await.is_err());
+        assert!(
+            project
+                .runner()
+                .settings_of(&ctx, &asset("other"))
+                .await
+                .is_err()
+        );
     }
 
     /// A table whose `api` is a text laid out with a language that only `items` has a command for, and whose
@@ -926,10 +943,14 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         project.items_script(ITEMS);
         let runner = project.runner();
         // the language is the layout's, and an interface with none (or none laid out) has no language
-        assert_eq!(runner.language("ctx", "api"), Ok("text".to_string()));
-        assert_eq!(runner.language("ctx", "bare"), Err(ItemsError::NoLanguage));
+        let ctx = context("ctx");
+        assert_eq!(runner.language(&ctx, &asset("api")), Ok("text".to_string()));
         assert_eq!(
-            runner.language("ctx", "nowhere"),
+            runner.language(&ctx, &asset("bare")),
+            Err(ItemsError::NoLanguage)
+        );
+        assert_eq!(
+            runner.language(&ctx, &asset("nowhere")),
             Err(ItemsError::NoLanguage)
         );
         let found = runner.items_of("text", "fn api() { f() }\n").await.unwrap();
@@ -1001,7 +1022,7 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         let project = Project::new(ITEMS_TABLE);
         project.items_script(ITEMS);
         let mut r = request("run-items");
-        r.interface = "api".to_string();
+        r.interface = asset("api");
         let error = project.runner().mutate_run(&r).await.unwrap_err();
         assert!(
             error
@@ -1011,7 +1032,7 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         );
         let error = project
             .runner()
-            .settings_of("ctx", "api")
+            .settings_of(&context("ctx"), &asset("api"))
             .await
             .unwrap_err();
         assert!(

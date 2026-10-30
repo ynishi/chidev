@@ -17,7 +17,7 @@ use serde_json::Value as Json;
 
 use super::correct::RecordKind;
 use super::ports::external::ExternalExecutor;
-use super::ports::{AssetName, IdSource, Store};
+use super::ports::{IdSource, NamedAsset, Store};
 use super::{App, AppError, Found, TargetInput, no_provider};
 use crate::domain::check::Level;
 use crate::domain::entity::change_request::ChangeRequest;
@@ -34,6 +34,7 @@ use crate::domain::service::crux::{check_supersedes, standing};
 use crate::domain::violation::{Applicability, Party, Remedy, Value, Violation};
 use crate::domain::vo::finding::RuleId;
 use crate::domain::vo::id::ChangeRequestId;
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::target::Target;
 
 /// The names of what a violation is about, as the application found them: the words a person knows each by.
@@ -928,11 +929,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     vec![
                         DiagSubject {
                             kind: "context",
-                            name: context.clone(),
+                            name: context.to_string(),
                         },
                         DiagSubject {
                             kind,
-                            name: name.clone(),
+                            name: name.to_string(),
                         },
                     ],
                     vec![("kind", DiagValue::Text((*kind).to_string()))],
@@ -942,8 +943,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             },
             AppError::UnknownContext(name) => {
                 let names = self.context_names().await;
-                vec![self.unknown_name("context", name, names, Vec::new())]
+                vec![self.unknown_name("context", name.as_str(), names, Vec::new())]
             }
+            // A name that breaks the rule is an input that is not well formed, said with what the rule refuses.
+            AppError::BadName(error) => vec![input_invalid(&error.to_string())],
             AppError::UnknownAsset {
                 context,
                 kind,
@@ -952,9 +955,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.asset_names(context, kind).await;
                 let scope = vec![DiagSubject {
                     kind: "context",
-                    name: context.clone(),
+                    name: context.to_string(),
                 }];
-                vec![self.unknown_name(kind, name, names, scope)]
+                vec![self.unknown_name(kind, name.as_str(), names, scope)]
             }
             AppError::UnknownItem {
                 context,
@@ -964,7 +967,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.member_names(context, "interface", interface).await;
                 let scope = vec![DiagSubject {
                     kind: "interface",
-                    name: interface.clone(),
+                    name: interface.to_string(),
                 }];
                 vec![self.unknown_name("item", key, names, scope)]
             }
@@ -1055,7 +1058,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.member_names(context, "contract", contract).await;
                 let scope = vec![DiagSubject {
                     kind: "contract",
-                    name: contract.clone(),
+                    name: contract.to_string(),
                 }];
                 vec![self.unknown_name("clause", label, names, scope)]
             }
@@ -1068,7 +1071,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.member_names(context, "contract", contract).await;
                 let scope = vec![DiagSubject {
                     kind: "contract",
-                    name: contract.clone(),
+                    name: contract.to_string(),
                 }];
                 let mut d = self.unknown_name("clause", label, names, scope);
                 // The label is not a Clause to cite or to add: the operation that would add it is not the mend.
@@ -1106,7 +1109,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.member_names(context, "harness", harness).await;
                 let scope = vec![DiagSubject {
                     kind: "harness",
-                    name: harness.clone(),
+                    name: harness.to_string(),
                 }];
                 vec![self.unknown_name("case", name, names, scope)]
             }
@@ -1145,15 +1148,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 d.field = Some("sections".to_string());
                 vec![d]
             }
-            AppError::Input(text) => match rule::rule(INPUT_INVALID.as_str()) {
-                Some(r) => vec![Diagnostic::of_rule(
-                    r,
-                    Vec::new(),
-                    vec![("detail", DiagValue::Text(text.clone()))],
-                    &[("detail", text.clone())],
-                )],
-                None => vec![Diagnostic::app_unmapped(text)],
-            },
+            AppError::Input(text) => vec![input_invalid(text)],
             AppError::Refused(found) => found.iter().map(Diagnostic::of_found).collect(),
             AppError::ExternalRefused { findings, .. } => {
                 findings.iter().map(Diagnostic::of_found).collect()
@@ -1256,10 +1251,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// The names of the assets of `kind` in the Context `context`.
-    async fn asset_names(&self, context: &str, kind: &str) -> Result<Vec<String>, AppError> {
+    async fn asset_names(
+        &self,
+        context: &ContextName,
+        kind: &str,
+    ) -> Result<Vec<String>, AppError> {
         let p = self.project().await?;
         let mut out = Vec::new();
-        for c in p.contexts().filter(|c| c.name().as_str() == context) {
+        for c in p.contexts().filter(|c| c.name() == context) {
             let ids: Vec<uuid::Uuid> = match kind {
                 "contract" => c.contracts().map(|k| k.id().as_uuid()).collect(),
                 "interface" => c.interfaces().map(|k| k.id().as_uuid()).collect(),
@@ -1267,7 +1266,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 _ => Vec::new(),
             };
             for id in ids {
-                out.push(self.name_of(id).await?);
+                out.push(self.name_of(id).await?.to_string());
             }
         }
         Ok(out)
@@ -1277,31 +1276,31 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// labels of a Contract, the names of the Cases of a Harness.
     async fn member_names(
         &self,
-        context: &str,
+        context: &ContextName,
         kind: &str,
-        asset: &str,
+        asset: &AssetName,
     ) -> Result<Vec<String>, AppError> {
         let p = self.project().await?;
         let mut out = Vec::new();
-        for c in p.contexts().filter(|c| c.name().as_str() == context) {
+        for c in p.contexts().filter(|c| c.name() == context) {
             match kind {
                 "interface" => {
                     for i in c.interfaces() {
-                        if self.name_of(i.id().as_uuid()).await? == asset {
+                        if self.name_of(i.id().as_uuid()).await? == *asset {
                             out.extend(i.items().iter().map(|it| it.key().to_string()));
                         }
                     }
                 }
                 "contract" => {
                     for k in c.contracts() {
-                        if self.name_of(k.id().as_uuid()).await? == asset {
+                        if self.name_of(k.id().as_uuid()).await? == *asset {
                             out.extend(k.clauses().iter().map(|cl| cl.label().to_string()));
                         }
                     }
                 }
                 _ => {
                     for h in c.harnesses() {
-                        if self.name_of(h.id().as_uuid()).await? == asset {
+                        if self.name_of(h.id().as_uuid()).await? == *asset {
                             out.extend(h.cases().iter().map(|k| k.name().to_string()));
                         }
                     }
@@ -1330,7 +1329,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         &self,
         p: &Project,
         words: &BTreeMap<Target, String>,
-        pending: &[AssetName],
+        pending: &[NamedAsset],
         party: Party,
     ) -> Result<String, AppError> {
         match party {
@@ -1351,7 +1350,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Party::PolicyLine(line) => Ok(line.to_string()),
             Party::Id(id) => match p.contexts().find(|c| c.id().as_uuid() == id) {
                 Some(c) => Ok(c.name().to_string()),
-                None => self.name_in(id, pending).await,
+                None => Ok(self.name_in(id, pending).await?.to_string()),
             },
         }
     }
@@ -1596,7 +1595,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 seen.into_iter()
                     .map(|(context, harness)| {
                         suggest(
-                            Mend::Op(SuggestedOp::RetireHarness { context, harness }),
+                            Mend::Op(SuggestedOp::RetireHarness {
+                                context: context.to_string(),
+                                harness: harness.to_string(),
+                            }),
                             how,
                         )
                     })
@@ -1625,7 +1627,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     Ok(Some(TargetInput::Case {
                         context, harness, ..
                     })) => vec![suggest(
-                        Mend::Op(SuggestedOp::PutHarnessWithoutCitation { context, harness }),
+                        Mend::Op(SuggestedOp::PutHarnessWithoutCitation {
+                            context: context.to_string(),
+                            harness: harness.to_string(),
+                        }),
                         how,
                     )],
                     _ => Vec::new(),
@@ -1659,7 +1664,10 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             Remedy::CheckTheInterface { interface } => {
                 match self.name_target(p, *interface).await {
                     Ok(Some(TargetInput::Interface { context, interface })) => vec![suggest(
-                        Mend::Op(SuggestedOp::CheckInterface { context, interface }),
+                        Mend::Op(SuggestedOp::CheckInterface {
+                            context: context.to_string(),
+                            interface: interface.to_string(),
+                        }),
                         how,
                     )],
                     _ => Vec::new(),
@@ -1673,12 +1681,26 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 }
 
+/// The diagnostic of an input that is not well formed (`input.invalid`), with `text` saying why; the text itself
+/// when the rule is not registered.
+fn input_invalid(text: &str) -> Diagnostic {
+    match rule::rule(INPUT_INVALID.as_str()) {
+        Some(r) => Diagnostic::of_rule(
+            r,
+            Vec::new(),
+            vec![("detail", DiagValue::Text(text.to_string()))],
+            &[("detail", text.to_string())],
+        ),
+        None => Diagnostic::app_unmapped(text),
+    }
+}
+
 /// The diagnostic of a rule about the put of an Interface (`at`: its Context and name). `values` are the keys the
 /// rule carries; one that is none is null, and empty in the sentence. `error` is the refusal, said as it is when
 /// the rule is not registered.
 fn interface_put_rule(
     rule: RuleId,
-    at: (&str, &str),
+    at: (&ContextName, &AssetName),
     values: &[(&'static str, Option<&str>)],
     error: &AppError,
 ) -> Diagnostic {
@@ -1689,7 +1711,7 @@ fn interface_put_rule(
 /// for an Interface.
 fn contract_put_rule(
     rule: RuleId,
-    at: (&str, &str),
+    at: (&ContextName, &AssetName),
     values: &[(&'static str, Option<&str>)],
     error: &AppError,
 ) -> Diagnostic {
@@ -1700,7 +1722,7 @@ fn contract_put_rule(
 fn asset_put_rule(
     rule: RuleId,
     kind: &'static str,
-    at: (&str, &str),
+    at: (&ContextName, &AssetName),
     values: &[(&'static str, Option<&str>)],
     error: &AppError,
 ) -> Diagnostic {

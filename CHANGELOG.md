@@ -41,6 +41,19 @@ and this project adheres to
 
 ### Changed
 
+- The name of a Contract, an Interface or a Harness follows the rule of a
+  Context's name: not empty, and only lower-case letters, digits, `-` and `_`.
+  A put, a change set or a reference with a name outside the rule is refused
+  (`input.invalid`, naming the character); a name in the store outside the rule
+  makes the store corrupt, and so does an asset with no name, which a lookup no
+  longer answers with its id. A `[[measure.layout]]` entry or a
+  `[measure.sim.<context>]` table whose context or name breaks the rule is a
+  configuration error. In Rust, `domain::vo::name::AssetName` and `NameError`
+  (with `NameOf`) in place of `ContextNameError`; `app::ports::AssetName` is
+  renamed `NamedAsset`; `ClauseName`, `TargetInput`, `ItemRef`, `ClauseRef`,
+  the `Runner` requests and `Runner::settings`/`sim_settings` and
+  `ItemSource::language` take `ContextName` and `AssetName` (#45).
+
 - A program chidev runs (an external check, a provider, a build, a test or a sim
   script) that exits without reading all of its standard input is no longer a
   failed run for that alone, and its process group is stopped as soon as it

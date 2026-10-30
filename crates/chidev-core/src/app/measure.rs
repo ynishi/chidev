@@ -10,7 +10,7 @@ use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{HarnessText, InterfaceText, MutateRequest, SimulateRequest};
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
-use super::{App, AppError, CorrectionStatus, context_id, correction_status};
+use super::{App, AppError, CorrectionStatus, context_named, correction_status};
 use crate::domain::entity::measurement::{Counts, MeasureBody, Measurement, MeasurementDraft};
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
@@ -21,6 +21,7 @@ use crate::domain::vo::digest::Digest;
 use crate::domain::vo::harness_kind::HarnessKind;
 use crate::domain::vo::id::{ClauseId, HarnessId, InterfaceId, MeasurementId};
 use crate::domain::vo::measure::{MeasureKind, MeasureStamp, MeasureSubject};
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{CitedClause, ClauseName, SimOutcome, SimStamp};
 use crate::domain::vo::target::Target;
 
@@ -239,11 +240,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         continue;
                     };
                     let interface = self.name_of(i.as_uuid()).await?;
-                    if let Ok(s) = self
-                        .runner
-                        .settings(&context.name().to_string(), &interface)
-                        .await
-                    {
+                    if let Ok(s) = self.runner.settings(context.name(), &interface).await {
                         settings.insert(i, s);
                     }
                 }
@@ -252,11 +249,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         continue;
                     };
                     let harness = self.name_of(h.as_uuid()).await?;
-                    if let Ok(s) = self
-                        .runner
-                        .sim_settings(&context.name().to_string(), &harness)
-                        .await
-                    {
+                    if let Ok(s) = self.runner.sim_settings(context.name(), &harness).await {
                         sim_settings.insert(h, s);
                     }
                 }
@@ -287,9 +280,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             )));
         }
         let p = self.project().await?;
-        let ctx = context_id(&p, context)?;
+        let (context, interface) = (
+            ContextName::try_from(context)?,
+            AssetName::try_from(interface)?,
+        );
+        let ctx = context_named(&p, &context)?;
         let iface = InterfaceId::from_uuid(
-            self.asset(ctx, context, AssetKind::Interface, interface)
+            self.asset(ctx, &context, AssetKind::Interface, &interface)
                 .await?,
         );
         let pin = self
@@ -297,8 +294,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .pin_of(iface)
             .await?
             .ok_or_else(|| AppError::NotPinned {
-                context: context.to_string(),
-                interface: interface.to_string(),
+                context: context.clone(),
+                interface: interface.clone(),
             })?;
         let code = self
             .store
@@ -306,11 +303,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .await?
             .filter(|c| Digest::of(c.as_bytes()) == pin.code())
             .ok_or_else(|| AppError::PinCodeNotKept {
-                interface: interface.to_string(),
+                interface: interface.clone(),
             })?;
         let basis = current_basis(&p, iface).ok_or_else(|| AppError::NotPinned {
-            context: context.to_string(),
-            interface: interface.to_string(),
+            context: context.clone(),
+            interface: interface.clone(),
         })?;
         let mut harnesses = Vec::with_capacity(basis.harnesses().len());
         for id in basis.harnesses().keys() {
@@ -334,14 +331,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 source: source.as_str().to_string(),
             });
         }
-        let settings = self.runner.settings(context, interface).await?;
+        let settings = self.runner.settings(&context, &interface).await?;
         let stamp = MeasureStamp::new(pin.code(), basis, settings)?;
         let id = MeasurementId::from_uuid(self.ids.next_uuid());
         let at = self.clock.now();
         let request = MutateRequest {
             run: id.to_string(),
-            context: context.to_string(),
-            interface: interface.to_string(),
+            context,
+            interface,
             code,
             harnesses,
         };
@@ -378,9 +375,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         harness: &str,
     ) -> Result<MeasureDone, AppError> {
         let p = self.project().await?;
-        let ctx = context_id(&p, context)?;
+        let (context, harness) = (
+            ContextName::try_from(context)?,
+            AssetName::try_from(harness)?,
+        );
+        let ctx = context_named(&p, &context)?;
         let id = HarnessId::from_uuid(
-            self.asset(ctx, context, AssetKind::Harness, harness)
+            self.asset(ctx, &context, AssetKind::Harness, &harness)
                 .await?,
         );
         let owner = p
@@ -416,11 +417,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let mut clauses = Vec::new();
         for c in cited_in(&p, sweep_case) {
             let contract = self.name_of(c.contract.as_uuid()).await?;
-            let name = ClauseName::new(&contract, c.label).map_err(|_| {
-                AppError::Input(format!(
-                    "the contract `{contract}` cannot be named in a report: its name has white space or is empty"
-                ))
-            })?;
+            let name = ClauseName::new(contract, c.label);
             clauses.push(CitedClause { name, id: c.clause });
         }
         let mut interfaces = Vec::new();
@@ -431,7 +428,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .pin_of(iface)
                 .await?
                 .ok_or_else(|| AppError::NotPinned {
-                    context: context.to_string(),
+                    context: context.clone(),
                     interface: name.clone(),
                 })?;
             let code = self
@@ -448,14 +445,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let basis = basis_of(&p, id, &pins).ok_or_else(|| {
             AppError::Input(format!("the sim harness `{harness}` is not in the project"))
         })?;
-        let settings = self.runner.sim_settings(context, harness).await?;
+        let settings = self.runner.sim_settings(&context, &harness).await?;
         let stamp = SimStamp::new(basis, settings).map_err(|e| AppError::Input(e.to_string()))?;
         let run_id = MeasurementId::from_uuid(self.ids.next_uuid());
         let at = self.clock.now();
         let request = SimulateRequest {
             run: run_id.to_string(),
-            context: context.to_string(),
-            harness: harness.to_string(),
+            context,
+            harness,
             script: script.as_str().to_string(),
             interfaces,
             clauses,
@@ -503,7 +500,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// `<contract>:<label>` for each Clause the simulation `outcome` names, from the model as it is now. A Clause
-    /// the model has not any more (or whose Contract has no name) is shown by its id.
+    /// the model has not any more is shown by its id.
     async fn clause_names(
         &self,
         outcome: Option<&SimOutcome>,
@@ -526,7 +523,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 continue;
             };
             let contract = self.name_of(contract.id().as_uuid()).await?;
-            names.insert(id, format!("{contract}:{}", clause.label()));
+            names.insert(id, ClauseName::new(contract, clause.label()).to_string());
         }
         Ok(names)
     }
@@ -642,7 +639,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     };
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
-                        interface: Some(self.name_of(i.id().as_uuid()).await?),
+                        interface: Some(self.name_of(i.id().as_uuid()).await?.to_string()),
                         harness: None,
                         kind: m.kind().word(),
                         id: m.id().to_string(),
@@ -677,7 +674,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     out.push(MeasurementStanding {
                         context: c.name().to_string(),
                         interface: None,
-                        harness: Some(self.name_of(h.id().as_uuid()).await?),
+                        harness: Some(self.name_of(h.id().as_uuid()).await?.to_string()),
                         kind: m.kind().word(),
                         id: m.id().to_string(),
                         stamp: m.stamp().fingerprint().to_string(),

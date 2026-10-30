@@ -10,6 +10,7 @@ use std::pin::Pin;
 use thiserror::Error;
 
 use crate::domain::vo::measure::{MeasureFailure, MutantResult, StepEvidence};
+use crate::domain::vo::name::{AssetName, ContextName};
 use crate::domain::vo::sim::{CaseRun, CitedClause, RegressName, Rerun};
 
 /// A future that is boxed so that the port can be used as a trait object: the use case holds one runner for the
@@ -20,7 +21,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessText {
     /// The Harness's name in its Context.
-    pub name: String,
+    pub name: AssetName,
     /// Its code, as the model holds it now.
     pub source: String,
 }
@@ -31,9 +32,9 @@ pub struct MutateRequest {
     /// An id of this run, unique, for the directory the run works in.
     pub run: String,
     /// The Context's name.
-    pub context: String,
+    pub context: ContextName,
     /// The Interface's name.
-    pub interface: String,
+    pub interface: AssetName,
     /// The code the Pin accepted, whole.
     pub code: String,
     /// The Harnesses that check the Interface, as the model holds them now.
@@ -60,7 +61,7 @@ pub struct MutateReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceText {
     /// The Interface's name in its Context.
-    pub name: String,
+    pub name: AssetName,
     /// The code the Pin accepted, whole.
     pub code: String,
 }
@@ -71,9 +72,9 @@ pub struct SimulateRequest {
     /// An id of this run, unique, for the directory the run works in.
     pub run: String,
     /// The Context's name.
-    pub context: String,
+    pub context: ContextName,
     /// The sim Harness's name.
-    pub harness: String,
+    pub harness: AssetName,
     /// The script, as the model holds it now.
     pub script: String,
     /// The code the Pins accepted for the Interfaces the Harness builds.
@@ -117,8 +118,8 @@ pub trait Runner: fmt::Debug + Send + Sync {
     /// provider and its executable): a measurement made with another one is made under other settings.
     fn settings<'a>(
         &'a self,
-        context: &'a str,
-        interface: &'a str,
+        context: &'a ContextName,
+        interface: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>>;
 
     /// Mutates the code of an Interface and runs the Harnesses against each mutant.
@@ -132,8 +133,8 @@ pub trait Runner: fmt::Debug + Send + Sync {
     /// its executable). An error when the configuration cannot simulate it.
     fn sim_settings<'a>(
         &'a self,
-        context: &'a str,
-        harness: &'a str,
+        context: &'a ContextName,
+        harness: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>>;
 
     /// Builds the program from the pinned code and runs the script for each case, then again for a sample of the
@@ -151,8 +152,8 @@ pub struct NoRunner;
 impl Runner for NoRunner {
     fn settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }
@@ -166,8 +167,8 @@ impl Runner for NoRunner {
 
     fn sim_settings<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a str,
+        _: &'a ContextName,
+        _: &'a AssetName,
     ) -> BoxFuture<'a, Result<String, RunnerError>> {
         Box::pin(async { Err(RunnerError::Unconfigured) })
     }

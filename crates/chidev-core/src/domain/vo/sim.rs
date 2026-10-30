@@ -13,6 +13,7 @@ use thiserror::Error;
 use super::clause::ClauseLabel;
 use super::digest::Digest;
 use super::id::{ClauseId, ContractId, InterfaceId};
+use super::name::AssetName;
 use super::revision::Revision;
 
 /// The name a sim Harness gives its one Case that stands for the seeded sweep.
@@ -35,7 +36,7 @@ pub enum SimError {
     BlankSettings,
     /// A text is not `<contract>:<label>`.
     #[error(
-        "`{0}` is not a clause name (`<contract>:C<n>`, the contract's name without white space)"
+        "`{0}` is not a clause name (`<contract>:C<n>`, with the contract's name of a-z, 0-9, `-` and `_`)"
     )]
     BadClauseName(String),
     /// No Clause of any Contract the sweep cites has this contract's name.
@@ -56,25 +57,20 @@ pub enum SimError {
 /// to the Clause's id when a run is recorded and the record keeps the id.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClauseName {
-    contract: String,
+    contract: AssetName,
     label: ClauseLabel,
 }
 
 impl ClauseName {
     /// The name of the Clause `label` of the Contract named `contract`. The Contract's name has no white space
-    /// (a line of the report ends the name at the first white space) and is not empty.
-    pub fn new(contract: &str, label: ClauseLabel) -> Result<ClauseName, SimError> {
-        if contract.is_empty() || contract.chars().any(char::is_whitespace) {
-            return Err(SimError::BadClauseName(format!("{contract}:{label}")));
-        }
-        Ok(ClauseName {
-            contract: contract.to_string(),
-            label,
-        })
+    /// (a line of the report ends the name at the first white space) and no `:`, which is what the rule of an
+    /// asset name gives; nothing else is checked here.
+    pub fn new(contract: AssetName, label: ClauseLabel) -> ClauseName {
+        ClauseName { contract, label }
     }
 
     /// The Contract's name.
-    pub fn contract(&self) -> &str {
+    pub fn contract(&self) -> &AssetName {
         &self.contract
     }
 
@@ -92,7 +88,8 @@ impl TryFrom<&str> for ClauseName {
         let bad = || SimError::BadClauseName(text.to_string());
         let (contract, label) = text.rsplit_once(':').ok_or_else(bad)?;
         let label = ClauseLabel::try_from(label).map_err(|_| bad())?;
-        ClauseName::new(contract, label).map_err(|_| bad())
+        let contract = AssetName::try_from(contract).map_err(|_| bad())?;
+        Ok(ClauseName::new(contract, label))
     }
 }
 
@@ -121,11 +118,11 @@ pub fn resolve(cited: &[CitedClause], name: &ClauseName) -> Result<ClauseId, Sim
     if cited.iter().any(|c| c.name.contract == name.contract) {
         return Err(SimError::UncitedClause(name.clone()));
     }
-    let mut known: Vec<String> = cited.iter().map(|c| c.name.contract.clone()).collect();
+    let mut known: Vec<String> = cited.iter().map(|c| c.name.contract.to_string()).collect();
     known.sort();
     known.dedup();
     Err(SimError::UnknownContract {
-        contract: name.contract.clone(),
+        contract: name.contract.to_string(),
         cited: known,
     })
 }
@@ -844,7 +841,7 @@ mod tests {
 
     fn cited() -> Vec<CitedClause> {
         let c = |contract: &str, l: u32, id: u32| CitedClause {
-            name: ClauseName::new(contract, label(l)).unwrap(),
+            name: ClauseName::new(AssetName::try_from(contract).unwrap(), label(l)),
             id: clause(id),
         };
         vec![c("stock", 1, 10), c("stock", 3, 11), c("cli", 1, 20)]
@@ -853,11 +850,12 @@ mod tests {
     #[test]
     fn a_clause_is_named_by_its_contract_and_label() {
         let name = ClauseName::try_from("stock:C3").unwrap();
-        assert_eq!((name.contract(), name.label()), ("stock", label(3)));
+        assert_eq!(
+            (name.contract().as_str(), name.label()),
+            ("stock", label(3))
+        );
         assert_eq!(name.to_string(), "stock:C3");
-        // a contract name may itself have a colon: the label is after the last one
-        let odd = ClauseName::try_from("a:b:C1").unwrap();
-        assert_eq!((odd.contract(), odd.to_string()), ("a:b", "a:b:C1".into()));
+        // a contract name has no colon, so the label is what follows the only one
         for bad in [
             "",
             "C1",
@@ -868,10 +866,11 @@ mod tests {
             "st ock:C1",
             "stock :C1",
             "stock:C1 ",
+            "a:b:C1",
+            "Stock:C1",
         ] {
             assert!(ClauseName::try_from(bad).is_err(), "{bad:?}");
         }
-        assert!(ClauseName::new("", label(1)).is_err());
     }
 
     #[test]

@@ -47,6 +47,7 @@ use crate::domain::repository::{
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::finding::{RuleId, Subject, SubjectKind};
 use crate::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceId, PinId};
+use crate::domain::vo::name::AssetName;
 
 /// The layout of the tables this code creates and reads. Layout 2 is layout 1 with the Cruxes in a table of their
 /// own.
@@ -626,7 +627,7 @@ impl AssetNames for SqliteStore {
         &self,
         context: ContextId,
         kind: AssetKind,
-        name: &str,
+        name: &AssetName,
     ) -> Result<Option<Uuid>, StoreError> {
         let (context, kind, name) = (context.as_uuid().to_string(), kind.word(), name.to_string());
         let found: Option<String> = self
@@ -648,9 +649,10 @@ impl AssetNames for SqliteStore {
             .transpose()
     }
 
-    async fn asset_name(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+    async fn asset_name(&self, id: Uuid) -> Result<Option<AssetName>, StoreError> {
         let id = id.to_string();
-        self.isle
+        let found: Option<String> = self
+            .isle
             .call(move |c| {
                 let mut stmt = c.prepare(
                     "SELECT name FROM asset_names WHERE id = ?1 ORDER BY context, kind LIMIT 1",
@@ -659,7 +661,13 @@ impl AssetNames for SqliteStore {
                 rows.next()?.map(|r| r.get(0)).transpose()
             })
             .await
-            .map_err(failed)
+            .map_err(failed)?;
+        found
+            .map(|name| {
+                AssetName::try_from(name.as_str())
+                    .map_err(|e| StoreError::Corrupt(format!("an asset name: {e}")))
+            })
+            .transpose()
     }
 }
 
@@ -1127,7 +1135,7 @@ impl SqliteStore {
                         params![
                             n.context.as_uuid().to_string(),
                             n.kind.word(),
-                            n.name,
+                            n.name.as_str(),
                             n.id.to_string()
                         ],
                     )?;
@@ -1228,12 +1236,20 @@ mod tests {
             pins: vec![fixture::pin(&p)],
             change_requests: fixture::change_requests(&p),
             cruxes: fixture::cruxes(&p),
-            names: vec![crate::app::ports::AssetName {
+            // Every asset of the Project is named: a model whose asset has no name is not one a use case can word.
+            names: [
+                (AssetKind::Interface, "stack", fixture::IFACE),
+                (AssetKind::Contract, "stack", 20),
+                (AssetKind::Harness, "stack-tests", 40),
+            ]
+            .into_iter()
+            .map(|(kind, name, id)| crate::app::ports::NamedAsset {
                 context: ContextId::from_uuid(fixture::id(11)),
-                kind: AssetKind::Interface,
-                name: "stack".to_string(),
-                id: fixture::id(fixture::IFACE),
-            }],
+                kind,
+                name: AssetName::try_from(name).unwrap(),
+                id: fixture::id(id),
+            })
+            .collect(),
             project: Some(p),
             invocations: vec![Invocation {
                 check: RuleId::from_static("cite.uncited-clause"),
@@ -1296,6 +1312,50 @@ mod tests {
         );
         assert_eq!(store.asset_name(n.id).await.unwrap(), Some(n.name.clone()));
         assert_eq!(ran(&store).await, c.invocations);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_asset_of_the_model_with_no_name_is_a_store_that_does_not_agree_with_its_model_not_its_id()
+     {
+        use crate::app::{App, AppError};
+        use crate::domain::vo::timestamp::Timestamp;
+        use crate::infra::{clock::FixedClock, ids::UuidV7};
+
+        let path = temp_db("unnamed-asset");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let mut held = changes();
+        held.names.clear();
+        store.write(StoreRevision(0), held).await.unwrap();
+        let app = App::new(store, UuidV7, FixedClock(Timestamp::from_millis(5)));
+        let error = app.status().await.unwrap_err();
+        assert!(
+            matches!(&error, AppError::Store(StoreError::Corrupt(why)) if why.contains("has no name")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_kept_that_breaks_the_rule_of_a_name_is_corrupt() {
+        let path = temp_db("bad-asset-name");
+        let store = SqliteStore::open(&path).await.unwrap();
+        let c = changes();
+        store.write(StoreRevision(0), c.clone()).await.unwrap();
+        store.close().await.unwrap();
+        let n = &c.names[0];
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE asset_names SET name = 'Has Space'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(&path).await.unwrap();
+        let err = store.asset_name(n.id).await.unwrap_err();
+        let StoreError::Corrupt(why) = err else {
+            panic!("not corrupt: {err:?}");
+        };
+        assert!(why.contains("an asset name"), "{why}");
+        assert!(why.contains("`H`"), "{why}");
+        // a name that is not there is none, not corrupt
+        assert_eq!(store.asset_name(Uuid::from_u128(999)).await.unwrap(), None);
         store.close().await.unwrap();
     }
 

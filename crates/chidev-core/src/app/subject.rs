@@ -2,23 +2,24 @@
 
 use super::ports::external::ExternalExecutor;
 use super::ports::{AssetKind, IdSource, Store};
-use super::{App, AppError, ClauseRef, ItemRef, context_id};
+use super::{App, AppError, ClauseRef, ItemRef, context_named};
 use crate::domain::entity::project::Project;
 use crate::domain::vo::finding::Subject;
 use crate::domain::vo::id::{CaseId, HarnessId, InterfaceId};
+use crate::domain::vo::name::{AssetName, ContextName};
 
 /// What a finding is about, addressed by the names the model view shows.
 /// Shared by change-request addresses and judged reports; `None` at their call sites means the whole Project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubjectInput {
     /// A Context, by name.
-    Context(String),
+    Context(ContextName),
     /// An Interface of a Context.
     Interface {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Interface.
-        interface: String,
+        interface: AssetName,
     },
     /// An Item, by the Interface's name and the key.
     Item(ItemRef),
@@ -27,9 +28,9 @@ pub enum SubjectInput {
     /// A Case of a Harness.
     Case {
         /// The Context.
-        context: String,
+        context: ContextName,
         /// The Harness.
-        harness: String,
+        harness: AssetName,
         /// The Case's name.
         name: String,
     },
@@ -45,9 +46,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         s: &SubjectInput,
     ) -> Result<Subject, AppError> {
         Ok(match s {
-            SubjectInput::Context(name) => Subject::Context(context_id(p, name)?),
+            SubjectInput::Context(name) => Subject::Context(context_named(p, name)?),
             SubjectInput::Interface { context, interface } => {
-                let ctx = context_id(p, context)?;
+                let ctx = context_named(p, context)?;
                 let id = self
                     .asset(ctx, context, AssetKind::Interface, interface)
                     .await?;
@@ -79,11 +80,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub(super) async fn case_named(
         &self,
         p: &Project,
-        context: &str,
-        harness: &str,
+        context: &ContextName,
+        harness: &AssetName,
         name: &str,
     ) -> Result<CaseId, AppError> {
-        let ctx = context_id(p, context)?;
+        let ctx = context_named(p, context)?;
         let id = HarnessId::from_uuid(
             self.asset(ctx, context, AssetKind::Harness, harness)
                 .await?,
@@ -101,8 +102,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         match cases.as_slice() {
             [one] => Ok(one.id()),
             [] => Err(AppError::UnknownCase {
-                context: context.to_string(),
-                harness: harness.to_string(),
+                context: context.clone(),
+                harness: harness.clone(),
                 name: name.to_string(),
             }),
             _ => Err(AppError::Input(format!(

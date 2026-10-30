@@ -16,6 +16,7 @@ use chidev_core::domain::entity::change_request::ChangeRequestError;
 use chidev_core::domain::repository::{ChangeRequestRepository, CruxRepository};
 use chidev_core::domain::vo::answer::Beyond;
 use chidev_core::domain::vo::crux::Decision;
+use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::target::ExpectKind;
 use chidev_core::domain::vo::timestamp::Timestamp;
 use chidev_core::infra::clock::FixedClock;
@@ -61,8 +62,8 @@ fn request(title: &str) -> ChangeRequestInput {
 
 fn clause(label: &str) -> TargetInput {
     TargetInput::Clause(ClauseRef {
-        context: Some("core".into()),
-        contract: "rounding".into(),
+        context: Some(ContextName::try_from("core").unwrap()),
+        contract: AssetName::try_from("rounding").unwrap(),
         label: label.into(),
     })
 }
@@ -70,8 +71,8 @@ fn clause(label: &str) -> TargetInput {
 /// The Contract `rounding`, as a request names it to be revised: its frame holds C1 and C2.
 fn rounding() -> TargetInput {
     TargetInput::Contract {
-        context: "core".into(),
-        contract: "rounding".into(),
+        context: ContextName::try_from("core").unwrap(),
+        contract: AssetName::try_from("rounding").unwrap(),
     }
 }
 
@@ -255,8 +256,8 @@ async fn a_crux_carries_the_findings_it_is_raised_from_and_is_refused_when_it_is
         FindingInput {
             rule: "cite.uncited-clause".into(),
             subject: Some(SubjectInput::Clause(ClauseRef {
-                context: Some("core".into()),
-                contract: "rounding".into(),
+                context: Some(ContextName::try_from("core").unwrap()),
+                contract: AssetName::try_from("rounding").unwrap(),
                 label: "C1".into(),
             })),
         },
@@ -1489,8 +1490,8 @@ async fn the_suggestion_for_an_open_or_an_answered_crux_names_that_crux_only() {
 /// A Clause of the Contract `billing`, which `with_billing` makes.
 fn billing_clause() -> TargetInput {
     TargetInput::Clause(ClauseRef {
-        context: Some("core".into()),
-        contract: "billing".into(),
+        context: Some(ContextName::try_from("core").unwrap()),
+        contract: AssetName::try_from("billing").unwrap(),
         label: "C1".into(),
     })
 }
@@ -1513,8 +1514,8 @@ async fn with_billing() -> Test {
     .unwrap();
     let mut billing = request("Billing totals");
     billing.targets = vec![TargetInput::Contract {
-        context: "core".into(),
-        contract: "billing".into(),
+        context: ContextName::try_from("core").unwrap(),
+        contract: AssetName::try_from("billing").unwrap(),
     }];
     app.open_change_request(&billing).await.unwrap();
     app
