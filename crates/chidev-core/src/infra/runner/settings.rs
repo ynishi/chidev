@@ -405,8 +405,9 @@ impl SimSettings {
 
 /// What a run of the examples of a Harness of examples reads: how it copies and builds, the program the examples are
 /// run against (the program its first word names is the one digested, the words as written), the limits, and where
-/// the Harness is laid out and where the code of the Interfaces it builds is written. The examples are not here: they
-/// are the model's, and a change of one moves the Harness's revision and not the settings.
+/// the code of the Interfaces it builds is written. The examples are not here: they are the model's, and a change of
+/// one moves the Harness's revision and not the settings. Nor is the Harness: a Harness of examples has no file, the
+/// run reads and writes nothing at a place of it, and so it needs no entry of the layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct ExamplesSettings {
     pub copy: CopySettings,
@@ -416,21 +417,17 @@ pub(super) struct ExamplesSettings {
     pub timeout: Duration,
     /// For the whole run.
     pub budget: Duration,
-    /// The Harness, as the layout names it. Nothing is written there: a Harness of examples has no code.
-    pub harness: Placed,
     /// Where the code of each Interface the Harness builds is written, sorted by name.
     pub builds: Vec<Placed>,
 }
 
 impl ExamplesSettings {
-    /// The settings of a run of the examples of the Harness `harness` of `context` that builds the Interfaces
-    /// `builds`, from `config`, its programs found at the project's root `root`. An error when the table cannot run
-    /// it.
+    /// The settings of a run of the examples of a Harness of `context` that builds the Interfaces `builds`, from
+    /// `config`, its programs found at the project's root `root`. An error when the table cannot run it.
     pub(super) async fn resolve(
         config: &Config,
         root: &Path,
         context: &ContextName,
-        harness: &AssetName,
         builds: &[AssetName],
     ) -> Result<Self, RunnerError> {
         let examples =
@@ -440,9 +437,6 @@ impl ExamplesSettings {
                 .ok_or_else(|| RunnerError::NoExamplesConfig {
                     context: context.clone(),
                 })?;
-        let laid_out = config
-            .harness(context, harness)
-            .ok_or_else(|| no_layout(LayoutPlace::Harness, context, harness))?;
         let mut placed = Vec::with_capacity(builds.len());
         for name in builds {
             let (layout, _) = config
@@ -461,7 +455,6 @@ impl ExamplesSettings {
             program: Program::resolve(root, CommandRole::Program, &words).await?,
             timeout: examples.timeout,
             budget: examples.budget,
-            harness: Placed::of(harness, laid_out),
             builds: placed,
         })
     }

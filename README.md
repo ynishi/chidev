@@ -1270,11 +1270,6 @@ budget = 600     # seconds, the whole run (default 600, at most 3600)
 context = "tally"
 interface = "tally"         # the code of each built Interface is written here
 path = "src/tally.rs"
-
-[[measure.layout]]
-context = "tally"
-harness = "acceptance"      # the Harness is named here; nothing is written, a Harness of examples has no code
-path = "acceptance"
 ```
 
 `program` is the command that starts the program under test. Its first word is a program found, as `build` is, at the
@@ -1283,10 +1278,10 @@ is another file fails the run before anything is started, `settings_moved`); it 
 holds, so it cannot be a path the build makes, and a launcher the project keeps (`./run.sh`, which starts what the
 build made) or an interpreter (`python3`, with `{tree}/prog.py` as the next word) is what to write there. The words
 after the first may hold `{tree}` and `{run}` (see "Placeholders"). Every Interface the Harness builds needs a layout
-entry and a Pin, and so does the Harness itself. The settings digest of a run of examples covers `copy_exclude`, `env`,
-`build`, `baseline_timeout`, the Context's `[measure.examples.<context>]`, the layout of the Harness and of the
-Interfaces it builds, and the executables of `build` and of the first word of `program`; the other settings are not in
-it.
+entry and a Pin; the Harness needs no layout entry, for it has no file and the run reads and writes nothing at a place
+of it. The settings digest of a run of examples covers `copy_exclude`, `env`, `build`, `baseline_timeout`, the
+Context's `[measure.examples.<context>]`, the layout of the Interfaces it builds, and the executables of `build` and of
+the first word of `program`; the other settings (the layout of any Harness among them) are not in it.
 
 A run stands on the revision of the Harness (its examples are in it, so a changed text, a Case added, dropped or
 renamed, or another `builds` moves it), the digest of the code pinned for each Interface the Harness builds, and the

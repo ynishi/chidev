@@ -373,11 +373,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     pub(super) async fn examples_measured(&self, p: &Project) -> Result<Measured, AppError> {
         let measurements = self
             .store
-            .latest_measurements()
-            .await?
-            .into_iter()
-            .filter(|m| m.kind() == MeasureKind::Examples)
-            .collect();
+            .latest_measurements_of(MeasureKind::Examples)
+            .await?;
         self.with_settings(p, measurements).await
     }
 

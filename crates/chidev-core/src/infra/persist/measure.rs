@@ -536,11 +536,14 @@ fn examples_of(items: &[ItemRow]) -> Result<ExamplesOutcome, StoreError> {
                 .map(CaseId::from_uuid)
                 .map_err(|_| corrupt(format!("`{}` is not a case id", i.key)))?;
             let reasons: Vec<ReasonDoc> = read(&i.detail, "an example's reasons")?;
+            // an example that passed has no reason, and one that failed has at least one
             let result = match (i.outcome.as_str(), reasons.is_empty()) {
                 ("passed", true) => ExampleResult::Passed,
-                ("failed", _) => {
+                ("failed", false) => {
                     ExampleResult::Failed(reasons.into_iter().map(Reason::from).collect())
                 }
+                ("passed", false) => return Err(corrupt("an example that passed with reasons")),
+                ("failed", true) => return Err(corrupt("an example that failed without a reason")),
                 (other, _) => {
                     return Err(corrupt(format!("an example with outcome `{other}`")));
                 }
@@ -1244,6 +1247,20 @@ mod tests {
                 .all(|i| i.site.is_empty() && i.operator.is_empty())
         );
         assert_eq!(decode(&run, &items).unwrap(), m);
+        // an item whose outcome and reasons disagree is corrupt, not read as one or the other
+        for (at, outcome, detail) in [
+            (1, "failed", "[]"),
+            (0, "passed", "[{\"exit\":1}]"),
+            (0, "skipped", "[]"),
+        ] {
+            let mut changed = items.clone();
+            changed[at].outcome = outcome.to_string();
+            changed[at].detail = detail.to_string();
+            assert!(
+                matches!(decode(&run, &changed), Err(StoreError::Corrupt(_))),
+                "{outcome} {detail}"
+            );
+        }
         // and a failed run keeps the examples it got through
         let mut draft = crate::domain::entity::measurement::fixture::examples_draft(
             8,

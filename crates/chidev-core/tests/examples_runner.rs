@@ -46,11 +46,6 @@ budget = 60
 context = "ctx"
 interface = "prog"
 path = "prog.sh"
-
-[[measure.layout]]
-context = "ctx"
-harness = "ex"
-path = "ex"
 "#,
         )
         .unwrap();
@@ -293,17 +288,6 @@ async fn a_configuration_that_cannot_run_the_examples_is_an_error_and_runs_nothi
         }
     );
     assert!(error.to_string().contains("[measure.examples.other]"));
-    // the Harness is not laid out
-    let error = runner
-        .run_examples(&ask(&|r| r.harness = asset("elsewhere")))
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("no entry for the harness `elsewhere`"),
-        "{error}"
-    );
     // an Interface that is not laid out
     let error = runner
         .run_examples(&ask(&|r| r.interfaces[0].name = asset("gone")))
@@ -358,7 +342,7 @@ async fn digest(project: &Project) -> SettingsDigest {
 }
 
 #[tokio::test]
-async fn the_settings_are_for_a_harness_and_the_interfaces_it_builds() {
+async fn the_settings_are_for_the_interfaces_a_harness_builds_and_the_harness_needs_no_layout() {
     let project = Project::new();
     let (ctx, ex, prog) = (context("ctx"), asset("ex"), [asset("prog")]);
     let one = project
@@ -367,7 +351,17 @@ async fn the_settings_are_for_a_harness_and_the_interfaces_it_builds() {
         .await
         .unwrap();
     assert_eq!(one, digest(&project).await);
-    // another Harness, another Context, or an Interface that is not laid out has no settings
+    // a Harness of examples is not a file, so it is in no entry of the layout and the settings are the same for
+    // any of them
+    assert_eq!(
+        one,
+        project
+            .runner()
+            .examples_settings(&ctx, &asset("other"), &prog)
+            .await
+            .unwrap()
+    );
+    // another Context, or an Interface that is not laid out has no settings
     assert_eq!(
         project
             .runner()
@@ -378,20 +372,17 @@ async fn the_settings_are_for_a_harness_and_the_interfaces_it_builds() {
             context: context("other")
         }
     );
-    for error in [
-        project
-            .runner()
-            .examples_settings(&ctx, &asset("other"), &prog)
-            .await
-            .unwrap_err(),
-        project
-            .runner()
-            .examples_settings(&ctx, &ex, &[asset("gone")])
-            .await
-            .unwrap_err(),
-    ] {
-        assert!(!error.to_string().is_empty());
-    }
+    let error = project
+        .runner()
+        .examples_settings(&ctx, &ex, &[asset("gone")])
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no entry for the interface `gone`"),
+        "{error}"
+    );
     // what the Harness builds is read by the run, so it is in the digest
     let none = project
         .runner()
@@ -402,8 +393,48 @@ async fn the_settings_are_for_a_harness_and_the_interfaces_it_builds() {
 }
 
 #[tokio::test]
+async fn a_harness_with_no_layout_entry_runs_and_the_layout_of_another_harness_moves_nothing() {
+    let project = Project::new();
+    // the table lays out no Harness at all, and the examples are run
+    let text = std::fs::read_to_string(project.0.join(FILE)).unwrap();
+    assert!(!text.contains("harness ="));
+    let before = digest(&project).await;
+    let report = project
+        .runner()
+        .run_examples(&request(
+            "run-nolayout",
+            vec![example("a1", "echo", "hi\n", "hi\n#exit 0\n")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.examples[0].1, Verdict::Ok);
+    assert_eq!(report.settings, before);
+    // another Harness's layout (a tests Harness, a sim script) is not read by the run
+    for (what, entry) in [
+        ("another harness laid out", "other"),
+        ("the harness of the request laid out", "ex"),
+    ] {
+        project.edit(|t| {
+            format!(
+                "{t}\n[[measure.layout]]\ncontext = \"ctx\"\nharness = \"{entry}\"\npath = \"{entry}.txt\"\n"
+            )
+        });
+        assert_eq!(digest(&project).await, before, "{what}");
+        project.edit(|t| t.replace(&format!("{entry}.txt"), &format!("{entry}-moved.txt")));
+        assert_eq!(digest(&project).await, before, "{what}, moved");
+        std::fs::write(project.0.join(FILE), &text).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_setting_a_run_of_examples_does_not_read_leaves_its_digest_as_it_was() {
     let project = Project::new();
+    project.edit(|t| {
+        format!(
+            "{t}\n[[measure.layout]]\ncontext = \"ctx\"\nharness = \"other\"\npath = \"other.txt\"\n"
+        )
+    });
     let before = digest(&project).await;
     let text = std::fs::read_to_string(project.0.join(FILE)).unwrap();
     // the layout entries in the other order
@@ -468,10 +499,6 @@ async fn each_setting_a_run_of_examples_reads_moves_its_digest() {
         ),
         ("timeout", text.replace("timeout = 2", "timeout = 3")),
         ("budget", text.replace("budget = 60", "budget = 61")),
-        (
-            "the path of the harness",
-            text.replace("path = \"ex\"", "path = \"ex2\""),
-        ),
         (
             "the path of a built interface",
             text.replace("path = \"prog.sh\"", "path = \"prog2.sh\""),

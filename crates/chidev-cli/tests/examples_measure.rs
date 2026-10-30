@@ -38,11 +38,6 @@ budget = 120
 context = "core"
 interface = "prog"
 path = "prog.sh"
-
-[[measure.layout]]
-context = "core"
-harness = "acceptance"
-path = "acceptance"
 "#,
     )
     .expect("chidev.toml");

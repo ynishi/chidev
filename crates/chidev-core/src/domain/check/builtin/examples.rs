@@ -8,9 +8,12 @@
 //! confirmation refused for a failing example registers an external gate (`chidev accept --external` is one).
 //!
 //! A run that no longer describes the model (an example, a built Interface or the code pinned for it, or the
-//! settings moved) is judged stale before anything else, so a failure of an old run is never reported for a program
-//! that has since changed. The checks that say a run is stale or could not finish also run where something is
-//! confirmed, since a confirmation must not claim a state the latest run contradicts.
+//! settings moved) is judged stale before anything else, so a failing example of an old run is never reported for a
+//! program that has since changed (`examples.failed` skips a stale run, and `examples.stale` skips a run that
+//! failed). A run that could not finish is reported by `examples.error` whether or not the model has moved since,
+//! as `sim.error` reports one: it could not finish, whatever it stood on. The checks that say a run is stale, could
+//! not finish or found a failing example also run where something is confirmed, since a confirmation must not claim
+//! a state the latest run contradicts.
 
 use std::borrow::Cow;
 
@@ -233,16 +236,18 @@ impl Check for ExamplesFailed {
             };
             for (case, reasons) in outcome.failed() {
                 // The record holds the Case's id, so a Case that was renamed since is still the one. A run that is
-                // not stale was made on the Harness as it is, so the Case is there.
-                let found = e.harness.case(case);
-                let name = found.map_or_else(|| case.to_string(), |c| c.name().to_string());
+                // not stale was made on the Harness as it is, so the Case is there; a Case that is not cites nothing
+                // to report about.
+                let Some(found) = e.harness.case(case) else {
+                    continue;
+                };
                 let why = reasons
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("; ");
-                let message = format!("example `{name}` failed: {why}");
-                for clause in found.iter().flat_map(|c| c.cites().clauses().keys()) {
+                let message = format!("example `{}` failed: {why}", found.name());
+                for clause in found.cites().clauses().keys() {
                     out.push(Finding::new(
                         &EXAMPLES_FAILED,
                         Some(Subject::Clause(*clause)),

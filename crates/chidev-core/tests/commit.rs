@@ -972,6 +972,13 @@ impl Store for Flaky {
         self.inner.latest_measurements().await
     }
 
+    async fn latest_measurements_of(
+        &self,
+        kind: chidev_core::domain::vo::measure::MeasureKind,
+    ) -> Result<Vec<Measurement>, StoreError> {
+        self.inner.latest_measurements_of(kind).await
+    }
+
     async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
         self.inner.measurements().await
     }

@@ -506,6 +506,16 @@ pub(super) fn parse(value: &toml::Value) -> Result<Config, String> {
             .map_err(|e| format!("`[measure.examples.<context>]`: {e}"))?;
         let program: Vec<String> = e.program.iter().map(|w| w.0.clone()).collect();
         command(&format!("examples.{context}.program"), &program)?;
+        // The first word names the file the settings digest and the run starts, found as written at the root and in
+        // the copy: it is never expanded, so a placeholder there could name no file.
+        if program
+            .first()
+            .is_some_and(|w| w.contains(RUN) || w.contains(TREE))
+        {
+            return Err(format!(
+                "the first word of `examples.{context}.program` takes no placeholder (`{RUN}`, `{TREE}`): it is the program found at the project's root; the words after it may hold one"
+            ));
+        }
         let example_timeout = seconds(&format!("examples.{context}.timeout"), e.timeout, 10)?;
         let example_budget = seconds(&format!("examples.{context}.budget"), e.budget, 600)?;
         if example_budget.as_secs() > 3600 {
@@ -971,6 +981,11 @@ path = "acceptance"
                 "[examples.inventory]",
                 "[examples.Inventory]",
                 "[measure.examples.<context>]",
+            ),
+            (
+                "program = [\"./run.sh\", \"{tree}/prog\", \"--plain\"]",
+                "program = [\"{run}/target/debug/prog\"]",
+                "the first word of `examples.inventory.program` takes no placeholder",
             ),
         ] {
             let error = parse(&table(&EXAMPLES.replacen(from, to, 1))).unwrap_err();

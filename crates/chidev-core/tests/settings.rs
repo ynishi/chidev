@@ -705,6 +705,13 @@ impl Store for NoPins {
         self.0.latest_measurements().await
     }
 
+    async fn latest_measurements_of(
+        &self,
+        kind: MeasureKind,
+    ) -> Result<Vec<Measurement>, StoreError> {
+        self.0.latest_measurements_of(kind).await
+    }
+
     async fn measurements(&self) -> Result<Vec<Measurement>, StoreError> {
         self.0.measurements().await
     }
