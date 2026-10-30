@@ -143,21 +143,12 @@ impl Check for Stale {
                 let Standing::Stale(moved) = standing(m, view.project, pin, &settings) else {
                     return None;
                 };
-                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
-                // to configure `[measure]` or to make its settings readable.
-                let message = match settings.why_not_compared() {
-                    Some(why) => format!(
-                        "the latest mutation run cannot be shown to describe the code now: {why}"
-                    ),
-                    None => format!(
-                        "the latest mutation run is stale: {}",
-                        moved.words().join(", ")
-                    ),
-                };
+                // Every part that moved is said; settings that cannot be compared say why, for the cure is not to
+                // run again but to configure `[measure]` or to make its settings readable.
                 Some(Finding::new(
                     &STALE,
                     Some(Subject::Interface(i.id())),
-                    message,
+                    format!("the latest mutation run is stale: {}", moved.said()),
                 ))
             })
             .collect()
@@ -479,11 +470,31 @@ mod tests {
             assert_eq!(stale.len(), 1, "{said}");
             assert_eq!(
                 stale[0].message(),
-                format!("the latest mutation run cannot be shown to describe the code now: {said}")
+                format!("the latest mutation run is stale: settings ({said})")
             );
             // a stale run is not judged: its survivor is not reported
             assert!(found(&Survived, &p, &pins, runs, &now).is_empty());
         }
+        // what else moved is said beside the settings: the code pinned again, and no `[measure]`
+        let repinned = [crate::domain::service::pin::record(
+            &p,
+            iface(),
+            crate::domain::vo::id::PinId::from_uuid(crate::domain::vo::id::test_uuid(51)),
+            Digest::of(b"other code"),
+        )
+        .unwrap()];
+        let both = found(
+            &Stale,
+            &p,
+            &repinned,
+            runs,
+            &settings_now(SettingsNow::Unconfigured),
+        );
+        assert_eq!(both.len(), 1);
+        assert_eq!(
+            both[0].message(),
+            "the latest mutation run is stale: code, settings (measure is not configured)"
+        );
         // settings that moved are a change, and say nothing of being unreadable
         let moved = found(
             &Stale,

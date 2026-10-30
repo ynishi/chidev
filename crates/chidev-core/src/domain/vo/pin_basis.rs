@@ -68,16 +68,23 @@ impl PinBasis {
 
     /// What of this basis has moved in `now`, in the order of [`StaleReason`] and then of the ids: the Interface,
     /// then each Harness, Contract and other Interface whose revision differs or that is in only one of the two.
-    /// Empty when nothing it stood on has moved.
+    /// Empty when nothing it stood on has moved. Every field is named, so a field added to the basis is not left out
+    /// of the comparison.
     pub fn moved(&self, now: &PinBasis) -> Vec<StaleReason> {
+        let PinBasis {
+            interface,
+            harnesses,
+            contracts,
+            used_interfaces,
+        } = self;
         let mut why = Vec::new();
-        if self.interface != now.interface {
+        if *interface != now.interface {
             why.push(StaleReason::Interface);
         }
-        why.extend(moved_keys(&self.harnesses, &now.harnesses).map(StaleReason::Harness));
-        why.extend(moved_keys(&self.contracts, &now.contracts).map(StaleReason::Contract));
+        why.extend(moved_keys(harnesses, &now.harnesses).map(StaleReason::Harness));
+        why.extend(moved_keys(contracts, &now.contracts).map(StaleReason::Contract));
         why.extend(
-            moved_keys(&self.used_interfaces, &now.used_interfaces).map(StaleReason::UsedInterface),
+            moved_keys(used_interfaces, &now.used_interfaces).map(StaleReason::UsedInterface),
         );
         why
     }

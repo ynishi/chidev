@@ -415,6 +415,7 @@ async fn a_configured_runner_with_no_layout_for_the_interface_makes_the_run_stal
         ));
         let mut app = restarted(app, &fixture).await;
         assert_eq!(state(&app).await, "stale");
+        assert_eq!(moved(&app).await, [("settings-unreadable", None)]);
         said(&mut app, "mutation.stale").await
     };
     // `check` and the run that asks every check read the same settings
@@ -437,7 +438,7 @@ async fn removing_measure_after_a_run_makes_it_stale_and_says_measure_is_not_con
     assert_eq!(state(&app).await, "current");
     let mut app = unconfigured(app);
     assert_eq!(state(&app).await, "stale");
-    assert_eq!(moved(&app).await, [("settings", None)]);
+    assert_eq!(moved(&app).await, [("settings-unconfigured", None)]);
     let (checked, asked) = said(&mut app, "mutation.stale").await;
     for messages in [checked, asked] {
         assert_eq!(messages.len(), 1, "{messages:?}");

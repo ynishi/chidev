@@ -42,21 +42,12 @@ impl Sim<'_> {
         view.sim_settings_now(self.harness.id())
     }
 
-    /// Whether the run still describes the model, and what moved if it does not. A run whose settings cannot be
-    /// compared is stale.
-    fn standing(&self, view: &CheckView<'_>) -> Option<Standing> {
-        let run = self.run?;
-        Some(sim_standing(
-            run,
-            view.project,
-            view.pins,
-            &self.settings(view),
-        ))
-    }
-
-    /// Whether there is a run, and it no longer describes the model.
+    /// Whether there is a run, and it no longer describes the model. A run whose settings cannot be compared is
+    /// stale.
     fn is_stale(&self, view: &CheckView<'_>) -> bool {
-        self.standing(view).is_some_and(|s| s.is_stale())
+        self.run.is_some_and(|run| {
+            sim_standing(run, view.project, view.pins, &self.settings(view)).is_stale()
+        })
     }
 }
 
@@ -282,24 +273,17 @@ impl Check for SimStale {
                 if run.measurement().failure().is_some() {
                     return None;
                 }
-                let Some(Standing::Stale(moved)) = s.standing(view) else {
+                let settings = s.settings(view);
+                let Standing::Stale(moved) = sim_standing(run, view.project, view.pins, &settings)
+                else {
                     return None;
                 };
-                // Settings that cannot be compared are told apart from a change: the cure is not to run again but
-                // to configure `[measure]` or to make its settings readable.
-                let message = match s.settings(view).why_not_compared() {
-                    Some(why) => format!(
-                        "the latest simulation cannot be shown to describe the program now: {why}"
-                    ),
-                    None => format!(
-                        "the latest simulation is stale: {}",
-                        moved.words().join(", ")
-                    ),
-                };
+                // Every part that moved is said; settings that cannot be compared say why, for the cure is not to
+                // run again but to configure `[measure]` or to make its settings readable.
                 Some(Finding::new(
                     &SIM_STALE,
                     Some(Subject::Case(s.sweep.id())),
-                    message,
+                    format!("the latest simulation is stale: {}", moved.said()),
                 ))
             })
             .collect()
@@ -1101,13 +1085,25 @@ mod tests {
             assert_eq!(stale.len(), 1, "{said}");
             assert_eq!(
                 stale[0].message(),
-                format!(
-                    "the latest simulation cannot be shown to describe the program now: {said}"
-                )
+                format!("the latest simulation is stale: settings ({said})")
             );
             // a stale run is not judged: its finding is not reported
             assert!(found(&SimFinding, &p, runs, &now).is_empty());
         }
+        // what else moved is said beside the settings: the script, and no `[measure]`
+        let mut changed = p.clone();
+        put_sim(&mut changed, "changed");
+        let both = found(
+            &SimStale,
+            &changed,
+            runs,
+            &settings_now(SettingsNow::Unconfigured),
+        );
+        assert_eq!(both.len(), 1);
+        assert_eq!(
+            both[0].message(),
+            "the latest simulation is stale: script, settings (measure is not configured)"
+        );
         // settings that moved are a change, and say nothing of being unreadable
         let moved = found(
             &SimStale,

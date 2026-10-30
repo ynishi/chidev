@@ -470,9 +470,9 @@ impl SettingsNow {
     /// Why a run cannot be compared on its settings; none when they are known.
     pub fn why_not_compared(&self) -> Option<String> {
         match self {
-            SettingsNow::Unconfigured => Some("measure is not configured".to_string()),
+            SettingsNow::Unconfigured => SettingsGap::Unconfigured.why(),
             SettingsNow::Known(_) => None,
-            SettingsNow::Unreadable(why) => Some(format!("the settings cannot be read: {why}")),
+            SettingsNow::Unreadable(why) => SettingsGap::Unreadable(why.clone()).why(),
         }
     }
 
@@ -499,6 +499,18 @@ pub enum SettingsGap {
     Unconfigured,
     /// The runner cannot read them for the subject, and says why.
     Unreadable(String),
+}
+
+impl SettingsGap {
+    /// Why a run cannot be compared on its settings, in a sentence; none when they could be compared and read as
+    /// another digest. The one place that words it.
+    pub fn why(&self) -> Option<String> {
+        match self {
+            SettingsGap::Differ => None,
+            SettingsGap::Unconfigured => Some("measure is not configured".to_string()),
+            SettingsGap::Unreadable(why) => Some(format!("the settings cannot be read: {why}")),
+        }
+    }
 }
 
 /// How an Interface that a sim Harness builds moved since a simulation was run.
@@ -558,9 +570,12 @@ pub enum StampPart {
 
 impl StampPart {
     /// The word for it, one of `code`, `interface`, `harness`, `contract`, `used-interface`, `script`,
-    /// `built-revision`, `built-code`, `builds`, `settings` and `gone`: the one place that names the parts in words,
-    /// for a finding and for the status. A Contract a Pin stood on and a Contract a simulation cites both say
-    /// `contract`: each is a cited Contract that moved.
+    /// `built-revision`, `built-code`, `builds`, `settings`, `settings-unconfigured`, `settings-unreadable` and
+    /// `gone`: the one place that names the parts in words, for the status. A Contract a Pin stood on and a Contract
+    /// a simulation cites both say `contract`: each is a cited Contract that moved. The settings say apart whether
+    /// they read as another digest (`settings`), or could not be compared because there is no `[measure]` table
+    /// (`settings-unconfigured`) or the runner cannot read them (`settings-unreadable`, whose
+    /// [`reason`](StampPart::reason) is the runner's).
     pub fn word(&self) -> &'static str {
         match self {
             StampPart::Code => "code",
@@ -572,8 +587,24 @@ impl StampPart {
             StampPart::Built(_, BuiltPart::Revision) => "built-revision",
             StampPart::Built(_, BuiltPart::PinnedCode) => "built-code",
             StampPart::Built(_, BuiltPart::Membership) => "builds",
-            StampPart::Settings(_) => "settings",
+            StampPart::Settings(SettingsGap::Differ) => "settings",
+            StampPart::Settings(SettingsGap::Unconfigured) => "settings-unconfigured",
+            StampPart::Settings(SettingsGap::Unreadable(_)) => "settings-unreadable",
             StampPart::Gone => "gone",
+        }
+    }
+
+    /// The reason the runner gave for settings it cannot read, in its own words; none for any other part.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            StampPart::Settings(SettingsGap::Unreadable(why)) => Some(why),
+            StampPart::Pin(_)
+            | StampPart::Code
+            | StampPart::Script
+            | StampPart::Contract(_)
+            | StampPart::Built(..)
+            | StampPart::Settings(SettingsGap::Differ | SettingsGap::Unconfigured)
+            | StampPart::Gone => None,
         }
     }
 
@@ -639,12 +670,18 @@ impl MeasureStamp {
     /// that are not known (`Unconfigured`, `Unreadable`) are a part that moved, for nothing shows the run was made
     /// under them.
     pub fn moved(&self, code: Digest, basis: &PinBasis, settings: &SettingsNow) -> Vec<StampPart> {
+        // every field is named, so a field added to the stamp is not left out of the comparison
+        let MeasureStamp {
+            code: was_code,
+            basis: was_basis,
+            settings: was_settings,
+        } = self;
         let mut parts = Vec::new();
-        if self.code != code {
+        if *was_code != code {
             parts.push(StampPart::Code);
         }
-        parts.extend(self.basis.moved(basis).into_iter().map(StampPart::Pin));
-        parts.extend(settings.moved_from(&self.settings));
+        parts.extend(was_basis.moved(basis).into_iter().map(StampPart::Pin));
+        parts.extend(settings.moved_from(was_settings));
         parts
     }
 
@@ -1001,15 +1038,31 @@ mod tests {
             (StampPart::Settings(SettingsGap::Differ), "settings", None),
             (
                 StampPart::Settings(SettingsGap::Unconfigured),
-                "settings",
+                "settings-unconfigured",
                 None,
             ),
-            (StampPart::Settings(unreadable()), "settings", None),
+            (
+                StampPart::Settings(unreadable()),
+                "settings-unreadable",
+                None,
+            ),
             (StampPart::Gone, "gone", None),
         ] {
             assert_eq!(part.word(), word, "{part:?}");
             assert_eq!(part.asset(), asset, "{part:?}");
+            // only settings the runner cannot read have a reason
+            let reason = (word == "settings-unreadable").then_some("why");
+            assert_eq!(part.reason(), reason, "{part:?}");
         }
+        assert_eq!(SettingsGap::Differ.why(), None);
+        assert_eq!(
+            SettingsGap::Unconfigured.why().as_deref(),
+            Some("measure is not configured")
+        );
+        assert_eq!(
+            unreadable().why().as_deref(),
+            Some("the settings cannot be read: why")
+        );
         assert_eq!(AssetRef::Harness(h).as_uuid(), h.as_uuid());
         assert_eq!(AssetRef::Contract(c).as_uuid(), c.as_uuid());
         assert_eq!(AssetRef::Interface(i).as_uuid(), i.as_uuid());

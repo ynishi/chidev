@@ -1019,6 +1019,9 @@ struct MovedOut<'a> {
     /// The name of the asset the part is about; left out for a part that is not about one.
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    /// Why the settings cannot be read, in the runner's words; left out for any other part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 /// The latest measurement of an Interface or a sim Harness, in the result of `status`.
@@ -3771,6 +3774,7 @@ where
                                 .map(|p| MovedOut {
                                     part: p.part().word(),
                                     name: p.name().map(AssetName::as_str),
+                                    reason: p.part().reason(),
                                 })
                                 .collect(),
                             MeasurementState::Current

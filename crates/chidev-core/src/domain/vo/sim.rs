@@ -534,14 +534,23 @@ impl SimStamp {
     /// `basis` under those settings. Settings that are not known (`Unconfigured`, `Unreadable`) are a part that
     /// moved, for nothing shows the run was made under them.
     pub fn moved(&self, basis: &SimBasis, settings: &SettingsNow) -> Vec<StampPart> {
-        let was = &self.basis;
+        // every field is named, so a field added to the stamp or its basis is not left out of the comparison
+        let SimStamp {
+            basis:
+                SimBasis {
+                    harness,
+                    contracts,
+                    interfaces,
+                },
+            settings: was_settings,
+        } = self;
         let mut parts = Vec::new();
-        if was.harness != basis.harness {
+        if *harness != basis.harness {
             parts.push(StampPart::Script);
         }
-        parts.extend(moved_keys(&was.contracts, &basis.contracts).map(StampPart::Contract));
-        for id in moved_keys(&was.interfaces, &basis.interfaces) {
-            match (was.interfaces.get(&id), basis.interfaces.get(&id)) {
+        parts.extend(moved_keys(contracts, &basis.contracts).map(StampPart::Contract));
+        for id in moved_keys(interfaces, &basis.interfaces) {
+            match (interfaces.get(&id), basis.interfaces.get(&id)) {
                 (Some((was_revision, was_code)), Some((revision, code))) => {
                     if was_revision != revision {
                         parts.push(StampPart::Built(id, BuiltPart::Revision));
@@ -553,7 +562,7 @@ impl SimStamp {
                 _ => parts.push(StampPart::Built(id, BuiltPart::Membership)),
             }
         }
-        parts.extend(settings.moved_from(&self.settings));
+        parts.extend(settings.moved_from(was_settings));
         parts
     }
 

@@ -23,16 +23,24 @@ impl Moved {
         &self.0
     }
 
-    /// The words of the parts that moved ([`StampPart::word`]), each once, in the order they first come.
-    pub fn words(&self) -> Vec<&'static str> {
-        let mut words: Vec<&'static str> = Vec::new();
+    /// What moved, said in a line for a finding: the word of each part ([`StampPart::word`]) once, in the order they
+    /// first come, joined by commas. The settings say `settings` whatever their gap, and when they could not be
+    /// compared they say why: `settings (measure is not configured)`.
+    pub fn said(&self) -> String {
+        let mut said: Vec<String> = Vec::new();
         for part in &self.0 {
-            let word = part.word();
-            if !words.contains(&word) {
-                words.push(word);
+            let one = match part {
+                StampPart::Settings(gap) => match gap.why() {
+                    Some(why) => format!("settings ({why})"),
+                    None => "settings".to_string(),
+                },
+                other => other.word().to_string(),
+            };
+            if !said.contains(&one) {
+                said.push(one);
             }
         }
-        words
+        said.join(", ")
     }
 }
 
@@ -57,22 +65,9 @@ impl Standing {
         }
     }
 
-    /// Whether it is current.
-    pub fn is_current(&self) -> bool {
-        matches!(self, Standing::Current)
-    }
-
     /// Whether it is stale.
     pub fn is_stale(&self) -> bool {
         matches!(self, Standing::Stale(_))
-    }
-
-    /// The word for it.
-    pub fn word(&self) -> &'static str {
-        match self {
-            Standing::Current => "current",
-            Standing::Stale(_) => "stale",
-        }
     }
 }
 
@@ -134,10 +129,8 @@ mod tests {
     fn nothing_moved_is_current_and_a_stale_standing_always_says_what_moved() {
         assert_eq!(Standing::of(Vec::new()), Standing::Current);
         let standing = Standing::of(vec![StampPart::Code]);
-        assert!(standing.is_stale() && !standing.is_current());
-        assert!(Standing::Current.is_current() && !Standing::Current.is_stale());
-        assert_eq!(standing.word(), "stale");
-        assert_eq!(Standing::Current.word(), "current");
+        assert!(standing.is_stale());
+        assert!(!Standing::Current.is_stale());
         let Standing::Stale(moved) = standing else {
             panic!("a part moved");
         };
@@ -201,6 +194,27 @@ mod tests {
         ]) else {
             panic!("parts moved");
         };
-        assert_eq!(moved.words(), ["code", "contract", "interface", "settings"]);
+        assert_eq!(moved.said(), "code, contract, interface, settings");
+    }
+
+    #[test]
+    fn settings_that_cannot_be_compared_say_why_beside_the_other_parts() {
+        let said = |gap: SettingsGap| {
+            let Standing::Stale(moved) =
+                Standing::of(vec![StampPart::Code, StampPart::Settings(gap)])
+            else {
+                panic!("parts moved");
+            };
+            moved.said()
+        };
+        assert_eq!(said(SettingsGap::Differ), "code, settings");
+        assert_eq!(
+            said(SettingsGap::Unconfigured),
+            "code, settings (measure is not configured)"
+        );
+        assert_eq!(
+            said(SettingsGap::Unreadable("no layout".to_string())),
+            "code, settings (the settings cannot be read: no layout)"
+        );
     }
 }
