@@ -389,14 +389,6 @@ async fn put_inputs(root: &Path, puts: Vec<PutDto>) -> Result<Vec<PutInput>, App
     }
 }
 
-/// The names of assets that a list of texts are.
-fn asset_names(names: &[String]) -> Result<Vec<AssetName>, AppError> {
-    names
-        .iter()
-        .map(|n| AssetName::try_from(n.as_str()).map_err(AppError::from))
-        .collect()
-}
-
 /// An entry of the `puts` of a change set as the input of the use case; the text of a `source_file` is read here, and
 /// the name of an asset is read as one (a text that breaks the rule of a name is refused, naming the character).
 async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
@@ -462,7 +454,10 @@ async fn put_input(root: &Path, d: PutDto) -> Result<PutInput, AppError> {
             cases,
         } => {
             let name = AssetName::try_from(name)?;
-            let builds = asset_names(&builds)?;
+            let builds = builds
+                .iter()
+                .map(|n| AssetName::try_from(n.as_str()))
+                .collect::<Result<Vec<_>, _>>()?;
             let label = format!("the put of the harness `{name}`");
             let content = harness_content(
                 root,

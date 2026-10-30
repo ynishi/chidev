@@ -85,11 +85,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 .chain(c.interfaces().map(|x| x.id().as_uuid()))
                 .chain(c.harnesses().map(|x| x.id().as_uuid()));
             for id in ids {
-                if let Some(n) = pending.iter().find(|n| n.id == id) {
-                    names.insert(id, n.name.to_string());
-                } else if let Some(n) = self.store.asset_name(id).await? {
-                    names.insert(id, n.to_string());
-                }
+                names.insert(id, self.name_in(id, pending).await?.to_string());
             }
         }
         Ok(names)

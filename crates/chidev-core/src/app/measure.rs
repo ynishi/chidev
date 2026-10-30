@@ -523,7 +523,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 continue;
             };
             let contract = self.name_of(contract.id().as_uuid()).await?;
-            names.insert(id, format!("{contract}:{}", clause.label()));
+            names.insert(id, ClauseName::new(contract, clause.label()).to_string());
         }
         Ok(names)
     }

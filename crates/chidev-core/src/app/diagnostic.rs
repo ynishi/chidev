@@ -945,19 +945,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 let names = self.context_names().await;
                 vec![self.unknown_name("context", name.as_str(), names, Vec::new())]
             }
-            AppError::BadName(error) => {
-                // A name that breaks the rule is an input that is not well formed, said with what the rule refuses.
-                let text = error.to_string();
-                match rule::rule(INPUT_INVALID.as_str()) {
-                    Some(r) => vec![Diagnostic::of_rule(
-                        r,
-                        Vec::new(),
-                        vec![("detail", DiagValue::Text(text.clone()))],
-                        &[("detail", text)],
-                    )],
-                    None => vec![Diagnostic::app_unmapped(&text)],
-                }
-            }
+            // A name that breaks the rule is an input that is not well formed, said with what the rule refuses.
+            AppError::BadName(error) => vec![input_invalid(&error.to_string())],
             AppError::UnknownAsset {
                 context,
                 kind,
@@ -1159,15 +1148,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 d.field = Some("sections".to_string());
                 vec![d]
             }
-            AppError::Input(text) => match rule::rule(INPUT_INVALID.as_str()) {
-                Some(r) => vec![Diagnostic::of_rule(
-                    r,
-                    Vec::new(),
-                    vec![("detail", DiagValue::Text(text.clone()))],
-                    &[("detail", text.clone())],
-                )],
-                None => vec![Diagnostic::app_unmapped(text)],
-            },
+            AppError::Input(text) => vec![input_invalid(text)],
             AppError::Refused(found) => found.iter().map(Diagnostic::of_found).collect(),
             AppError::ExternalRefused { findings, .. } => {
                 findings.iter().map(Diagnostic::of_found).collect()
@@ -1697,6 +1678,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 vec![suggest(Mend::Op(SuggestedOp::AddContext { name: None }), how)]
             }
         }
+    }
+}
+
+/// The diagnostic of an input that is not well formed (`input.invalid`), with `text` saying why; the text itself
+/// when the rule is not registered.
+fn input_invalid(text: &str) -> Diagnostic {
+    match rule::rule(INPUT_INVALID.as_str()) {
+        Some(r) => Diagnostic::of_rule(
+            r,
+            Vec::new(),
+            vec![("detail", DiagValue::Text(text.to_string()))],
+            &[("detail", text.to_string())],
+        ),
+        None => Diagnostic::app_unmapped(text),
     }
 }
 
