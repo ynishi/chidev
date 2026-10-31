@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::commit::{RecordChanges, RecordTrigger};
 use super::ports::external::ExternalExecutor;
 use super::ports::measure::{
-    ExamplesRequest, HarnessText, InterfaceText, MutateRequest, RunnerError, SimulateRequest,
+    ExamplesRequest, HarnessText, InterfaceText, MutateRequest, RunnerError, SettingsTarget,
+    SimulateRequest,
 };
 use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, CorrectionStatus, context_named, correction_status};
@@ -49,6 +50,13 @@ pub(super) struct Measured {
     pub(super) settings: BTreeMap<InterfaceId, SettingsNow>,
     pub(super) sim_settings: BTreeMap<HarnessId, SettingsNow>,
     pub(super) examples_settings: BTreeMap<HarnessId, SettingsNow>,
+}
+
+/// Whose settings a target of [`SettingsTarget`] that was asked of the runner are.
+enum Asked {
+    Interface(InterfaceId),
+    SimHarness(HarnessId),
+    ExamplesHarness(HarnessId),
 }
 
 /// What the settings are now, from what the runner said of them: no runner is a project that has no `[measure]`
@@ -391,7 +399,9 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         self.with_settings(p, measurements).await
     }
 
-    /// `measurements`, with the settings now of the subjects they are of that are in the model.
+    /// `measurements`, with the settings now of the subjects they are of that are in the model. Every subject is
+    /// collected first and the runner is asked once for all of them, so that what they share (a program several of
+    /// them use) is read once; the answers come back beside their targets.
     async fn with_settings(
         &self,
         p: &Project,
@@ -400,6 +410,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let mut settings = BTreeMap::new();
         let mut sim_settings = BTreeMap::new();
         let mut examples_settings = BTreeMap::new();
+        let mut asked: Vec<(SettingsTarget, Asked)> = Vec::new();
         for m in &measurements {
             match m.subject() {
                 MeasureSubject::Interface(i) => {
@@ -420,11 +431,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     for (h, _) in tests {
                         harnesses.push(self.name_of(h.id().as_uuid()).await?);
                     }
-                    let said = self
-                        .runner
-                        .settings(context.name(), &interface, &harnesses)
-                        .await;
-                    settings.insert(i, settings_now(said));
+                    asked.push((
+                        SettingsTarget::Mutation {
+                            context: context.name().clone(),
+                            interface,
+                            harnesses,
+                        },
+                        Asked::Interface(i),
+                    ));
                 }
                 MeasureSubject::Harness(h) => {
                     let Some((context, harness_entity)) = p
@@ -440,21 +454,51 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     }
                     // A kind of run asks the runner for the settings of that kind: a Harness whose kind has
                     // changed since is asked as its runs were made.
-                    if m.kind() == MeasureKind::Examples {
-                        let said = self
-                            .runner
-                            .examples_settings(context.name(), &harness, &builds)
-                            .await;
-                        examples_settings.insert(h, settings_now(said));
+                    let context = context.name().clone();
+                    asked.push(if m.kind() == MeasureKind::Examples {
+                        (
+                            SettingsTarget::Examples {
+                                context,
+                                harness,
+                                builds,
+                            },
+                            Asked::ExamplesHarness(h),
+                        )
                     } else {
-                        let said = self
-                            .runner
-                            .sim_settings(context.name(), &harness, &builds)
-                            .await;
-                        sim_settings.insert(h, settings_now(said));
-                    }
+                        (
+                            SettingsTarget::Simulation {
+                                context,
+                                harness,
+                                builds,
+                            },
+                            Asked::SimHarness(h),
+                        )
+                    });
                 }
             }
+        }
+        let (targets, whose): (Vec<SettingsTarget>, Vec<Asked>) = asked.into_iter().unzip();
+        let said = if targets.is_empty() {
+            Vec::new()
+        } else {
+            self.runner.settings_of(&targets).await
+        };
+        for (k, (target, whose)) in targets.iter().zip(whose).enumerate() {
+            // The answer is the one beside the target, wherever the runner put it (most often where it was asked);
+            // a runner that left a target out gives no settings for it.
+            let answer = said
+                .get(k)
+                .filter(|(t, _)| t == target)
+                .or_else(|| said.iter().find(|(t, _)| t == target));
+            let now = match answer {
+                Some((_, digest)) => settings_now(digest.clone()),
+                None => SettingsNow::Unreadable("the runner gave no settings for it".to_string()),
+            };
+            match whose {
+                Asked::Interface(i) => settings.insert(i, now),
+                Asked::SimHarness(h) => sim_settings.insert(h, now),
+                Asked::ExamplesHarness(h) => examples_settings.insert(h, now),
+            };
         }
         Ok(Measured {
             measurements,

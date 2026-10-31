@@ -52,15 +52,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::super::process::{self, Capture, Over, Pipe};
-use super::settings::SimSettings;
+use super::settings::{Files, SimSettings};
 use super::{Command, ERROR_LIMIT, Job, ProcessRunner, TAIL, io, millis, provider};
 use crate::app::ports::measure::{
     InterfaceText, LayoutPlace, RunnerError, SimulateReport, SimulateRequest,
 };
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::ClauseId;
-use crate::domain::vo::measure::{FailureKind, MeasureFailure, SettingsDigest, StepEvidence};
-use crate::domain::vo::name::{AssetName, ContextName};
+use crate::domain::vo::measure::{FailureKind, MeasureFailure, StepEvidence};
+use crate::domain::vo::name::AssetName;
 use crate::domain::vo::sim::{
     CaseExit, CaseFinding, CaseRun, CaseUnreached, CitedClause, ClauseName, Rerun, SimCase,
     reproduction, rerun_cases, resolve,
@@ -233,18 +233,6 @@ struct SimProgress {
 }
 
 impl ProcessRunner {
-    /// The digest of the settings of a simulation of `harness` of `context` that builds the Interfaces `builds`.
-    pub(super) async fn sim_settings_of(
-        &self,
-        context: &ContextName,
-        harness: &AssetName,
-        builds: &[AssetName],
-    ) -> Result<SettingsDigest, RunnerError> {
-        SimSettings::resolve(&self.config, &self.root, context, harness, builds)
-            .await?
-            .digest()
-    }
-
     /// Runs the simulation `request` asks for.
     pub(super) async fn simulate_run(
         &self,
@@ -252,6 +240,7 @@ impl ProcessRunner {
     ) -> Result<SimulateReport, RunnerError> {
         let builds: Vec<AssetName> = request.interfaces.iter().map(|i| i.name.clone()).collect();
         let settings = SimSettings::resolve(
+            &mut Files::default(),
             &self.config,
             &self.root,
             &request.context,

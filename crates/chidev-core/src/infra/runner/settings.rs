@@ -9,6 +9,11 @@
 //! entries to leave out of a copy) are sorted and maps are `BTreeMap`s, so the same settings give the same digest
 //! however the table orders them, and a table with a default written out gives the digest of one without it.
 //!
+//! Settings are resolved for many subjects at once when the runner is asked so ([`Files`]): the programs they
+//! share are found and hashed once, by the path of the file, and each command still keeps its own words, so the
+//! same binary started with other arguments is another [`Program`] with the one digest of its file. That memo is
+//! local to one resolution and is gone with it.
+//!
 //! The first word of a program under test (a simulation's, or the examples') is digested by its file only when it is
 //! a file of the host ([`ProgramStart`]); one that is in the copy is the build's and the pinned code's to account for.
 //! These are not in the digest, for they are not settings: the environment the runner inherits from its host, and
@@ -76,14 +81,65 @@ impl NotFound {
     }
 }
 
+/// The digests of the files read while the settings of one or many subjects are resolved, so that a file that
+/// several of them use is read once. It is keyed by the file's path as resolved, and holds only what reading the
+/// file gave (its digest, or why its bytes cannot be read) and nothing of the command that names it: two commands
+/// that start the same file with other arguments are each their own [`Program`], with the one digest of the file.
+///
+/// It is a value local to one resolution: whoever resolves makes one and drops it, so a file that changes between
+/// two resolutions is read again. It covers the programs found through [`find_in`] (build, test, provider,
+/// interpreter) and the file of a [`ProgramStart::Host`]; a program that is [`ProgramStart::InCopy`] or
+/// [`ProgramStart::Unfound`] has no digest and is not in it.
+#[derive(Debug, Default)]
+pub(super) struct Files {
+    digests: BTreeMap<PathBuf, Result<String, process::Failure>>,
+    /// How many files were read, which a test counts to see that a shared file is read once.
+    #[cfg(test)]
+    read: usize,
+}
+
+impl Files {
+    /// The digest of `file`, read the first time it is asked.
+    async fn digest(&mut self, file: &Path) -> Result<String, process::Failure> {
+        // the same file spelled with and without a `.` component is the same key
+        let key: PathBuf = file.components().collect();
+        if let Some(said) = self.digests.get(&key) {
+            return said.clone();
+        }
+        #[cfg(test)]
+        {
+            self.read += 1;
+        }
+        let said = process::file_digest(file).await;
+        self.digests.insert(key, said.clone());
+        said
+    }
+
+    /// How many files were read.
+    #[cfg(test)]
+    pub(super) fn read(&self) -> usize {
+        self.read
+    }
+}
+
 /// Finds `program` in the tree rooted at `base`, by the one rule: the project's root for the settings, and the
 /// copy of the project for the run. A path is taken from `base`, an absolute one stays, and a bare name is looked
 /// for in `PATH`, an entry of which that is relative being taken from `base` too.
 pub(super) async fn find(base: &Path, program: &str) -> Result<Found, NotFound> {
+    find_in(&mut Files::default(), base, program).await
+}
+
+/// As [`find`], reading the file through `files`: a file it has read is not read again.
+pub(super) async fn find_in(
+    files: &mut Files,
+    base: &Path,
+    program: &str,
+) -> Result<Found, NotFound> {
     let executable = process::locate(base, program)
         .await
         .map_err(NotFound::Locate)?;
-    let digest = process::file_digest(&executable)
+    let digest = files
+        .digest(&executable)
         .await
         .map_err(NotFound::Fingerprint)?;
     Ok(Found { executable, digest })
@@ -131,8 +187,9 @@ pub(super) struct Program {
 }
 
 impl Program {
-    /// The command `words` of `role`, its program found at the project's root `root`.
+    /// The command `words` of `role`, its program found at the project's root `root`, its file read through `files`.
     async fn resolve(
+        files: &mut Files,
         root: &Path,
         role: CommandRole,
         words: &[String],
@@ -140,7 +197,9 @@ impl Program {
         let Some((program, args)) = words.split_first() else {
             return Err(no_program(role));
         };
-        let found = find(root, program).await.map_err(|e| refused(role, e))?;
+        let found = find_in(files, root, program)
+            .await
+            .map_err(|e| refused(role, e))?;
         Ok(Self {
             program: program.clone(),
             args: args.to_vec(),
@@ -212,16 +271,18 @@ impl ProgramStart {
     /// [`ProgramStart::Host`] is found, and digested. An error when it cannot be found (but for a bare name of a
     /// simulation) or read; one that is in the copy is neither looked for nor read.
     pub(super) async fn of(
+        files: &mut Files,
         root: &Path,
         role: CommandRole,
         word: &str,
     ) -> Result<Self, RunnerError> {
         let search = std::env::var_os("PATH").unwrap_or_default();
-        Self::searching(root, role, word, &search).await
+        Self::searching(files, root, role, word, &search).await
     }
 
     /// As [`ProgramStart::of`], with `search` in the place of `PATH`.
     async fn searching(
+        files: &mut Files,
         root: &Path,
         role: CommandRole,
         word: &str,
@@ -255,7 +316,8 @@ impl ProgramStart {
                 }
             }
         };
-        let digest = process::file_digest(&file)
+        let digest = files
+            .digest(&file)
             .await
             .map_err(|f| refused(role, NotFound::Fingerprint(f)))?;
         Ok(Self::Host(executable_at(root, &file, digest)))
@@ -317,6 +379,7 @@ pub(super) struct ProgramUnderTest {
 impl ProgramUnderTest {
     /// The program `words` of `role`, started from where its first word says, for the project rooted at `root`.
     async fn resolve(
+        files: &mut Files,
         root: &Path,
         role: CommandRole,
         words: &[Template],
@@ -325,7 +388,7 @@ impl ProgramUnderTest {
             return Err(no_program(role));
         };
         Ok(Self {
-            start: ProgramStart::of(root, role, program.as_str()).await?,
+            start: ProgramStart::of(files, root, role, program.as_str()).await?,
             program: program.clone(),
             args: args.to_vec(),
         })
@@ -416,7 +479,7 @@ pub(super) struct CopySettings {
 }
 
 impl CopySettings {
-    async fn resolve(config: &Config, root: &Path) -> Result<Self, RunnerError> {
+    async fn resolve(files: &mut Files, config: &Config, root: &Path) -> Result<Self, RunnerError> {
         Ok(Self {
             copy_exclude: config
                 .copy_exclude
@@ -424,7 +487,7 @@ impl CopySettings {
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
             env: config.env.iter().cloned().collect(),
-            build: Program::resolve(root, CommandRole::Build, &config.build).await?,
+            build: Program::resolve(files, root, CommandRole::Build, &config.build).await?,
             baseline_timeout: config.baseline_timeout,
         })
     }
@@ -471,6 +534,7 @@ impl MutationSettings {
     /// The settings of a mutation run of `interface` of `context` that runs the tests `harnesses`, from `config`,
     /// its programs found at the project's root `root`. An error when the table cannot mutate it.
     pub(super) async fn resolve(
+        files: &mut Files,
         config: &Config,
         root: &Path,
         context: &ContextName,
@@ -499,10 +563,11 @@ impl MutationSettings {
         }
         placed.sort();
         Ok(Self {
-            copy: CopySettings::resolve(config, root).await?,
-            test: Program::resolve(root, CommandRole::Test, test).await?,
+            copy: CopySettings::resolve(files, config, root).await?,
+            test: Program::resolve(files, root, CommandRole::Test, test).await?,
             lang: lang.to_string(),
             provider: Program::resolve(
+                files,
                 root,
                 CommandRole::Provider {
                     lang: lang.to_string(),
@@ -560,6 +625,7 @@ impl SimSettings {
     /// `builds`, from `config`, its programs found at the project's root `root`. An error when the table cannot
     /// simulate it.
     pub(super) async fn resolve(
+        files: &mut Files,
         config: &Config,
         root: &Path,
         context: &ContextName,
@@ -584,9 +650,11 @@ impl SimSettings {
         }
         placed.sort();
         Ok(Self {
-            copy: CopySettings::resolve(config, root).await?,
-            interpreter: Program::resolve(root, CommandRole::Interpreter, &sim.interpreter).await?,
-            program: ProgramUnderTest::resolve(root, CommandRole::SimProgram, &sim.program).await?,
+            copy: CopySettings::resolve(files, config, root).await?,
+            interpreter: Program::resolve(files, root, CommandRole::Interpreter, &sim.interpreter)
+                .await?,
+            program: ProgramUnderTest::resolve(files, root, CommandRole::SimProgram, &sim.program)
+                .await?,
             seeds: sim.seeds,
             sample: sim.sample,
             timeout: sim.timeout,
@@ -629,6 +697,7 @@ impl ExamplesSettings {
     /// The settings of a run of the examples of a Harness of `context` that builds the Interfaces `builds`, from
     /// `config`, its programs found at the project's root `root`. An error when the table cannot run it.
     pub(super) async fn resolve(
+        files: &mut Files,
         config: &Config,
         root: &Path,
         context: &ContextName,
@@ -650,8 +719,9 @@ impl ExamplesSettings {
         }
         placed.sort();
         Ok(Self {
-            copy: CopySettings::resolve(config, root).await?,
+            copy: CopySettings::resolve(files, config, root).await?,
             program: ProgramUnderTest::resolve(
+                files,
                 root,
                 CommandRole::ExamplesProgram,
                 &examples.program,
@@ -709,7 +779,7 @@ mod tests {
     #[tokio::test]
     async fn a_command_with_no_word_names_no_program() {
         let root = dir("empty");
-        let error = Program::resolve(&root, CommandRole::Build, &[])
+        let error = Program::resolve(&mut Files::default(), &root, CommandRole::Build, &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -734,7 +804,14 @@ mod tests {
 
     /// Where the `word` of a program under test starts from in the project rooted at `root`, when `PATH` is `search`.
     async fn start_of(root: &Path, word: &str, search: &str) -> Result<ProgramStart, RunnerError> {
-        ProgramStart::searching(root, CommandRole::SimProgram, word, OsStr::new(search)).await
+        ProgramStart::searching(
+            &mut Files::default(),
+            root,
+            CommandRole::SimProgram,
+            word,
+            OsStr::new(search),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -841,10 +918,15 @@ mod tests {
         // so a simulation's word is not `Unfound`
         for search in [locked.to_string_lossy().into_owned(), "locked".to_string()] {
             for role in [CommandRole::SimProgram, CommandRole::ExamplesProgram] {
-                let error =
-                    ProgramStart::searching(&root, role.clone(), "prog", OsStr::new(&search))
-                        .await
-                        .unwrap_err();
+                let error = ProgramStart::searching(
+                    &mut Files::default(),
+                    &root,
+                    role.clone(),
+                    "prog",
+                    OsStr::new(&search),
+                )
+                .await
+                .unwrap_err();
                 let RunnerError::Locate { what, reason } = &error else {
                     panic!("{error:?} is not a failure to locate");
                 };
@@ -958,6 +1040,7 @@ mod tests {
         }
         // and the program under test asks it of its first word, from the environment's `PATH`
         let sh = ProgramUnderTest::resolve(
+            &mut Files::default(),
             &root,
             CommandRole::ExamplesProgram,
             &[serde_json::from_value("sh".into()).unwrap()],
@@ -981,6 +1064,7 @@ mod tests {
             ProgramStart::Unfound
         );
         let error = ProgramStart::searching(
+            &mut Files::default(),
             &root,
             CommandRole::ExamplesProgram,
             "chidev-no-such-program",
@@ -995,6 +1079,7 @@ mod tests {
         assert!(matches!(error, RunnerError::Locate { .. }));
         // an absolute path that is not there is not found, for either
         let error = ProgramStart::searching(
+            &mut Files::default(),
             &root,
             CommandRole::ExamplesProgram,
             "/chidev-no-such-dir/app",
@@ -1036,6 +1121,7 @@ mod tests {
         let templates =
             |list: &[&str]| -> Vec<Template> { serde_json::from_value(list.into()).unwrap() };
         let under = ProgramUnderTest::resolve(
+            &mut Files::default(),
             &root,
             CommandRole::ExamplesProgram,
             &templates(&["./target/debug/app", "{tree}/x", "-v"]),
@@ -1062,9 +1148,10 @@ mod tests {
             json.contains("\"InCopy\"") && json.contains("{tree}/x"),
             "{json}"
         );
-        let error = ProgramUnderTest::resolve(&root, CommandRole::SimProgram, &[])
-            .await
-            .unwrap_err();
+        let error =
+            ProgramUnderTest::resolve(&mut Files::default(), &root, CommandRole::SimProgram, &[])
+                .await
+                .unwrap_err();
         assert_eq!(
             error,
             RunnerError::Locate {
@@ -1084,9 +1171,14 @@ mod tests {
             std::fs::set_permissions(root.join("tool.sh"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        let inside = Program::resolve(&root, CommandRole::Test, &words(&["./tool.sh", "-x"]))
-            .await
-            .unwrap();
+        let inside = Program::resolve(
+            &mut Files::default(),
+            &root,
+            CommandRole::Test,
+            &words(&["./tool.sh", "-x"]),
+        )
+        .await
+        .unwrap();
         assert_eq!(inside.executable().at, "tool.sh");
         assert_eq!(inside.words(), words(&["./tool.sh", "-x"]));
         assert_eq!(inside.args(), ["-x"]);
@@ -1097,11 +1189,113 @@ mod tests {
         assert_eq!(found.executable, copy.join("./tool.sh"));
         assert_eq!(found.digest, inside.executable().digest());
         // a program that is not in the project keeps the path it was found at
-        let outside = Program::resolve(&root, CommandRole::Test, &words(&["sh"]))
-            .await
-            .unwrap();
+        let outside = Program::resolve(
+            &mut Files::default(),
+            &root,
+            CommandRole::Test,
+            &words(&["sh"]),
+        )
+        .await
+        .unwrap();
         assert!(Path::new(&outside.executable().at).is_absolute());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(copy);
+    }
+
+    #[tokio::test]
+    async fn a_file_is_read_once_however_many_commands_start_it_and_each_command_keeps_its_own_words()
+     {
+        let root = dir("files-shared");
+        let tool = executable(&root, "tool.sh", "#!/bin/sh\n");
+        let mut files = Files::default();
+        // one file, started by two commands with other arguments, and spelled three ways
+        let first = Program::resolve(
+            &mut files,
+            &root,
+            CommandRole::Test,
+            &words(&["./tool.sh", "-a"]),
+        )
+        .await
+        .unwrap();
+        let second = Program::resolve(
+            &mut files,
+            &root,
+            CommandRole::Build,
+            &words(&["./tool.sh", "-b"]),
+        )
+        .await
+        .unwrap();
+        let absolute = tool.to_string_lossy().into_owned();
+        let by_path = Program::resolve(
+            &mut files,
+            &root,
+            CommandRole::Interpreter,
+            &words(&[&absolute, "-a"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(files.read(), 1);
+        // the file is the same and the commands are not: their digests differ by their arguments
+        assert_eq!(first.executable(), second.executable());
+        assert_ne!(first, second);
+        assert_ne!(digest_of(&first).unwrap(), digest_of(&second).unwrap());
+        assert_eq!(first.executable(), by_path.executable());
+        // a file of the host that is a program under test is the same file, and is not read again either
+        let start = ProgramStart::searching(
+            &mut files,
+            &root,
+            CommandRole::ExamplesProgram,
+            &absolute,
+            OsStr::new(""),
+        )
+        .await
+        .unwrap();
+        let ProgramStart::Host(host) = &start else {
+            panic!("{start:?} is not the host's");
+        };
+        assert_eq!(host, first.executable());
+        // a program of the copy has no digest and is not read
+        let in_copy = ProgramStart::searching(
+            &mut files,
+            &root,
+            CommandRole::ExamplesProgram,
+            "./target/debug/app",
+            OsStr::new(""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(in_copy, ProgramStart::InCopy);
+        assert_eq!(files.read(), 1);
+        // the memo is the value's: the file changed, and what this one has is what was read when it asked first
+        executable(&root, "tool.sh", "#!/bin/sh\n# changed\n");
+        let stale = Program::resolve(&mut files, &root, CommandRole::Test, &words(&["./tool.sh"]))
+            .await
+            .unwrap();
+        assert_eq!(stale.executable(), first.executable());
+        let mut fresh = Files::default();
+        let now = Program::resolve(&mut fresh, &root, CommandRole::Test, &words(&["./tool.sh"]))
+            .await
+            .unwrap();
+        assert_ne!(now.executable(), first.executable());
+        assert_eq!(fresh.read(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_is_not_read_again_and_says_so_each_time() {
+        let root = dir("files-unreadable");
+        std::fs::create_dir_all(root.join("adir")).unwrap();
+        let mut files = Files::default();
+        for role in [CommandRole::Build, CommandRole::Test] {
+            let error = Program::resolve(&mut files, &root, role.clone(), &words(&["./adir"]))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, RunnerError::Fingerprint { what, .. } if *what == role),
+                "{error:?}"
+            );
+        }
+        assert_eq!(files.read(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

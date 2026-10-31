@@ -80,6 +80,13 @@ and this project adheres to
   `{tree}`/`{run}` in its first word. Earlier simulations and runs of examples
   are stale once.
 
+- Judging the measurements (`check`, `commit_ask`, a confirmation) asks the
+  runner for the settings of every subject at once, and a program the subjects
+  share is read and hashed once per judgement instead of once per subject.
+  Nothing is kept between judgements. In Rust: `Runner::settings_of` with
+  `SettingsTarget` and `SettingsSaid`; its default asks one target after
+  another.
+
 - A stale measurement says what moved. `mutation.stale` and `sim.stale` name
   every moved part, and a settings part gives its reason
   (`settings-unconfigured (measure is not configured)`). In
