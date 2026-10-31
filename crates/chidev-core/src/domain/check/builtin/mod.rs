@@ -20,6 +20,7 @@ mod examples;
 mod measure;
 mod pins;
 mod sim;
+mod tree;
 
 use super::Check;
 use super::level::Moment;
@@ -37,6 +38,7 @@ pub use self::sim::{
     SimError, SimFinding, SimNondeterministic, SimShapeKept, SimStale, SimUncitedClause,
     SimUnreached, SimUnrun,
 };
+pub use self::tree::{CodeMoved, FAMILY as TREE_FAMILY, HarnessMoved, Unread as TreeUnread};
 
 /// Every builtin check.
 pub fn all() -> &'static [&'static dyn Check] {
@@ -73,6 +75,9 @@ pub fn all() -> &'static [&'static dyn Check] {
         &ExamplesStale,
         &ExamplesError,
         &ExamplesFailed,
+        &CodeMoved,
+        &HarnessMoved,
+        &TreeUnread,
     ]
 }
 
@@ -113,6 +118,7 @@ mod fixture {
     use crate::domain::vo::source::Source;
     use crate::domain::vo::target::{ExpectKind, Target};
     use crate::domain::vo::title::Title;
+    use crate::domain::vo::tree::TreeNow;
 
     pub(super) fn ctx() -> ContextId {
         ContextId::from_uuid(test_uuid(1))
@@ -339,6 +345,7 @@ mod fixture {
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
                 examples_settings: &BTreeMap::new(),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),

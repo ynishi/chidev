@@ -667,12 +667,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         at: StoreRevision,
     ) -> Result<ExternalChecked, AppError> {
         let state = self.read_state(at).await?;
-        let measured = self.measured(&state.project).await?;
+        let inputs = self.check_inputs(&state.project, &state.pins).await?;
         let view = CheckView {
-            measurements: &measured.measurements,
-            measure_settings: &measured.settings,
-            sim_settings: &measured.sim_settings,
-            examples_settings: &measured.examples_settings,
+            measurements: &inputs.measured.measurements,
+            measure_settings: &inputs.measured.settings,
+            sim_settings: &inputs.measured.sim_settings,
+            examples_settings: &inputs.measured.examples_settings,
+            tree: inputs.tree(),
             ..state.view()
         };
         let (p, crs, cruxes) = (&state.project, &state.change_requests, &state.cruxes);

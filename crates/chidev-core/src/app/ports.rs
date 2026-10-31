@@ -4,6 +4,7 @@
 pub mod external;
 pub mod items;
 pub mod measure;
+pub mod tree;
 
 use std::fmt;
 use std::future::Future;

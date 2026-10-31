@@ -9,6 +9,7 @@ use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::id::{ChangeRequestId, HarnessId, InterfaceId};
 use crate::domain::vo::measure::SettingsNow;
+use crate::domain::vo::tree::TreeNow;
 
 /// The model a check is run on: one state of it. It is everything a check may look at, so that a check is a
 /// function of it alone. A check never sees two states; what a change introduced is found by running the checks
@@ -39,6 +40,10 @@ pub struct CheckView<'a> {
     /// The same for the Harnesses of examples: what the settings of a run of the examples of each are now, absent
     /// as above.
     pub examples_settings: &'a BTreeMap<HarnessId, SettingsNow>,
+    /// The copies of the placed assets in the working tree, as they are now. The moments of a change and of a
+    /// confirmation give none (every asset is then unplaced, which the checks of the tree say nothing about): a
+    /// copy is read by the on-demand moment alone.
+    pub tree: &'a TreeNow,
     /// The change request this state is the resolution of: set only when the use case that resolves one runs the
     /// checks, on the state with it already resolved. The checks that judge only unresolved requests judge this one
     /// too, so that the resolution is told what was left (`cr.keep-moved`, `cr.out-of-frame`). None in every other

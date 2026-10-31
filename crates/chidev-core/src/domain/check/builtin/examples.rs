@@ -281,6 +281,7 @@ mod tests {
     use crate::domain::vo::id::{CaseId, HarnessId, PinId, test_uuid};
     use crate::domain::vo::measure::{FailureKind, MeasureFailure};
     use crate::domain::vo::revision::Revision;
+    use crate::domain::vo::tree::TreeNow;
 
     fn hid() -> HarnessId {
         HarnessId::from_uuid(test_uuid(600))
@@ -380,6 +381,7 @@ mod tests {
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
                 examples_settings: &BTreeMap::from([(hid(), settings)]),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),
@@ -634,6 +636,7 @@ mod tests {
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &BTreeMap::new(),
                 examples_settings: &BTreeMap::new(),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),

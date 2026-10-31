@@ -18,6 +18,9 @@ pub use self::change_set::{
 };
 use self::change_set::{only_put, only_setting};
 mod check;
+mod check_inputs;
+use self::check_inputs::{CheckInputs, NO_TREE};
+pub use self::check_inputs::{TreeAsset, TreeMoved, TreeStatus, TreeUnplaced};
 pub mod commit;
 use self::commit::{ConfirmTrigger, EditTrigger, ModelDelta};
 mod correct;
@@ -40,6 +43,7 @@ pub use self::measure::{
 };
 use self::ports::items::{ItemSource, NoItems};
 use self::ports::measure::{NoRunner, Runner, RunnerError};
+use self::ports::tree::{NoTree, WorkingTree};
 mod model_view;
 mod rekey;
 pub use self::rekey::{ItemRevised, KeyChanged, Rekeyed};
@@ -527,6 +531,7 @@ fn view<'a>(
         measure_settings: &NO_SETTINGS,
         sim_settings: &NO_SIM_SETTINGS,
         examples_settings: &NO_EXAMPLES_SETTINGS,
+        tree: &NO_TREE,
         resolving: None,
     }
 }
@@ -1287,6 +1292,9 @@ pub struct Status {
     /// The latest measurement of each Interface that has one: its counts, and whether it still describes the
     /// Pin (`current`) or not (`stale`).
     pub measurements: Vec<MeasurementStanding>,
+    /// Where the copies of the placed assets in the working tree stand; none when no check that reads the working
+    /// tree runs (they are all off), and then it was not looked at.
+    pub tree: Option<TreeStatus>,
 }
 
 /// A decision, for `status`.
@@ -1436,6 +1444,7 @@ pub struct App<S, G, E = NoExternal> {
     external: E,
     runner: Box<dyn Runner>,
     items: Box<dyn ItemSource>,
+    tree: Box<dyn WorkingTree>,
     clock: Box<dyn Clock>,
 }
 
@@ -1461,6 +1470,7 @@ impl<S: Store, G: IdSource> App<S, G, NoExternal> {
             external: NoExternal,
             runner: Box::new(NoRunner),
             items: Box::new(NoItems),
+            tree: Box::new(NoTree),
             clock: Box::new(clock),
         }
     }
@@ -1476,6 +1486,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             external,
             runner: self.runner,
             items: self.items,
+            tree: self.tree,
             clock: self.clock,
         }
     }
@@ -1491,6 +1502,13 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// code. Without one, an Interface put with no `items` is refused (`items.no-provider`).
     pub fn with_items(mut self, items: impl ItemSource + 'static) -> Self {
         self.items = Box::new(items);
+        self
+    }
+
+    /// Supplies the working tree: where the copies of the placed assets are read from. Without one, no asset is
+    /// placed, and the checks of the working tree find nothing.
+    pub fn with_tree(mut self, tree: impl WorkingTree + 'static) -> Self {
+        self.tree = Box::new(tree);
         self
     }
 
@@ -2382,17 +2400,18 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         Err(AppError::UnknownRuleSelector { given, near })
     }
 
-    /// The findings of [`App::check`], the judged rules not up to date, and the measurements they read, on the
-    /// Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the store held at `at`.
+    /// The findings of [`App::check`], the judged rules not up to date, and what the checks read besides the model
+    /// ([`App::check_inputs`]), on the Project `p`, the change requests `crs` and the Cruxes `cruxes`, which the
+    /// store held at `at`.
     async fn checked_on(
         &self,
         at: StoreRevision,
         p: &Project,
         crs: &[ChangeRequest],
         cruxes: &[Crux],
-    ) -> Result<(Vec<Found>, Vec<RuleStanding>, measure::Measured), AppError> {
+    ) -> Result<(Vec<Found>, Vec<RuleStanding>, CheckInputs), AppError> {
         let pins = self.store.pins().await?;
-        let measured = self.measured(p).await?;
+        let inputs = self.check_inputs(p, &pins).await?;
         let run = self.registry.run(
             Moment::Check,
             at,
@@ -2401,10 +2420,11 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 pins: &pins,
                 change_requests: crs,
                 cruxes,
-                measurements: &measured.measurements,
-                measure_settings: &measured.settings,
-                sim_settings: &measured.sim_settings,
-                examples_settings: &measured.examples_settings,
+                measurements: &inputs.measured.measurements,
+                measure_settings: &inputs.measured.settings,
+                sim_settings: &inputs.measured.sim_settings,
+                examples_settings: &inputs.measured.examples_settings,
+                tree: inputs.tree(),
                 resolving: None,
             },
         );
@@ -2412,7 +2432,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         found.extend(self.external_standing(p, crs, cruxes, at).await?.0);
         let (judged, standing) = self.judged_standing(p, crs, cruxes, at).await?;
         found.extend(judged);
-        Ok((found, standing, measured))
+        Ok((found, standing, inputs))
     }
 
     /// The change request titled `title`.
@@ -2506,8 +2526,12 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 now: s.now.number(),
             });
         }
-        let (findings, judged, measured) = self.checked_on(at, &p, &crs, &cruxes).await?;
-        let measurements = self.measurement_standings(&p, &measured).await?;
+        let (findings, judged, inputs) = self.checked_on(at, &p, &crs, &cruxes).await?;
+        let measurements = self.measurement_standings(&p, &inputs.measured).await?;
+        let tree = match &inputs.tree {
+            Some(now) => Some(self.tree_status(&p, now).await?),
+            None => None,
+        };
         let title_of = |id: ChangeRequestId| {
             crs.iter()
                 .find(|c| c.id() == id)
@@ -2649,6 +2673,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             judged,
             external: self.external_standing(&p, &crs, &cruxes, at).await?.1,
             measurements,
+            tree,
         })
     }
 

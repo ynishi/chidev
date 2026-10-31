@@ -1987,7 +1987,7 @@ fn the_policy_files_of_the_project_and_the_person_set_the_levels() {
             .find(|c| c["id"] == id)
             .unwrap_or_else(|| panic!("no check {id}"))
     };
-    assert_eq!(listed["checks"].as_array().expect("checks").len(), 32);
+    assert_eq!(listed["checks"].as_array().expect("checks").len(), 35);
     assert_eq!(entry("cr.resolved-without-work")["level"], "warning");
     assert_eq!(entry("cr.targets-untouched")["level"], "note");
     assert_eq!(

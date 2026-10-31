@@ -18,7 +18,8 @@ use chidev_core::app::{
     PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
     RecommendationInput, RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding,
     ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
-    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, ViewInput,
+    RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, TreeAsset,
+    TreeStatus, ViewInput,
 };
 use chidev_core::domain::check::{Level, Moment, Selector, renamed_key};
 use chidev_core::domain::entity::change_request::ChangeRequestField;
@@ -2428,6 +2429,66 @@ struct ExternalOut<'a> {
     state: &'static str,
 }
 
+/// An asset by the names a person knows it by, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct TreeAssetOut<'a> {
+    context: &'a str,
+    name: &'a str,
+}
+
+impl<'a> From<&'a TreeAsset> for TreeAssetOut<'a> {
+    fn from(a: &'a TreeAsset) -> TreeAssetOut<'a> {
+        TreeAssetOut {
+            context: &a.context,
+            name: &a.name,
+        }
+    }
+}
+
+/// The assets that have no copy in the working tree to look at, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct TreeUnplacedOut<'a> {
+    interfaces: Vec<TreeAssetOut<'a>>,
+    harnesses: Vec<TreeAssetOut<'a>>,
+}
+
+/// An Interface whose copy in the working tree moved, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct TreeMovedOut<'a> {
+    context: &'a str,
+    interface: &'a str,
+    declared: &'static str,
+}
+
+/// Where the copies in the working tree stand, in the result of `status`.
+#[derive(Debug, Serialize)]
+struct TreeOut<'a> {
+    unplaced: TreeUnplacedOut<'a>,
+    unpinned: Vec<TreeAssetOut<'a>>,
+    moved: Vec<TreeMovedOut<'a>>,
+}
+
+impl<'a> From<&'a TreeStatus> for TreeOut<'a> {
+    fn from(t: &'a TreeStatus) -> TreeOut<'a> {
+        TreeOut {
+            unplaced: TreeUnplacedOut {
+                interfaces: t.unplaced.interfaces.iter().map(Into::into).collect(),
+                harnesses: t.unplaced.harnesses.iter().map(Into::into).collect(),
+            },
+            unpinned: t.unpinned.iter().map(Into::into).collect(),
+            moved: t
+                .moved
+                .iter()
+                .map(|m| TreeMovedOut {
+                    context: &m.context,
+                    interface: &m.interface,
+                    declared: m.declared.word(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A thing the project retired, in the result of `status` and of a retire operation.
 #[derive(Debug, Serialize)]
 struct RetiredOut<'a> {
@@ -2568,6 +2629,8 @@ struct StatusOut<'a> {
     judged: Vec<StandingOut<'a>>,
     external: Vec<ExternalOut<'a>>,
     measurements: Vec<MeasurementOut<'a>>,
+    /// `null` when no check that reads the working tree runs: it was not looked at.
+    tree: Option<TreeOut<'a>>,
 }
 
 /// The result of `check`.
@@ -4078,6 +4141,7 @@ where
                         }
                     })
                     .collect(),
+                tree: s.tree.as_ref().map(TreeOut::from),
             })?
         }
         Op::Check { context, rules } => check_op(app, context.as_deref(), &rules).await?.0,

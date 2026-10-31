@@ -10,6 +10,20 @@ and this project adheres to
 
 ### Added
 
+- `check`, `check_run` and `status` read the working tree: the file each
+  `[[measure.layout]]` entry places an Interface or a Harness at. A pinned
+  Interface whose file holds other code than its Pin accepted is
+  `tree.code-moved`, a Harness whose file holds another source than the model
+  keeps is `tree.harness-moved`, and a placed file that is missing or not text
+  is `tree.unread` (all warnings, at the moment `check` only). So code changed
+  on disk is seen without putting it again. No program is started, and edits,
+  `pin` and `cr_resolve` do not read the tree.
+  `status.tree` lists the moved, unread, unplaced and unpinned assets, and is
+  `null` when every `tree.*` check is off.
+  [ADR 0010](docs/adr/0010-the-working-tree-is-read-at-check-and-starts-no-program.md)
+  records why. In Rust: `WorkingTree` with `NoTree`, `domain::vo::tree`
+  (`CopyRead`, `CodeNow`, `FileNow`, `TreeNow`) and `App::with_tree`.
+
 - `chidev check [RULE...] [--context NAME] [--store PATH]` runs every check as
   the operation `check` does and prints its result, narrowed to the rules given:
   a rule's id, or a family written as a key of the policy file is (`examples.`).
