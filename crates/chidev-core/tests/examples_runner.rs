@@ -695,6 +695,8 @@ async fn a_program_in_the_copy_that_the_build_did_not_write_is_the_runs_failure(
         .await
         .unwrap();
     let failure = report.failure.expect("a failure");
+    assert_eq!(failure.kind(), FailureKind::Io, "{failure}");
     assert!(failure.message().contains("target/debug/app"), "{failure}");
     assert!(report.examples.is_empty());
+    assert!(!project.0.join(WORK_DIR).join("run-unwritten").exists());
 }

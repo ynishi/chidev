@@ -12,8 +12,9 @@
 //! `{tree}` in a word of the program is the root of the copy and `{run}` the directory of the run, the first word
 //! included. The program is found in the copy as the build left it. Whether the settings hold its file depends on
 //! where the first word starts it from ([`super::settings::ProgramStart`]): a file of the host is digested, and one in
-//! the copy is not. Either way the copy is not asked whether it is the file the settings have, for the host's is the
-//! same file from the copy and the copy's has no digest, so a run of examples has no `settings_moved` for its program.
+//! the copy is not. The copy is asked, as it is made, whether the first word of a program of the host still resolves
+//! (a relative entry of `PATH` being the copy's) to the file the settings have, and a copy in which it does not fails
+//! the run (`settings_moved`) before anything is started; the copy's own program has no digest to be held to.
 //!
 //! One example is run and judged as `chidev accept` runs and judges one ([`crate::infra::accept`]), so the two cannot
 //! differ on what a program that ended answered. An example that gets no answer from the program (it cannot be
@@ -112,10 +113,16 @@ impl Job<'_> {
             .iter()
             .map(|(path, i)| (*path, i.code.as_str()))
             .collect();
-        // The program under test is not held to the settings when the copy is made: a file of the host is the same
-        // from the copy as from the root, and one in the copy has no digest in them (`ProgramStart`).
-        self.prepare("examples", &written, &[], &mut out.evidence)
-            .await?;
+        // The program under test is held to the settings when the copy is made if its first word starts from the host;
+        // one in the copy has no digest in them (`ProgramStart`).
+        self.prepare(
+            "examples",
+            &written,
+            &[],
+            &settings.program,
+            &mut out.evidence,
+        )
+        .await?;
         // The program is the file the copy has now, which the build may have written.
         let program = self.program_command(&settings.program).await?;
         let fixed = program.args.clone();

@@ -112,15 +112,12 @@ fn no_program(role: CommandRole) -> RunnerError {
     }
 }
 
-/// The program `found`, as the project's root `root` has it.
-fn executable_at(root: &Path, found: &Found) -> Executable {
-    let at = found
-        .executable
-        .strip_prefix(root)
-        .unwrap_or(&found.executable);
+/// The program at `executable` whose file has `digest`, as the project's root `root` has it.
+fn executable_at(root: &Path, executable: &Path, digest: String) -> Executable {
+    let at = executable.strip_prefix(root).unwrap_or(executable);
     Executable {
         at: at.to_string_lossy().into_owned(),
-        digest: found.digest.clone(),
+        digest,
     }
 }
 
@@ -147,7 +144,7 @@ impl Program {
         Ok(Self {
             program: program.clone(),
             args: args.to_vec(),
-            executable: executable_at(root, &found),
+            executable: executable_at(root, &found.executable, found.digest),
         })
     }
 
@@ -182,31 +179,38 @@ impl Program {
 /// be what the build writes (`./target/debug/app`, `{tree}/bin/app`), and `target` is not even copied. A file at the
 /// root under that path is then a local build, not the program the run starts, and digesting it would stale a run
 /// for a rebuild on the developer's machine, or leave the settings unreadable for good where nothing is built.
-/// So the word is sorted by where it resolves when the run starts:
+/// So the word is sorted by where it resolves when the run starts it, with the copy as the working directory:
 ///
-/// - a word with `{tree}` or `{run}`, a relative path (it has a `/`), an absolute path inside the project's root,
-///   and a bare name that `PATH` resolves to a file inside the root (a relative entry of it) are [`InCopy`]: the
-///   file is in the copy the run makes, and the pinned code and the build account for it;
-/// - any other is [`Host`]: a file that is outside the project (`python3`, `/usr/bin/env`), which the copy resolves
-///   to as the root does. Its file is digested.
+/// - a word with `{tree}` or `{run}`, a relative path (more than one component: `./target/debug/app`, `bin/app`),
+///   and a bare name that the walk of `PATH` first finds under a relative entry (which is relative to the copy) are
+///   [`InCopy`]: the file is in the copy the run makes, and the pinned code and the build account for it;
+/// - an absolute path, wherever it points (inside the project's root too: at run time it is the root's file and
+///   not the copy's), and a bare name that the walk first finds under an absolute entry, are [`Host`]: a file
+///   outside the copy (`python3`, `/usr/bin/env`). Its file is digested, and the copy is asked before the run
+///   whether the word still resolves to it ([`ProgramUnderTest::moved`]);
+/// - a bare name that the walk finds nowhere is [`Unfound`] for a simulation, whose script starts the program and
+///   whose word may not be an executable at all (`app.jar`); the examples, which the runner starts, are refused it.
 ///
 /// What a run of the kind has to say of the words as written is in the settings either way.
 ///
 /// [`InCopy`]: ProgramStart::InCopy
 /// [`Host`]: ProgramStart::Host
+/// [`Unfound`]: ProgramStart::Unfound
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) enum ProgramStart {
-    /// A file of the host, outside the project, with its executable as found now. The same file is found from the
-    /// copy, so nothing is checked against it when the copy is made.
+    /// A file outside the copy, with its executable as found now. The copy resolves the word to the same file, or
+    /// the run fails as `settings_moved`.
     Host(Executable),
     /// A file of the copy the run makes (it may be written by the build): not digested.
     InCopy,
+    /// A bare name of a simulation that `PATH` does not find: not digested, for there is no file to digest.
+    Unfound,
 }
 
 impl ProgramStart {
     /// Where the `word` of the role `role` starts from, for the project rooted at `root`; the executable of a
-    /// [`ProgramStart::Host`] is found as [`find`] finds a program, and digested. An error when it cannot be found or
-    /// read; one that is in the copy is neither looked for nor read.
+    /// [`ProgramStart::Host`] is found, and digested. An error when it cannot be found (but for a bare name of a
+    /// simulation) or read; one that is in the copy is neither looked for nor read.
     pub(super) async fn of(
         root: &Path,
         role: CommandRole,
@@ -224,29 +228,72 @@ impl ProgramStart {
         search: &OsStr,
     ) -> Result<Self, RunnerError> {
         let path = Path::new(word);
-        let in_copy = has_place(word)
-            || (path.is_absolute() && path.starts_with(root))
-            || (!path.is_absolute() && word.contains('/'));
-        if in_copy {
+        if has_place(word) {
             return Ok(Self::InCopy);
         }
-        let located = process::locate_in(root, word, search)
-            .await
-            .map_err(|f| refused(role.clone(), NotFound::Locate(f)))?;
-        // A bare name found through a relative entry of `PATH` is a file of the project, which the copy has.
-        if located.starts_with(root) {
+        let file = if path.is_absolute() {
+            process::locate_in(root, word, search)
+                .await
+                .map_err(|f| refused(role.clone(), NotFound::Locate(f)))?
+        } else if path.components().count() > 1 {
             return Ok(Self::InCopy);
-        }
-        let digest = process::file_digest(&located)
+        } else {
+            match process::search_path(root, word, search).await {
+                // a relative entry is relative to the copy, which has the file the root has under it
+                Some(hit) if hit.relative => return Ok(Self::InCopy),
+                Some(hit) => hit.file,
+                // the script of a simulation starts the program, and the word may be no executable
+                None if role == CommandRole::SimProgram => return Ok(Self::Unfound),
+                None => {
+                    return Err(RunnerError::Locate {
+                        what: role,
+                        reason: format!("executable `{word}` not found in PATH"),
+                    });
+                }
+            }
+        };
+        let digest = process::file_digest(&file)
             .await
             .map_err(|f| refused(role, NotFound::Fingerprint(f)))?;
-        Ok(Self::Host(executable_at(
-            root,
-            &Found {
-                executable: located,
-                digest,
-            },
-        )))
+        Ok(Self::Host(executable_at(root, &file, digest)))
+    }
+
+    /// Why the copy `tree` does not resolve the `word` to the file the settings hold, as the run will, when `self`
+    /// is a [`ProgramStart::Host`] and that is so: the word is walked from the copy, so a relative entry of `PATH`
+    /// finds the copy's own file. None when it resolves to the same file with the same digest, and for the others,
+    /// which hold nothing. An error when the file cannot be read.
+    async fn moved(
+        &self,
+        root: &Path,
+        tree: &Path,
+        word: &str,
+        search: &OsStr,
+    ) -> Result<Option<String>, process::Failure> {
+        let Self::Host(recorded) = self else {
+            return Ok(None);
+        };
+        let was = root.join(&recorded.at);
+        let Ok(now) = process::locate_in(tree, word, search).await else {
+            return Ok(Some(format!(
+                "`{word}` is not found in the copy, and was {} at the project's root, where the settings were digested",
+                was.display()
+            )));
+        };
+        if now != was {
+            return Ok(Some(format!(
+                "`{word}` is {} in the copy and was {} at the project's root, where the settings were digested",
+                now.display(),
+                was.display()
+            )));
+        }
+        let digest = process::file_digest(&now).await?;
+        if digest != recorded.digest {
+            return Ok(Some(format!(
+                "`{word}` is another file in the copy (sha256 {digest}) than at the project's root (sha256 {}), where the settings were digested",
+                recorded.digest
+            )));
+        }
+        Ok(None)
     }
 }
 
@@ -254,9 +301,9 @@ impl ProgramStart {
 /// ([`ProgramStart`]) and its words as written, each a [`Template`] that is made the places of a run when it is
 /// started.
 ///
-/// A [`ProgramStart::Host`] file is in the settings digest, and the copy resolves to the file the root does, so
-/// there is nothing to check against it when the copy is made (`settings_moved` is not for it). An
-/// [`ProgramStart::InCopy`] one has no digest to hold the copy to.
+/// A [`ProgramStart::Host`] file is in the settings digest, and the copy is held to it when it is made
+/// ([`ProgramUnderTest::moved`], which `settings_moved` is the failure of). An [`ProgramStart::InCopy`] or
+/// [`ProgramStart::Unfound`] one has no digest to hold the copy to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct ProgramUnderTest {
     start: ProgramStart,
@@ -279,6 +326,20 @@ impl ProgramUnderTest {
             program: program.clone(),
             args: args.to_vec(),
         })
+    }
+
+    /// Why the copy `tree` of the project rooted at `root` does not hold the program the settings do, when the
+    /// first word starts from the host and the copy, as the run will walk `PATH` from it, resolves it to another
+    /// file or to one with another digest (see [`ProgramStart::moved`]); none otherwise.
+    pub(super) async fn moved(
+        &self,
+        root: &Path,
+        tree: &Path,
+    ) -> Result<Option<String>, process::Failure> {
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        self.start
+            .moved(root, tree, self.program.as_str(), &search)
+            .await
     }
 
     /// The first word, as written: the program.
@@ -710,18 +771,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_word_starts_in_the_copy_when_it_names_a_place_a_relative_path_or_a_file_inside_the_project()
+    async fn a_word_starts_in_the_copy_when_it_names_a_place_a_relative_path_or_a_relative_entry_of_path()
      {
         let root = dir("start-copy");
         // none of these is looked for or read: the file is the copy's, and may be what the build writes later
-        let inside = root.join("out/app").to_string_lossy().into_owned();
         for word in [
             "./target/debug/app",
             "bin/app",
             "{tree}/x",
             "{tree}",
             "{run}/target/debug/app",
-            inside.as_str(),
         ] {
             assert_eq!(
                 start_of(&root, word, "").await.unwrap(),
@@ -741,27 +800,130 @@ mod tests {
             start_of(&root, "prog", "bin").await.unwrap(),
             ProgramStart::InCopy
         );
-        // an entry that is absolute and inside the root is the project's too
+        // the walk is in order: a relative entry that has it decides before an absolute one that has it too
+        let outside = dir("start-copy-outside");
+        executable(&outside, "prog", "#!/bin/sh\n");
         assert_eq!(
-            start_of(&root, "prog", &root.join("bin").to_string_lossy())
+            start_of(&root, "prog", &format!("bin:{}", outside.display()))
                 .await
                 .unwrap(),
             ProgramStart::InCopy
         );
+        // and the other way round, the absolute entry that comes first decides
+        assert!(matches!(
+            start_of(&root, "prog", &format!("{}:bin", outside.display()))
+                .await
+                .unwrap(),
+            ProgramStart::Host(_)
+        ));
         let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn an_absolute_path_is_the_hosts_wherever_it_points_inside_the_project_too() {
+        let root = dir("start-absolute");
+        let app = executable(&root, "out/app", "#!/bin/sh\n");
+        // at run time it is the root's file and not the copy's, so it is held, relative to the root
+        let by_path = start_of(&root, &app.to_string_lossy(), "").await.unwrap();
+        let ProgramStart::Host(found) = &by_path else {
+            panic!("{by_path:?} is not the host's");
+        };
+        assert_eq!(found.at, "out/app");
+        assert_eq!(found.digest, process::file_digest(&app).await.unwrap());
+        // and one that is not there is not found, as a host's is not
+        let error = start_of(&root, &root.join("out/gone").to_string_lossy(), "")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RunnerError::Locate { .. }), "{error:?}");
+        // a bare name found through an absolute entry of `PATH` that is inside the root is the same file
+        let by_name = start_of(&root, "app", &root.join("out").to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(by_name, by_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_host_program_is_moved_when_the_copy_resolves_it_to_another_file_or_to_other_bytes() {
+        let (root, tree) = (dir("moved-root"), dir("moved-tree"));
+        let outside = dir("moved-outside");
+        let tool = executable(&outside, "tool", "#!/bin/sh\necho one\n");
+        let search = format!("bin:{}", outside.display());
+        // recorded from the root, where the relative entry `bin` has nothing: the host's
+        let start = start_of(&root, "tool", &search).await.unwrap();
+        assert!(matches!(&start, ProgramStart::Host(_)), "{start:?}");
+        let moved = |start: &ProgramStart| {
+            let start = start.clone();
+            let (root, tree, search) = (root.clone(), tree.clone(), search.clone());
+            async move {
+                start
+                    .moved(&root, &tree, "tool", OsStr::new(&search))
+                    .await
+                    .unwrap()
+            }
+        };
+        // the copy resolves it to the same file with the same bytes: not moved
+        assert_eq!(moved(&start).await, None);
+        // the copy has the name under the relative entry, which comes first in the walk from the copy
+        executable(&tree, "bin/tool", "#!/bin/sh\necho one\n");
+        let why = moved(&start).await.expect("moved");
+        assert!(
+            why.contains(&format!("{}", tree.join("bin/tool").display()))
+                && why.contains(&format!("{}", tool.display())),
+            "{why}"
+        );
+        std::fs::remove_dir_all(tree.join("bin")).unwrap();
+        // the file is other bytes now
+        executable(&outside, "tool", "#!/bin/sh\necho two\n");
+        let why = moved(&start).await.expect("moved");
+        assert!(why.contains("another file in the copy (sha256 "), "{why}");
+        // gone from where the copy looks
+        std::fs::remove_file(&tool).unwrap();
+        let why = moved(&start).await.expect("moved");
+        assert!(why.contains("is not found in the copy"), "{why}");
+        // a program of the copy, or one nothing found, holds nothing to be moved from
+        for start in [ProgramStart::InCopy, ProgramStart::Unfound] {
+            assert_eq!(moved(&start).await, None);
+        }
+        // and the program under test asks it of its first word, from the environment's `PATH`
+        let sh = ProgramUnderTest::resolve(
+            &root,
+            CommandRole::ExamplesProgram,
+            &[serde_json::from_value("sh".into()).unwrap()],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(sh.start, ProgramStart::Host(_)));
+        assert_eq!(sh.moved(&root, &tree).await.unwrap(), None);
+        for dir in [root, tree, outside] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
     async fn a_host_program_that_is_not_there_or_not_a_file_says_whose_it_is() {
         let root = dir("start-missing");
-        let error = start_of(&root, "chidev-no-such-program", "")
-            .await
-            .unwrap_err();
+        // a bare name that `PATH` finds nowhere: the script of a simulation starts the program, and the word may be
+        // no executable (`app.jar`), so it is not digested and not an error; the runner starts the examples' program
+        assert_eq!(
+            start_of(&root, "chidev-no-such-program", "").await.unwrap(),
+            ProgramStart::Unfound
+        );
+        let error = ProgramStart::searching(
+            &root,
+            CommandRole::ExamplesProgram,
+            "chidev-no-such-program",
+            OsStr::new(""),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "the program of the simulation: executable `chidev-no-such-program` not found in PATH"
+            "the program of the examples: executable `chidev-no-such-program` not found in PATH"
         );
         assert!(matches!(error, RunnerError::Locate { .. }));
+        // an absolute path that is not there is not found, for either
         let error = ProgramStart::searching(
             &root,
             CommandRole::ExamplesProgram,
@@ -789,9 +951,11 @@ mod tests {
             matches!(&error, RunnerError::Fingerprint { .. }),
             "{error:?}"
         );
-        // a name that `PATH` finds nowhere, with a relative entry that has no such file
-        let error = start_of(&root, "prog", "bin").await.unwrap_err();
-        assert!(matches!(error, RunnerError::Locate { .. }), "{error:?}");
+        // a name that `PATH` finds nowhere, with a relative entry that has no such file, is the same for a simulation
+        assert_eq!(
+            start_of(&root, "prog", "bin").await.unwrap(),
+            ProgramStart::Unfound
+        );
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
     }

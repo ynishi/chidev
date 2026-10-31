@@ -910,8 +910,8 @@ for it) is stale, not current, and the finding says which and why. A run whose `
 interpreter in the copy, as the copy is made and before any command runs, or whose provider
 when it is started, is not the file digested at the project's root fails with kind
 `settings_moved`; a program the build writes later is the run's own. The program under
-test is not asked: a program of the host is the same file from the copy, and one in the
-copy has no digest.
+test is asked too when its first word starts from the host, and not when it is in the copy
+(see "The program under test").
 
 **Placeholders.** A run has two places, and each has a name of its own that means the
 same wherever it is taken: `{run}` is the run's directory (under `.chidev/measure/`,
@@ -932,20 +932,27 @@ command until it is rewritten.
 **The program under test.** The `program` of a sim and of the examples is a command whose
 first word is sorted by where it resolves when the run starts:
 
-- *In the copy*: a word with `{tree}` or `{run}`, a relative path (it has a `/`:
-  `./target/debug/app`, `bin/app`), an absolute path inside the project's root, and a bare
-  name that `PATH` finds inside the root (through a relative entry of it). The file is the
-  build's output or the project's own, so the pinned code and the build account for it and
-  the settings do not hold it: a build of one's own at that path of the root does not make a
-  run stale, and a root with no build leaves the settings readable. The copy has the file
-  only when the build has made it; a program that is not there when the run starts it fails
-  the run.
-- *A program of the host*: any other word (`python3`, `/usr/bin/env`), a file outside the
-  project. The settings digest holds its executable, so a changed interpreter makes earlier
-  runs stale, and one that is not found or cannot be read is an error of the settings. The
-  copy finds the same file, so nothing is checked against it when the copy is made.
+- *In the copy*: a word with `{tree}` or `{run}`, a relative path (more than one component:
+  `./target/debug/app`, `bin/app`), and a bare name that the walk of `PATH` first finds
+  under a relative entry (a relative entry is relative to the copy, which is the working
+  directory). The file is the build's output or the project's own, so the pinned code and
+  the build account for it and the settings do not hold it: a build of one's own at that
+  path of the root does not make a run stale, and a root with no build leaves the settings
+  readable. The copy has the file only when the build has made it; a program that is not
+  there when the run starts it fails the run.
+- *A program of the host*: an absolute path, wherever it points (inside the project's root
+  too: at run time it is the root's file, not the copy's), and a bare name that the walk
+  first finds under an absolute entry of `PATH` (`python3`, `/usr/bin/env`). The settings
+  digest holds its executable, so a changed interpreter makes earlier runs stale, and one
+  that is not found or cannot be read is an error of the settings. As the copy is made, the
+  first word is resolved from the copy by the same walk; a copy in which it is another file
+  (a relative entry of `PATH` that has the name there), or the same file with other bytes,
+  fails the run with `settings_moved` before anything is started.
+- *Not found*: in a sim, a bare name that `PATH` does not find. The script starts the
+  program, and the word may be no executable (`app.jar`), so it is not an error and its
+  file is not digested. In the examples, which chidev starts, it is an error of the settings.
 
-The words as written are in the digest either way. `build`, `test`, the provider and the
+The words as written are in the digest in every case. `build`, `test`, the provider and the
 interpreter are not sorted so: they exist before the build and are digested by their files
 even inside the root, while the program under test may be what the build writes. A sim
 script starts the program, not chidev, which is why the settings are all chidev holds of it.

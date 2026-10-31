@@ -152,41 +152,54 @@ pub(crate) async fn locate_in(
     } else if command_path.components().count() > 1 {
         root.join(command_path)
     } else {
-        let mut found = None;
-        for path in std::env::split_paths(search) {
-            let path = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            let candidate = path.join(command);
-            if tokio::fs::metadata(&candidate).await.is_ok_and(|m| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    m.is_file() && m.permissions().mode() & 0o111 != 0
-                }
-                #[cfg(not(unix))]
-                {
-                    m.is_file()
-                }
-            }) {
-                found = Some(candidate);
-                break;
-            }
-        }
-        found.ok_or_else(|| {
-            failure(
-                FailureKind::Spawn,
-                format!("executable `{command}` not found in PATH"),
-            )
-        })?
+        search_path(root, command, search)
+            .await
+            .map(|hit| hit.file)
+            .ok_or_else(|| {
+                failure(
+                    FailureKind::Spawn,
+                    format!("executable `{command}` not found in PATH"),
+                )
+            })?
     };
     // A path that names nothing is a failure to start, here and not later at the spawn.
     tokio::fs::metadata(&candidate)
         .await
         .map_err(|e| failure(FailureKind::Spawn, format!("{}: {e}", candidate.display())))?;
     Ok(candidate)
+}
+
+/// Where a bare name was found along a search path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hit {
+    /// The file.
+    pub file: PathBuf,
+    /// Whether the entry of the search path that has it is a relative one, which is taken from `root`.
+    pub relative: bool,
+}
+
+/// The first entry of `search`, in order, that has an executable file called `command`: the one walk of a `PATH`,
+/// for a relative entry is taken from `root` (the copy for a run, the project's root for the settings).
+pub(crate) async fn search_path(root: &Path, command: &str, search: &OsStr) -> Option<Hit> {
+    for entry in std::env::split_paths(search) {
+        let relative = !entry.is_absolute();
+        let dir = if relative { root.join(&entry) } else { entry };
+        let file = dir.join(command);
+        if tokio::fs::metadata(&file).await.is_ok_and(|m| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                m.is_file() && m.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                m.is_file()
+            }
+        }) {
+            return Some(Hit { file, relative });
+        }
+    }
+    None
 }
 
 /// The SHA-256 of the executable's bytes, in lower-case hex. It identifies the file, not what it loads.
