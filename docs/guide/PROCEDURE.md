@@ -156,10 +156,14 @@ Crux names there waits on that question. `view` does not give a request's
      gains or loses lines moves the declarations after it: count their `lines`
      again, or keep such comments after the last Item, or leave `items` out
      where a provider finds them.
-   - An Interface has one Item per declaration a caller uses: for a library,
-     each public function or type it calls; for a program, `main`, with its
-     subcommands, arguments and what it reads and writes in the comments
-     (Clauses promise what they do).
+   - An Interface has one Item per declaration a caller can name. A caller is
+     code outside the source, built as a caller builds it (not as part of the
+     source's own tests): for a library, each function or type it calls; for a
+     program, `main`, with its subcommands, arguments and what it reads and
+     writes in the comments (Clauses promise what they do). Where a provider
+     finds the Items, it leaves out the declarations a caller cannot name (a
+     private helper, a test) and the put says how many in `left_out`; write the
+     `source` so that what a caller uses is visible to a caller (`pub` in Rust).
 4. **Harness (blind).** The Harness writer writes the tests from the Contracts
    and Interfaces, and puts the Harness in a `change_set` `for` the part whose
    change that put carries: every Case cites the Items it calls and the

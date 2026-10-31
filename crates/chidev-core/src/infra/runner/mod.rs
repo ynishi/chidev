@@ -29,7 +29,7 @@
 //!
 //! The same configuration answers a second question for the use cases, as the [`ItemSource`] port: the language of an
 //! Interface (its layout's `lang`) and the Items a provider of that language finds in its code (`items.rs`, which
-//! holds the protocol `chidev-items 1`). That provider is started in the project's root, not in a copy, under the
+//! holds the protocol `chidev-items 2`). That provider is started in the project's root, not in a copy, under the
 //! `timeout` of the table.
 
 mod config;
@@ -53,7 +53,7 @@ use self::settings::{
 };
 use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
-use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
+use crate::app::ports::items::{FoundItems, ItemSource, ItemsError};
 use crate::app::ports::measure::{
     BoxFuture, ExamplesReport, ExamplesRequest, LayoutPlace, MutateReport, MutateRequest, Runner,
     RunnerError, SettingsSaid, SettingsTarget, SimulateReport, SimulateRequest,
@@ -196,7 +196,7 @@ impl ItemSource for ProcessRunner {
         &'a self,
         lang: &'a str,
         source: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<FoundItem>, ItemsError>> {
+    ) -> BoxFuture<'a, Result<FoundItems, ItemsError>> {
         Box::pin(self.items_of(lang, source))
     }
 }
@@ -278,8 +278,8 @@ impl ProcessRunner {
         said
     }
 
-    /// The Items the provider of `lang` finds in `source`.
-    async fn items_of(&self, lang: &str, source: &str) -> Result<Vec<FoundItem>, ItemsError> {
+    /// The Items the provider of `lang` finds in `source`, and how many declarations it left out.
+    async fn items_of(&self, lang: &str, source: &str) -> Result<FoundItems, ItemsError> {
         let command = self
             .config
             .items
@@ -1870,7 +1870,7 @@ path = "bare.txt"
     /// A provider that keeps what it was asked and answers two Items on the one line.
     const ITEMS: &str = r#"#!/bin/sh
 cat > request.json
-printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f","lines":[1,1]}]}'
+printf '%s' '{"protocol":2,"items":[{"key":"api","lines":[1,1]},{"key":"api::f","lines":[1,1]}],"left_out":2}'
 "#;
 
     impl Project {
@@ -1905,18 +1905,20 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         let found = runner.items_of("text", "fn api() { f() }\n").await.unwrap();
         assert_eq!(
             found
+                .items
                 .iter()
                 .map(|i| (i.key.as_str(), i.lines))
                 .collect::<Vec<_>>(),
             [("api", (1, 1)), ("api::f", (1, 1))]
         );
+        assert_eq!(found.left_out, 2);
         // the request is the protocol, and the provider ran where the table is
         let asked: serde_json::Value =
             serde_json::from_slice(&std::fs::read(project.0.join("request.json")).unwrap())
                 .unwrap();
         assert_eq!(
             asked,
-            serde_json::json!({"protocol": 1, "source": "fn api() { f() }\n"})
+            serde_json::json!({"protocol": 2, "source": "fn api() { f() }\n"})
         );
         // a language `items` has no command for has no provider
         assert_eq!(
@@ -1929,7 +1931,7 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
     async fn a_provider_that_cannot_be_run_to_its_end_has_failed_and_one_that_disagrees_has_not_kept_the_protocol()
      {
         let project = Project::new(ITEMS_TABLE);
-        let failed = |e: Result<Vec<FoundItem>, ItemsError>| match e {
+        let failed = |e: Result<FoundItems, ItemsError>| match e {
             Err(ItemsError::Failed(m)) => m,
             other => panic!("not a failure to run: {other:?}"),
         };
@@ -1952,8 +1954,22 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         for (answer, expected) in [
             ("not json", "not a chidev-items reply"),
             (
-                r#"{"protocol":1,"items":[{"key":"a","lines":[1,2]}]}"#,
+                r#"{"protocol":2,"items":[{"key":"a","lines":[1,2]}],"left_out":0}"#,
                 "past the last",
+            ),
+            // no `left_out`: not a reply of `chidev-items 2`, and it says what chidev reads
+            (
+                r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}]}"#,
+                "chidev reads chidev-items 2",
+            ),
+            // a reply of `chidev-items 1`
+            (
+                r#"{"protocol":1,"items":[{"key":"a","lines":[1,1]}]}"#,
+                "chidev reads chidev-items 2",
+            ),
+            (
+                r#"{"protocol":1,"items":[],"left_out":0}"#,
+                "chidev reads chidev-items 2",
             ),
         ] {
             project.items_script(&format!(

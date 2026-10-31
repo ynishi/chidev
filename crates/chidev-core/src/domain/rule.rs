@@ -811,8 +811,8 @@ static RULES: &[Rule] = &[
     Rule {
         id: ITEMS_PROTOCOL,
         kind: RuleKind::Input,
-        summary: "The provider of items answers as the protocol `chidev-items 1` says and as the code is.",
-        help: "A reply is `{\"protocol\":1,\"items\":[{\"key\":..,\"lines\":[first,last]}]}`: a key that is not empty and is one line, and lines that are lines of the code. The provider's own diagnostics go to standard error. Nothing was put. Fix the provider, or write `items` and leave it out of this put.",
+        summary: "The provider of items answers as the protocol `chidev-items 2` says and as the code is.",
+        help: "A reply is `{\"protocol\":2,\"items\":[{\"key\":..,\"lines\":[first,last]}],\"left_out\":N}`: a key that is not empty and is one line, lines that are lines of the code, and `left_out` (always, 0 included), how many declarations it found that a caller cannot name. chidev reads chidev-items 2 only. The provider's own diagnostics go to standard error. Nothing was put. Fix the provider, or write `items` and leave it out of this put.",
         message: "the provider of items for `{lang}` did not answer as the protocol and the code of {s1} of {s0} allow: {detail}",
         values: &["lang", "detail"],
         example: r#"{"op":"interface_put","context":"core","name":"api","source":"fn a();\n"}"#,

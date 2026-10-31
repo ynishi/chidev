@@ -6,12 +6,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use chidev_core::app::ports::items::{FoundItem, ItemSource, ItemsError};
+use chidev_core::app::ports::items::{FoundItem, FoundItems, ItemSource, ItemsError};
 use chidev_core::app::ports::measure::BoxFuture;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut, ItemInput,
-    ItemRef, ItemRevised, ItemsInput, KeyChanged, PutInput, RenameInput,
+    App, AppError, AssetPutKind, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut,
+    ItemInput, ItemRef, ItemRevised, ItemsFrom, ItemsInput, KeyChanged, PutDone, PutInput,
+    RenameInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::name::{AssetName, ContextName};
@@ -32,7 +33,7 @@ impl IdSource for Counter {
 }
 
 type Language = dyn Fn(&str, &str) -> Result<String, ItemsError> + Send + Sync;
-type Answer = dyn Fn(&str, &str) -> Result<Vec<FoundItem>, ItemsError> + Send + Sync;
+type Answer = dyn Fn(&str, &str) -> Result<FoundItems, ItemsError> + Send + Sync;
 type Moment = dyn Fn() -> BoxFuture<'static, ()> + Send + Sync;
 
 /// A source of Items that answers as the test says, and keeps what it was asked.
@@ -57,7 +58,12 @@ impl std::fmt::Debug for Fake {
 impl Fake {
     /// Every Interface is `rust`, and the provider answers `found`.
     fn answering(found: &[(&str, usize, usize)]) -> Fake {
-        let found: Vec<FoundItem> = found
+        Fake::answering_but(found, 0)
+    }
+
+    /// As [`Fake::answering`], and the provider says it `left_out` declarations a caller cannot name.
+    fn answering_but(found: &[(&str, usize, usize)], left_out: usize) -> Fake {
+        let items: Vec<FoundItem> = found
             .iter()
             .map(|(key, first, last)| FoundItem {
                 key: (*key).to_string(),
@@ -66,7 +72,12 @@ impl Fake {
             .collect();
         Fake::with(
             Arc::new(|_, _| Ok("rust".to_string())),
-            Arc::new(move |_, _| Ok(found.clone())),
+            Arc::new(move |_, _| {
+                Ok(FoundItems {
+                    items: items.clone(),
+                    left_out,
+                })
+            }),
         )
     }
 
@@ -101,7 +112,7 @@ impl ItemSource for Fake {
         &'a self,
         lang: &'a str,
         source: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<FoundItem>, ItemsError>> {
+    ) -> BoxFuture<'a, Result<FoundItems, ItemsError>> {
         Box::pin(async move {
             self.asked
                 .lock()
@@ -254,6 +265,91 @@ async fn an_interface_put_without_items_is_given_the_keys_and_lines_the_provider
 }
 
 #[tokio::test]
+async fn a_put_that_used_the_provider_says_how_many_declarations_it_left_out_and_one_that_did_not_says_nothing()
+ {
+    // 3 declarations the provider found that a caller cannot name
+    let mut app = open(&dir("left-out").join("chidev.db"), 0)
+        .await
+        .with_items(Fake::answering_but(&[("fits", 1, 1)], 3));
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    let source = "fn fits()\n";
+    let done = app
+        .put_interface_of("core", "stock", source, found(&[]))
+        .await
+        .unwrap();
+    assert_eq!(done.value.items, ItemsFrom::Found { left_out: 3 });
+    // none left out is said too, as 0
+    let mut app = open(&dir("left-out-none").join("chidev.db"), 0)
+        .await
+        .with_items(Fake::answering(&[("fits", 1, 1)]));
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    let done = app
+        .put_interface_of("core", "stock", source, found(&[]))
+        .await
+        .unwrap();
+    assert_eq!(done.value.items, ItemsFrom::Found { left_out: 0 });
+    // Items that are written were found by no provider
+    let done = app
+        .put_interface("core", "stock", source, &[item("fits", 1)])
+        .await
+        .unwrap();
+    assert_eq!(done.value.items, ItemsFrom::Written);
+}
+
+#[tokio::test]
+async fn a_change_set_says_what_the_provider_left_out_of_the_interface_it_found_the_items_of() {
+    let mut app = open(&dir("left-out-set").join("chidev.db"), 0)
+        .await
+        .with_items(Fake::answering_but(&[("fits", 1, 1)], 2));
+    app.init().await.unwrap();
+    app.add_context("core", &[]).await.unwrap();
+    let set = ChangeSetInput {
+        change_request: None,
+        puts: vec![
+            PutInput::Contract(ContractPut {
+                context: "core".to_string(),
+                name: AssetName::try_from("stock").unwrap(),
+                title: "Stock".to_string(),
+                clauses: Vec::new(),
+            }),
+            PutInput::Interface(InterfacePut {
+                context: "core".to_string(),
+                name: AssetName::try_from("found").unwrap(),
+                source: "fn fits()\n".to_string(),
+                items: found(&[]),
+            }),
+            PutInput::Interface(InterfacePut {
+                context: "core".to_string(),
+                name: AssetName::try_from("written").unwrap(),
+                source: "fn fits()\n".to_string(),
+                items: ItemsInput::Written(vec![item("fits", 1)]),
+            }),
+        ],
+        retires: Vec::new(),
+    };
+    let done = app.apply_change_set(&set).await.unwrap();
+    let kinds: Vec<AssetPutKind> = done
+        .value
+        .puts
+        .iter()
+        .map(|p| match p {
+            PutDone::Asset { kind, .. } => *kind,
+            other => panic!("not an asset: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            AssetPutKind::Contract,
+            AssetPutKind::Interface(ItemsFrom::Found { left_out: 2 }),
+            AssetPutKind::Interface(ItemsFrom::Written),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn items_that_are_written_are_all_of_them_and_no_provider_is_asked() {
     let fake = Fake::failing(ItemsError::Failed("must not be asked".to_string()));
     let mut app = stock("written", fake.clone()).await;
@@ -343,7 +439,12 @@ async fn a_rename_to_the_same_key_is_not_a_rename_that_is_kept() {
 async fn a_put_without_items_in_a_language_the_layout_does_not_give_is_refused_by_name() {
     let fake = Fake::with(
         Arc::new(|_, _| Err(ItemsError::NoLanguage)),
-        Arc::new(|_, _| Ok(Vec::new())),
+        Arc::new(|_, _| {
+            Ok(FoundItems {
+                items: Vec::new(),
+                left_out: 0,
+            })
+        }),
     );
     let mut app = stock("required", fake.clone()).await;
     let d = refused(&mut app, SOURCE, found(&[])).await;
@@ -552,10 +653,13 @@ async fn a_provider_that_fails_refuses_the_whole_change_set_and_names_each_inter
             if source.contains("broken") {
                 Err(ItemsError::Failed("exit 1".to_string()))
             } else {
-                Ok(vec![FoundItem {
-                    key: "ok".to_string(),
-                    lines: (1, 1),
-                }])
+                Ok(FoundItems {
+                    items: vec![FoundItem {
+                        key: "ok".to_string(),
+                        lines: (1, 1),
+                    }],
+                    left_out: 0,
+                })
             }
         }),
     );
@@ -643,6 +747,18 @@ fn changed(from: &str, to: &str) -> KeyChanged {
         from: from.to_string(),
         to: to.to_string(),
     }
+}
+
+#[tokio::test]
+async fn a_rekey_says_how_many_declarations_the_provider_left_out() {
+    let fake = Fake::answering_but(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)], 2);
+    let mut app = stock("rekey-left-out", fake.clone()).await;
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
+    assert_eq!(done.left_out, 2);
+    let fake = Fake::answering(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)]);
+    let mut app = stock("rekey-left-out-none", fake.clone()).await;
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
+    assert_eq!(done.left_out, 0);
 }
 
 #[tokio::test]
@@ -883,7 +999,12 @@ async fn a_rekey_with_no_provider_or_a_failing_one_is_refused_by_name_and_change
     // no language laid out for the Interface
     let fake = Fake::with(
         Arc::new(|_, _| Err(ItemsError::NoLanguage)),
-        Arc::new(|_, _| Ok(Vec::new())),
+        Arc::new(|_, _| {
+            Ok(FoundItems {
+                items: Vec::new(),
+                left_out: 0,
+            })
+        }),
     );
     let mut app = stock("rekey-language", fake).await;
     let err = app.items_rekey("core", "stock").await.unwrap_err();

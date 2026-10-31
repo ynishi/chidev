@@ -8,14 +8,14 @@ use std::path::{Component, Path};
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, InvocationField, InvocationSeq, Store};
 use chidev_core::app::{
-    App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, BeyondInput,
-    BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef,
-    ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
-    DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
-    ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
-    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasureSummary,
-    MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue,
-    PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
+    App, AppError, AssetPutKind, AssumptionInput, AwaitingOption, BasisInput, BasisStatus,
+    BeyondInput, BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput,
+    ClauseRef, ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind,
+    CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput,
+    EvidenceStatus, ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut,
+    HarnessPutContent, Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsFrom, ItemsInput,
+    MeasureSummary, MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput,
+    ParamValue, PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
     RecommendationInput, RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding,
     ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
     RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, TreeAsset,
@@ -80,8 +80,10 @@ enum Op {
     },
     /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
     /// project's root); exactly one is given. `items` may be left out: the provider of the language its
-    /// `[[measure.layout]]` gives finds them in the code, and `renames` (`{"from","to"}`) hand the id of the Item
-    /// that had the key `from` to the one found under `to`. With `items`, nothing is found and `renames` is refused.
+    /// `[[measure.layout]]` gives finds them in the code (the declarations a caller outside it can name; the result
+    /// says in `left_out` how many it found that a caller cannot), and `renames` (`{"from","to"}`) hand the id of the
+    /// Item that had the key `from` to the one found under `to`. With `items`, nothing is found and `renames` is
+    /// refused.
     InterfacePut {
         context: String,
         name: String,
@@ -2525,6 +2527,8 @@ struct RekeyOut<'a> {
     rekeyed: Vec<KeyChangedOut<'a>>,
     revised: Vec<ItemRevisedOut<'a>>,
     unmatched: &'a [String],
+    /// How many declarations the provider left out, as a caller cannot name them.
+    left_out: usize,
     /// The revision of the Interface once it is done.
     revision: u64,
     findings: Vec<FindingOut<'a>>,
@@ -2564,6 +2568,16 @@ enum PutOut<'a> {
         id: String,
         revision: u64,
     },
+    /// An Interface whose items a provider found.
+    FoundInterface {
+        put: &'static str,
+        context: &'a str,
+        name: &'a str,
+        id: String,
+        revision: u64,
+        /// How many declarations the provider left out (0 included).
+        left_out: usize,
+    },
 }
 
 impl<'a> From<&'a PutDone> for PutOut<'a> {
@@ -2578,6 +2592,20 @@ impl<'a> From<&'a PutDone> for PutOut<'a> {
                 context: name.as_str(),
                 id: id.to_string(),
                 revision: revision.number(),
+            },
+            PutDone::Asset {
+                kind: kind @ AssetPutKind::Interface(ItemsFrom::Found { left_out }),
+                context,
+                name,
+                id,
+                revision,
+            } => PutOut::FoundInterface {
+                put: kind.word(),
+                context: context.as_str(),
+                name: name.as_str(),
+                id: id.to_string(),
+                revision: revision.number(),
+                left_out: *left_out,
             },
             PutDone::Asset {
                 kind,
@@ -2611,6 +2639,16 @@ struct ChangeSetOut<'a> {
 struct AssetPutOut<'a> {
     id: String,
     revision: u64,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// The result of an `interface_put` whose items a provider found: as [`AssetPutOut`], and `left_out`, how many
+/// declarations the provider found that a caller cannot name (0 included), so that leaving them out is never silent.
+#[derive(Debug, Serialize)]
+struct FoundInterfacePutOut<'a> {
+    id: String,
+    revision: u64,
+    left_out: usize,
     findings: Vec<FindingOut<'a>>,
 }
 
@@ -3730,11 +3768,19 @@ where
             let done = app
                 .put_interface_of(&context, &name, &source, items)
                 .await?;
-            to_value(&AssetPutOut {
-                id: done.value.id.to_string(),
-                revision: done.value.revision.number(),
-                findings: findings_out(&done.findings),
-            })?
+            match done.value.items {
+                ItemsFrom::Found { left_out } => to_value(&FoundInterfacePutOut {
+                    id: done.value.id.to_string(),
+                    revision: done.value.revision.number(),
+                    left_out,
+                    findings: findings_out(&done.findings),
+                })?,
+                ItemsFrom::Written => to_value(&AssetPutOut {
+                    id: done.value.id.to_string(),
+                    revision: done.value.revision.number(),
+                    findings: findings_out(&done.findings),
+                })?,
+            }
         }
         Op::HarnessPut {
             context,
@@ -3817,6 +3863,7 @@ where
                     })
                     .collect(),
                 unmatched: &done.value.unmatched,
+                left_out: done.value.left_out,
                 revision: done.value.revision,
                 findings: findings_out(&done.findings),
             })?

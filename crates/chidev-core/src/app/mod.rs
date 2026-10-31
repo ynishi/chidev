@@ -13,10 +13,10 @@
 mod change_set;
 pub use self::change_set::{
     AssetPutKind, ChangeSetDone, ChangeSetInput, ClausesPut, ContractPut, ExampleInput,
-    ExampleTexts, HarnessPut, HarnessPutContent, InterfacePut, ItemsInput, PutDone, PutInput,
-    RetireInput, SettingKind,
+    ExampleTexts, HarnessPut, HarnessPutContent, InterfacePut, ItemsFrom, ItemsInput, PutDone,
+    PutInput, RetireInput, SettingKind,
 };
-use self::change_set::{only_put, only_setting};
+use self::change_set::{only_interface, only_put, only_setting};
 mod check;
 mod check_inputs;
 use self::check_inputs::{CheckInputs, NO_TREE};
@@ -619,6 +619,19 @@ pub struct Put<I> {
     pub id: I,
     /// Its revision after the change.
     pub revision: Revision,
+}
+
+/// An Interface made or revised: its id, the revision it is at, and where its Items came from. It is the one put
+/// that has Items, so it is the one that says what a provider left out of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterfaceDone {
+    /// The Interface's id.
+    pub id: InterfaceId,
+    /// Its revision after the change.
+    pub revision: Revision,
+    /// Whether the Items were written or found by a provider, and what it left out: so that a filter is never
+    /// silent and a put that filtered nothing says 0.
+    pub items: ItemsFrom,
 }
 
 /// Where the Pin of one Interface stands.
@@ -1638,7 +1651,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         name: &str,
         source: &str,
         items: &[ItemInput],
-    ) -> Result<Checked<Put<InterfaceId>>, AppError> {
+    ) -> Result<Checked<InterfaceDone>, AppError> {
         self.put_interface_of(context, name, source, ItemsInput::Written(items.to_vec()))
             .await
     }
@@ -1652,7 +1665,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         name: &str,
         source: &str,
         items: ItemsInput,
-    ) -> Result<Checked<Put<InterfaceId>>, AppError> {
+    ) -> Result<Checked<InterfaceDone>, AppError> {
         let put = PutInput::Interface(InterfacePut {
             context: context.to_string(),
             name: AssetName::try_from(name)?,
@@ -1660,7 +1673,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             items,
         });
         let done = self.apply_one(EditTrigger::PutInterface, put).await?;
-        only_put(done, InterfaceId::from_uuid)
+        only_interface(done)
     }
 
     /// Makes or revises the Harness named `name` of the Context `context` from its code and the Cases found in
