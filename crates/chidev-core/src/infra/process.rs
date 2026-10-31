@@ -153,7 +153,7 @@ pub(crate) async fn locate_in(
         root.join(command_path)
     } else {
         search_path(root, command, search)
-            .await
+            .await?
             .map(|hit| hit.file)
             .ok_or_else(|| {
                 failure(
@@ -179,27 +179,54 @@ pub(crate) struct Hit {
 }
 
 /// The first entry of `search`, in order, that has an executable file called `command`: the one walk of a `PATH`,
-/// for a relative entry is taken from `root` (the copy for a run, the project's root for the settings).
-pub(crate) async fn search_path(root: &Path, command: &str, search: &OsStr) -> Option<Hit> {
+/// for a relative entry is taken from `root` (the copy for a run, the project's root for the settings). None when no
+/// entry has it. An entry that has no such file, or has a name that is not a file or is no directory, is passed over.
+/// So is any other error on the way (an entry that cannot be read, say), as `execvp` passes over it: it is
+/// remembered, and the walk goes on, so a later entry that has the name is the hit. Only when no entry has it is the
+/// first such error the failure of the walk, for the name might have been behind that entry.
+pub(crate) async fn search_path(
+    root: &Path,
+    command: &str,
+    search: &OsStr,
+) -> Result<Option<Hit>, Failure> {
+    let mut unreadable = None;
     for entry in std::env::split_paths(search) {
         let relative = !entry.is_absolute();
         let dir = if relative { root.join(&entry) } else { entry };
         let file = dir.join(command);
-        if tokio::fs::metadata(&file).await.is_ok_and(|m| {
+        let meta = match tokio::fs::metadata(&file).await {
+            Ok(meta) => meta,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                unreadable.get_or_insert_with(|| {
+                    failure(FailureKind::Spawn, format!("{}: {e}", file.display()))
+                });
+                continue;
+            }
+        };
+        let executable = {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                m.is_file() && m.permissions().mode() & 0o111 != 0
+                meta.is_file() && meta.permissions().mode() & 0o111 != 0
             }
             #[cfg(not(unix))]
             {
-                m.is_file()
+                meta.is_file()
             }
-        }) {
-            return Some(Hit { file, relative });
+        };
+        if executable {
+            return Ok(Some(Hit { file, relative }));
         }
     }
-    None
+    unreadable.map_or(Ok(None), Err)
 }
 
 /// The SHA-256 of the executable's bytes, in lower-case hex. It identifies the file, not what it loads.

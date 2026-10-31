@@ -238,7 +238,10 @@ impl ProgramStart {
         } else if path.components().count() > 1 {
             return Ok(Self::InCopy);
         } else {
-            match process::search_path(root, word, search).await {
+            let found = process::search_path(root, word, search)
+                .await
+                .map_err(|f| refused(role.clone(), NotFound::Locate(f)))?;
+            match found {
                 // a relative entry is relative to the copy, which has the file the root has under it
                 Some(hit) if hit.relative => return Ok(Self::InCopy),
                 Some(hit) => hit.file,
@@ -818,6 +821,73 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn an_entry_of_path_that_cannot_be_read_is_gone_past_and_is_an_error_only_if_the_name_is_found_nowhere()
+     {
+        use std::os::unix::fs::PermissionsExt;
+        let root = dir("start-unreadable");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // a user who can read it anyway (root) cannot show the error
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        // the name found nowhere, absolute or relative, the entry may have had it: the walk cannot say it does not,
+        // so a simulation's word is not `Unfound`
+        for search in [locked.to_string_lossy().into_owned(), "locked".to_string()] {
+            for role in [CommandRole::SimProgram, CommandRole::ExamplesProgram] {
+                let error =
+                    ProgramStart::searching(&root, role.clone(), "prog", OsStr::new(&search))
+                        .await
+                        .unwrap_err();
+                let RunnerError::Locate { what, reason } = &error else {
+                    panic!("{error:?} is not a failure to locate");
+                };
+                assert_eq!(what, &role);
+                assert!(
+                    reason.contains("locked/prog") && reason.contains("Permission denied"),
+                    "{reason}"
+                );
+            }
+        }
+        // as `execvp` goes on past an entry it cannot read, a later entry that has the name is the hit, and is the
+        // host's or the copy's by that entry
+        let outside = dir("start-unreadable-outside");
+        executable(&outside, "prog", "#!/bin/sh\n");
+        executable(&root, "bin/prog", "#!/bin/sh\n");
+        for locked_entry in [locked.to_string_lossy().into_owned(), "locked".to_string()] {
+            let search = format!("{locked_entry}:{}", outside.display());
+            assert!(
+                matches!(
+                    start_of(&root, "prog", &search).await.unwrap(),
+                    ProgramStart::Host(_)
+                ),
+                "{search}"
+            );
+            let search = format!("{locked_entry}:bin");
+            assert_eq!(
+                start_of(&root, "prog", &search).await.unwrap(),
+                ProgramStart::InCopy,
+                "{search}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(outside);
+        // an entry that has no such file, or is a file and no directory, is only passed over
+        std::fs::write(root.join("plain"), "").unwrap();
+        for search in ["gone", "plain"] {
+            let search = format!("{search}:{}", root.display());
+            assert_eq!(
+                start_of(&root, "prog", &search).await.unwrap(),
+                ProgramStart::Unfound
+            );
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
