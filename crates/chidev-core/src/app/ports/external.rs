@@ -198,8 +198,9 @@ pub struct ExternalReply {
 /// Evidence available even when execution failed before a process started.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionEvidence {
-    /// Resolved executable path, if resolution succeeded. The file behind it is not digested: nothing would compare
-    /// a digest of it, and reading a large program on every run counted against the run's time limit.
+    /// Resolved executable path, if resolution succeeded. The file behind it is not digested: nothing compares a
+    /// digest of it, and reading a large program would count against the run's time limit. A record saved with a
+    /// `command_digest` still reads; the field is ignored.
     pub command: Option<String>,
     /// Digest of process configuration.
     pub config_digest: String,

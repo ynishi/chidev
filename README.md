@@ -687,9 +687,10 @@ is held to; what a `level` becomes (capped for an advisory rule, an error for a 
 is said above. See the RustDoc of `app::ports::external` for the wire types, and
 `infra::external` for process limits and platform support.
 
-The recorded SHA-256 identifies the executable read before launch. It does not
-cover script arguments, dependencies, or later filesystem changes; displaying a
-saved result does not re-hash the executable or check the filesystem. The check
+The execution evidence names the resolved executable; it does not digest its
+bytes, so it does not identify what the file, its script arguments or its
+dependencies held when it ran, and displaying a saved result does not check the
+filesystem. The check
 input consists of the selected model sections, not a snapshot of the working
 tree. Re-run a check after changing inputs outside that model.
 

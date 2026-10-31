@@ -1779,6 +1779,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn evidence_saved_with_a_program_digest_still_reads() {
+        let saved = r#"{"command":"/tools/check-contract","command_digest":"ab","config_digest":"c","exit_code":0,"stderr":""}"#;
+        let evidence: ExecutionEvidence = serde_json::from_str(saved).unwrap();
+        assert_eq!(evidence.command.as_deref(), Some("/tools/check-contract"));
+        assert_eq!(evidence.config_digest, "c");
+    }
+
     #[tokio::test]
     async fn external_reports_replace_their_rule_and_evidence_survives_reopening() {
         let path = temp_db("external-reopen");
