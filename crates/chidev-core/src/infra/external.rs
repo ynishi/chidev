@@ -277,8 +277,6 @@ impl ProcessExecutor {
                 .await
                 .map_err(failed)?;
             evidence.command = Some(executable.to_string_lossy().into_owned());
-            evidence.command_digest =
-                Some(process::file_digest(&executable).await.map_err(failed)?);
             Ok::<_, ExternalFailure>(executable)
         })
         .await
@@ -527,11 +525,6 @@ mod tests {
         assert!(attempt.result.unwrap().findings.is_empty());
         assert_eq!(attempt.evidence.exit_code, Some(0));
         assert_eq!(attempt.evidence.stderr, "diagnostic\n");
-        let bytes = std::fs::read(fixture.0.join("checker")).unwrap();
-        assert_eq!(
-            attempt.evidence.command_digest,
-            Some(Digest::of(&bytes).to_string())
-        );
         let received: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture.0.join("received.json")).unwrap())
                 .unwrap();

@@ -1771,7 +1771,6 @@ mod tests {
             }],
             evidence: ExecutionEvidence {
                 command: Some("/tools/check-contract".into()),
-                command_digest: Some(Digest::of(b"program").to_string()),
                 config_digest: Digest::of(b"process").to_string(),
                 exit_code: Some(0),
                 stderr: "a diagnostic".into(),
