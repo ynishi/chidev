@@ -46,7 +46,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use self::config::{Config, RunDirs, WORK_DIR};
-use self::settings::{CopySettings, MutationSettings, NotFound, Program, find};
+use self::settings::{CopySettings, MutationSettings, NotFound, Program, ProgramUnderTest, find};
 use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
@@ -365,6 +365,17 @@ impl Job<'_> {
         Ok(())
     }
 
+    /// Checks that the program under test `program`, when its first word starts from the host, is resolved from the
+    /// copy as the run will resolve it (a relative entry of `PATH` is the copy's) to the file the settings were
+    /// digested with. Asked at the same moment as [`Job::verify`]. A program in the copy has no digest to be held to.
+    async fn verify_under_test(&self, program: &ProgramUnderTest) -> Result<(), MeasureFailure> {
+        match program.moved(self.root, &self.dirs.tree).await {
+            Ok(None) => Ok(()),
+            Ok(Some(why)) => Err(MeasureFailure::of(FailureKind::SettingsMoved, why)),
+            Err(f) => Err(self.fail(f)),
+        }
+    }
+
     /// The command `program` in the copy: the file it names there now, which is the one the run starts. Its digest
     /// is the evidence of what ran.
     async fn command(&self, program: &Program) -> Result<Command, MeasureFailure> {
@@ -380,7 +391,8 @@ impl Job<'_> {
 
     /// Makes the copy a program is run from: copies the project, writes `written` over it (the code the Pins
     /// accepted, and any file the kind of run owns, each at its path in the copy), checks that the build command and
-    /// the `programs` of the run are in the copy the files the settings were digested with, and runs the build command
+    /// the `programs` of the run are in the copy the files the settings were digested with (as is the program under
+    /// test when it starts from the host, [`Job::verify_under_test`]), and runs the build command
     /// under the time of the baseline. `tag` names the step in the evidence (`<tag>-build`), which is put in
     /// `evidence` whether or not the build passes. A build that fails is the failure `no_build`: there is no program
     /// to run. The one preparation of every run that builds a program from pinned code, so that a simulation and a
@@ -390,6 +402,7 @@ impl Job<'_> {
         tag: &str,
         written: &[(&Path, &str)],
         programs: &[&Program],
+        under_test: &ProgramUnderTest,
         evidence: &mut Vec<StepEvidence>,
     ) -> Result<(), MeasureFailure> {
         let (root, tree, exclude) = (
@@ -410,6 +423,8 @@ impl Job<'_> {
         for program in programs {
             self.verify(program).await?;
         }
+        // The program under test is held to the settings only when its first word starts from the host.
+        self.verify_under_test(under_test).await?;
         let env = self.env();
         let build = self.command(&self.copy.build).await?;
         let started = Instant::now();

@@ -67,6 +67,19 @@ and this project adheres to
 
 ### Changed
 
+- The program under test of a simulation or of examples (`program` of
+  `[measure.sim.<context>]` and `[measure.examples.<context>]`) is judged by
+  where its first word starts from, with the copy as the working directory. A
+  program of the host (a name found through an absolute `PATH` entry, or an
+  absolute path) has its executable in the settings digest, so changing it makes
+  earlier runs stale, and a run whose copy would start another file fails as
+  `settings_moved`. A program of the copy (a relative path, a relative `PATH`
+  entry, or `{tree}`/`{run}`) is followed by the pinned code and the build, not
+  digested. A simulation's first word found nowhere is left to its script; an
+  examples program found nowhere is refused. `program` of examples now takes
+  `{tree}`/`{run}` in its first word. Earlier simulations and runs of examples
+  are stale once.
+
 - A stale measurement says what moved. `mutation.stale` and `sim.stale` name
   every moved part, and a settings part gives its reason
   (`settings-unconfigured (measure is not configured)`). In

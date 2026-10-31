@@ -762,3 +762,122 @@ async fn an_interpreter_the_build_rewrites_in_the_copy_is_the_runs_and_not_a_mov
     assert_eq!(report.failure, None, "{report:#?}");
     assert_eq!(report.cases.len(), 4);
 }
+
+/// A directory of the host, outside any project, for a program the script starts that is not the project's own.
+struct Host(PathBuf);
+
+impl Host {
+    fn new() -> Host {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "chidev-sim-host-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Host(dir)
+    }
+
+    /// Writes the executable `name` and returns its path.
+    fn script(&self, name: &str, text: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn the_file_of_a_program_of_the_host_is_in_the_digest_and_the_report_carries_it() {
+    let project = Project::new(GOOD);
+    // the script starts the program, and the runner does not; the program is a file of the host, outside the project
+    let host = Host::new();
+    let interpreter = host.script("python-like", "#!/bin/sh\necho one\n");
+    project.edit(|t| {
+        t.replace(
+            "program = [\"{tree}/prog.sh\"]",
+            &format!(
+                "program = [\"{}\", \"{{tree}}/prog.sh\"]",
+                interpreter.display()
+            ),
+        )
+    });
+    let before = digest(&project).await;
+    host.script("python-like", "#!/bin/sh\necho two\n");
+    let after = digest(&project).await;
+    assert_ne!(before, after);
+    // the words as written are in it too
+    project.edit(|t| t.replace("\"{tree}/prog.sh\"]", "\"{tree}/prog.sh\", \"-x\"]"));
+    assert_ne!(digest(&project).await, after);
+    project.edit(|t| t.replace(", \"-x\"]", "]"));
+    assert_eq!(digest(&project).await, after);
+    // the run is stamped with the digest it resolved
+    let report = project
+        .runner()
+        .simulate(&request("run-host", GOOD))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.settings, after);
+    // a program of the host that is gone is the settings' error, and nothing is run
+    std::fs::remove_file(&interpreter).unwrap();
+    let error = project
+        .runner()
+        .sim_settings(&context("ctx"), &asset("sim"), &[asset("prog")])
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("the program of the simulation: "),
+        "{error}"
+    );
+    assert!(matches!(
+        error,
+        chidev_core::app::ports::measure::RunnerError::Locate { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_program_in_the_copy_is_not_in_the_digest_and_need_not_be_built_at_the_root() {
+    let project = Project::new(GOOD);
+    // the build writes it, and `target` is not copied: nothing is built at the root
+    project.edit(|t| {
+        t.replace(
+            "program = [\"{tree}/prog.sh\"]",
+            "program = [\"./target/debug/app\", \"{tree}/prog.sh\"]",
+        )
+    });
+    assert!(!project.0.join("target").exists());
+    let before = digest(&project).await;
+    // a local build at that path of the root is no part of the settings, whichever build it is
+    std::fs::create_dir_all(project.0.join("target/debug")).unwrap();
+    for text in ["local build\n", "local rebuild\n"] {
+        std::fs::write(project.0.join("target/debug/app"), text).unwrap();
+        assert_eq!(digest(&project).await, before);
+    }
+    // nor is a relative path to a file of the project
+    project.edit(|t| t.replace("./target/debug/app", "bin/app"));
+    let relative = digest(&project).await;
+    std::fs::create_dir_all(project.0.join("bin")).unwrap();
+    std::fs::write(project.0.join("bin/app"), "one\n").unwrap();
+    assert_eq!(digest(&project).await, relative);
+    std::fs::write(project.0.join("bin/app"), "two\n").unwrap();
+    assert_eq!(digest(&project).await, relative);
+    // the words as written are, and the run is stamped with the digest
+    assert_ne!(relative, before);
+    let report = project
+        .runner()
+        .simulate(&request("run-copy", GOOD))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.settings, relative);
+}

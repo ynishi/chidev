@@ -10,6 +10,7 @@
 //! a [`Spec`] and a [`Capture`] that fills in as the program runs, so what the program wrote and how it exited are
 //! kept even when the run fails (a timeout still shows the diagnostics written so far).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -135,48 +136,97 @@ pub async fn resolve(root: &Path, command: &str) -> Result<PathBuf, Failure> {
 /// that is a link to another (`cargo` and `rustc` are links to `rustup`, which picks what to run by the name it was
 /// started as) has to be started by the link's name; [`file_digest`] still reads the file behind it.
 pub async fn locate(root: &Path, command: &str) -> Result<PathBuf, Failure> {
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    locate_in(root, command, &search).await
+}
+
+/// As [`locate`], with `search` in the place of `PATH`: the one rule, with the list of directories handed in.
+pub(crate) async fn locate_in(
+    root: &Path,
+    command: &str,
+    search: &OsStr,
+) -> Result<PathBuf, Failure> {
     let command_path = Path::new(command);
     let candidate = if command_path.is_absolute() {
         command_path.to_path_buf()
     } else if command_path.components().count() > 1 {
         root.join(command_path)
     } else {
-        let search = std::env::var_os("PATH").unwrap_or_default();
-        let mut found = None;
-        for path in std::env::split_paths(&search) {
-            let path = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            let candidate = path.join(command);
-            if tokio::fs::metadata(&candidate).await.is_ok_and(|m| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    m.is_file() && m.permissions().mode() & 0o111 != 0
-                }
-                #[cfg(not(unix))]
-                {
-                    m.is_file()
-                }
-            }) {
-                found = Some(candidate);
-                break;
-            }
-        }
-        found.ok_or_else(|| {
-            failure(
-                FailureKind::Spawn,
-                format!("executable `{command}` not found in PATH"),
-            )
-        })?
+        search_path(root, command, search)
+            .await?
+            .map(|hit| hit.file)
+            .ok_or_else(|| {
+                failure(
+                    FailureKind::Spawn,
+                    format!("executable `{command}` not found in PATH"),
+                )
+            })?
     };
     // A path that names nothing is a failure to start, here and not later at the spawn.
     tokio::fs::metadata(&candidate)
         .await
         .map_err(|e| failure(FailureKind::Spawn, format!("{}: {e}", candidate.display())))?;
     Ok(candidate)
+}
+
+/// Where a bare name was found along a search path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hit {
+    /// The file.
+    pub file: PathBuf,
+    /// Whether the entry of the search path that has it is a relative one, which is taken from `root`.
+    pub relative: bool,
+}
+
+/// The first entry of `search`, in order, that has an executable file called `command`: the one walk of a `PATH`,
+/// for a relative entry is taken from `root` (the copy for a run, the project's root for the settings). None when no
+/// entry has it. An entry that has no such file, or has a name that is not a file or is no directory, is passed over.
+/// So is any other error on the way (an entry that cannot be read, say), as `execvp` passes over it: it is
+/// remembered, and the walk goes on, so a later entry that has the name is the hit. Only when no entry has it is the
+/// first such error the failure of the walk, for the name might have been behind that entry.
+pub(crate) async fn search_path(
+    root: &Path,
+    command: &str,
+    search: &OsStr,
+) -> Result<Option<Hit>, Failure> {
+    let mut unreadable = None;
+    for entry in std::env::split_paths(search) {
+        let relative = !entry.is_absolute();
+        let dir = if relative { root.join(&entry) } else { entry };
+        let file = dir.join(command);
+        let meta = match tokio::fs::metadata(&file).await {
+            Ok(meta) => meta,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                unreadable.get_or_insert_with(|| {
+                    failure(FailureKind::Spawn, format!("{}: {e}", file.display()))
+                });
+                continue;
+            }
+        };
+        let executable = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                meta.is_file() && meta.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                meta.is_file()
+            }
+        };
+        if executable {
+            return Ok(Some(Hit { file, relative }));
+        }
+    }
+    unreadable.map_or(Ok(None), Err)
 }
 
 /// The SHA-256 of the executable's bytes, in lower-case hex. It identifies the file, not what it loads.
