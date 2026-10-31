@@ -512,6 +512,11 @@ and this project adheres to
   Crux is named by its id (`crux`, not `title`), and an option by its id
   (`option`, not the text `choice`); `wording`, `unspecified`, `basis` and `by`
   are as they were.
+- The digest of an external check's program. Its evidence names the resolved
+  executable (`command`) and no longer has `command_digest`: nothing compared
+  it, and reading a large program on every run counted against the run's time
+  limit. A record saved with one still reads. In Rust,
+  `ExecutionEvidence::command_digest`.
 
 ### Added
 

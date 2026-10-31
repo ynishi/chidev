@@ -1922,11 +1922,10 @@ fn external_runs_are_explicit_persisted_and_return_gate_failure_evidence() {
     assert_eq!(code, Some(1), "{err}\n{results:#?}");
     assert_eq!(results[0]["ok"], false);
     assert_eq!(results[0]["external"][0]["findings"][0]["level"], "error");
-    assert!(
-        results[0]["external"][0]["evidence"]["command_digest"]
-            .as_str()
-            .is_some_and(|s| s.len() == 64)
-    );
+    let evidence = &results[0]["external"][0]["evidence"];
+    assert!(evidence["command"].as_str().is_some(), "{evidence:#?}");
+    // The program the check started is named, not digested: nothing compares a digest of it.
+    assert!(evidence.get("command_digest").is_none(), "{evidence:#?}");
     assert_eq!(results[1]["external"][0]["state"], "stale");
 }
 

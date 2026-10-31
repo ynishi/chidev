@@ -77,7 +77,6 @@ impl ExternalExecutor for FakeExecutor {
         ExternalAttempt {
             evidence: ExecutionEvidence {
                 command: Some("/test/checker".into()),
-                command_digest: Some("a".repeat(64)),
                 config_digest: "config-v1".into(),
                 exit_code: Some(0),
                 stderr: String::new(),

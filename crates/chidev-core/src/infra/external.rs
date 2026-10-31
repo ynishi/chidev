@@ -6,7 +6,7 @@
 //! JSON document on stdout (the request is protocol version 2; a reply of version 1 or 2 is accepted). Stderr is
 //! diagnostics, never part of the response.
 //! Stdout is capped at 1 MiB and stderr at 64 KiB; exceeding either cap fails the attempt. The default
-//! timeout is 10 seconds and covers executable resolution and hashing as well as pipe I/O and process
+//! timeout is 10 seconds and covers executable resolution as well as pipe I/O and process
 //! completion. A timeout or cancellation kills the process group and reaps the direct child. Only Unix
 //! process groups are implemented; other platforms return an explicit unsupported-platform failure.
 //!
@@ -22,8 +22,8 @@
 //! ```
 //!
 //! Commands containing a path are resolved relative to the project root (absolute paths stay absolute).
-//! A bare executable name is resolved through PATH. SHA-256 records that executable's bytes before
-//! spawning it; it does not fingerprint interpreter dependencies or attest against concurrent changes.
+//! A bare executable name is resolved through PATH. The evidence names the resolved executable; its bytes
+//! are not digested, so the evidence does not identify what the file held when it ran.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -272,17 +272,12 @@ impl ProcessExecutor {
                 format!("exceeded {} seconds", spec.timeout.as_secs()),
             )
         };
-        let executable = tokio::time::timeout_at(deadline, async {
-            let executable = process::resolve(&self.root, &spec.command)
+        let executable =
+            tokio::time::timeout_at(deadline, process::resolve(&self.root, &spec.command))
                 .await
+                .map_err(|_| timed_out())?
                 .map_err(failed)?;
-            evidence.command = Some(executable.to_string_lossy().into_owned());
-            evidence.command_digest =
-                Some(process::file_digest(&executable).await.map_err(failed)?);
-            Ok::<_, ExternalFailure>(executable)
-        })
-        .await
-        .map_err(|_| timed_out())??;
+        evidence.command = Some(executable.to_string_lossy().into_owned());
         let input = serde_json::to_vec(&call).map_err(|e| failure("protocol", e.to_string()))?;
         let mut capture = process::Capture::default();
         let result = process::run(
@@ -527,11 +522,6 @@ mod tests {
         assert!(attempt.result.unwrap().findings.is_empty());
         assert_eq!(attempt.evidence.exit_code, Some(0));
         assert_eq!(attempt.evidence.stderr, "diagnostic\n");
-        let bytes = std::fs::read(fixture.0.join("checker")).unwrap();
-        assert_eq!(
-            attempt.evidence.command_digest,
-            Some(Digest::of(&bytes).to_string())
-        );
         let received: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture.0.join("received.json")).unwrap())
                 .unwrap();

@@ -1771,13 +1771,20 @@ mod tests {
             }],
             evidence: ExecutionEvidence {
                 command: Some("/tools/check-contract".into()),
-                command_digest: Some(Digest::of(b"program").to_string()),
                 config_digest: Digest::of(b"process").to_string(),
                 exit_code: Some(0),
                 stderr: "a diagnostic".into(),
             },
             failure: failure.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn evidence_saved_with_a_program_digest_still_reads() {
+        let saved = r#"{"command":"/tools/check-contract","command_digest":"ab","config_digest":"c","exit_code":0,"stderr":""}"#;
+        let evidence: ExecutionEvidence = serde_json::from_str(saved).unwrap();
+        assert_eq!(evidence.command.as_deref(), Some("/tools/check-contract"));
+        assert_eq!(evidence.config_digest, "c");
     }
 
     #[tokio::test]
