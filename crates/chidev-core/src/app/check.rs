@@ -218,6 +218,20 @@ impl Registry {
         self.policy.of(id).map(|r| r.level)
     }
 
+    /// Whether some builtin check whose id begins with `family` (written with its dot, as a policy does) runs at
+    /// `moment` and is not off: whether a run of the moment would use what that family reads.
+    pub fn runs(&self, family: &str, moment: Moment) -> bool {
+        self.checks.iter().any(|c| {
+            let d = c.descriptor();
+            d.id.as_str().starts_with(family)
+                && d.runs_at(moment)
+                && self
+                    .policy
+                    .of(&d.id)
+                    .is_some_and(|resolved| resolved.level != Level::Off)
+        })
+    }
+
     /// Runs the checks that run at `moment` and are not off over `view`, which the store stood at `read_at` for.
     pub fn run(&self, moment: Moment, read_at: StoreRevision, view: &CheckView<'_>) -> Run {
         let mut run = Run::default();

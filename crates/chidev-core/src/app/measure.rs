@@ -17,6 +17,7 @@ use super::ports::{AssetKind, IdSource, Store, StoreRevision};
 use super::{App, AppError, CorrectionStatus, context_named, correction_status};
 use crate::domain::entity::harness::Harness;
 use crate::domain::entity::measurement::{Counts, MeasureBody, Measurement, MeasurementDraft};
+use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::{Project, ProjectError, refused};
 use crate::domain::repository::StoreError;
 use crate::domain::service::examples;
@@ -388,6 +389,17 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         self.with_settings(p, measurements).await
     }
 
+    /// The code the Pin `pin` accepted, as the store kept it; none when the store kept no text for it (a Pin made
+    /// before the code was kept) or kept text that is not the code the Pin's digest is of. The one place that holds a
+    /// Pin to its code, for every use case that runs or reads the code a Pin accepted.
+    pub(super) async fn kept_pin_code(&self, pin: &Pin) -> Result<Option<String>, AppError> {
+        Ok(self
+            .store
+            .pin_code(pin.id())
+            .await?
+            .filter(|c| Digest::of(c.as_bytes()) == pin.code()))
+    }
+
     /// The latest runs of examples alone, and the settings now of the Harnesses they are of that are in the model.
     /// What a confirmation (a pin, a resolution) reads of the measurements: a mutation run or a simulation is not
     /// asked about, for the checks that judge them run on demand only, and what the runner is asked costs.
@@ -549,10 +561,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 interface: interface.clone(),
             })?;
         let code = self
-            .store
-            .pin_code(pin.id())
+            .kept_pin_code(&pin)
             .await?
-            .filter(|c| Digest::of(c.as_bytes()) == pin.code())
             .ok_or_else(|| AppError::PinCodeNotKept {
                 interface: interface.clone(),
             })?;
@@ -815,10 +825,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     interface: name.clone(),
                 })?;
             let code = self
-                .store
-                .pin_code(pin.id())
+                .kept_pin_code(&pin)
                 .await?
-                .filter(|c| Digest::of(c.as_bytes()) == pin.code())
                 .ok_or_else(|| AppError::PinCodeNotKept {
                     interface: name.clone(),
                 })?;

@@ -1384,6 +1384,41 @@ that wants a confirmation refused for a failing example registers an external ga
 A run that is stale is not judged for its failing examples, and a run that failed is not either: it is reported by
 `examples.error` alone, whether or not the model has moved since.
 
+## The working tree
+
+The text of a placed asset is held twice: by the model (the code a Pin accepted, the source of a Harness) and by the
+file the project's `[[measure.layout]]` places it in (see "`[measure]` in `chidev.toml`"). The model never reads that
+file, and `pin.stale` compares revisions of the model, so a pinned file that is changed on disk moves nothing the model
+records: `check` stays silent until the code is put and pinned again. The `tree.*` checks look at the files and say when
+a copy has gone from the text the model holds:
+
+<!-- checks: tree -->
+| rule | default | moments | finds |
+|---|---|---|---|
+| `tree.code-moved` | warning | check | an interface whose file in the working tree holds other code than the code its pin accepted |
+| `tree.harness-moved` | warning | check | a harness (about its first case) whose file in the working tree holds other source than the harness does |
+| `tree.unread` | warning | check | an interface or a harness (about its first case) whose file in the working tree is missing or cannot be read as text |
+<!-- /checks -->
+
+- **Only at `check`.** `check`, `status` and `check_run` read the files; an edit, a `pin` and a `cr_resolve` do not. A Pin
+  accepts code, not a file, and reading the files of the whole project at every confirmation would add their cost to
+  each one ([ADR 0010](docs/adr/0010-the-working-tree-is-read-at-check-and-starts-no-program.md)).
+- **Files only, no program.** Each file a layout names is read once per check, whatever the number of assets that name
+  it, and compared as text by its digest, the digest a Pin makes of the same text: the bytes are not normalised, so a
+  changed line ending or a white space is a change. A file that is not there, is a directory or is not UTF-8 is
+  `tree.unread` and says why. Nothing is started: `status` and `check` still start no program.
+- **What is compared.** An Interface's file is compared with the code its Pin accepted; a Harness's file with the source
+  the model holds. An Interface that has a file and no Pin is compared with nothing (`pin.unpinned` says so). An
+  Interface or a Harness that no layout entry places, and every asset of a project with no `[measure]` table, has no
+  copy to look at and is found by no `tree.*` check.
+- **File by file.** A finding says that the file differs, not which Item changed; two Interfaces laid out in one file
+  both move with it.
+- `status.tree` lists what the checks do not: `unplaced` (the `interfaces` and `harnesses` no layout places),
+  `unpinned` (the Interfaces with a file and no Pin) and `moved` (each Interface whose file moved, with `declared`, which
+  says whether the Items of the copy are looked at: `"off"`). Each entry names its `context` and the asset (`name`, or
+  `interface` in `moved`). It is `null` when every `tree.*` check is off, for then nothing was looked at. To turn the
+  checks off, set the level of the family in the policy: `[checks."tree."]` with `level = "off"`.
+
 ## Change requests
 
 A change request says what is asked, why (`situation`, in the words of whoever

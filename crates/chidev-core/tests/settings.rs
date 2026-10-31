@@ -38,6 +38,7 @@ use chidev_core::domain::vo::id::{ChangeRequestId, ContextId, CruxId, InterfaceI
 use chidev_core::domain::vo::measure::{MeasureKind, SettingsDigest, SettingsNow};
 use chidev_core::domain::vo::name::{AssetName, ContextName};
 use chidev_core::domain::vo::timestamp::Timestamp;
+use chidev_core::domain::vo::tree::TreeNow;
 use chidev_core::infra::clock::FixedClock;
 use chidev_core::infra::project::{self, FILE};
 use chidev_core::infra::runner::{self, ProcessRunner};
@@ -564,6 +565,7 @@ async fn a_subject_the_view_has_no_settings_for_is_stale() {
                     measure_settings,
                     sim_settings: &BTreeMap::new(),
                     examples_settings: &BTreeMap::new(),
+                    tree: &TreeNow::empty(),
                     resolving: None,
                 },
             )

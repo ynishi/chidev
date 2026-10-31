@@ -384,8 +384,12 @@ async fn with_app(
     let (registry, executor, measure) = registry;
     let mut app = App::with_registry(sqlite, UuidV7, registry, SystemClock).with_external(executor);
     if let Some(measure) = measure {
-        // one table answers both: how to measure, and how to find the Items of an Interface
-        app = app.with_items(measure.clone()).with_runner(measure);
+        // one table answers all: how to measure, how to find the Items of an Interface, and where the copies of
+        // the placed assets are in the working tree
+        app = app
+            .with_items(measure.clone())
+            .with_tree(measure.clone())
+            .with_runner(measure);
     }
     let code = body(&mut app, root).await;
     if let Err(e) = app.into_store().close().await {

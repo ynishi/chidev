@@ -268,6 +268,7 @@ mod tests {
     use crate::domain::vo::digest::Digest;
     use crate::domain::vo::id::InterfaceId;
     use crate::domain::vo::measure::{FailureKind, MeasureFailure, MutantOutcome, SettingsNow};
+    use crate::domain::vo::tree::TreeNow;
 
     /// Runs `check` over the fixture Project with its Pin and these measurements, the settings being `settings`.
     fn found(
@@ -287,6 +288,7 @@ mod tests {
                 measure_settings: settings,
                 sim_settings: &BTreeMap::new(),
                 examples_settings: &BTreeMap::new(),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),

@@ -38,6 +38,7 @@ mod items;
 mod provider;
 mod settings;
 mod sim;
+mod tree;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

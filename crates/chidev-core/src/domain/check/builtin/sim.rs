@@ -556,6 +556,7 @@ mod tests {
     };
     use crate::domain::vo::source::Source;
     use crate::domain::vo::title::Title;
+    use crate::domain::vo::tree::TreeNow;
 
     fn hid() -> HarnessId {
         HarnessId::from_uuid(test_uuid(500))
@@ -663,6 +664,7 @@ mod tests {
                 measure_settings: &BTreeMap::new(),
                 sim_settings: settings,
                 examples_settings: &BTreeMap::new(),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),
@@ -957,6 +959,7 @@ mod tests {
             measure_settings: &BTreeMap::new(),
             sim_settings: &unchanged(),
             examples_settings: &BTreeMap::new(),
+            tree: &TreeNow::empty(),
             resolving: None,
         };
         assert_eq!(SimStale.run(&view, &Params::default()).len(), 1);
@@ -1056,6 +1059,7 @@ mod tests {
                 measure_settings: &BTreeMap::new(),
                 sim_settings: &same,
                 examples_settings: &BTreeMap::new(),
+                tree: &TreeNow::empty(),
                 resolving: None,
             },
             &Params::default(),
