@@ -619,6 +619,10 @@ pub struct Put<I> {
     pub id: I,
     /// Its revision after the change.
     pub revision: Revision,
+    /// For an Interface put with its Items left to a provider: how many declarations the provider found that a
+    /// caller cannot name and left out (0 included). None for any other put, so that a filter is never silent and a
+    /// put that filtered nothing says 0.
+    pub left_out: Option<usize>,
 }
 
 /// Where the Pin of one Interface stands.

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 const PROVIDER: &str = r#"#!/bin/sh
 cat > request.json
 if grep -q BADLINES request.json; then
-  printf '%s' '{"protocol":1,"items":[{"key":"a","lines":[9,9]}]}'
+  printf '%s' '{"protocol":2,"items":[{"key":"a","lines":[9,9]}],"left_out":0}'
 elif grep -q BOOM request.json; then
   echo 'cannot parse the code' >&2
   exit 3
@@ -51,7 +51,7 @@ fn project(name: &str, timeout: u64) -> PathBuf {
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"a","lines":[1,1]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}],"left_out":0}"#,
     );
     write(
         &dir,
@@ -165,7 +165,7 @@ fn an_interface_put_without_items_is_given_those_the_provider_found_and_a_rename
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}],"left_out":0}"#,
     );
     let source = "pub fn price(\n    total: u64,\n) -> u64;\nfn tax() -> u64;\n";
     let mut ops = setup();
@@ -176,7 +176,7 @@ fn an_interface_put_without_items_is_given_those_the_provider_found_and_a_rename
     // the provider got the protocol's request, in the project's root
     let asked: Value =
         serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
-    assert_eq!(asked, json!({"protocol":1,"source":source}));
+    assert_eq!(asked, json!({"protocol":2,"source":source}));
     let (revision, before) = items_of(&dir, "api");
     assert_eq!(revision, 1);
     assert_eq!(
@@ -191,7 +191,7 @@ fn an_interface_put_without_items_is_given_those_the_provider_found_and_a_rename
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"pricing::price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"pricing::price","lines":[1,3]},{"key":"tax","lines":[4,4]}],"left_out":0}"#,
     );
     let mut again = put("api", source);
     again["renames"] = json!([{"from":"price","to":"pricing::price"}]);
@@ -208,7 +208,7 @@ fn an_interface_put_without_items_is_given_those_the_provider_found_and_a_rename
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"pricing::price","lines":[1,3]},{"key":"pricing::tax","lines":[4,4]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"pricing::price","lines":[1,3]},{"key":"pricing::tax","lines":[4,4]}],"left_out":0}"#,
     );
     let results = exec(&dir, &[put("api", source)]);
     assert_eq!(results[0]["ok"], true, "{results:#?}");
@@ -236,6 +236,54 @@ fn items_that_are_written_start_no_provider() {
     );
     assert_eq!(results[0]["ok"], true, "{results:#?}");
     assert!(!dir.join("request.json").exists());
+}
+
+#[test]
+fn a_put_whose_items_the_provider_found_shows_how_many_declarations_it_left_out() {
+    let dir = project("items-left-out", 10);
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}],"left_out":4}"#,
+    );
+    let mut ops = setup();
+    ops.push(put("api", "pub fn a();\n"));
+    let results = exec(&dir, &ops);
+    assert_eq!(results[2]["ok"], true, "{results:#?}");
+    assert_eq!(results[2]["left_out"], 4, "{results:#?}");
+    // none left out is said as 0
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}],"left_out":0}"#,
+    );
+    let results = exec(&dir, &[put("api", "pub fn a();\n// again\n")]);
+    assert_eq!(results[0]["left_out"], 0, "{results:#?}");
+    // a change set says it for the Interface put whose items were found, and for no other put
+    write(
+        &dir,
+        "answer.json",
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}],"left_out":2}"#,
+    );
+    let results = exec(
+        &dir,
+        &[json!({"op":"change_set","puts":[
+            {"put":"contract","context":"core","name":"c","title":"C","clauses":[]},
+            {"put":"interface","context":"core","name":"api","source":"pub fn a();\n"}]})],
+    );
+    assert_eq!(results[0]["ok"], true, "{results:#?}");
+    assert_eq!(results[0]["puts"][0].get("left_out"), None, "{results:#?}");
+    assert_eq!(results[0]["puts"][1]["left_out"], 2, "{results:#?}");
+    // written items were found by no provider, so there is nothing to say
+    let results = exec(
+        &dir,
+        &[
+            json!({"op":"interface_put","context":"core","name":"api","source":"pub fn a();\n",
+            "items":[{"key":"a","lines":[1,1]}]}),
+        ],
+    );
+    assert_eq!(results[0]["ok"], true, "{results:#?}");
+    assert_eq!(results[0].get("left_out"), None, "{results:#?}");
 }
 
 #[test]
@@ -361,7 +409,7 @@ fn the_renames_that_cannot_be_carried_out_are_refused_by_name() {
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"x","lines":[1,1]},{"key":"y","lines":[2,2]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"x","lines":[1,1]},{"key":"y","lines":[2,2]}],"left_out":0}"#,
     );
     let mut ops = setup();
     ops.push(put("api", "fn x();\nfn y();\n"));
@@ -425,7 +473,7 @@ fn the_examples_of_the_rules_of_renames_are_refused_by_those_rules() {
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"a","lines":[1,1]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]}],"left_out":0}"#,
     );
     let ids = ["input.rename-unknown", "input.renames-with-items"];
     let ops: Vec<Value> = ids
@@ -479,7 +527,7 @@ fn items_rekey_gives_the_provider_keys_and_keeps_the_ids_and_the_revisions() {
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"price","lines":[1,1]},{"key":"tax","lines":[2,2]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"price","lines":[1,1]},{"key":"tax","lines":[2,2]}],"left_out":0}"#,
     );
     let results = exec(&dir, &[rekey("api")]);
     let r = &results[0];
@@ -500,7 +548,7 @@ fn items_rekey_gives_the_provider_keys_and_keeps_the_ids_and_the_revisions() {
     // the provider was sent the code the Interface keeps
     let asked: Value =
         serde_json::from_slice(&std::fs::read(dir.join("request.json")).unwrap()).unwrap();
-    assert_eq!(asked, json!({"protocol":1,"source":source}));
+    assert_eq!(asked, json!({"protocol":2,"source":source}));
     let (now, after) = items_of(&dir, "api");
     assert_eq!(now, revision);
     assert_eq!(
@@ -537,7 +585,7 @@ fn items_rekey_revises_an_item_whose_new_lines_declare_something_else_and_lists_
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}],"left_out":0}"#,
     );
     let r = &exec(&dir, &[rekey("api")])[0];
     assert_eq!(r["ok"], true, "{r:#?}");
@@ -566,7 +614,7 @@ fn items_rekey_leaves_an_item_with_no_single_declaration_as_it_is_and_lists_it()
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"a","lines":[1,1]},{"key":"b","lines":[2,2]},{"key":"C","lines":[3,3]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"a","lines":[1,1]},{"key":"b","lines":[2,2]},{"key":"C","lines":[3,3]}],"left_out":0}"#,
     );
     let (_, before) = items_of(&dir, "api");
     let r = &exec(&dir, &[rekey("api")])[0];
@@ -608,7 +656,7 @@ fn items_rekey_that_would_give_one_key_twice_or_has_no_provider_changes_nothing(
     write(
         &dir,
         "answer.json",
-        r#"{"protocol":1,"items":[{"key":"x","lines":[1,1]},{"key":"x","lines":[2,2]}]}"#,
+        r#"{"protocol":2,"items":[{"key":"x","lines":[1,1]},{"key":"x","lines":[2,2]}],"left_out":0}"#,
     );
     let results = exec(
         &dir,
@@ -710,6 +758,34 @@ fn the_rust_provider_finds_the_items_of_an_interface_put_without_them_end_to_end
     );
 }
 
+#[test]
+fn the_rust_provider_leaves_out_what_a_caller_cannot_name_and_the_put_says_how_many() {
+    let dir = rust_project("rust-left-out");
+    let source = "\
+pub fn api() {}
+fn helper() {}
+mod inner {
+    pub fn x() {}
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+";
+    let mut ops = setup();
+    ops.push(put("api", source));
+    let results = exec(&dir, &ops);
+    assert_eq!(results[2]["ok"], true, "{results:#?}");
+    // helper, inner::x (inner is private) and tests::t
+    assert_eq!(results[2]["left_out"], 3, "{results:#?}");
+    let (_, items) = items_of(&dir, "api");
+    assert_eq!(
+        items.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+        ["api"]
+    );
+}
+
 /// `chidev provider items-rust` with `input` on its standard input: its exit code, standard output and error.
 fn items_rust(input: &str) -> (Option<i32>, String, String) {
     use std::io::Write;
@@ -737,16 +813,17 @@ fn items_rust(input: &str) -> (Option<i32>, String, String) {
 
 #[test]
 fn the_items_rust_provider_answers_one_reply_on_standard_output_and_a_failure_with_an_exit_code() {
-    let (code, out, _) = items_rust(r#"{"protocol":1,"source":"fn price(total: u64) -> u64;\n"}"#);
+    let (code, out, _) =
+        items_rust(r#"{"protocol":2,"source":"pub fn price(total: u64) -> u64;\nfn helper();\n"}"#);
     assert_eq!(code, Some(0));
     assert_eq!(
         out,
-        r#"{"protocol":1,"items":[{"key":"price","lines":[1,1]}]}"#
+        r#"{"protocol":2,"items":[{"key":"price","lines":[1,1]}],"left_out":1}"#
     );
     for (input, said) in [
         ("not json", "not a chidev-items request"),
-        (r#"{"protocol":2,"source":""}"#, "protocol 2"),
-        (r#"{"protocol":1,"source":"fn ("}"#, "does not parse"),
+        (r#"{"protocol":1,"source":""}"#, "protocol 1"),
+        (r#"{"protocol":2,"source":"fn ("}"#, "does not parse"),
     ] {
         let (code, out, err) = items_rust(input);
         assert_eq!(code, Some(2), "{input}");

@@ -39,7 +39,7 @@
 //! and `str-marker`; their `operator` is `str`. An edit elsewhere in the file moves none of them, so a record of
 //! a mutant outlives unrelated changes.
 //!
-//! The Rust provider of Items, which speaks `chidev-items 1` the same way, is the module [`items`].
+//! The Rust provider of Items, which speaks `chidev-items 2` the same way, is the module [`items`].
 
 #![warn(missing_docs)]
 

@@ -180,9 +180,10 @@ enum Provider {
     /// Makes the mutants of a Rust source: reads one `chidev-mutants 1` request (JSON) on standard input and writes
     /// the reply (JSON) on standard output. Pure: it reads no file and runs nothing.
     MutantsRust,
-    /// Finds the Items of a Rust source: reads one `chidev-items 1` request (JSON) on standard input and writes the
-    /// reply (JSON) on standard output, a key and the lines of each declaration. Pure: it reads no file and runs
-    /// nothing.
+    /// Finds the Items of a Rust source, the declarations a caller outside it can name: reads one `chidev-items 2`
+    /// request (JSON) on standard input and writes the reply (JSON) on standard output, a key and the lines of each
+    /// Item, and in `left_out` how many declarations it found that a caller cannot name. Pure: it reads no file and
+    /// runs nothing.
     ItemsRust,
 }
 

@@ -1,8 +1,12 @@
-//! The Rust provider of Items. It speaks `chidev-items 1`: one JSON request `{protocol, source}` in, one JSON reply
-//! `{protocol, items: [{key, lines}]}` out, and nothing else. Like the provider of mutants it is a pure function of
-//! the request: it touches no file, no process and no clock.
+//! The Rust provider of Items. It speaks `chidev-items 2`: one JSON request `{protocol, source}` in, one JSON reply
+//! `{protocol, items: [{key, lines}], left_out}` out, and nothing else. Like the provider of mutants it is a pure
+//! function of the request: it touches no file, no process and no clock.
 //!
-//! An Item is a declaration of the source, found by its **key** and the **lines** it is declared on. The lines
+//! A **caller** of a source is code outside that source, built as a caller builds it (not as part of the source's
+//! own tests). An Item is a declaration such a caller can name. The provider answers the Items, and in `left_out`
+//! how many declarations it found that are not. `left_out` is always written, even when it is 0.
+//!
+//! An Item is found by its **key** and the **lines** it is declared on. The lines
 //! point at the declaration alone: from its first token (after the doc comments and attributes) to the line that
 //! ends the signature, with the `;` or the `{` of its body. A `struct`, `enum` or `union` declares its fields or
 //! variants, so its lines go on to the closing `}`: a field added or retyped is a change of what the Item declares.
@@ -15,6 +19,29 @@
 //! (`fn f() -> u64;`, which an Interface holds when it is the code a Case is written against) is not an item to
 //! the Rust parser, so it is parsed again as a declaration. Nothing else is found: not a `mod` itself (an inline
 //! one is entered), not an `impl` block, not what is inside a function body, not a `use`.
+//!
+//! # What a caller can name
+//!
+//! "Outside" is outside the module of the file and outside the inline `mod`s in it. A found declaration is an Item
+//! when it reaches outside, and counts in `left_out` when it does not. The same rules hold for a declaration with
+//! no body.
+//!
+//! | declaration | Item? |
+//! |---|---|
+//! | no visibility, `pub(self)` | no |
+//! | `pub`, `pub(crate)` | yes |
+//! | `pub(super)` at the top level of the file | yes |
+//! | `pub(super)` inside an inline `mod m` | no |
+//! | `pub(in path)` | no if `path` starts with `self`, otherwise yes (an approximation: the provider does not know the module path) |
+//! | inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside |
+//! | a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside |
+//! | a member of a `trait` | when the trait is an Item |
+//! | a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching) |
+//! | under `#[cfg(test)]` (also `all(test, ..)`, and `any(..)` of those), inside such a `mod`, a `#[test]` fn | no |
+//! | a `macro_rules!` | only with `#[macro_export]` (and the `mod`s around it reach) |
+//!
+//! A type or trait is looked up in the module the `impl` is in, by the path as written (`self::`, `super::` and
+//! the names of inline `mod`s are followed; a path from `crate` or from another file is not found, so it reaches).
 //!
 //! # The key
 //!
@@ -53,6 +80,8 @@
 //! The keys of the mutants of [`crate`] are made by another function and are not these: those are kept in the
 //! records of a measurement, and changing them would cut the record from its history.
 
+use std::collections::BTreeMap;
+
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
@@ -63,7 +92,7 @@ use syn::spanned::Spanned;
 use thiserror::Error;
 
 /// The protocol version this provider speaks.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// What chidev asks for: the Items of `source`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +103,7 @@ pub struct Request {
     pub source: String,
 }
 
-/// One declaration found.
+/// One declaration a caller can name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     /// The name the Item is matched by when the code is put again.
@@ -88,8 +117,11 @@ pub struct Item {
 pub struct Reply {
     /// The protocol version.
     pub protocol: u32,
-    /// The declarations, in the order of the source: a `trait` or a `mod`'s item before what is inside it.
+    /// The declarations a caller can name, in the order of the source: a `trait` or a `mod`'s item before what is
+    /// inside it.
     pub items: Vec<Item>,
+    /// How many declarations were found that a caller cannot name. Always written, 0 included.
+    pub left_out: usize,
 }
 
 /// Why no reply could be made.
@@ -123,35 +155,134 @@ pub fn items(request: &Request) -> Result<Reply, Error> {
         return Err(Error::Protocol(request.protocol));
     }
     let file = syn::parse_file(&request.source).map_err(|e| Error::Source(e.to_string()))?;
-    let mut walk = Walk::default();
+    let mut walk = Walk::new();
+    walk.declare(&file.items);
     walk.items(&file.items);
     Ok(Reply {
         protocol: PROTOCOL,
         items: walk.found,
+        left_out: walk.left_out,
     })
 }
 
 /// Walks the declarations of a file and keeps the Items.
-#[derive(Default)]
 struct Walk {
     /// The `mod`s the walk is inside, outermost first.
     path: Vec<String>,
+    /// Whether the `mod`s the walk is inside all reach outside (and none is under `#[cfg(test)]`).
+    outside: bool,
+    /// The types and traits the file declares, by their path from the file, and whether each reaches outside.
+    declared: BTreeMap<Vec<String>, bool>,
     found: Vec<Item>,
+    /// The declarations found that are not Items.
+    left_out: usize,
 }
 
 impl Walk {
+    fn new() -> Walk {
+        Walk {
+            path: Vec::new(),
+            outside: true,
+            declared: BTreeMap::new(),
+            found: Vec::new(),
+            left_out: 0,
+        }
+    }
+
+    /// Notes which types and traits the file declares and whether each reaches outside, before any `impl` is read.
+    fn declare(&mut self, items: &[syn::Item]) {
+        for item in items {
+            let (name, attrs, vis) = match item {
+                syn::Item::Struct(s) => (&s.ident, &s.attrs, &s.vis),
+                syn::Item::Enum(e) => (&e.ident, &e.attrs, &e.vis),
+                syn::Item::Union(u) => (&u.ident, &u.attrs, &u.vis),
+                syn::Item::Type(t) => (&t.ident, &t.attrs, &t.vis),
+                syn::Item::Trait(t) => (&t.ident, &t.attrs, &t.vis),
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        let outside = self.outside;
+                        self.outside = self.allowed(outside, &m.attrs, Some(&m.vis));
+                        self.path.push(m.ident.to_string());
+                        self.declare(inner);
+                        self.path.pop();
+                        self.outside = outside;
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let reaches = self.allowed(self.outside, attrs, Some(vis));
+            let mut full = self.path.clone();
+            full.push(name.to_string());
+            *self.declared.entry(full).or_insert(false) |= reaches;
+        }
+    }
+
+    /// Whether a declaration reaches outside: `base` (what the place it is in allows), no `#[cfg(test)]` or
+    /// `#[test]` on it, and its own visibility `vis` (none for a member whose visibility is not its own, a trait's or
+    /// a trait impl's).
+    fn allowed(&self, base: bool, attrs: &[syn::Attribute], vis: Option<&syn::Visibility>) -> bool {
+        base && !is_test(attrs) && vis.is_none_or(|v| reaches(v, self.path.len()))
+    }
+
+    /// Whether the type or trait named by `path` reaches outside: what the file declares under that path, or
+    /// reaching when it declares none (the name is from another file).
+    fn path_reaches(&self, path: &syn::Path) -> bool {
+        let mut full = self.path.clone();
+        if path.leading_colon.is_some() {
+            return true;
+        }
+        for (n, segment) in path.segments.iter().enumerate() {
+            let word = segment.ident.to_string();
+            match word.as_str() {
+                "crate" => return true,
+                "self" if n == 0 => {}
+                "super" => {
+                    if full.pop().is_none() {
+                        return true;
+                    }
+                }
+                _ => full.push(word),
+            }
+        }
+        self.declared.get(&full).copied().unwrap_or(true)
+    }
+
+    /// Whether the type `ty` of an `impl` reaches outside: a path is looked up (past references), any other type
+    /// reaches.
+    fn type_reaches(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(p) if p.qself.is_none() => self.path_reaches(&p.path),
+            syn::Type::Reference(r) => self.type_reaches(&r.elem),
+            syn::Type::Paren(p) => self.type_reaches(&p.elem),
+            syn::Type::Group(g) => self.type_reaches(&g.elem),
+            _ => true,
+        }
+    }
+
     fn items(&mut self, items: &[syn::Item]) {
         for item in items {
             self.item(item);
         }
     }
 
-    /// Keeps the Item `name` of the scope `owner` (a type, a trait; none for a free item) when its tokens run from
-    /// their first one (past the attributes) to `end`.
-    fn keep(&mut self, owner: Option<&str>, name: &str, tokens: TokenStream, end: Span) {
+    /// Keeps the declaration `name` of the scope `owner` (a type, a trait; none for a free item) when its tokens run
+    /// from their first one (past the attributes) to `end`: an Item when `reach`, otherwise it is counted as left out.
+    fn keep(
+        &mut self,
+        owner: Option<&str>,
+        name: &str,
+        tokens: TokenStream,
+        end: Span,
+        reach: bool,
+    ) {
         let Some(first) = first_line(tokens) else {
             return;
         };
+        if !reach {
+            self.left_out += 1;
+            return;
+        }
         let key = match owner {
             Some(owner) => format!("{owner}::{name}"),
             None => self.scoped(name),
@@ -173,150 +304,228 @@ impl Walk {
 
     fn item(&mut self, item: &syn::Item) {
         match item {
-            syn::Item::Fn(f) => self.keep(
-                None,
-                &f.sig.ident.to_string(),
-                f.to_token_stream(),
-                f.block.brace_token.span.open(),
-            ),
+            syn::Item::Fn(f) => {
+                let reach = self.allowed(self.outside, &f.attrs, Some(&f.vis));
+                self.keep(
+                    None,
+                    &f.sig.ident.to_string(),
+                    f.to_token_stream(),
+                    f.block.brace_token.span.open(),
+                    reach,
+                );
+            }
             // The fields and variants of a type are what it declares, so its lines go to the closing brace.
             syn::Item::Struct(s) => {
                 let end = match &s.fields {
                     syn::Fields::Named(named) => named.brace_token.span.close(),
                     _ => semi_or(s.semi_token.as_ref(), s.ident.span()),
                 };
-                self.keep(None, &s.ident.to_string(), s.to_token_stream(), end);
+                let reach = self.allowed(self.outside, &s.attrs, Some(&s.vis));
+                self.keep(None, &s.ident.to_string(), s.to_token_stream(), end, reach);
             }
-            syn::Item::Enum(e) => self.keep(
-                None,
-                &e.ident.to_string(),
-                e.to_token_stream(),
-                e.brace_token.span.close(),
-            ),
-            syn::Item::Union(u) => self.keep(
-                None,
-                &u.ident.to_string(),
-                u.to_token_stream(),
-                u.fields.brace_token.span.close(),
-            ),
-            syn::Item::Type(t) => self.keep(
-                None,
-                &t.ident.to_string(),
-                t.to_token_stream(),
-                t.semi_token.span(),
-            ),
-            syn::Item::Const(c) => self.keep(
-                None,
-                &c.ident.to_string(),
-                c.to_token_stream(),
-                c.semi_token.span(),
-            ),
-            syn::Item::Static(s) => self.keep(
-                None,
-                &s.ident.to_string(),
-                s.to_token_stream(),
-                s.semi_token.span(),
-            ),
+            syn::Item::Enum(e) => {
+                let reach = self.allowed(self.outside, &e.attrs, Some(&e.vis));
+                self.keep(
+                    None,
+                    &e.ident.to_string(),
+                    e.to_token_stream(),
+                    e.brace_token.span.close(),
+                    reach,
+                );
+            }
+            syn::Item::Union(u) => {
+                let reach = self.allowed(self.outside, &u.attrs, Some(&u.vis));
+                self.keep(
+                    None,
+                    &u.ident.to_string(),
+                    u.to_token_stream(),
+                    u.fields.brace_token.span.close(),
+                    reach,
+                );
+            }
+            syn::Item::Type(t) => {
+                let reach = self.allowed(self.outside, &t.attrs, Some(&t.vis));
+                self.keep(
+                    None,
+                    &t.ident.to_string(),
+                    t.to_token_stream(),
+                    t.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::Item::Const(c) => {
+                let reach = self.allowed(self.outside, &c.attrs, Some(&c.vis));
+                self.keep(
+                    None,
+                    &c.ident.to_string(),
+                    c.to_token_stream(),
+                    c.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::Item::Static(s) => {
+                let reach = self.allowed(self.outside, &s.attrs, Some(&s.vis));
+                self.keep(
+                    None,
+                    &s.ident.to_string(),
+                    s.to_token_stream(),
+                    s.semi_token.span(),
+                    reach,
+                );
+            }
+            // A macro has no visibility: `#[macro_export]` is what puts it in reach of a caller.
             syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
                 if let Some(name) = &m.ident {
+                    let exported = m.attrs.iter().any(|a| a.path().is_ident("macro_export"));
+                    let reach = self.allowed(self.outside && exported, &m.attrs, None);
                     self.keep(
                         None,
                         &format!("{name}!"),
                         m.to_token_stream(),
                         m.mac.delimiter.span().open(),
+                        reach,
                     );
                 }
             }
             syn::Item::Trait(t) => {
+                let reach = self.allowed(self.outside, &t.attrs, Some(&t.vis));
                 self.keep(
                     None,
                     &t.ident.to_string(),
                     t.to_token_stream(),
                     t.brace_token.span.open(),
+                    reach,
                 );
                 let owner = self.scoped(&t.ident.to_string());
                 for member in &t.items {
-                    self.trait_item(&owner, member);
+                    self.trait_item(&owner, member, reach);
                 }
             }
             syn::Item::Impl(i) => {
                 let owner = self.impl_owner(i);
+                let types = self.type_reaches(&i.self_ty);
+                let (base, own) = match &i.trait_ {
+                    // an inherent `impl T`: each member's visibility, when `T` reaches
+                    None => (types, true),
+                    // an `impl Trait for T`: no member has a visibility, and `Trait` and `T` both have to reach
+                    Some((_, path, _)) => (types && self.path_reaches(path), false),
+                };
+                let base = self.allowed(self.outside && base, &i.attrs, None);
                 for member in &i.items {
-                    self.impl_item(&owner, member);
+                    self.impl_item(&owner, member, base, own);
                 }
             }
             syn::Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
+                    let outside = self.outside;
+                    self.outside = self.allowed(outside, &m.attrs, Some(&m.vis));
                     self.path.push(m.ident.to_string());
                     self.items(items);
                     self.path.pop();
+                    self.outside = outside;
                 }
             }
-            syn::Item::Verbatim(tokens) => self.declared(None, tokens.clone()),
+            syn::Item::Verbatim(tokens) => {
+                self.declared(None, tokens.clone(), self.outside, true);
+            }
             _ => {}
         }
     }
 
-    fn trait_item(&mut self, owner: &str, member: &syn::TraitItem) {
+    /// A member of a trait: an Item when the trait is (`trait_reach`), whatever it says of itself.
+    fn trait_item(&mut self, owner: &str, member: &syn::TraitItem, trait_reach: bool) {
         match member {
             syn::TraitItem::Fn(f) => {
                 let end = match &f.default {
                     Some(block) => block.brace_token.span.open(),
                     None => semi_or(f.semi_token.as_ref(), f.sig.ident.span()),
                 };
+                let reach = self.allowed(trait_reach, &f.attrs, None);
                 self.keep(
                     Some(owner),
                     &f.sig.ident.to_string(),
                     f.to_token_stream(),
                     end,
+                    reach,
                 );
             }
-            syn::TraitItem::Const(c) => self.keep(
-                Some(owner),
-                &c.ident.to_string(),
-                c.to_token_stream(),
-                c.semi_token.span(),
-            ),
-            syn::TraitItem::Type(t) => self.keep(
-                Some(owner),
-                &t.ident.to_string(),
-                t.to_token_stream(),
-                t.semi_token.span(),
-            ),
-            syn::TraitItem::Verbatim(tokens) => self.declared(Some(owner), tokens.clone()),
+            syn::TraitItem::Const(c) => {
+                let reach = self.allowed(trait_reach, &c.attrs, None);
+                self.keep(
+                    Some(owner),
+                    &c.ident.to_string(),
+                    c.to_token_stream(),
+                    c.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::TraitItem::Type(t) => {
+                let reach = self.allowed(trait_reach, &t.attrs, None);
+                self.keep(
+                    Some(owner),
+                    &t.ident.to_string(),
+                    t.to_token_stream(),
+                    t.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::TraitItem::Verbatim(tokens) => {
+                self.declared(Some(owner), tokens.clone(), trait_reach, false);
+            }
             _ => {}
         }
     }
 
-    fn impl_item(&mut self, owner: &str, member: &syn::ImplItem) {
+    /// A member of an `impl`: an Item when the `impl` lets it (`base`) and, for an inherent `impl` (`own`), when its
+    /// own visibility reaches.
+    fn impl_item(&mut self, owner: &str, member: &syn::ImplItem, base: bool, own: bool) {
         match member {
-            syn::ImplItem::Fn(f) => self.keep(
-                Some(owner),
-                &f.sig.ident.to_string(),
-                f.to_token_stream(),
-                f.block.brace_token.span.open(),
-            ),
-            syn::ImplItem::Const(c) => self.keep(
-                Some(owner),
-                &c.ident.to_string(),
-                c.to_token_stream(),
-                c.semi_token.span(),
-            ),
-            syn::ImplItem::Type(t) => self.keep(
-                Some(owner),
-                &t.ident.to_string(),
-                t.to_token_stream(),
-                t.semi_token.span(),
-            ),
-            syn::ImplItem::Verbatim(tokens) => self.declared(Some(owner), tokens.clone()),
+            syn::ImplItem::Fn(f) => {
+                let reach = self.allowed(base, &f.attrs, own.then_some(&f.vis));
+                self.keep(
+                    Some(owner),
+                    &f.sig.ident.to_string(),
+                    f.to_token_stream(),
+                    f.block.brace_token.span.open(),
+                    reach,
+                );
+            }
+            syn::ImplItem::Const(c) => {
+                let reach = self.allowed(base, &c.attrs, own.then_some(&c.vis));
+                self.keep(
+                    Some(owner),
+                    &c.ident.to_string(),
+                    c.to_token_stream(),
+                    c.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::ImplItem::Type(t) => {
+                let reach = self.allowed(base, &t.attrs, own.then_some(&t.vis));
+                self.keep(
+                    Some(owner),
+                    &t.ident.to_string(),
+                    t.to_token_stream(),
+                    t.semi_token.span(),
+                    reach,
+                );
+            }
+            syn::ImplItem::Verbatim(tokens) => {
+                self.declared(Some(owner), tokens.clone(), base, own);
+            }
             _ => {}
         }
     }
 
     /// A declaration with no body, which the parser leaves as tokens (`pub fn f() -> u64;`, `const N: usize;`):
-    /// parsed again as the declaration it is. Tokens that are not one are not an Item.
-    fn declared(&mut self, owner: Option<&str>, tokens: TokenStream) {
+    /// parsed again as the declaration it is, and judged as any other (`base` is what the place it is in allows;
+    /// `own` says that its own visibility counts). Tokens that are not one are neither an Item nor left out.
+    fn declared(&mut self, owner: Option<&str>, tokens: TokenStream, base: bool, own: bool) {
         if let Ok(d) = syn::parse2::<Bodyless>(tokens) {
+            if !self.allowed(base, &d.attrs, own.then_some(&d.vis)) {
+                self.left_out += 1;
+                return;
+            }
             let key = match owner {
                 Some(owner) => format!("{owner}::{}", d.name),
                 None => self.scoped(&d.name),
@@ -380,19 +589,73 @@ fn first_line(tokens: TokenStream) -> Option<usize> {
     None
 }
 
-/// A declaration that has no body, as it is parsed again: its name, the line of its first token past the
-/// attributes, and the line of its `;`.
+/// Whether a declaration with these attributes is test code: `#[test]`, or `#[cfg(test)]` (also `all(test, ..)`, and
+/// `any(..)` of which every branch is, since those build only for a test).
+fn is_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("test")
+            || (a.path().is_ident("cfg")
+                && a.parse_args::<syn::Meta>().is_ok_and(|m| cfg_is_test(&m)))
+    })
+}
+
+/// Whether a `cfg` condition holds only when building for a test.
+fn cfg_is_test(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(p) => p.is_ident("test"),
+        syn::Meta::List(l) if l.path.is_ident("all") || l.path.is_ident("any") => {
+            let Ok(inner) = l.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if l.path.is_ident("all") {
+                inner.iter().any(cfg_is_test)
+            } else {
+                !inner.is_empty() && inner.iter().all(cfg_is_test)
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether a visibility written at `depth` inline `mod`s deep (0 at the top of the file) reaches outside the file's
+/// module and its inline `mod`s.
+fn reaches(vis: &syn::Visibility, depth: usize) -> bool {
+    match vis {
+        syn::Visibility::Inherited => false,
+        syn::Visibility::Public(_) => true,
+        syn::Visibility::Restricted(r) => {
+            if r.in_token.is_some() {
+                // an approximation: the provider does not know the module path
+                r.path.segments.first().is_none_or(|s| s.ident != "self")
+            } else if r.path.is_ident("self") {
+                false
+            } else if r.path.is_ident("super") {
+                // the parent of an inline `mod` is the file's module or another inline `mod`
+                depth == 0
+            } else {
+                true
+            }
+        }
+    }
+}
+
+/// A declaration that has no body, as it is parsed again: its name, its attributes and visibility, the line of its
+/// first token past the attributes, and the line of its `;`.
 struct Bodyless {
     name: String,
+    attrs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
     first: usize,
     end: usize,
 }
 
 impl Parse for Bodyless {
     fn parse(input: ParseStream) -> syn::Result<Bodyless> {
-        input.call(syn::Attribute::parse_outer)?;
+        let attrs = input.call(syn::Attribute::parse_outer)?;
         let first = input.cursor().span().start().line;
-        input.parse::<syn::Visibility>()?;
+        let vis = input.parse::<syn::Visibility>()?;
         input.parse::<Option<syn::Token![default]>>()?;
         // `const fn f();` is a function and `const N: usize;` is not: a signature is tried first
         let ahead = input.fork();
@@ -417,7 +680,13 @@ impl Parse for Bodyless {
             input.parse::<TokenTree>()?;
         }
         let end = input.parse::<syn::Token![;]>()?.span().end().line;
-        Ok(Bodyless { name, first, end })
+        Ok(Bodyless {
+            name,
+            attrs,
+            vis,
+            first,
+            end,
+        })
     }
 }
 
@@ -766,9 +1035,10 @@ mod tests {
         ask(source).into_iter().map(|i| (i.key, i.lines)).collect()
     }
 
-    /// The key of the one `fn f` in an `impl` with the header `header`.
+    /// The key of the one `fn f` in an `impl` with the header `header` (`pub`, which the inherent ones need and a
+    /// trait's do not read).
     fn key_of_impl(header: &str) -> String {
-        let source = format!("{header} {{ fn f() {{}} }}");
+        let source = format!("{header} {{ pub fn f() {{}} }}");
         let all = keys(&source);
         assert_eq!(all.len(), 1, "{header}: {all:?}");
         all.into_iter().next().unwrap()
@@ -776,7 +1046,7 @@ mod tests {
 
     #[test]
     fn a_free_fn_or_type_is_its_name_and_a_mod_leads_it_with_its_path() {
-        let source = "fn a() {}\nstruct B;\nmod m {\n    fn c() {}\n    mod n {\n        enum D {}\n    }\n}\nconst E: u8 = 1;\n";
+        let source = "pub fn a() {}\npub struct B;\npub mod m {\n    pub fn c() {}\n    pub mod n {\n        pub enum D {}\n    }\n}\npub const E: u8 = 1;\n";
         assert_eq!(keys(source), ["a", "B", "m::c", "m::n::D", "E"]);
     }
 
@@ -791,25 +1061,26 @@ pub fn price(
     total
 }
 
-struct Unit;
-struct Tuple(
+pub struct Unit;
+pub struct Tuple(
     u8,
 );
 pub struct Named {
     n: u8,
 }
-enum Kind {
+pub enum Kind {
     A,
 }
-union Bits {
+pub union Bits {
     a: u8,
 }
-trait Shape {
+pub trait Shape {
     fn area(&self) -> u64;
 }
-type Alias = u8;
-const LIMIT: u8 = 1;
-static COUNT: u8 = 1;
+pub type Alias = u8;
+pub const LIMIT: u8 = 1;
+pub static COUNT: u8 = 1;
+#[macro_export]
 macro_rules! twice {
     ($e:expr) => { $e * 2 };
 }
@@ -828,21 +1099,21 @@ macro_rules! twice {
                 ("Alias".to_string(), [25, 25]),
                 ("LIMIT".to_string(), [26, 26]),
                 ("COUNT".to_string(), [27, 27]),
-                ("twice!".to_string(), [28, 28]),
+                ("twice!".to_string(), [29, 29]),
             ]
         );
     }
 
     #[test]
     fn the_lines_start_after_the_doc_comments_and_attributes() {
-        let source = "/// One.\n/// Two.\n#[must_use]\n#[cfg(unix)]\nfn f() -> u8 {\n    1\n}\n";
+        let source =
+            "/// One.\n/// Two.\n#[must_use]\n#[cfg(unix)]\npub fn f() -> u8 {\n    1\n}\n";
         assert_eq!(found(source), [("f".to_string(), [5, 5])]);
     }
 
     #[test]
     fn the_lines_end_at_the_line_of_the_semicolon_or_the_brace_of_the_body() {
-        let source =
-            "fn f<T>(x: T)\nwhere\n    T: Copy,\n{\n    let _ = x;\n}\ntype Long =\n    u8;\n";
+        let source = "pub fn f<T>(x: T)\nwhere\n    T: Copy,\n{\n    let _ = x;\n}\npub type Long =\n    u8;\n";
         assert_eq!(
             found(source),
             [("f".to_string(), [1, 4]), ("Long".to_string(), [7, 8])]
@@ -851,7 +1122,7 @@ macro_rules! twice {
 
     #[test]
     fn a_type_with_fields_or_variants_goes_on_to_its_closing_brace() {
-        let source = "pub struct P {\n    x: u8,\n}\npub enum Kind {\n    A,\n    B,\n}\nunion U {\n    a: u8,\n}\npub struct T(u8);\n";
+        let source = "pub struct P {\n    x: u8,\n}\npub enum Kind {\n    A,\n    B,\n}\npub union U {\n    a: u8,\n}\npub struct T(u8);\n";
         assert_eq!(
             found(source),
             [
@@ -866,16 +1137,16 @@ macro_rules! twice {
     #[test]
     fn members_of_an_impl_and_a_trait_are_found_whatever_their_kind() {
         let source = "\
-trait Tr<T> {
+pub trait Tr<T> {
     type Out;
     const N: usize;
     fn make() -> T;
     fn name(&self) -> u8 { 1 }
 }
-struct S;
+pub struct S;
 impl S {
-    const K: u8 = 1;
-    fn new() -> S { S }
+    pub const K: u8 = 1;
+    pub fn new() -> S { S }
 }
 impl Tr<u8> for S {
     type Out = u8;
@@ -903,7 +1174,7 @@ impl Tr<u8> for S {
 
     #[test]
     fn a_mod_leads_the_key_of_what_is_in_an_impl_or_a_trait_in_it() {
-        let source = "mod m {\n    trait Tr { fn a(); }\n    struct S;\n    impl S { fn b() {} }\n    impl Tr for S { fn a() {} }\n}\n";
+        let source = "pub mod m {\n    pub trait Tr { fn a(); }\n    pub struct S;\n    impl S { pub fn b() {} }\n    impl Tr for S { fn a() {} }\n}\n";
         assert_eq!(
             keys(source),
             ["m::Tr", "m::Tr::a", "m::S", "m::S::b", "m::<S as Tr>::a"]
@@ -913,13 +1184,13 @@ impl Tr<u8> for S {
     #[test]
     fn what_a_key_does_not_name_is_not_found() {
         // a `mod` itself, an `impl` block, a `use`, a macro call, and what a function body holds
-        let source = "mod outer;\nmod inner {}\nuse std::fmt;\nthread_local! { static X: u8 = 1; }\nfn f() {\n    fn nested() {}\n    struct Local;\n}\nimpl Drop for S { fn drop(&mut self) {} }\nstruct S;\nextern \"C\" {\n    fn c();\n}\n";
+        let source = "mod outer;\nmod inner {}\nuse std::fmt;\nthread_local! { static X: u8 = 1; }\npub fn f() {\n    fn nested() {}\n    struct Local;\n}\nimpl Drop for S { fn drop(&mut self) {} }\npub struct S;\nextern \"C\" {\n    fn c();\n}\n";
         assert_eq!(keys(source), ["f", "<S as Drop>::drop", "S"]);
     }
 
     #[test]
     fn the_inherent_impls_of_one_type_with_other_arguments_are_other_keys() {
-        let source = "impl Foo<u8> { fn f() {} }\nimpl Foo<u16> { fn f() {} }\nimpl<T> Foo<T> { fn f() {} }\n";
+        let source = "impl Foo<u8> { pub fn f() {} }\nimpl Foo<u16> { pub fn f() {} }\nimpl<T> Foo<T> { pub fn f() {} }\n";
         assert_eq!(keys(source), ["Foo<u8>::f", "Foo<u16>::f", "Foo<T>::f"]);
     }
 
@@ -936,13 +1207,13 @@ impl Tr<u8> for S {
         let source = "\
 /// The price.
 pub fn price(total: u64) -> u64;
-const fn square(n: u64) -> u64;
-unsafe extern \"C\" fn raw(
+pub const fn square(n: u64) -> u64;
+pub unsafe extern \"C\" fn raw(
     p: *const u8,
 ) -> u8;
-const LIMIT: u64;
-static COUNT: u64;
-type Money;
+pub const LIMIT: u64;
+pub static COUNT: u64;
+pub type Money;
 ";
         assert_eq!(
             found(source),
@@ -959,13 +1230,13 @@ type Money;
 
     #[test]
     fn a_bodyless_declaration_inside_a_mod_and_an_impl_is_found_too() {
-        let source = "mod m {\n    pub fn f() -> u8;\n}\nimpl S {\n    pub fn g() -> u8;\n}\n";
+        let source = "pub mod m {\n    pub fn f() -> u8;\n}\nimpl S {\n    pub fn g() -> u8;\n}\n";
         assert_eq!(keys(source), ["m::f", "S::g"]);
     }
 
     #[test]
     fn two_declarations_on_one_line_have_lines_that_overlap() {
-        let source = "struct A; struct B;\npub trait Clock { fn now(&self) -> u64; }\n";
+        let source = "pub struct A; pub struct B;\npub trait Clock { fn now(&self) -> u64; }\n";
         assert_eq!(
             found(source),
             [
@@ -980,9 +1251,9 @@ type Money;
     #[test]
     fn declarations_of_the_two_namespaces_get_one_key_and_the_domain_refuses_it() {
         // the provider reports both; `interface.key-taken` is chidev's to raise
-        assert_eq!(keys("struct Foo;\nfn Foo() {}\n"), ["Foo", "Foo"]);
+        assert_eq!(keys("pub struct Foo;\npub fn Foo() {}\n"), ["Foo", "Foo"]);
         assert_eq!(
-            keys("#[cfg(unix)]\nfn f() {}\n#[cfg(windows)]\nfn f() {}\n"),
+            keys("#[cfg(unix)]\npub fn f() {}\n#[cfg(windows)]\npub fn f() {}\n"),
             ["f", "f"]
         );
     }
@@ -1040,13 +1311,13 @@ type Money;
 
     #[test]
     fn a_trailing_comma_over_several_lines_is_the_same_key_as_none() {
-        let broken = "impl<A, B> Foo<\n    A,\n    B,\n> {\n    fn f() {}\n}\n";
-        let plain = "impl<A, B> Foo<A, B> { fn f() {} }";
+        let broken = "impl<A, B> Foo<\n    A,\n    B,\n> {\n    pub fn f() {}\n}\n";
+        let plain = "impl<A, B> Foo<A, B> { pub fn f() {} }";
         assert_eq!(keys(broken), ["Foo<A,B>::f"]);
         assert_eq!(keys(broken), keys(plain));
-        let tupled = "impl Foo<(\n    A,\n    B,\n)> { fn f() {} }";
+        let tupled = "impl Foo<(\n    A,\n    B,\n)> { pub fn f() {} }";
         assert_eq!(keys(tupled), ["Foo<(A,B)>::f"]);
-        let function = "impl Foo<fn(\n    A,\n    B,\n) -> C> { fn f() {} }";
+        let function = "impl Foo<fn(\n    A,\n    B,\n) -> C> { pub fn f() {} }";
         assert_eq!(keys(function), ["Foo<fn(A,B)->C>::f"]);
     }
 
@@ -1101,26 +1372,33 @@ type Money;
         ));
         assert!(matches!(
             items(&Request {
-                protocol: 2,
+                protocol: 1,
                 source: String::new()
             }),
-            Err(Error::Protocol(2))
+            Err(Error::Protocol(1))
         ));
         assert!(matches!(handle(b"not json"), Err(Error::Request(_))));
     }
 
     #[test]
-    fn the_reply_is_the_json_of_the_protocol() {
-        let out = handle(br#"{"protocol":1,"source":"fn price(total: u64) -> u64;\n"}"#).unwrap();
+    fn the_reply_is_the_json_of_the_protocol_and_left_out_is_always_in_it() {
+        let out =
+            handle(br#"{"protocol":2,"source":"pub fn price(total: u64) -> u64;\n"}"#).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            r#"{"protocol":1,"items":[{"key":"price","lines":[1,1]}]}"#
+            r#"{"protocol":2,"items":[{"key":"price","lines":[1,1]}],"left_out":0}"#
+        );
+        let out = handle(br#"{"protocol":2,"source":"fn helper() {}\n"}"#).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"protocol":2,"items":[],"left_out":1}"#
         );
     }
 
     #[test]
     fn the_same_request_gives_the_same_reply_byte_for_byte() {
-        let request = br#"{"protocol":1,"source":"mod m { impl<T> Foo<T> { fn f() {} } }\n"}"#;
+        let request =
+            br#"{"protocol":2,"source":"pub mod m { impl<T> Foo<T> { pub fn f() {} } }\n"}"#;
         assert_eq!(handle(request).unwrap(), handle(request).unwrap());
     }
 
@@ -1128,5 +1406,202 @@ type Money;
     fn an_empty_source_has_no_item() {
         assert!(ask("").is_empty());
         assert!(ask("// nothing here\n").is_empty());
+        assert_eq!(left_out(""), 0);
+    }
+
+    /// How many declarations of `source` the provider found that a caller cannot name.
+    fn left_out(source: &str) -> usize {
+        items(&Request {
+            protocol: PROTOCOL,
+            source: source.to_string(),
+        })
+        .unwrap_or_else(|e| panic!("no reply for {source:?}: {e}"))
+        .left_out
+    }
+
+    #[test]
+    fn what_a_caller_cannot_name_is_not_an_item_and_is_counted() {
+        let source = "\
+pub fn api() {}
+fn helper() {}
+mod inner { pub fn x() {} }
+mod m { pub(super) fn y() {} }
+pub(super) fn z() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+";
+        // helper, inner::x (inner is private), m::y (`pub(super)` reaches the file's module only) and tests::t
+        assert_eq!(keys(source), ["api", "z"]);
+        assert_eq!(left_out(source), 4);
+    }
+
+    #[test]
+    fn the_visibility_that_reaches_outside_is_pub_pub_crate_and_pub_super_at_the_top() {
+        let source = "\
+fn a() {}
+pub(self) fn b() {}
+pub fn c() {}
+pub(crate) fn d() {}
+pub(super) fn e() {}
+pub mod m {
+    pub(super) fn f() {}
+    pub(self) fn g() {}
+    pub(crate) fn h() {}
+    pub mod n {
+        pub(super) fn i() {}
+        pub fn j() {}
+    }
+}
+";
+        // left out: a, b, m::f, m::g, m::n::i
+        assert_eq!(keys(source), ["c", "d", "e", "m::h", "m::n::j"]);
+        assert_eq!(left_out(source), 5);
+    }
+
+    #[test]
+    fn pub_in_a_path_is_out_when_the_path_starts_with_self_and_in_otherwise() {
+        assert!(keys("pub(in self::x) fn a() {}").is_empty());
+        assert!(keys("pub(in self) fn a() {}").is_empty());
+        assert_eq!(left_out("pub(in self::x) fn a() {}"), 1);
+        assert_eq!(keys("pub(in crate::a) fn a() {}"), ["a"]);
+        assert_eq!(keys("pub(in super::a) fn a() {}"), ["a"]);
+    }
+
+    #[test]
+    fn a_declaration_in_a_mod_needs_every_mod_around_it_to_reach_too() {
+        let source = "pub mod a {\n    mod b {\n        pub fn hidden() {}\n    }\n    pub mod c {\n        pub fn shown() {}\n        fn private() {}\n    }\n}\n";
+        assert_eq!(keys(source), ["a::c::shown"]);
+        assert_eq!(left_out(source), 2);
+    }
+
+    #[test]
+    fn a_member_of_an_inherent_impl_of_a_type_that_does_not_reach_is_not_an_item() {
+        let source = "struct S;\nimpl S { pub fn f() {} }\npub struct P;\nimpl P { pub fn g() {} fn h() {} }\nimpl Elsewhere { pub fn i() {} }\n";
+        // left out: S, S::f, P::h
+        assert_eq!(keys(source), ["P", "P::g", "Elsewhere::i"]);
+        assert_eq!(left_out(source), 3);
+        // the type is looked up where the `impl` is, by the path as written
+        let source = "mod m {\n    pub struct S;\n}\npub struct S;\nimpl S { pub fn f() {} }\nimpl m::S { pub fn g() {} }\n";
+        // left out: m::S (m is private), m::S::g
+        assert_eq!(keys(source), ["S", "S::f"]);
+        assert_eq!(left_out(source), 2);
+    }
+
+    #[test]
+    fn a_member_of_a_trait_is_an_item_when_the_trait_is() {
+        let source = "pub trait A { fn a(); const N: u8; type T; }\ntrait B { fn b(); }\n";
+        assert_eq!(keys(source), ["A", "A::a", "A::N", "A::T"]);
+        assert_eq!(left_out(source), 2);
+    }
+
+    #[test]
+    fn a_member_of_a_trait_impl_is_an_item_when_the_trait_and_the_type_declared_here_reach() {
+        let source = "pub struct P;\nimpl std::fmt::Display for P {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }\n}\n";
+        assert_eq!(keys(source), ["P", "<P as std::fmt::Display>::fmt"]);
+        assert_eq!(left_out(source), 0);
+        // a type declared here that does not reach
+        let source = "struct S;\nimpl std::fmt::Display for S { fn fmt() {} }\n";
+        assert!(keys(source).is_empty());
+        assert_eq!(left_out(source), 2);
+        // a trait declared here that does not reach, for a type that does
+        let source = "trait T { fn t(); }\npub struct P;\nimpl T for P { fn t() {} }\nimpl Elsewhere for P { fn e() {} }\n";
+        assert_eq!(keys(source), ["P", "<P as Elsewhere>::e"]);
+        assert_eq!(left_out(source), 3);
+        // names from another file reach
+        assert_eq!(
+            keys("impl Other for Another { fn f() {} }"),
+            ["<Another as Other>::f"]
+        );
+        // through a reference
+        let source = "struct S;\nimpl Elsewhere for &S { fn f() {} }\n";
+        assert!(keys(source).is_empty());
+    }
+
+    #[test]
+    fn test_code_is_not_an_item_wherever_it_is() {
+        let source = "\
+#[cfg(test)]
+pub fn a() {}
+#[test]
+pub fn b() {}
+#[cfg(all(test, unix))]
+pub fn c() {}
+#[cfg(not(test))]
+pub fn d() {}
+#[cfg(unix)]
+pub fn e() {}
+#[cfg(any(test, unix))]
+pub fn f() {}
+#[cfg(test)]
+pub struct Fake;
+impl Fake { pub fn g() {} }
+pub struct S;
+#[cfg(test)]
+impl S { pub fn h() {} }
+impl S {
+    #[cfg(test)]
+    pub fn i() {}
+    pub fn j() {}
+}
+pub trait Tr {
+    #[cfg(test)]
+    fn k();
+    fn l();
+}
+#[cfg(test)]
+pub mod tests {
+    pub fn m() {}
+}
+";
+        assert_eq!(keys(source), ["d", "e", "f", "S", "S::j", "Tr", "Tr::l"]);
+        // a, b, c, Fake, Fake::g, h, i, k, m
+        assert_eq!(left_out(source), 9);
+    }
+
+    #[test]
+    fn a_declaration_with_no_body_is_judged_by_the_same_rules() {
+        let source = "\
+pub fn a() -> u8;
+fn b() -> u8;
+pub(super) fn c() -> u8;
+#[cfg(test)]
+pub fn d() -> u8;
+mod m {
+    pub fn e() -> u8;
+}
+pub mod n {
+    pub(super) fn f() -> u8;
+    pub fn g() -> u8;
+}
+struct S;
+impl S {
+    pub fn h() -> u8;
+}
+pub struct P;
+impl P {
+    pub fn i() -> u8;
+    fn j() -> u8;
+}
+pub trait Tr {
+    const N: usize;
+}
+trait Hidden {
+    const M: usize;
+}
+";
+        assert_eq!(keys(source), ["a", "c", "n::g", "P", "P::i", "Tr", "Tr::N"]);
+        // b, d, m::e, n::f, S, S::h, P::j, Hidden, Hidden::M
+        assert_eq!(left_out(source), 9);
+    }
+
+    #[test]
+    fn a_macro_is_an_item_only_when_exported() {
+        let source =
+            "#[macro_export]\nmacro_rules! a { () => {}; }\nmacro_rules! b { () => {}; }\n";
+        assert_eq!(keys(source), ["a!"]);
+        assert_eq!(left_out(source), 1);
     }
 }

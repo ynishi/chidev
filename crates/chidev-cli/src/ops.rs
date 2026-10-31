@@ -80,8 +80,10 @@ enum Op {
     },
     /// Makes or revises an Interface. The code is `source`, or the text of the file `source_file` (relative to the
     /// project's root); exactly one is given. `items` may be left out: the provider of the language its
-    /// `[[measure.layout]]` gives finds them in the code, and `renames` (`{"from","to"}`) hand the id of the Item
-    /// that had the key `from` to the one found under `to`. With `items`, nothing is found and `renames` is refused.
+    /// `[[measure.layout]]` gives finds them in the code (the declarations a caller outside it can name; the result
+    /// says in `left_out` how many it found that a caller cannot), and `renames` (`{"from","to"}`) hand the id of the
+    /// Item that had the key `from` to the one found under `to`. With `items`, nothing is found and `renames` is
+    /// refused.
     InterfacePut {
         context: String,
         name: String,
@@ -2563,6 +2565,9 @@ enum PutOut<'a> {
         name: &'a str,
         id: String,
         revision: u64,
+        /// An Interface whose items a provider found: how many declarations it left out (0 included).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        left_out: Option<usize>,
     },
 }
 
@@ -2585,12 +2590,14 @@ impl<'a> From<&'a PutDone> for PutOut<'a> {
                 name,
                 id,
                 revision,
+                left_out,
             } => PutOut::Asset {
                 put: kind.word(),
                 context: context.as_str(),
                 name: name.as_str(),
                 id: id.to_string(),
                 revision: revision.number(),
+                left_out: *left_out,
             },
         }
     }
@@ -2606,11 +2613,15 @@ struct ChangeSetOut<'a> {
 }
 
 /// The result of a put of one asset (`contract_put`, `clauses_put`, `interface_put`, `harness_put`): the asset's id
-/// and the revision it has after the put.
+/// and the revision it has after the put. An `interface_put` whose items a provider found also says `left_out`, how
+/// many declarations the provider found that a caller cannot name (0 included), so that leaving them out is never
+/// silent.
 #[derive(Debug, Serialize)]
 struct AssetPutOut<'a> {
     id: String,
     revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left_out: Option<usize>,
     findings: Vec<FindingOut<'a>>,
 }
 
@@ -3691,6 +3702,7 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
+                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }
@@ -3707,6 +3719,7 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
+                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }
@@ -3733,6 +3746,7 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
+                left_out: done.value.left_out,
                 findings: findings_out(&done.findings),
             })?
         }
@@ -3783,6 +3797,7 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
+                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }

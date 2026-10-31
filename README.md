@@ -24,7 +24,7 @@ uses chidev as a library depends on `chidev` (see "Crates").
 | `chidev` | Umbrella: the name users depend on. Re-exports the core. |
 | `chidev-core` | Core (SDK): `domain` (pure rules and types), `app` (use cases and their ports), `infra` (adapters with real I/O). |
 | `chidev-cli` | The `chidev` command. |
-| `chidev-provider-rust` | The Rust providers: of mutants (`chidev provider mutants-rust`, a pure function from a source text to edits) and of Items (`chidev provider items-rust`, from a source text to the keys and lines of its declarations). Depended on by the CLI only; the core reaches a provider as a process. |
+| `chidev-provider-rust` | The Rust providers: of mutants (`chidev provider mutants-rust`, a pure function from a source text to edits) and of Items (`chidev provider items-rust`, from a source text to the keys and lines of the declarations a caller can name). Depended on by the CLI only; the core reaches a provider as a process. |
 
 The layer rules are in `arch-lint.toml` and run with `cargo test`. A crate or layer
 that does not fit the project is deleted, together with its `arch-lint.toml` scope.
@@ -122,7 +122,7 @@ where they belong):
 {"op":"base_on_contract","context":"pricing"}
 {"op":"contract_put","context":"pricing","name":"discount","title":"Discount",
  "clauses":[{"label":"C1","text":"a discount over 100% is refused"}]}
-{"op":"interface_put","context":"pricing","name":"price","source":"fn price(total: u64) -> u64;\n",
+{"op":"interface_put","context":"pricing","name":"price","source":"pub fn price(total: u64) -> u64;\n",
  "items":[{"key":"price","lines":[1,1]}]}
 {"op":"harness_put","context":"pricing","name":"price-tests","source":"#[test] fn refuses() {}\n",
  "cases":[{"name":"refuses","lines":[1,1],
@@ -212,12 +212,16 @@ where they belong):
     (`input.replaces-kept`) and is replaced by one Item at most
     (`input.rename-conflict`).
   - `items` can be left out. A provider for the language of the Interface then
-    finds them in `source` (see "Provider protocol `chidev-items 1`"): the language
+    finds them in `source` (see "Provider protocol `chidev-items 2`"): the language
     is the `lang` of the Interface's `[[measure.layout]]`, and the command is
     `[measure.items]` of `chidev.toml`. The keys and lines are the provider's, so
     nothing is written by hand, and a provider that fails or disagrees refuses the
-    put before anything is read or kept. With `items` written, no provider is
-    started. A put that leaves `items` out is refused when the Interface has no layout
+    put before anything is read or kept. The Items are the declarations a caller of
+    the code can name; the declarations the provider found that a caller cannot
+    (a private helper, a test) are left out, and the result of the put says how many
+    in `left_out` (0 included), so that nothing is dropped silently. In a
+    `change_set` the entry of that Interface has `left_out`. With `items` written, no
+    provider is started and there is no `left_out`. A put that leaves `items` out is refused when the Interface has no layout
     or no `lang` (`input.items-required`), when `[measure.items]` has no command for
     the language (`items.no-provider`), when the provider answers what the protocol
     or the code does not allow (`items.protocol`), and when it cannot be run to its
@@ -248,7 +252,8 @@ where they belong):
     read. An Item and a declaration the provider found are paired when their lines
     overlap and each overlaps no other on the other side. A paired Item takes the
     provider's key *and* its lines. An Item that is not paired stays as it is and is
-    listed in `unmatched`: no declaration is on its lines, or it and the declarations
+    listed in `unmatched`: no declaration is on its lines (a declaration the provider
+    leaves out because a caller cannot name it is none), or it and the declarations
     share lines with others (two declarations on one line; an Item written over the
     lines of several).
   - The result has `rekeyed` (`{"from","to"}` of each key that changed), `revised`
@@ -521,7 +526,7 @@ checked once, on the state it ends in, and all of it is applied or none of it.
 {"op":"change_set",
  "puts":[
   {"put":"contract","context":"core","name":"stock","title":"Stock","clauses":[{"label":"C1","text":".."}]},
-  {"put":"interface","context":"core","name":"stock","source":"fn reserve();\n",
+  {"put":"interface","context":"core","name":"stock","source":"pub fn reserve();\n",
    "items":[{"key":"reserve","lines":[1,1]}]},
   {"put":"harness","context":"core","name":"stock-tests","source":"..","cases":[
    {"name":"reserve_refuses","lines":[1,1],
@@ -964,7 +969,7 @@ runs stale. Leave `str` out to skip the mutants of string literals.
 
 `[measure.items]` is read by the same loader as `[measure.mutants]`: a language and
 the command that finds the Items of an Interface of that language (see "Provider
-protocol `chidev-items 1`"). The language of an Interface is the `lang` of its
+protocol `chidev-items 2`"). The language of an Interface is the `lang` of its
 `[[measure.layout]]` entry, and a `lang` is valid when `mutants` or `items` (or both)
 has a command for it. Three things follow from the table being `[measure]`'s:
 
@@ -1017,39 +1022,75 @@ arguments of `include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!`
 point of the class is the message no test reads (a wrong number or an empty text
 in an error): such a mutant survives.
 
-### Provider protocol `chidev-items 1`
+### Provider protocol `chidev-items 2`
 
 The provider of items is a program that finds the declarations of an Interface in
-its code and nothing else: a pure function of a source text. Like the provider of
-mutants it gets one JSON document on stdin, answers one on stdout, and writes its
-diagnostics to stderr:
+its code that a caller can name, and nothing else: a pure function of a source text.
+Like the provider of mutants it gets one JSON document on stdin, answers one on
+stdout, and writes its diagnostics to stderr:
 
 ```json
-{"protocol":1,"source":"pub fn price(\n    total: u64,\n) -> u64;\nfn tax() -> u64;\n"}
-{"protocol":1,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}]}
+{"protocol":2,"source":"pub fn price(\n    total: u64,\n) -> u64;\npub fn tax() -> u64;\nfn round(n: u64) -> u64;\n"}
+{"protocol":2,"items":[{"key":"price","lines":[1,3]},{"key":"tax","lines":[4,4]}],"left_out":1}
 ```
+
+A **caller** of a source is code outside that source, built as a caller builds it
+(not as part of the source's own tests). An Item is a declaration such a caller can
+name. The provider answers the Items, and in `left_out` how many declarations it
+found that are not (above, `round`, which nothing outside can name). What a caller
+can name is the provider's to say, by the rules of its language. `left_out` is
+required and is written even when it is 0, so that leaving declarations out is never
+silent: the result of the put that used the provider shows it.
 
 An Item is a `key` (the name the Item is matched by when the code is put again: not
 empty, one line, opaque to chidev) and the first and last of its `lines`, from 1,
 that point at the declaration alone, from its first token to the line that ends the
-signature. There is no `kind`. chidev checks the reply against the code before it
-puts anything: a protocol other than 1, a field the protocol does not have, an empty
-key, and `lines` that are not lines of the code are `items.protocol`; a command that
-cannot be started, exits with a failure, or does not answer within `timeout` is
-`items.failed`. Whether the declarations are apart is not checked: a trait and its
-method on one line have the same `lines`, which is a right answer, and the Items
-that share a line are all revised when that line changes. The same key twice is
-refused by the Interface (`interface.key-taken`). The reply is capped at 4 MiB.
+signature. There is no `kind`. chidev reads `chidev-items 2` only, and checks the
+reply against the code before it puts anything: a protocol other than 2, a reply
+without `left_out` (what `chidev-items 1` answered), a field the protocol does not
+have, an empty key, and `lines` that are not lines of the code are `items.protocol`;
+a command that cannot be started, exits with a failure, or does not answer within
+`timeout` is `items.failed`. Whether the declarations are apart is not checked: a
+trait and its method on one line have the same `lines`, which is a right answer, and
+the Items that share a line are all revised when that line changes. The same key
+twice is refused by the Interface (`interface.key-taken`). The reply is capped at
+4 MiB.
 
 The bundled Rust provider is `chidev provider items-rust` (`rust = ["chidev",
 "provider", "items-rust"]` in `[measure.items]`). It finds a `fn`, `struct`, `enum`,
 `union`, `trait`, `type`, `const`, `static` and `macro_rules!` item, and the `fn`,
 `const` and `type` inside an `impl` or a `trait`; an inline `mod` is entered, and
 nothing in a function body is found. A declaration with no body
-(`fn price(total: u64) -> u64;`, the form the examples above use) is found as well. The
-`lines` of an Item run from its first token, after the doc comments and attributes, to
+(`pub fn price(total: u64) -> u64;`, the form the examples above use) is found as well.
+The `lines` of an Item run from its first token, after the doc comments and attributes, to
 the line that has the `;` or the `{` of its body; a `struct`, `enum` or `union` runs on
 to its closing `}`, so a field or variant added, removed or retyped revises the Item.
+
+Of what it finds, it answers the declarations a caller can name. "Outside" is outside
+the module of the file and outside the inline `mod`s in it; a declaration with no body
+is judged as any other:
+
+| declaration | Item? |
+|---|---|
+| no visibility, `pub(self)` | no |
+| `pub`, `pub(crate)` | yes |
+| `pub(super)` at the top level of the file | yes |
+| `pub(super)` inside an inline `mod m` | no |
+| `pub(in path)` | no if `path` starts with `self`, otherwise yes (an approximation: the provider does not know the module path) |
+| inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside |
+| a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside |
+| a member of a `trait` | when the trait is an Item |
+| a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching) |
+| under `#[cfg(test)]`, inside such a `mod`, a `#[test]` fn | no |
+
+Two more things follow from "a caller builds it": `#[cfg(all(test, ..))]`, and
+`#[cfg(any(..))]` of which every branch is `test`, count as `#[cfg(test)]`; and a
+`macro_rules!` has no visibility, so it is an Item only with `#[macro_export]` (and
+the inline `mod`s around it reach outside). A type or a trait is looked up in the
+module the `impl` is in, by the path as written (`self::`, `super::` and the names of
+inline `mod`s are followed); a path from `crate` or one the file does not declare
+reaches. Every declaration that is not an Item is counted in `left_out`, the contents
+of a `#[cfg(test)]` `mod` included.
 
 A key is a name and a path, not the text of the declaration:
 

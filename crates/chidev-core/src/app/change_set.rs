@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::commit::{EditTrigger, ModelDelta};
 use super::ports::external::ExternalExecutor;
-use super::ports::items::{FoundItem, ItemsError};
+use super::ports::items::{FoundItem, FoundItems, ItemsError};
 use super::ports::{AssetKind, IdSource, NamedAsset, Store};
 use super::{
     App, AppError, CaseInput, Checked, ClauseInput, ClauseRef, ItemInput, Names, Put, RenameInput,
@@ -93,8 +93,9 @@ pub struct InterfacePut {
 pub enum ItemsInput {
     /// They are all of them, and no provider is asked.
     Written(Vec<ItemInput>),
-    /// The provider of the language the Interface is laid out with finds them in `source`, before the set is planned
-    /// and before the store is read, so a provider that fails leaves everything as it was.
+    /// The provider of the language the Interface is laid out with finds them in `source` (the declarations a caller
+    /// can name, and it says how many others it left out: see [`PutDone::Asset`]), before the set is planned and
+    /// before the store is read, so a provider that fails leaves everything as it was.
     Found {
         /// The Item that had the key `from` is the one found under `to`, and keeps its id (what `replaces` is for
         /// Items that are written). Only the keys named are renamed.
@@ -314,6 +315,9 @@ pub enum PutDone {
         id: Uuid,
         /// The asset's revision after the change.
         revision: Revision,
+        /// For an Interface put with its Items left to a provider: how many declarations the provider found that a
+        /// caller cannot name and so left out (0 included). None for any other put.
+        left_out: Option<usize>,
     },
 }
 
@@ -500,7 +504,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     keep_or_note(done, &mut puts, &mut problems);
                 }
                 PutInput::Interface(i) => {
-                    let found = found.get(&n).map(Vec::as_slice);
+                    let found = found.get(&n).map(|f| f.items.as_slice());
                     let done = self.interface_put(&p, &mut plan, i, found).await;
                     keep_or_note(done, &mut puts, &mut problems);
                 }
@@ -577,7 +581,8 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         let done = set
             .puts
             .iter()
-            .map(|put| put_done(put, &p, &plan, &after))
+            .enumerate()
+            .map(|(n, put)| put_done(put, found.get(&n).map(|f| f.left_out), &p, &plan, &after))
             .collect::<Result<Vec<PutDone>, AppError>>()?;
         // The change request the set is applied for gains the work in the state after, which is how an edit can
         // introduce a finding about its request.
@@ -801,14 +806,15 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         }
     }
 
-    /// The Items the provider finds for each Interface put that gives none, by the index of the put in the set. It
-    /// asks nothing of the store: it is the first step of a set, so that a provider that fails refuses the set
-    /// before the store is read, and the Items are input like any other when the set is planned. An Interface put
-    /// with its Items asks no provider. Every Interface that cannot be given its Items is named.
+    /// The Items the provider finds for each Interface put that gives none, by the index of the put in the set, with
+    /// how many declarations it left out. It asks nothing of the store: it is the first step of a set, so that a
+    /// provider that fails refuses the set before the store is read, and the Items are input like any other when the
+    /// set is planned. An Interface put with its Items asks no provider. Every Interface that cannot be given its
+    /// Items is named.
     async fn found_items(
         &self,
         set: &ChangeSetInput,
-    ) -> Result<BTreeMap<usize, Vec<FoundItem>>, AppError> {
+    ) -> Result<BTreeMap<usize, FoundItems>, AppError> {
         let mut found = BTreeMap::new();
         let mut problems = Vec::new();
         for (n, put) in set.puts.iter().enumerate() {
@@ -832,7 +838,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     }
 
     /// The Items of `i.source`, from the provider of the language `i` is laid out with.
-    async fn find_items(&self, i: &InterfacePut) -> Result<Vec<FoundItem>, AppError> {
+    async fn find_items(&self, i: &InterfacePut) -> Result<FoundItems, AppError> {
         let context = ContextName::try_from(i.context.as_str())?;
         let lang = self
             .items
@@ -1518,8 +1524,10 @@ fn target_of(kind: AssetKind, id: Uuid) -> Target {
 }
 
 /// What a put came to, from the plan and the Project after the change (`before` resolves the Context's name).
+/// `left_out` is what the provider left out of the Interface this put gave no Items, when it is that put.
 fn put_done(
     put: &PutInput,
+    left_out: Option<usize>,
     before: &Project,
     plan: &Plan,
     after: &Project,
@@ -1567,15 +1575,21 @@ fn put_done(
             plan,
             after,
         ),
-        PutInput::Interface(i) => asset_put_done(
-            AssetPutKind::Interface,
-            AssetKind::Interface,
-            &i.context,
-            &i.name,
-            before,
-            plan,
-            after,
-        ),
+        PutInput::Interface(i) => {
+            let mut done = asset_put_done(
+                AssetPutKind::Interface,
+                AssetKind::Interface,
+                &i.context,
+                &i.name,
+                before,
+                plan,
+                after,
+            )?;
+            if let PutDone::Asset { left_out: slot, .. } = &mut done {
+                *slot = left_out;
+            }
+            Ok(done)
+        }
         PutInput::Harness(h) => asset_put_done(
             AssetPutKind::Harness,
             AssetKind::Harness,
@@ -1631,6 +1645,7 @@ fn asset_put_done(
         name: name.to_string(),
         id,
         revision,
+        left_out: None,
     })
 }
 
@@ -1653,9 +1668,15 @@ pub(super) fn only_put<I>(
         .into_iter()
         .next()
         .and_then(|d| match d {
-            PutDone::Asset { id, revision, .. } => Some(Put {
+            PutDone::Asset {
+                id,
+                revision,
+                left_out,
+                ..
+            } => Some(Put {
                 id: make(id),
                 revision,
+                left_out,
             }),
             _ => None,
         })

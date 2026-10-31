@@ -95,6 +95,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .items(&lang, old.source().as_str())
             .await
             .map_err(|e| items_error(&context, &interface, Some(&lang), e))?;
+        let found = found.items;
         let ranges = found
             .iter()
             .map(|f| LineRange::new(f.lines.0, f.lines.1))
