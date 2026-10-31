@@ -385,15 +385,6 @@ pub trait Runner: fmt::Debug + Send + Sync {
 pub struct NoRunner;
 
 impl Runner for NoRunner {
-    fn settings_of<'a>(&'a self, targets: &'a [SettingsTarget]) -> BoxFuture<'a, SettingsSaid> {
-        Box::pin(async move {
-            targets
-                .iter()
-                .map(|target| (target.clone(), Err(RunnerError::Unconfigured)))
-                .collect()
-        })
-    }
-
     fn settings<'a>(
         &'a self,
         _: &'a ContextName,

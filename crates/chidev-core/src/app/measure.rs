@@ -454,7 +454,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                     }
                     // A kind of run asks the runner for the settings of that kind: a Harness whose kind has
                     // changed since is asked as its runs were made.
-                    let (context, harness) = (context.name().clone(), harness);
+                    let context = context.name().clone();
                     asked.push(if m.kind() == MeasureKind::Examples {
                         (
                             SettingsTarget::Examples {
@@ -477,15 +477,20 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 }
             }
         }
-        let targets: Vec<SettingsTarget> = asked.iter().map(|(t, _)| t.clone()).collect();
+        let (targets, whose): (Vec<SettingsTarget>, Vec<Asked>) = asked.into_iter().unzip();
         let said = if targets.is_empty() {
             Vec::new()
         } else {
             self.runner.settings_of(&targets).await
         };
-        for (target, whose) in asked {
-            // The answer is the one beside the target; a runner that left a target out gives no settings for it.
-            let now = match said.iter().find(|(t, _)| *t == target) {
+        for (k, (target, whose)) in targets.iter().zip(whose).enumerate() {
+            // The answer is the one beside the target, wherever the runner put it (most often where it was asked);
+            // a runner that left a target out gives no settings for it.
+            let answer = said
+                .get(k)
+                .filter(|(t, _)| t == target)
+                .or_else(|| said.iter().find(|(t, _)| t == target));
+            let now = match answer {
                 Some((_, digest)) => settings_now(digest.clone()),
                 None => SettingsNow::Unreadable("the runner gave no settings for it".to_string()),
             };

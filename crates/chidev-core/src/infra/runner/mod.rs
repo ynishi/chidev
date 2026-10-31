@@ -1702,11 +1702,8 @@ path = "check.txt"
                 .await
                 .unwrap();
         }
-        assert!(
-            (4..=5).contains(&together.read()),
-            "{} files",
-            together.read()
-        );
+        // the interpreter and the program are the one `sh`, found by the one walk of `PATH`: one file more
+        assert_eq!(together.read(), 4);
         // and what is said is what the single asks say, for every target
         let said = runner.settings_of(&targets).await;
         assert_eq!(said.len(), targets.len());

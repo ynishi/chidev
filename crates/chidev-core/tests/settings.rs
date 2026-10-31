@@ -862,10 +862,7 @@ async fn the_settings_now_of_every_run_are_asked_of_the_runner_once_and_together
     assert_eq!(asks.singles.load(Ordering::Relaxed), 0);
     // and a check of the project reads them the same way: once more, and still never one at a time
     app.check(None, &[]).await.unwrap();
-    assert!(asks.batches.load(Ordering::Relaxed) >= 2);
-    assert_eq!(
-        asks.batches.load(Ordering::Relaxed),
-        asks.targets.load(Ordering::Relaxed)
-    );
+    assert_eq!(asks.batches.load(Ordering::Relaxed), 2);
+    assert_eq!(asks.targets.load(Ordering::Relaxed), 2);
     assert_eq!(asks.singles.load(Ordering::Relaxed), 0);
 }
