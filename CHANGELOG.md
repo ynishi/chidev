@@ -81,6 +81,19 @@ and this project adheres to
 
 ### Changed
 
+- An Interface's Items are the declarations a caller can name: the provider
+  protocol is `chidev-items 2`, which defines a caller as code outside the
+  source, built as a caller builds it (not as the source's own tests), and
+  whose reply has a required `left_out`, the number of declarations found
+  that are not Items. `chidev provider items-rust` leaves out private
+  declarations, `#[cfg(test)]` code and `#[test]` functions, and an
+  unreadable `cfg` is a failure of the provider. A put, a `change_set` entry
+  and `items_rekey` say `left_out`, so leaving them out is never silent. A
+  reply of version 1, or one without `left_out`, is `items.protocol`.
+  Putting an Interface again with its `items` left out retires the Items that
+  are now left out (a Case that cites one is refused first). In Rust:
+  `FoundItems`, `ItemsFrom`, `InterfaceDone`, and `Rekeyed::left_out`.
+
 - The program under test of a simulation or of examples (`program` of
   `[measure.sim.<context>]` and `[measure.examples.<context>]`) is judged by
   where its first word starts from, with the copy as the working directory. A
