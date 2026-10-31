@@ -80,6 +80,37 @@ impl Drop for Project {
     }
 }
 
+/// A directory of the host, outside any project, for the programs a project starts that are not its own.
+struct Host(PathBuf);
+
+impl Host {
+    fn new() -> Host {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "chidev-examples-host-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Host(dir)
+    }
+
+    /// Writes the executable `name` and returns its path.
+    fn script(&self, name: &str, text: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The program as the Pin accepted it: it answers by its first argument.
 const PROGRAM: &str = r#"# PINNED
 case "$1" in
@@ -321,7 +352,12 @@ async fn a_program_that_is_not_there_is_an_error_naming_the_program() {
         .await
         .unwrap_err();
     assert!(matches!(error, RunnerError::Locate { .. }), "{error:?}");
-    assert!(error.to_string().starts_with("the program: "), "{error}");
+    assert!(
+        error
+            .to_string()
+            .starts_with("the program of the examples: "),
+        "{error}"
+    );
     // and its settings cannot be read either
     let error = project
         .runner()
@@ -540,10 +576,17 @@ async fn a_table_with_its_defaults_written_out_and_one_without_have_one_digest()
 #[tokio::test]
 async fn the_programs_file_is_in_the_digest_and_the_report_carries_the_digest_the_run_ran_under() {
     let project = Project::new();
-    project.script("launch.sh", "#!/bin/sh\nexec sh \"$@\"\n");
-    project.edit(|t| t.replace("program = [\"sh\",", "program = [\"./launch.sh\","));
+    // a program of the host: a file outside the project
+    let host = Host::new();
+    let launch = host.script("launch.sh", "#!/bin/sh\nexec sh \"$@\"\n");
+    project.edit(|t| {
+        t.replace(
+            "program = [\"sh\",",
+            &format!("program = [\"{}\",", launch.display()),
+        )
+    });
     let before = digest(&project).await;
-    project.script("launch.sh", "#!/bin/sh\nexec sh \"$@\" # changed\n");
+    host.script("launch.sh", "#!/bin/sh\nexec sh \"$@\" # changed\n");
     let after = digest(&project).await;
     assert_ne!(before, after);
     let report = project
@@ -559,27 +602,99 @@ async fn the_programs_file_is_in_the_digest_and_the_report_carries_the_digest_th
     assert_eq!(report.examples[0].1, Verdict::Ok);
 }
 
-#[tokio::test]
-async fn a_program_that_is_another_file_in_the_copy_than_at_the_root_fails_the_run_as_settings_moved()
- {
+/// The build of a program the build writes: it checks the pinned code and writes `target/debug/app` in the copy,
+/// which runs the pinned code. `target` is not copied, so the program is not there until the build has run.
+const BUILDS_APP: &str = "mkdir -p target/debug && grep -q PINNED prog.sh && printf '#!/bin/sh\\\\nexec sh prog.sh \\\"$@\\\"\\\\n' > target/debug/app && chmod +x target/debug/app";
+
+/// The project whose program is `first` (the only word of `program`), built by `build` (a shell command).
+fn project_of_app(first: &str, build: &str) -> Project {
     let project = Project::new();
-    project.script("launch.sh", "#!/bin/sh\nexec sh \"$@\"\n");
-    // the pinned code is written over `launch.sh` in the copy
     project.edit(|t| {
-        t.replace("program = [\"sh\",", "program = [\"./launch.sh\",")
-            .replace("path = \"prog.sh\"", "path = \"launch.sh\"")
+        t.replace(
+            "build = [\"sh\", \"-c\", \"grep -q PINNED prog.sh\"]",
+            &format!("build = [\"sh\", \"-c\", \"{build}\"]"),
+        )
+        .replace(
+            "program = [\"sh\", \"{tree}/prog.sh\"]",
+            &format!("program = [\"{first}\"]"),
+        )
     });
+    project
+}
+
+/// The project of a program the build writes, started as `first`.
+fn project_of_built_app(first: &str) -> Project {
+    project_of_app(first, BUILDS_APP)
+}
+
+#[tokio::test]
+async fn a_program_the_build_writes_is_in_the_copy_and_not_in_the_settings() {
+    let project = project_of_built_app("./target/debug/app");
+    // no build at the root: the settings are still readable
+    assert!(!project.0.join("target").exists());
+    let before = digest(&project).await;
+    // a build of the developer's own, at that path of the root, is not the program a run starts
+    std::fs::create_dir_all(project.0.join("target/debug")).unwrap();
+    project.script("target/debug/app", "#!/bin/sh\necho local build\n");
+    assert_eq!(digest(&project).await, before);
+    project.script("target/debug/app", "#!/bin/sh\necho local rebuild\n");
+    assert_eq!(digest(&project).await, before);
+    // the run starts the program the build wrote in the copy, from the pinned code
     let report = project
         .runner()
         .run_examples(&request(
-            "run-moved",
+            "run-built",
+            vec![example("a1", "echo", "hi\n", "hi\n#exit 0\n")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.examples[0].1, Verdict::Ok);
+    assert_eq!(report.settings, before);
+    // and it is not asked to be the file at the root: no `settings_moved`, with a root that has none or another
+    std::fs::remove_dir_all(project.0.join("target")).unwrap();
+    let report = project
+        .runner()
+        .run_examples(&request(
+            "run-built-again",
+            vec![example("a1", "echo", "hi\n", "hi\n#exit 0\n")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.settings, before);
+}
+
+#[tokio::test]
+async fn a_first_word_with_a_placeholder_is_accepted_and_runs() {
+    let project = project_of_built_app("{tree}/target/debug/app");
+    let report = project
+        .runner()
+        .run_examples(&request(
+            "run-tree",
+            vec![example("a1", "echo", "hi\n", "hi\n#exit 0\n")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(report.failure, None, "{report:#?}");
+    assert_eq!(report.examples[0].1, Verdict::Ok);
+    assert_eq!(report.settings, digest(&project).await);
+}
+
+#[tokio::test]
+async fn a_program_in_the_copy_that_the_build_did_not_write_is_the_runs_failure() {
+    // the settings are readable, and the run fails when it comes to start the program
+    let project = project_of_app("./target/debug/app", "grep -q PINNED prog.sh");
+    digest(&project).await;
+    let report = project
+        .runner()
+        .run_examples(&request(
+            "run-unwritten",
             vec![example("a1", "echo", "hi\n", "hi\n#exit 0\n")],
         ))
         .await
         .unwrap();
     let failure = report.failure.expect("a failure");
-    assert_eq!(failure.kind(), FailureKind::SettingsMoved, "{failure}");
-    assert!(failure.message().contains("`./launch.sh`"), "{failure}");
+    assert!(failure.message().contains("target/debug/app"), "{failure}");
     assert!(report.examples.is_empty());
-    assert!(!project.0.join(WORK_DIR).join("run-moved").exists());
 }

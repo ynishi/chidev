@@ -895,7 +895,9 @@ from the code). A field that is not known is refused by name. A project with no
 `[measure]` has no runner: `measure` is refused, and the checks still judge what is
 kept. The settings digest is of one kind of run for one subject, and covers the values
 that run reads, defaults applied, and the executable of the first word of `build`,
-`test`, the provider (of the Interface's `lang`) and, for a sim, the interpreter. A
+`test`, the provider (of the Interface's `lang`) and, for a sim, the interpreter; and,
+for a sim and for examples, the executable of the first word of the program under test
+when that is a program of the host (see "The program under test"). A
 mutation run reads `copy_exclude`, `env`, `build`, `baseline_timeout`, `test`, the
 provider command, `operators`, `timeout`, `budget`, `max_mutants`, `seed` and the layout
 of its Interface and of the tests it runs; so changing one, or upgrading the provider,
@@ -904,10 +906,12 @@ layout of other things) does not. The host environment and `PATH`, the files of 
 other than the pinned code and the Harnesses, and the programs a later word of a command
 starts are not in it (`sh -c "cargo test"` digests `sh`), so a changed toolchain is in
 general not seen. A run whose settings cannot be read now (no `[measure]`, or no layout
-for it) is stale, not current, and the finding says which and why. A run whose program in
-the copy, as the copy is made and before any command runs, or whose provider when it is
-started, is not the file digested at the project's root fails with kind `settings_moved`;
-a program the build writes later is the run's own.
+for it) is stale, not current, and the finding says which and why. A run whose `build` or
+interpreter in the copy, as the copy is made and before any command runs, or whose provider
+when it is started, is not the file digested at the project's root fails with kind
+`settings_moved`; a program the build writes later is the run's own. The program under
+test is not asked: a program of the host is the same file from the copy, and one in the
+copy has no digest.
 
 **Placeholders.** A run has two places, and each has a name of its own that means the
 same wherever it is taken: `{run}` is the run's directory (under `.chidev/measure/`,
@@ -918,11 +922,33 @@ there `{tree}` is the root of that copy while `{run}` stays the same: what is un
 `{run}` (the build's target) is shared by the first and the second runs, so state the
 second runs must not inherit goes under `{tree}`. Only two kinds
 of field take a placeholder: the value of a variable of `env`, and a word of the
-`program` of a `[measure.sim.<context>]`. Any other `{...}` in them is left as it is.
+`program` of a `[measure.sim.<context>]` or of a `[measure.examples.<context>]`, the first
+included. Any other `{...}` in them is left as it is.
 A `{run}` or `{tree}` in any other string of `[measure]` (a command, a layout `path`,
 `copy_exclude`, a key) is refused by name, and so is `{work}`, which was the name of
 both places before each had one: a configuration that still has it stops every
 command until it is rewritten.
+
+**The program under test.** The `program` of a sim and of the examples is a command whose
+first word is sorted by where it resolves when the run starts:
+
+- *In the copy*: a word with `{tree}` or `{run}`, a relative path (it has a `/`:
+  `./target/debug/app`, `bin/app`), an absolute path inside the project's root, and a bare
+  name that `PATH` finds inside the root (through a relative entry of it). The file is the
+  build's output or the project's own, so the pinned code and the build account for it and
+  the settings do not hold it: a build of one's own at that path of the root does not make a
+  run stale, and a root with no build leaves the settings readable. The copy has the file
+  only when the build has made it; a program that is not there when the run starts it fails
+  the run.
+- *A program of the host*: any other word (`python3`, `/usr/bin/env`), a file outside the
+  project. The settings digest holds its executable, so a changed interpreter makes earlier
+  runs stale, and one that is not found or cannot be read is an error of the settings. The
+  copy finds the same file, so nothing is checked against it when the copy is made.
+
+The words as written are in the digest either way. `build`, `test`, the provider and the
+interpreter are not sorted so: they exist before the build and are digested by their files
+even inside the root, while the program under test may be what the build writes. A sim
+script starts the program, not chidev, which is why the settings are all chidev holds of it.
 
 `operators` limits the classes of mutant the provider is asked for (the bundled one
 makes `rel`, `eq`, `arith`, `logic`, `bool`, `int` and `str`). Leave it out for all of
@@ -1196,6 +1222,7 @@ build = ["python3", "-m", "py_compile", "bank.py"]   # a failure: the run fails 
 [measure.sim.ledger]
 interpreter = ["python3"]                  # argv prefix; the script path follows it
 program = ["python3", "{tree}/bank.py"]    # the program under test; {tree} = root of the copy
+                                           # (python3 is a program of the host: it is in the settings digest)
 seeds = 50       # seed-0 .. seed-49 (default 50, at most 10000)
 sample = 6       # cases with findings run again besides seed-0 (default 6, at most 1000)
 timeout = 60     # seconds, one case (default 60)
@@ -1216,8 +1243,10 @@ Every Interface a sim Harness builds needs a layout entry and a Pin (`pin` keeps
 the code text); the script needs one. `build` runs with `baseline_timeout`. The
 settings digest of a simulation covers `copy_exclude`, `env`, `build`,
 `baseline_timeout`, the Context's `[measure.sim.<context>]`, the layout of the script
-and of the Interfaces it builds, and the executables of `build` and the interpreter;
-the mutation settings are not in it.
+and of the Interfaces it builds, and the executables of `build`, the interpreter and,
+when it is a program of the host, the first word of `program` (see "The program under
+test": the script starts the program, so a program of the host is digested there and one
+in the copy is the build's); the mutation settings are not in it.
 
 #### Rules
 
@@ -1307,16 +1336,16 @@ interface = "tally"         # the code of each built Interface is written here
 path = "src/tally.rs"
 ```
 
-`program` is the command that starts the program under test. Its first word is a program found, as `build` is, at the
-project's root for the settings and in the copy for the run, and it has to be the same file in both (a copy in which it
-is another file fails the run before anything is started, `settings_moved`); it is the file that the settings digest
-holds, so it cannot be a path the build makes, and a launcher the project keeps (`./run.sh`, which starts what the
-build made) or an interpreter (`python3`, with `{tree}/prog.py` as the next word) is what to write there. The words
-after the first may hold `{tree}` and `{run}` (see "Placeholders"). Every Interface the Harness builds needs a layout
-entry and a Pin; the Harness needs no layout entry, for it has no file and the run reads and writes nothing at a place
-of it. The settings digest of a run of examples covers `copy_exclude`, `env`, `build`, `baseline_timeout`, the
-Context's `[measure.examples.<context>]`, the layout of the Interfaces it builds, and the executables of `build` and of
-the first word of `program`; the other settings (the layout of any Harness among them) are not in it.
+`program` is the command that starts the program under test. Its first word may be what the build makes
+(`./target/debug/tally`, `{tree}/bin/tally`), a launcher the project keeps (`./run.sh`), or a program of the host
+(`python3`, with `{tree}/prog.py` as the next word); see "The program under test" for which of them the settings hold the
+file of. Every word, the first included, may hold `{tree}` and `{run}` (see "Placeholders"). The program is found in the
+copy as the build left it, and one that is not there when the run starts it fails the run. Every Interface the Harness
+builds needs a layout entry and a Pin; the Harness needs no layout entry, for it has no file and the run reads and writes
+nothing at a place of it. The settings digest of a run of examples covers `copy_exclude`, `env`, `build`,
+`baseline_timeout`, the Context's `[measure.examples.<context>]`, the layout of the Interfaces it builds, and the
+executables of `build` and, when it is a program of the host, of the first word of `program`; the other settings (the
+layout of any Harness among them) are not in it.
 
 A run stands on the revision of the Harness (its examples are in it, so a changed text, a Case added, dropped or
 renamed, or another `builds` moves it), the digest of the code pinned for each Interface the Harness builds, and the

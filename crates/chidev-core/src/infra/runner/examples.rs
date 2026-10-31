@@ -9,9 +9,11 @@
 //! ```
 //!
 //! with the example's input on standard input, the copy as the working directory and the environment of the table.
-//! `{tree}` in a word of the program is the root of the copy and `{run}` the directory of the run. The program is
-//! found in the copy as the build left it, and the program its first word names is the file the settings were
-//! digested with: a copy in which it is another file fails the run (`settings_moved`) before anything is started.
+//! `{tree}` in a word of the program is the root of the copy and `{run}` the directory of the run, the first word
+//! included. The program is found in the copy as the build left it. Whether the settings hold its file depends on
+//! where the first word starts it from ([`super::settings::ProgramStart`]): a file of the host is digested, and one in
+//! the copy is not. Either way the copy is not asked whether it is the file the settings have, for the host's is the
+//! same file from the copy and the copy's has no digest, so a run of examples has no `settings_moved` for its program.
 //!
 //! One example is run and judged as `chidev accept` runs and judges one ([`crate::infra::accept`]), so the two cannot
 //! differ on what a program that ended answered. An example that gets no answer from the program (it cannot be
@@ -21,8 +23,8 @@
 
 use std::path::Path;
 
-use super::settings::ExamplesSettings;
-use super::{Job, ProcessRunner};
+use super::settings::{ExamplesSettings, ProgramUnderTest, find};
+use super::{Command, Job, ProcessRunner};
 use crate::app::ports::measure::{
     ExamplesReport, ExamplesRequest, InterfaceText, LayoutPlace, RunnerError,
 };
@@ -110,21 +112,13 @@ impl Job<'_> {
             .iter()
             .map(|(path, i)| (*path, i.code.as_str()))
             .collect();
-        self.prepare(
-            "examples",
-            &written,
-            &[&settings.program],
-            &mut out.evidence,
-        )
-        .await?;
-        // The program is the file the copy has now, which the build may have written; it is the one `verify` held to
-        // the settings before the build if the copy had it then.
-        let program = self.command(&settings.program).await?;
-        let fixed: Vec<String> = program
-            .args
-            .iter()
-            .map(|word| self.dirs.expand_text(word))
-            .collect();
+        // The program under test is not held to the settings when the copy is made: a file of the host is the same
+        // from the copy as from the root, and one in the copy has no digest in them (`ProgramStart`).
+        self.prepare("examples", &written, &[], &mut out.evidence)
+            .await?;
+        // The program is the file the copy has now, which the build may have written.
+        let program = self.program_command(&settings.program).await?;
+        let fixed = program.args.clone();
         let env = self.env();
         for (name, example) in &request.examples {
             if self.over_budget() {
@@ -156,6 +150,20 @@ impl Job<'_> {
             out.examples.push((name.clone(), verdict));
         }
         Ok(())
+    }
+
+    /// The command that starts the program under test `program` in the copy: its words made the places of the run,
+    /// and the file the first names there now, found by the one rule of [`find`]. A program that is not there when
+    /// the run starts it is the run's failure.
+    async fn program_command(&self, program: &ProgramUnderTest) -> Result<Command, MeasureFailure> {
+        let found = find(&self.dirs.tree, &self.dirs.expand(program.program()))
+            .await
+            .map_err(|e| self.fail(e.failure()))?;
+        Ok(Command {
+            executable: found.executable,
+            args: program.args().iter().map(|w| self.dirs.expand(w)).collect(),
+            digest: found.digest,
+        })
     }
 
     /// The failure of a run that has used up its time.

@@ -10,7 +10,9 @@
 //!
 //! `<case>` is `seed-<n>` or `regress-<name>`, the working directory is the copy, and `<program argv...>` is the
 //! configured `program` with `{tree}` made the root of the copy (`rerun-tree` in the second copy) and `{run}` the
-//! directory of the run. The script drives the program as a black box (standard input and output, arguments) and
+//! directory of the run. The script, not the runner, starts the program, so the runner only sees to it that the settings
+//! hold the program's file when it is a file of the host ([`super::settings::ProgramStart`]). The script drives the
+//! program as a black box (standard input and output, arguments) and
 //! writes two files into `<dir>`: `schedule`, the choices it made for this case from its seed, and `trace`, what the
 //! program did under them. chidev takes their SHA-256 digests; the script does not report them. On standard output
 //! the script prints, one per line:
@@ -356,7 +358,7 @@ impl Job<'_> {
         args.push("--out".to_string());
         args.push(dir.to_string_lossy().into_owned());
         args.push("--".to_string());
-        args.extend(plan.settings.program.iter().map(|w| self.dirs.expand(w)));
+        args.extend(plan.settings.program.words().map(|w| self.dirs.expand(w)));
         let command = Command {
             executable: interpreter.executable.clone(),
             args,

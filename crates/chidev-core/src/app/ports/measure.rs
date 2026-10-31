@@ -166,8 +166,10 @@ pub enum CommandRole {
     },
     /// The interpreter a sim script runs under.
     Interpreter,
-    /// The program the examples of a Harness are run against.
-    Program,
+    /// The program under test of a simulation: the one its script drives.
+    SimProgram,
+    /// The program under test of a run of examples: the one the examples are run against.
+    ExamplesProgram,
 }
 
 impl fmt::Display for CommandRole {
@@ -177,7 +179,8 @@ impl fmt::Display for CommandRole {
             CommandRole::Test => f.write_str("the test command"),
             CommandRole::Provider { lang } => write!(f, "the provider for `{lang}`"),
             CommandRole::Interpreter => f.write_str("the interpreter"),
-            CommandRole::Program => f.write_str("the program"),
+            CommandRole::SimProgram => f.write_str("the program of the simulation"),
+            CommandRole::ExamplesProgram => f.write_str("the program of the examples"),
         }
     }
 }
@@ -411,7 +414,14 @@ mod tests {
         assert_eq!(CommandRole::Build.to_string(), "the build command");
         assert_eq!(CommandRole::Test.to_string(), "the test command");
         assert_eq!(CommandRole::Interpreter.to_string(), "the interpreter");
-        assert_eq!(CommandRole::Program.to_string(), "the program");
+        assert_eq!(
+            CommandRole::SimProgram.to_string(),
+            "the program of the simulation"
+        );
+        assert_eq!(
+            CommandRole::ExamplesProgram.to_string(),
+            "the program of the examples"
+        );
         assert_eq!(
             CommandRole::Provider {
                 lang: "rust".to_string()

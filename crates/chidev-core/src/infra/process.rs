@@ -10,6 +10,7 @@
 //! a [`Spec`] and a [`Capture`] that fills in as the program runs, so what the program wrote and how it exited are
 //! kept even when the run fails (a timeout still shows the diagnostics written so far).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -135,15 +136,24 @@ pub async fn resolve(root: &Path, command: &str) -> Result<PathBuf, Failure> {
 /// that is a link to another (`cargo` and `rustc` are links to `rustup`, which picks what to run by the name it was
 /// started as) has to be started by the link's name; [`file_digest`] still reads the file behind it.
 pub async fn locate(root: &Path, command: &str) -> Result<PathBuf, Failure> {
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    locate_in(root, command, &search).await
+}
+
+/// As [`locate`], with `search` in the place of `PATH`: the one rule, with the list of directories handed in.
+pub(crate) async fn locate_in(
+    root: &Path,
+    command: &str,
+    search: &OsStr,
+) -> Result<PathBuf, Failure> {
     let command_path = Path::new(command);
     let candidate = if command_path.is_absolute() {
         command_path.to_path_buf()
     } else if command_path.components().count() > 1 {
         root.join(command_path)
     } else {
-        let search = std::env::var_os("PATH").unwrap_or_default();
         let mut found = None;
-        for path in std::env::split_paths(&search) {
+        for path in std::env::split_paths(search) {
             let path = if path.is_absolute() {
                 path
             } else {
