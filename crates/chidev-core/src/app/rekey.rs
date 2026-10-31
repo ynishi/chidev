@@ -47,6 +47,9 @@ pub struct Rekeyed {
     /// provider found is on their lines, or they and the declarations share lines with others (see
     /// [`crate::domain::service::rekey::pair`]).
     pub unmatched: Vec<String>,
+    /// How many declarations the provider found that a caller cannot name, and so left out: an Item kept on such a
+    /// declaration is paired with nothing and is in `unmatched`.
+    pub left_out: usize,
     /// The revision of the Interface after the change.
     pub revision: u64,
 }
@@ -95,6 +98,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .items(&lang, old.source().as_str())
             .await
             .map_err(|e| items_error(&context, &interface, Some(&lang), e))?;
+        let left_out = found.left_out;
         let found = found.items;
         let ranges = found
             .iter()
@@ -149,6 +153,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                 rekeyed,
                 revised,
                 unmatched,
+                left_out,
                 revision,
             },
             findings,

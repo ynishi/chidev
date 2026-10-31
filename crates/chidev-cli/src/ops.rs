@@ -2527,6 +2527,8 @@ struct RekeyOut<'a> {
     rekeyed: Vec<KeyChangedOut<'a>>,
     revised: Vec<ItemRevisedOut<'a>>,
     unmatched: &'a [String],
+    /// How many declarations the provider left out, as a caller cannot name them.
+    left_out: usize,
     /// The revision of the Interface once it is done.
     revision: u64,
     findings: Vec<FindingOut<'a>>,
@@ -3832,6 +3834,7 @@ where
                     })
                     .collect(),
                 unmatched: &done.value.unmatched,
+                left_out: done.value.left_out,
                 revision: done.value.revision,
                 findings: findings_out(&done.findings),
             })?

@@ -742,6 +742,18 @@ fn changed(from: &str, to: &str) -> KeyChanged {
 }
 
 #[tokio::test]
+async fn a_rekey_says_how_many_declarations_the_provider_left_out() {
+    let fake = Fake::answering_but(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)], 2);
+    let mut app = stock("rekey-left-out", fake.clone()).await;
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
+    assert_eq!(done.left_out, 2);
+    let fake = Fake::answering(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)]);
+    let mut app = stock("rekey-left-out-none", fake.clone()).await;
+    let done = app.items_rekey("core", "stock").await.unwrap().value;
+    assert_eq!(done.left_out, 0);
+}
+
+#[tokio::test]
 async fn a_rekey_changes_the_keys_and_moves_no_revision_when_the_lines_declare_the_same() {
     let fake = Fake::answering(&[("Stock::reserve", 1, 1), ("Stock::release", 2, 2)]);
     let mut app = stock("rekey-keys", fake.clone()).await;

@@ -32,13 +32,13 @@
 //! | `pub`, `pub(crate)` | yes |
 //! | `pub(super)` at the top level of the file | yes |
 //! | `pub(super)` inside an inline `mod m` | no |
-//! | `pub(in path)` | no if `path` starts with `self`, otherwise yes (an approximation: the provider does not know the module path) |
-//! | inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside |
-//! | a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside |
+//! | `pub(in path)` | no if `path` starts with `self`; with `super`, yes when it climbs out of the file's module (`pub(in super)` is `pub(super)`); otherwise yes (an approximation: the provider does not know the module path) |
+//! | inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside (a member of an `impl` and a `#[macro_export]` macro excepted: see their rows) |
+//! | a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside, whatever `mod` the `impl` is written in |
 //! | a member of a `trait` | when the trait is an Item |
-//! | a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching) |
-//! | under `#[cfg(test)]` (also `all(test, ..)`, and `any(..)` of those), inside such a `mod`, a `#[test]` fn | no |
-//! | a `macro_rules!` | only with `#[macro_export]` (and the `mod`s around it reach) |
+//! | a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching), whatever `mod` the `impl` is written in |
+//! | under `#[cfg(test)]` (also `all(test, ..)`, and `any(..)` of those), inside such a `mod`, a `#[test]` fn (or another attribute named `test`, `#[tokio::test]`) | no |
+//! | a `macro_rules!` | only with `#[macro_export]`, which exports it whatever `mod` it is in (not from test code) |
 //!
 //! A type or trait is looked up in the module the `impl` is in, by the path as written (`self::`, `super::` and
 //! the names of inline `mod`s are followed; a path from `crate` or from another file is not found, so it reaches).
@@ -171,6 +171,9 @@ struct Walk {
     path: Vec<String>,
     /// Whether the `mod`s the walk is inside all reach outside (and none is under `#[cfg(test)]`).
     outside: bool,
+    /// Whether one of the `mod`s the walk is inside is test code (`#[cfg(test)]`): what is in it builds for a test
+    /// only, wherever it is named from.
+    test: bool,
     /// The types and traits the file declares, by their path from the file, and whether each reaches outside.
     declared: BTreeMap<Vec<String>, bool>,
     found: Vec<Item>,
@@ -183,6 +186,7 @@ impl Walk {
         Walk {
             path: Vec::new(),
             outside: true,
+            test: false,
             declared: BTreeMap::new(),
             found: Vec::new(),
             left_out: 0,
@@ -198,24 +202,45 @@ impl Walk {
                 syn::Item::Union(u) => (&u.ident, &u.attrs, &u.vis),
                 syn::Item::Type(t) => (&t.ident, &t.attrs, &t.vis),
                 syn::Item::Trait(t) => (&t.ident, &t.attrs, &t.vis),
+                // a type with no body (`type Money;`) is a type the file declares too
+                syn::Item::Verbatim(tokens) => {
+                    if let Ok(d) = syn::parse2::<Bodyless>(tokens.clone())
+                        && d.is_type
+                    {
+                        let reaches = self.allowed(self.outside, &d.attrs, Some(&d.vis));
+                        self.note(&d.name, reaches);
+                    }
+                    continue;
+                }
                 syn::Item::Mod(m) => {
                     if let Some((_, inner)) = &m.content {
-                        let outside = self.outside;
-                        self.outside = self.allowed(outside, &m.attrs, Some(&m.vis));
-                        self.path.push(m.ident.to_string());
-                        self.declare(inner);
-                        self.path.pop();
-                        self.outside = outside;
+                        self.inside(m, |walk| walk.declare(inner));
                     }
                     continue;
                 }
                 _ => continue,
             };
             let reaches = self.allowed(self.outside, attrs, Some(vis));
-            let mut full = self.path.clone();
-            full.push(name.to_string());
-            *self.declared.entry(full).or_insert(false) |= reaches;
+            self.note(&name.to_string(), reaches);
         }
+    }
+
+    /// Notes that the file declares the type or trait `name` in the `mod` the walk is in, reaching outside or not.
+    fn note(&mut self, name: &str, reaches: bool) {
+        let mut full = self.path.clone();
+        full.push(name.to_string());
+        *self.declared.entry(full).or_insert(false) |= reaches;
+    }
+
+    /// Runs `f` inside the inline `mod` `m`: its name leads the path, and what it allows is what the walk allows.
+    fn inside(&mut self, m: &syn::ItemMod, f: impl FnOnce(&mut Walk)) {
+        let (outside, test) = (self.outside, self.test);
+        self.outside = self.allowed(outside, &m.attrs, Some(&m.vis));
+        self.test = test || is_test(&m.attrs);
+        self.path.push(m.ident.to_string());
+        f(self);
+        self.path.pop();
+        (self.outside, self.test) = (outside, test);
     }
 
     /// Whether a declaration reaches outside: `base` (what the place it is in allows), no `#[cfg(test)]` or
@@ -248,14 +273,18 @@ impl Walk {
         self.declared.get(&full).copied().unwrap_or(true)
     }
 
-    /// Whether the type `ty` of an `impl` reaches outside: a path is looked up (past references), any other type
-    /// reaches.
+    /// Whether the type `ty` of an `impl` reaches outside: a path is looked up (past references, pointers, slices
+    /// and arrays; a tuple when each of its elements does), any other type reaches.
     fn type_reaches(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(p) if p.qself.is_none() => self.path_reaches(&p.path),
             syn::Type::Reference(r) => self.type_reaches(&r.elem),
             syn::Type::Paren(p) => self.type_reaches(&p.elem),
             syn::Type::Group(g) => self.type_reaches(&g.elem),
+            syn::Type::Slice(s) => self.type_reaches(&s.elem),
+            syn::Type::Array(a) => self.type_reaches(&a.elem),
+            syn::Type::Ptr(p) => self.type_reaches(&p.elem),
+            syn::Type::Tuple(t) => t.elems.iter().all(|e| self.type_reaches(e)),
             _ => true,
         }
     }
@@ -302,82 +331,84 @@ impl Walk {
         }) + name
     }
 
+    /// Keeps the free declaration `name` with these attributes and visibility, as [`Walk::keep`] does: an Item when
+    /// it reaches outside from the `mod` the walk is in.
+    fn free(
+        &mut self,
+        attrs: &[syn::Attribute],
+        vis: &syn::Visibility,
+        name: &str,
+        tokens: TokenStream,
+        end: Span,
+    ) {
+        let reach = self.allowed(self.outside, attrs, Some(vis));
+        self.keep(None, name, tokens, end, reach);
+    }
+
     fn item(&mut self, item: &syn::Item) {
         match item {
-            syn::Item::Fn(f) => {
-                let reach = self.allowed(self.outside, &f.attrs, Some(&f.vis));
-                self.keep(
-                    None,
-                    &f.sig.ident.to_string(),
-                    f.to_token_stream(),
-                    f.block.brace_token.span.open(),
-                    reach,
-                );
-            }
+            syn::Item::Fn(f) => self.free(
+                &f.attrs,
+                &f.vis,
+                &f.sig.ident.to_string(),
+                f.to_token_stream(),
+                f.block.brace_token.span.open(),
+            ),
             // The fields and variants of a type are what it declares, so its lines go to the closing brace.
             syn::Item::Struct(s) => {
                 let end = match &s.fields {
                     syn::Fields::Named(named) => named.brace_token.span.close(),
                     _ => semi_or(s.semi_token.as_ref(), s.ident.span()),
                 };
-                let reach = self.allowed(self.outside, &s.attrs, Some(&s.vis));
-                self.keep(None, &s.ident.to_string(), s.to_token_stream(), end, reach);
-            }
-            syn::Item::Enum(e) => {
-                let reach = self.allowed(self.outside, &e.attrs, Some(&e.vis));
-                self.keep(
-                    None,
-                    &e.ident.to_string(),
-                    e.to_token_stream(),
-                    e.brace_token.span.close(),
-                    reach,
-                );
-            }
-            syn::Item::Union(u) => {
-                let reach = self.allowed(self.outside, &u.attrs, Some(&u.vis));
-                self.keep(
-                    None,
-                    &u.ident.to_string(),
-                    u.to_token_stream(),
-                    u.fields.brace_token.span.close(),
-                    reach,
-                );
-            }
-            syn::Item::Type(t) => {
-                let reach = self.allowed(self.outside, &t.attrs, Some(&t.vis));
-                self.keep(
-                    None,
-                    &t.ident.to_string(),
-                    t.to_token_stream(),
-                    t.semi_token.span(),
-                    reach,
-                );
-            }
-            syn::Item::Const(c) => {
-                let reach = self.allowed(self.outside, &c.attrs, Some(&c.vis));
-                self.keep(
-                    None,
-                    &c.ident.to_string(),
-                    c.to_token_stream(),
-                    c.semi_token.span(),
-                    reach,
-                );
-            }
-            syn::Item::Static(s) => {
-                let reach = self.allowed(self.outside, &s.attrs, Some(&s.vis));
-                self.keep(
-                    None,
+                self.free(
+                    &s.attrs,
+                    &s.vis,
                     &s.ident.to_string(),
                     s.to_token_stream(),
-                    s.semi_token.span(),
-                    reach,
+                    end,
                 );
             }
-            // A macro has no visibility: `#[macro_export]` is what puts it in reach of a caller.
+            syn::Item::Enum(e) => self.free(
+                &e.attrs,
+                &e.vis,
+                &e.ident.to_string(),
+                e.to_token_stream(),
+                e.brace_token.span.close(),
+            ),
+            syn::Item::Union(u) => self.free(
+                &u.attrs,
+                &u.vis,
+                &u.ident.to_string(),
+                u.to_token_stream(),
+                u.fields.brace_token.span.close(),
+            ),
+            syn::Item::Type(t) => self.free(
+                &t.attrs,
+                &t.vis,
+                &t.ident.to_string(),
+                t.to_token_stream(),
+                t.semi_token.span(),
+            ),
+            syn::Item::Const(c) => self.free(
+                &c.attrs,
+                &c.vis,
+                &c.ident.to_string(),
+                c.to_token_stream(),
+                c.semi_token.span(),
+            ),
+            syn::Item::Static(s) => self.free(
+                &s.attrs,
+                &s.vis,
+                &s.ident.to_string(),
+                s.to_token_stream(),
+                s.semi_token.span(),
+            ),
+            // A macro has no visibility: `#[macro_export]` puts it at the root of the crate, whatever `mod` it is
+            // written in, so only test code keeps it from a caller.
             syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
                 if let Some(name) = &m.ident {
                     let exported = m.attrs.iter().any(|a| a.path().is_ident("macro_export"));
-                    let reach = self.allowed(self.outside && exported, &m.attrs, None);
+                    let reach = self.allowed(exported && !self.test, &m.attrs, None);
                     self.keep(
                         None,
                         &format!("{name}!"),
@@ -401,6 +432,8 @@ impl Walk {
                     self.trait_item(&owner, member, reach);
                 }
             }
+            // An `impl` gives its members to the type wherever it is written, so the `mod` it is in does not keep
+            // them from a caller (test code does): the type, the trait and the members' own visibility do.
             syn::Item::Impl(i) => {
                 let owner = self.impl_owner(i);
                 let types = self.type_reaches(&i.self_ty);
@@ -410,19 +443,14 @@ impl Walk {
                     // an `impl Trait for T`: no member has a visibility, and `Trait` and `T` both have to reach
                     Some((_, path, _)) => (types && self.path_reaches(path), false),
                 };
-                let base = self.allowed(self.outside && base, &i.attrs, None);
+                let base = self.allowed(!self.test && base, &i.attrs, None);
                 for member in &i.items {
                     self.impl_item(&owner, member, base, own);
                 }
             }
             syn::Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
-                    let outside = self.outside;
-                    self.outside = self.allowed(outside, &m.attrs, Some(&m.vis));
-                    self.path.push(m.ident.to_string());
-                    self.items(items);
-                    self.path.pop();
-                    self.outside = outside;
+                    self.inside(m, |walk| walk.items(items));
                 }
             }
             syn::Item::Verbatim(tokens) => {
@@ -593,7 +621,8 @@ fn first_line(tokens: TokenStream) -> Option<usize> {
 /// `any(..)` of which every branch is, since those build only for a test).
 fn is_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
-        a.path().is_ident("test")
+        // `#[test]`, and a test attribute of a crate (`#[tokio::test]`)
+        a.path().segments.last().is_some_and(|s| s.ident == "test")
             || (a.path().is_ident("cfg")
                 && a.parse_args::<syn::Meta>().is_ok_and(|m| cfg_is_test(&m)))
     })
@@ -627,8 +656,22 @@ fn reaches(vis: &syn::Visibility, depth: usize) -> bool {
         syn::Visibility::Public(_) => true,
         syn::Visibility::Restricted(r) => {
             if r.in_token.is_some() {
-                // an approximation: the provider does not know the module path
-                r.path.segments.first().is_none_or(|s| s.ident != "self")
+                // `self` stays inside; `super` as many times as there are `mod`s around and once more leaves the
+                // file's module (`pub(in super)` is `pub(super)`); any other path is an approximation, as the
+                // provider does not know the module path
+                let mut segments = r
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .peekable();
+                if segments.peek().is_some_and(|s| s == "self") {
+                    false
+                } else if segments.peek().is_some_and(|s| s == "super") {
+                    segments.take_while(|s| s == "super").count() > depth
+                } else {
+                    true
+                }
             } else if r.path.is_ident("self") {
                 false
             } else if r.path.is_ident("super") {
@@ -641,10 +684,11 @@ fn reaches(vis: &syn::Visibility, depth: usize) -> bool {
     }
 }
 
-/// A declaration that has no body, as it is parsed again: its name, its attributes and visibility, the line of its
-/// first token past the attributes, and the line of its `;`.
+/// A declaration that has no body, as it is parsed again: its name, whether it declares a type, its attributes and
+/// visibility, the line of its first token past the attributes, and the line of its `;`.
 struct Bodyless {
     name: String,
+    is_type: bool,
     attrs: Vec<syn::Attribute>,
     vis: syn::Visibility,
     first: usize,
@@ -659,6 +703,7 @@ impl Parse for Bodyless {
         input.parse::<Option<syn::Token![default]>>()?;
         // `const fn f();` is a function and `const N: usize;` is not: a signature is tried first
         let ahead = input.fork();
+        let is_type = input.peek(syn::Token![type]);
         let name = if let Ok(sig) = ahead.parse::<syn::Signature>() {
             input.advance_to(&ahead);
             sig.ident.to_string()
@@ -682,6 +727,7 @@ impl Parse for Bodyless {
         let end = input.parse::<syn::Token![;]>()?.span().end().line;
         Ok(Bodyless {
             name,
+            is_type,
             attrs,
             vis,
             first,
@@ -1598,10 +1644,51 @@ trait Hidden {
     }
 
     #[test]
+    fn an_impl_gives_its_members_to_the_type_whatever_mod_it_is_written_in() {
+        let source = "pub struct S;\nmod m {\n    impl super::S { pub fn f() {} fn g() {} }\n    impl std::fmt::Debug for super::S { fn fmt() {} }\n}\n#[cfg(test)]\nmod tests {\n    impl super::S { pub fn h() {} }\n}\n";
+        // left out: m::super::S::g (no visibility), and h (test code)
+        assert_eq!(
+            keys(source),
+            [
+                "S",
+                "m::super::S::f",
+                "m::<super::S as std::fmt::Debug>::fmt"
+            ]
+        );
+        assert_eq!(left_out(source), 2);
+    }
+
+    #[test]
+    fn pub_in_super_is_pub_super_and_reaches_only_when_it_climbs_out_of_the_file() {
+        let source = "pub mod m {\n    pub(in super) fn a() {}\n    pub(in super::super) fn b() {}\n    pub(in super::x) fn c() {}\n}\npub(in super) fn d() {}\n";
+        assert_eq!(keys(source), ["m::b", "d"]);
+        assert_eq!(left_out(source), 2);
+    }
+
+    #[test]
+    fn a_test_attribute_of_a_crate_is_test_code_too() {
+        let source = "#[tokio::test]\npub async fn t() {}\n";
+        assert!(keys(source).is_empty());
+        assert_eq!(left_out(source), 1);
+    }
+
+    #[test]
+    fn a_private_type_with_no_body_or_inside_another_type_keeps_its_impl_from_a_caller() {
+        let source = "type Money;\nimpl Money { pub fn f() -> u8; }\nstruct S;\nimpl Tr for [S] { fn g() {} }\nimpl Tr for (u8, S) { fn h() {} }\nimpl Tr for *const S { fn i() {} }\n";
+        assert!(keys(source).is_empty());
+        // Money, Money::f, S, g, h, i
+        assert_eq!(left_out(source), 6);
+    }
+
+    #[test]
     fn a_macro_is_an_item_only_when_exported() {
         let source =
             "#[macro_export]\nmacro_rules! a { () => {}; }\nmacro_rules! b { () => {}; }\n";
         assert_eq!(keys(source), ["a!"]);
+        assert_eq!(left_out(source), 1);
+        // exported from a private `mod` all the same, but not from test code
+        let source = "mod m {\n    #[macro_export]\n    macro_rules! a { () => {}; }\n}\n#[cfg(test)]\nmod tests {\n    #[macro_export]\n    macro_rules! b { () => {}; }\n}\n";
+        assert_eq!(keys(source), ["m::a!"]);
         assert_eq!(left_out(source), 1);
     }
 }

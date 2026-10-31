@@ -257,8 +257,9 @@ where they belong):
     share lines with others (two declarations on one line; an Item written over the
     lines of several).
   - The result has `rekeyed` (`{"from","to"}` of each key that changed), `revised`
-    (`{"key","from","to"}` of each Item whose revision went up) and `unmatched` (keys),
-    and the Interface's `revision` after it. A new key alone moves no revision. The
+    (`{"key","from","to"}` of each Item whose revision went up), `unmatched` (keys),
+    `left_out` (how many declarations the provider left out, as a caller cannot name
+    them), and the Interface's `revision` after it. A new key alone moves no revision. The
     signature is the text of the Item's lines, so an Item whose new lines declare
     something else goes to its next revision, and the Interface with it, and the
     Cases that cite it go stale; `revised` is that list.
@@ -1076,17 +1077,17 @@ is judged as any other:
 | `pub`, `pub(crate)` | yes |
 | `pub(super)` at the top level of the file | yes |
 | `pub(super)` inside an inline `mod m` | no |
-| `pub(in path)` | no if `path` starts with `self`, otherwise yes (an approximation: the provider does not know the module path) |
-| inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside |
-| a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside |
+| `pub(in path)` | no if `path` starts with `self`; with `super`, yes when it climbs out of the file's module (`pub(in super)` is `pub(super)`); otherwise yes (an approximation: the provider does not know the module path) |
+| inside an inline `mod m` | only when its own visibility and that of every enclosing inline `mod` reach outside (a member of an `impl` and a `#[macro_export]` macro excepted: see their rows) |
+| a member of an inherent `impl T` | when its own visibility reaches outside, and `T` is not a declaration of this file that does not reach outside, whatever `mod` the `impl` is written in |
 | a member of a `trait` | when the trait is an Item |
-| a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching) |
-| under `#[cfg(test)]`, inside such a `mod`, a `#[test]` fn | no |
+| a member of `impl Trait for T` | when each of `Trait` and `T` that is declared in this file reaches outside (a name from another file counts as reaching), whatever `mod` the `impl` is written in |
+| under `#[cfg(test)]`, inside such a `mod`, a `#[test]` fn (or another attribute named `test`, `#[tokio::test]`) | no |
 
 Two more things follow from "a caller builds it": `#[cfg(all(test, ..))]`, and
 `#[cfg(any(..))]` of which every branch is `test`, count as `#[cfg(test)]`; and a
-`macro_rules!` has no visibility, so it is an Item only with `#[macro_export]` (and
-the inline `mod`s around it reach outside). A type or a trait is looked up in the
+`macro_rules!` has no visibility, so it is an Item only with `#[macro_export]`, which
+exports it whatever inline `mod` it is in (not from test code). A type or a trait is looked up in the
 module the `impl` is in, by the path as written (`self::`, `super::` and the names of
 inline `mod`s are followed); a path from `crate` or one the file does not declare
 reaches. Every declaration that is not an Item is counted in `left_out`, the contents
