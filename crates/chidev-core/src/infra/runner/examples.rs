@@ -24,14 +24,14 @@
 
 use std::path::Path;
 
-use super::settings::{ExamplesSettings, ProgramUnderTest, find};
+use super::settings::{ExamplesSettings, Files, ProgramUnderTest, find};
 use super::{Command, Job, ProcessRunner};
 use crate::app::ports::measure::{
     ExamplesReport, ExamplesRequest, InterfaceText, LayoutPlace, RunnerError,
 };
 use crate::domain::vo::example::{ExampleName, Verdict, Why};
-use crate::domain::vo::measure::{MeasureFailure, SettingsDigest, StepEvidence};
-use crate::domain::vo::name::{AssetName, ContextName};
+use crate::domain::vo::measure::{MeasureFailure, StepEvidence};
+use crate::domain::vo::name::AssetName;
 use crate::infra::accept::{self, Example, Resolved};
 use crate::infra::process;
 
@@ -43,28 +43,20 @@ struct ExamplesProgress {
 }
 
 impl ProcessRunner {
-    /// The digest of the settings of a run of the examples of a Harness of `context` that builds the Interfaces
-    /// `builds`.
-    pub(super) async fn examples_settings_of(
-        &self,
-        context: &ContextName,
-        _harness: &AssetName,
-        builds: &[AssetName],
-    ) -> Result<SettingsDigest, RunnerError> {
-        // The Harness is asked about by the port but the run reads nothing of it: the examples are the request's.
-        ExamplesSettings::resolve(&self.config, &self.root, context, builds)
-            .await?
-            .digest()
-    }
-
     /// Runs the examples `request` asks for.
     pub(super) async fn examples_run(
         &self,
         request: &ExamplesRequest,
     ) -> Result<ExamplesReport, RunnerError> {
         let builds: Vec<AssetName> = request.interfaces.iter().map(|i| i.name.clone()).collect();
-        let settings =
-            ExamplesSettings::resolve(&self.config, &self.root, &request.context, &builds).await?;
+        let settings = ExamplesSettings::resolve(
+            &mut Files::default(),
+            &self.config,
+            &self.root,
+            &request.context,
+            &builds,
+        )
+        .await?;
         let digest = settings.digest()?;
         let mut interfaces = Vec::with_capacity(request.interfaces.len());
         for i in &request.interfaces {

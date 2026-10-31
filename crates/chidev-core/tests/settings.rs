@@ -7,13 +7,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chidev_core::app::commit::Gated;
 use chidev_core::app::ports::external::ExternalReport;
 use chidev_core::app::ports::measure::{
     BoxFuture, ExamplesReport, ExamplesRequest, MutateReport, MutateRequest, Runner, RunnerError,
-    SimulateReport, SimulateRequest,
+    SettingsSaid, SettingsTarget, SimulateReport, SimulateRequest,
 };
 use chidev_core::app::ports::{
     AssetKind, AssetNames, IdSource, Invocation, InvocationSeq, JudgedReport, JudgedRepository,
@@ -765,4 +766,106 @@ async fn a_run_of_an_interface_retired_since_stays_retired() {
     assert_eq!(standing.state, MeasurementState::Retired);
     assert_eq!(standing.state.word(), "retired");
     assert_eq!(standing.interface.as_deref(), Some("api (retired)"));
+}
+
+/// How a runner was asked for settings.
+#[derive(Debug, Default)]
+struct Asks {
+    /// How many times it was asked for many at once, and how many targets those asks held.
+    batches: AtomicUsize,
+    targets: AtomicUsize,
+    /// How many times it was asked about one subject.
+    singles: AtomicUsize,
+}
+
+/// The real runner, which counts how it is asked for settings.
+#[derive(Debug)]
+struct Counting {
+    runner: Resolving,
+    asks: Arc<Asks>,
+}
+
+impl Runner for Counting {
+    fn settings_of<'a>(&'a self, targets: &'a [SettingsTarget]) -> BoxFuture<'a, SettingsSaid> {
+        self.asks.batches.fetch_add(1, Ordering::Relaxed);
+        self.asks
+            .targets
+            .fetch_add(targets.len(), Ordering::Relaxed);
+        self.runner.0.settings_of(targets)
+    }
+
+    fn settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        interface: &'a AssetName,
+        harnesses: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        self.asks.singles.fetch_add(1, Ordering::Relaxed);
+        self.runner.settings(context, interface, harnesses)
+    }
+
+    fn mutate<'a>(
+        &'a self,
+        request: &'a MutateRequest,
+    ) -> BoxFuture<'a, Result<MutateReport, RunnerError>> {
+        self.runner.mutate(request)
+    }
+
+    fn sim_settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        harness: &'a AssetName,
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        self.asks.singles.fetch_add(1, Ordering::Relaxed);
+        self.runner.sim_settings(context, harness, builds)
+    }
+
+    fn simulate<'a>(
+        &'a self,
+        request: &'a SimulateRequest,
+    ) -> BoxFuture<'a, Result<SimulateReport, RunnerError>> {
+        self.runner.simulate(request)
+    }
+
+    fn examples_settings<'a>(
+        &'a self,
+        context: &'a ContextName,
+        harness: &'a AssetName,
+        builds: &'a [AssetName],
+    ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
+        self.asks.singles.fetch_add(1, Ordering::Relaxed);
+        self.runner.examples_settings(context, harness, builds)
+    }
+
+    fn run_examples<'a>(
+        &'a self,
+        request: &'a ExamplesRequest,
+    ) -> BoxFuture<'a, Result<ExamplesReport, RunnerError>> {
+        self.runner.run_examples(request)
+    }
+}
+
+#[tokio::test]
+async fn the_settings_now_of_every_run_are_asked_of_the_runner_once_and_together() {
+    let fixture = Fixture::new(TABLE);
+    let app = measured(&fixture).await;
+    let asks = Arc::new(Asks::default());
+    let app = App::new(app.into_store(), Counter(10_000), clock()).with_runner(Counting {
+        runner: Resolving(fixture.runner()),
+        asks: Arc::clone(&asks),
+    });
+    // the standing reads the measurements and what the settings are now: one ask, with the run's subject in it
+    assert_eq!(state(&app).await, "current");
+    assert_eq!(asks.batches.load(Ordering::Relaxed), 1);
+    assert_eq!(asks.targets.load(Ordering::Relaxed), 1);
+    assert_eq!(asks.singles.load(Ordering::Relaxed), 0);
+    // and a check of the project reads them the same way: once more, and still never one at a time
+    app.check(None, &[]).await.unwrap();
+    assert!(asks.batches.load(Ordering::Relaxed) >= 2);
+    assert_eq!(
+        asks.batches.load(Ordering::Relaxed),
+        asks.targets.load(Ordering::Relaxed)
+    );
+    assert_eq!(asks.singles.load(Ordering::Relaxed), 0);
 }

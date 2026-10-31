@@ -46,13 +46,16 @@ use std::time::Instant;
 use thiserror::Error;
 
 use self::config::{Config, RunDirs, WORK_DIR};
-use self::settings::{CopySettings, MutationSettings, NotFound, Program, ProgramUnderTest, find};
+use self::settings::{
+    CopySettings, ExamplesSettings, Files, MutationSettings, NotFound, Program, ProgramUnderTest,
+    SimSettings, find,
+};
 use super::process::{self, Capture, Over, Pipe};
 use super::project::{Project, Section};
 use crate::app::ports::items::{FoundItem, ItemSource, ItemsError};
 use crate::app::ports::measure::{
     BoxFuture, ExamplesReport, ExamplesRequest, LayoutPlace, MutateReport, MutateRequest, Runner,
-    RunnerError, SimulateReport, SimulateRequest,
+    RunnerError, SettingsSaid, SettingsTarget, SimulateReport, SimulateRequest,
 };
 use crate::domain::vo::measure::{
     FailureKind, MeasureFailure, MutantOutcome, MutantResult, SettingsDigest, StepEvidence,
@@ -100,13 +103,30 @@ pub fn load(project: &Project) -> Result<Option<ProcessRunner>, MeasureConfigErr
 }
 
 impl Runner for ProcessRunner {
+    /// Resolves every target by the one path the single asks take, with one memo of the files read for the whole
+    /// call ([`Files`]): a program that several targets use is found and hashed once, and each command is still its
+    /// own [`Program`], so two commands that start one binary with other arguments keep their own digests. The memo
+    /// is dropped when the call ends; nothing is kept between calls. Only the files of build, test, provider,
+    /// interpreter and of a `ProgramStart::Host` program under test are in it: a program that starts in the copy,
+    /// or that `PATH` does not find, has no digest.
+    fn settings_of<'a>(&'a self, targets: &'a [SettingsTarget]) -> BoxFuture<'a, SettingsSaid> {
+        Box::pin(self.digests_of(targets))
+    }
+
     fn settings<'a>(
         &'a self,
         context: &'a ContextName,
         interface: &'a AssetName,
         harnesses: &'a [AssetName],
     ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
-        Box::pin(self.settings_of(context, interface, harnesses))
+        Box::pin(async move {
+            self.digest_of_one(&SettingsTarget::Mutation {
+                context: context.clone(),
+                interface: interface.clone(),
+                harnesses: harnesses.to_vec(),
+            })
+            .await
+        })
     }
 
     fn mutate<'a>(
@@ -122,7 +142,14 @@ impl Runner for ProcessRunner {
         harness: &'a AssetName,
         builds: &'a [AssetName],
     ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
-        Box::pin(self.sim_settings_of(context, harness, builds))
+        Box::pin(async move {
+            self.digest_of_one(&SettingsTarget::Simulation {
+                context: context.clone(),
+                harness: harness.clone(),
+                builds: builds.to_vec(),
+            })
+            .await
+        })
     }
 
     fn simulate<'a>(
@@ -138,7 +165,14 @@ impl Runner for ProcessRunner {
         harness: &'a AssetName,
         builds: &'a [AssetName],
     ) -> BoxFuture<'a, Result<SettingsDigest, RunnerError>> {
-        Box::pin(self.examples_settings_of(context, harness, builds))
+        Box::pin(async move {
+            self.digest_of_one(&SettingsTarget::Examples {
+                context: context.clone(),
+                harness: harness.clone(),
+                builds: builds.to_vec(),
+            })
+            .await
+        })
     }
 
     fn run_examples<'a>(
@@ -188,16 +222,59 @@ fn millis(since: Instant) -> u64 {
 }
 
 impl ProcessRunner {
-    /// The digest of the settings of a mutation run of `interface` that runs the tests `harnesses`.
-    async fn settings_of(
+    /// The digest of the settings of `target`, its programs found through `files`. The one place a settings struct
+    /// is resolved for a digest, for the single asks and for the batch.
+    async fn digest_of_target(
         &self,
-        context: &ContextName,
-        interface: &AssetName,
-        harnesses: &[AssetName],
+        files: &mut Files,
+        target: &SettingsTarget,
     ) -> Result<SettingsDigest, RunnerError> {
-        MutationSettings::resolve(&self.config, &self.root, context, interface, harnesses)
+        match target {
+            SettingsTarget::Mutation {
+                context,
+                interface,
+                harnesses,
+            } => MutationSettings::resolve(
+                files,
+                &self.config,
+                &self.root,
+                context,
+                interface,
+                harnesses,
+            )
             .await?
-            .digest()
+            .digest(),
+            SettingsTarget::Simulation {
+                context,
+                harness,
+                builds,
+            } => SimSettings::resolve(files, &self.config, &self.root, context, harness, builds)
+                .await?
+                .digest(),
+            // The Harness is named by the port but the run reads nothing of it: the examples are the request's.
+            SettingsTarget::Examples {
+                context, builds, ..
+            } => ExamplesSettings::resolve(files, &self.config, &self.root, context, builds)
+                .await?
+                .digest(),
+        }
+    }
+
+    /// The digest of the settings of the one `target`, with a memo of its own.
+    async fn digest_of_one(&self, target: &SettingsTarget) -> Result<SettingsDigest, RunnerError> {
+        self.digest_of_target(&mut Files::default(), target).await
+    }
+
+    /// The digest of the settings of each of `targets`, each beside its target, all through one memo of the files
+    /// read ([`Files`]) that ends with the call.
+    async fn digests_of(&self, targets: &[SettingsTarget]) -> SettingsSaid {
+        let mut files = Files::default();
+        let mut said = Vec::with_capacity(targets.len());
+        for target in targets {
+            let digest = self.digest_of_target(&mut files, target).await;
+            said.push((target.clone(), digest));
+        }
+        said
     }
 
     /// The Items the provider of `lang` finds in `source`.
@@ -227,6 +304,7 @@ impl ProcessRunner {
     async fn mutate_run(&self, request: &MutateRequest) -> Result<MutateReport, RunnerError> {
         let names: Vec<AssetName> = request.harnesses.iter().map(|h| h.name.clone()).collect();
         let settings = MutationSettings::resolve(
+            &mut Files::default(),
             &self.config,
             &self.root,
             &request.context,
@@ -987,7 +1065,7 @@ path = "check.txt"
     async fn digest(project: &Project) -> SettingsDigest {
         project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .settings(&context("ctx"), &asset("api"), &[asset("checks")])
             .await
             .unwrap()
     }
@@ -1109,7 +1187,7 @@ path = "check.txt"
         async fn of(runner: &ProcessRunner, names: &[&str]) -> SettingsDigest {
             let names: Vec<AssetName> = names.iter().map(|n| asset(n)).collect();
             runner
-                .settings_of(&context("ctx"), &asset("api"), &names)
+                .settings(&context("ctx"), &asset("api"), &names)
                 .await
                 .unwrap()
         }
@@ -1314,7 +1392,7 @@ path = "check.txt"
     async fn refused(table: &str) -> RunnerError {
         Project::new(table)
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .settings(&context("ctx"), &asset("api"), &[asset("checks")])
             .await
             .unwrap_err()
     }
@@ -1327,7 +1405,7 @@ path = "check.txt"
         let project = Project::new(TABLE);
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("other"), &[])
+            .settings(&context("ctx"), &asset("other"), &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1349,7 +1427,7 @@ path = "check.txt"
         let project = Project::new(TABLE);
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[asset("elsewhere")])
+            .settings(&context("ctx"), &asset("api"), &[asset("elsewhere")])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1371,7 +1449,7 @@ path = "check.txt"
         let project = Project::new(ITEMS_TABLE);
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("bare"), &[])
+            .settings(&context("ctx"), &asset("bare"), &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1392,7 +1470,7 @@ path = "check.txt"
         let project = Project::new(ITEMS_TABLE);
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[])
+            .settings(&context("ctx"), &asset("api"), &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1424,7 +1502,7 @@ path = "check.txt"
         let project = Project::new(TABLE);
         let error = project
             .runner()
-            .sim_settings_of(&context("ctx"), &asset("checks"), &[])
+            .sim_settings(&context("ctx"), &asset("checks"), &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1485,7 +1563,7 @@ path = "check.txt"
         let project = Project::new(&sim);
         let error = project
             .runner()
-            .sim_settings_of(&context("ctx"), &asset("checks"), &[])
+            .sim_settings(&context("ctx"), &asset("checks"), &[])
             .await
             .unwrap_err();
         assert_eq!(
@@ -1511,7 +1589,7 @@ path = "check.txt"
         std::fs::create_dir(project.0.join("adir")).unwrap();
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[asset("checks")])
+            .settings(&context("ctx"), &asset("api"), &[asset("checks")])
             .await
             .unwrap_err();
         let said = "the configured executable is not a regular file";
@@ -1523,6 +1601,229 @@ path = "check.txt"
             }
         );
         assert_eq!(error.to_string(), format!("the build command: {said}"));
+    }
+
+    /// [`scripted`] with a second Interface `web` of a language whose provider is the same binary as `api`'s with
+    /// another argument, and a sim and examples of the Context whose program is the host's `sh`.
+    fn shared() -> String {
+        let table = scripted().replace(
+            "text = [\"./provider.sh\"]",
+            "text = [\"./provider.sh\"]\ntext2 = [\"./provider.sh\", \"--x\"]",
+        );
+        format!(
+            "{table}[[layout]]\ncontext = \"ctx\"\ninterface = \"web\"\nlang = \"text2\"\npath = \"web.txt\"\n\
+             [measure.sim.ctx]\ninterpreter = [\"sh\"]\nprogram = [\"sh\", \"-s\"]\n\
+             [measure.examples.ctx]\nprogram = [\"sh\", \"-s\"]\n"
+        )
+    }
+
+    fn shared_project() -> Project {
+        let project = Project::new(&shared());
+        project.script("build.sh", "#!/bin/sh\ntrue\n");
+        project.script("test.sh", "#!/bin/sh\ntrue\n");
+        project
+    }
+
+    /// One target of each kind, and a second of the mutation kind.
+    fn targets() -> Vec<SettingsTarget> {
+        vec![
+            SettingsTarget::Mutation {
+                context: context("ctx"),
+                interface: asset("api"),
+                harnesses: vec![asset("checks")],
+            },
+            SettingsTarget::Mutation {
+                context: context("ctx"),
+                interface: asset("web"),
+                harnesses: vec![asset("checks")],
+            },
+            SettingsTarget::Simulation {
+                context: context("ctx"),
+                harness: asset("checks"),
+                builds: vec![asset("api"), asset("web")],
+            },
+            SettingsTarget::Examples {
+                context: context("ctx"),
+                harness: asset("ex"),
+                builds: vec![asset("api")],
+            },
+        ]
+    }
+
+    /// What the single ask of the kind of `target` says of it.
+    async fn alone(
+        runner: &ProcessRunner,
+        target: &SettingsTarget,
+    ) -> Result<SettingsDigest, RunnerError> {
+        match target {
+            SettingsTarget::Mutation {
+                context,
+                interface,
+                harnesses,
+            } => runner.settings(context, interface, harnesses).await,
+            SettingsTarget::Simulation {
+                context,
+                harness,
+                builds,
+            } => runner.sim_settings(context, harness, builds).await,
+            SettingsTarget::Examples {
+                context,
+                harness,
+                builds,
+            } => runner.examples_settings(context, harness, builds).await,
+        }
+    }
+
+    #[tokio::test]
+    async fn subjects_that_share_programs_have_each_file_hashed_once_in_one_ask() {
+        let project = shared_project();
+        let runner = project.runner();
+        let targets = targets();
+        // two Interfaces that share the build, the test and the provider's file: three files, not six
+        let mut together = Files::default();
+        for target in &targets[..2] {
+            runner
+                .digest_of_target(&mut together, target)
+                .await
+                .unwrap();
+        }
+        assert_eq!(together.read(), 3);
+        let mut apart = 0;
+        for target in &targets[..2] {
+            let mut files = Files::default();
+            runner.digest_of_target(&mut files, target).await.unwrap();
+            apart += files.read();
+        }
+        assert_eq!(apart, 6);
+        // the sim and the examples add the host's `sh` and nothing of the build they share
+        for target in &targets[2..] {
+            runner
+                .digest_of_target(&mut together, target)
+                .await
+                .unwrap();
+        }
+        assert!(
+            (4..=5).contains(&together.read()),
+            "{} files",
+            together.read()
+        );
+        // and what is said is what the single asks say, for every target
+        let said = runner.settings_of(&targets).await;
+        assert_eq!(said.len(), targets.len());
+        for (target, digest) in &said {
+            assert!(digest.is_ok(), "{target:?}: {digest:?}");
+            assert_eq!(digest, &alone(&runner, target).await, "{target:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_answers_are_paired_with_their_targets_whatever_the_order_they_are_asked_in() {
+        let project = shared_project();
+        let runner = project.runner();
+        let gone = SettingsTarget::Mutation {
+            context: context("ctx"),
+            interface: asset("elsewhere"),
+            harnesses: Vec::new(),
+        };
+        let mut forward = targets();
+        forward.insert(2, gone.clone());
+        let backward: Vec<SettingsTarget> = forward.iter().rev().cloned().collect();
+        let (first, second) = (
+            runner.settings_of(&forward).await,
+            runner.settings_of(&backward).await,
+        );
+        assert_eq!(
+            first.iter().map(|(t, _)| t).collect::<Vec<_>>(),
+            forward.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            second.iter().map(|(t, _)| t).collect::<Vec<_>>(),
+            backward.iter().collect::<Vec<_>>()
+        );
+        for (target, digest) in &first {
+            let (_, other) = second.iter().find(|(t, _)| t == target).unwrap();
+            assert_eq!(digest, other, "{target:?}");
+        }
+        // the one that cannot be read says so beside its own target, and does not take the others with it
+        let unread: Vec<_> = first.iter().filter(|(_, d)| d.is_err()).collect();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].0, gone);
+        assert!(matches!(
+            unread[0].1,
+            Err(RunnerError::NoLayout {
+                place: LayoutPlace::Interface,
+                ..
+            })
+        ));
+        // each of the others has a digest of its own
+        let digests: Vec<_> = first.iter().filter_map(|(_, d)| d.as_ref().ok()).collect();
+        assert_eq!(digests.len(), 4);
+        for (i, one) in digests.iter().enumerate() {
+            for other in &digests[i + 1..] {
+                assert_ne!(one, other);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_binary_started_by_two_commands_with_other_arguments_keeps_a_digest_for_each() {
+        let project = shared_project();
+        let runner = project.runner();
+        let mut files = Files::default();
+        let [api, web] = ["api", "web"].map(asset);
+        let harnesses = [asset("checks")];
+        let api = MutationSettings::resolve(
+            &mut files,
+            &runner.config,
+            &runner.root,
+            &context("ctx"),
+            &api,
+            &harnesses,
+        )
+        .await
+        .unwrap();
+        let web = MutationSettings::resolve(
+            &mut files,
+            &runner.config,
+            &runner.root,
+            &context("ctx"),
+            &web,
+            &harnesses,
+        )
+        .await
+        .unwrap();
+        // the file is the same and read once, with the build and the test: three files
+        assert_eq!(api.provider.executable(), web.provider.executable());
+        assert_eq!(files.read(), 3);
+        // the commands are not: each keeps its own arguments
+        assert!(api.provider.args().is_empty());
+        assert_eq!(web.provider.args(), ["--x"]);
+        assert_ne!(api.provider, web.provider);
+        // and so, in one ask, the settings of the two are two digests
+        let said = runner.settings_of(&targets()[..2]).await;
+        assert_ne!(said[0].1.as_ref().unwrap(), said[1].1.as_ref().unwrap());
+        assert_eq!(said[1].1, alone(&runner, &said[1].0).await);
+        // a table that differs from this one by the arguments alone gives another digest of the same Interface
+        async fn of_web(project: &Project) -> SettingsDigest {
+            let ask = targets()[1..2].to_vec();
+            let mut said = project.runner().settings_of(&ask).await;
+            said.remove(0).1.unwrap()
+        }
+        let before = of_web(&project).await;
+        project.table(&shared().replace("\"--x\"", "\"--y\""));
+        assert_ne!(of_web(&project).await, before);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_kept_between_two_asks() {
+        let project = shared_project();
+        let runner = project.runner();
+        let targets = &targets()[..1];
+        let before = runner.settings_of(targets).await;
+        // the file of the build changes between the asks, and the runner that was asked before sees it
+        project.script("build.sh", "#!/bin/sh\ntrue # changed\n");
+        let after = runner.settings_of(targets).await;
+        assert_ne!(before[0].1.as_ref().unwrap(), after[0].1.as_ref().unwrap());
     }
 
     #[tokio::test]
@@ -1682,7 +1983,7 @@ printf '%s' '{"protocol":1,"items":[{"key":"api","lines":[1,1]},{"key":"api::f",
         );
         let error = project
             .runner()
-            .settings_of(&context("ctx"), &asset("api"), &[])
+            .settings(&context("ctx"), &asset("api"), &[])
             .await
             .unwrap_err();
         assert!(

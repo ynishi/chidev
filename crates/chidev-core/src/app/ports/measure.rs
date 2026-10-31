@@ -259,9 +259,77 @@ pub enum RunnerError {
     Deadline(String),
 }
 
+/// One subject whose settings are asked about, with the names the single-subject asks of [`Runner`] take: what
+/// [`Runner::settings`], [`Runner::sim_settings`] and [`Runner::examples_settings`] are each asked about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsTarget {
+    /// A mutation run of `interface` of `context` that runs the tests `harnesses` ([`Runner::settings`]).
+    Mutation {
+        /// The Context's name.
+        context: ContextName,
+        /// The Interface's name.
+        interface: AssetName,
+        /// The Harnesses the run runs as tests.
+        harnesses: Vec<AssetName>,
+    },
+    /// A simulation of the sim Harness `harness` of `context` that builds `builds` ([`Runner::sim_settings`]).
+    Simulation {
+        /// The Context's name.
+        context: ContextName,
+        /// The sim Harness's name.
+        harness: AssetName,
+        /// The Interfaces it builds.
+        builds: Vec<AssetName>,
+    },
+    /// A run of the examples of the Harness `harness` of `context` that builds `builds`
+    /// ([`Runner::examples_settings`]).
+    Examples {
+        /// The Context's name.
+        context: ContextName,
+        /// The Harness of examples' name.
+        harness: AssetName,
+        /// The Interfaces it builds.
+        builds: Vec<AssetName>,
+    },
+}
+
+/// What a runner said of each [`SettingsTarget`] it was asked about, each beside the target it is of.
+pub type SettingsSaid = Vec<(SettingsTarget, Result<SettingsDigest, RunnerError>)>;
+
 /// Consumer-owned port to run a measure. An implementation copies the project, never touches the project's own
 /// files, bounds what it runs by deadlines, and removes what it made.
 pub trait Runner: fmt::Debug + Send + Sync {
+    /// The digests of the settings of many subjects at once, each paired with the target it is of (never by
+    /// position). Each digest is what the single ask of the target's kind gives for it ([`Runner::settings`],
+    /// [`Runner::sim_settings`], [`Runner::examples_settings`]); asking together lets an implementation reuse what
+    /// the targets share within the one call, and nothing outlives it. The default asks one target after another.
+    fn settings_of<'a>(&'a self, targets: &'a [SettingsTarget]) -> BoxFuture<'a, SettingsSaid> {
+        Box::pin(async move {
+            let mut said = Vec::with_capacity(targets.len());
+            for target in targets {
+                let digest = match target {
+                    SettingsTarget::Mutation {
+                        context,
+                        interface,
+                        harnesses,
+                    } => self.settings(context, interface, harnesses).await,
+                    SettingsTarget::Simulation {
+                        context,
+                        harness,
+                        builds,
+                    } => self.sim_settings(context, harness, builds).await,
+                    SettingsTarget::Examples {
+                        context,
+                        harness,
+                        builds,
+                    } => self.examples_settings(context, harness, builds).await,
+                };
+                said.push((target.clone(), digest));
+            }
+            said
+        })
+    }
+
     /// The digest of what a mutation run of `interface` of `context` that runs the tests `harnesses` reads of the
     /// configuration: a measurement made with another digest is made under other settings. It covers the settings
     /// that run reads and no others. It says what the settings are now; the stamp of a run is the digest in its
@@ -317,6 +385,15 @@ pub trait Runner: fmt::Debug + Send + Sync {
 pub struct NoRunner;
 
 impl Runner for NoRunner {
+    fn settings_of<'a>(&'a self, targets: &'a [SettingsTarget]) -> BoxFuture<'a, SettingsSaid> {
+        Box::pin(async move {
+            targets
+                .iter()
+                .map(|target| (target.clone(), Err(RunnerError::Unconfigured)))
+                .collect()
+        })
+    }
+
     fn settings<'a>(
         &'a self,
         _: &'a ContextName,
@@ -396,6 +473,29 @@ mod tests {
                 .unwrap_err(),
             RunnerError::Unconfigured
         );
+        let targets = [
+            SettingsTarget::Mutation {
+                context: context.clone(),
+                interface: name.clone(),
+                harnesses: Vec::new(),
+            },
+            SettingsTarget::Simulation {
+                context: context.clone(),
+                harness: name.clone(),
+                builds: Vec::new(),
+            },
+            SettingsTarget::Examples {
+                context: context.clone(),
+                harness: name.clone(),
+                builds: Vec::new(),
+            },
+        ];
+        let said = NoRunner.settings_of(&targets).await;
+        assert_eq!(said.len(), targets.len());
+        for (target, said) in targets.iter().zip(said) {
+            assert_eq!(said, (target.clone(), Err(RunnerError::Unconfigured)));
+        }
+        assert!(NoRunner.settings_of(&[]).await.is_empty());
         let request = ExamplesRequest {
             run: "run".to_string(),
             context,
