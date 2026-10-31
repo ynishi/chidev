@@ -2482,7 +2482,7 @@ impl<'a> From<&'a TreeStatus> for TreeOut<'a> {
                 .map(|m| TreeMovedOut {
                     context: &m.context,
                     interface: &m.interface,
-                    declared: m.declared,
+                    declared: m.declared.word(),
                 })
                 .collect(),
         }

@@ -12,10 +12,11 @@ use super::ports::{IdSource, Store};
 use super::{App, AppError};
 use crate::domain::check::Moment;
 use crate::domain::check::builtin::TREE_FAMILY;
+use crate::domain::entity::pin::Pin;
 use crate::domain::entity::project::Project;
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::{HarnessId, InterfaceId};
-use crate::domain::vo::tree::{CodeNow, CopyRead, FileNow, Observed, TreeNow};
+use crate::domain::vo::tree::{CodeNow, CopyRead, DeclaredNow, FileNow, Observed, TreeNow};
 
 /// What the checks of the `check` moment read besides the model.
 #[derive(Debug)]
@@ -69,8 +70,8 @@ pub struct TreeMoved {
     pub context: String,
     /// The Interface's name.
     pub interface: String,
-    /// What is known of the Items the copy declares: `off` when the project does not look at them.
-    pub declared: &'static str,
+    /// What is known of the Items the copy declares.
+    pub declared: DeclaredNow,
 }
 
 /// Where the copies in the working tree stand, in the result of `status`: what has no copy to look at, what has a
@@ -91,25 +92,30 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
     /// collects it, for `check`, for `status` and for the question that keeps what the checks said.
     ///
     /// The working tree is looked at only when a check that reads it runs, and then once, whatever the number of
-    /// assets: a copy is read by the port for all of them together.
-    pub(super) async fn check_inputs(&self, p: &Project) -> Result<CheckInputs, AppError> {
-        let measured = self.measured(p).await?;
-        let tree = if self.registry.runs(TREE_FAMILY, Moment::Check) {
-            Some(self.tree_now(p).await?)
-        } else {
-            None
+    /// assets: a copy is read by the port for all of them together. `pins` are the Pins of the state the checks
+    /// run on, which the caller has read already; the copies of the code are compared with them. The settings and
+    /// the copies are read at once, for neither waits on the other.
+    pub(super) async fn check_inputs(
+        &self,
+        p: &Project,
+        pins: &[Pin],
+    ) -> Result<CheckInputs, AppError> {
+        let tree = async {
+            if self.registry.runs(TREE_FAMILY, Moment::Check) {
+                self.tree_now(p, pins).await.map(Some)
+            } else {
+                Ok(None)
+            }
         };
+        let (measured, tree) = tokio::try_join!(self.measured(p), tree)?;
         Ok(CheckInputs { measured, tree })
     }
 
-    /// The copies of the placed assets of `p`: the working tree is asked about every Interface and every Harness
-    /// that holds a source, once, and each answer is set against what the model holds of the asset. An asset the
-    /// answer leaves out has no copy among the result, which reads as unplaced.
-    async fn tree_now(&self, p: &Project) -> Result<TreeNow, AppError> {
-        let pins: BTreeMap<InterfaceId, Digest> = self
-            .store
-            .pins()
-            .await?
+    /// The copies of the placed assets of `p`, whose Pins are `pins`: the working tree is asked about every
+    /// Interface and every Harness that holds a source, once, and each answer is set against what the model holds
+    /// of the asset. An asset the answer leaves out has no copy among the result, which reads as unplaced.
+    async fn tree_now(&self, p: &Project, pins: &[Pin]) -> Result<TreeNow, AppError> {
+        let pins: BTreeMap<InterfaceId, Digest> = pins
             .iter()
             .map(|pin| (pin.interface(), pin.code()))
             .collect();
@@ -200,7 +206,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
                         status.moved.push(TreeMoved {
                             context: c.name().to_string(),
                             interface: self.name_of(i.id().as_uuid()).await?.to_string(),
-                            declared: declared.word(),
+                            declared,
                         });
                     }
                     CodeNow::Missing | CodeNow::Unreadable(_) | CodeNow::Same => {}

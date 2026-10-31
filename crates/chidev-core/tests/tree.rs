@@ -395,7 +395,7 @@ async fn status_names_what_has_no_copy_what_has_no_pin_and_what_moved_and_finds_
         (
             tree_status.moved[0].context.as_str(),
             tree_status.moved[0].interface.as_str(),
-            tree_status.moved[0].declared
+            tree_status.moved[0].declared.word()
         ),
         ("core", "api", "off")
     );

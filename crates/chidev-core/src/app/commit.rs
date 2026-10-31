@@ -667,7 +667,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         at: StoreRevision,
     ) -> Result<ExternalChecked, AppError> {
         let state = self.read_state(at).await?;
-        let inputs = self.check_inputs(&state.project).await?;
+        let inputs = self.check_inputs(&state.project, &state.pins).await?;
         let view = CheckView {
             measurements: &inputs.measured.measurements,
             measure_settings: &inputs.measured.settings,

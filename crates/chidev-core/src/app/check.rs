@@ -5,6 +5,7 @@
 use super::ports::{Invocation, Outcome, StoreRevision};
 use crate::domain::check::builtin;
 use crate::domain::check::external::ExternalRule;
+use crate::domain::check::policy::Resolved;
 use thiserror::Error;
 
 use crate::domain::check::{
@@ -223,13 +224,16 @@ impl Registry {
     pub fn runs(&self, family: &str, moment: Moment) -> bool {
         self.checks.iter().any(|c| {
             let d = c.descriptor();
-            d.id.as_str().starts_with(family)
-                && d.runs_at(moment)
-                && self
-                    .policy
-                    .of(&d.id)
-                    .is_some_and(|resolved| resolved.level != Level::Off)
+            d.id.as_str().starts_with(family) && self.active(d, moment).is_some()
         })
+    }
+
+    /// The level and parameters the check `d` runs with at `moment`; none when it does not run then or is off. The
+    /// one place that decides whether a builtin check runs, for [`Registry::run`] and [`Registry::runs`].
+    fn active(&self, d: &Descriptor, moment: Moment) -> Option<&Resolved> {
+        self.policy
+            .of(&d.id)
+            .filter(|resolved| resolved.level != Level::Off && d.runs_at(moment))
     }
 
     /// Runs the checks that run at `moment` and are not off over `view`, which the store stood at `read_at` for.
@@ -237,12 +241,9 @@ impl Registry {
         let mut run = Run::default();
         for check in &self.checks {
             let d = check.descriptor();
-            let Some(resolved) = self.policy.of(&d.id) else {
+            let Some(resolved) = self.active(d, moment) else {
                 continue;
             };
-            if resolved.level == Level::Off || !d.runs_at(moment) {
-                continue;
-            }
             let found: Vec<Finding> = check
                 .run(view, &resolved.params)
                 .into_iter()

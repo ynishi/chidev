@@ -2411,7 +2411,7 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
         cruxes: &[Crux],
     ) -> Result<(Vec<Found>, Vec<RuleStanding>, CheckInputs), AppError> {
         let pins = self.store.pins().await?;
-        let inputs = self.check_inputs(p).await?;
+        let inputs = self.check_inputs(p, &pins).await?;
         let run = self.registry.run(
             Moment::Check,
             at,

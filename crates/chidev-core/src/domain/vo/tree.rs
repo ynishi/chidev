@@ -10,7 +10,6 @@
 //! Project, and what it says of an asset it holds no copy of is said in one place.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use crate::domain::vo::digest::Digest;
 use crate::domain::vo::id::{HarnessId, InterfaceId};
@@ -190,23 +189,6 @@ impl TreeNow {
     }
 }
 
-/// A file of the working tree, by its path relative to the project's root.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TreePlace(String);
-
-impl TreePlace {
-    /// The file at `path`, a path that was checked to stay under the project's root where it was read.
-    pub fn new(path: String) -> TreePlace {
-        TreePlace(path)
-    }
-}
-
-impl fmt::Display for TreePlace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,15 +293,5 @@ mod tests {
         assert_eq!(tree.harness(harness(9)), FileNow::Unplaced);
         assert_eq!(TreeNow::empty().interface(interface(1)), CodeNow::Unplaced);
         assert_eq!(TreeNow::empty(), TreeNow::default());
-    }
-
-    #[test]
-    fn a_place_is_ordered_and_written_as_its_path() {
-        let (a, b) = (
-            TreePlace::new("a/x.rs".into()),
-            TreePlace::new("b.rs".into()),
-        );
-        assert!(a < b);
-        assert_eq!(a.to_string(), "a/x.rs");
     }
 }
