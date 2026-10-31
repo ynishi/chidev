@@ -10,8 +10,9 @@ use chidev_core::app::ports::items::{FoundItem, FoundItems, ItemSource, ItemsErr
 use chidev_core::app::ports::measure::BoxFuture;
 use chidev_core::app::ports::{IdSource, Store};
 use chidev_core::app::{
-    App, AppError, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut, ItemInput,
-    ItemRef, ItemRevised, ItemsInput, KeyChanged, PutDone, PutInput, RenameInput,
+    App, AppError, AssetPutKind, CaseInput, ChangeSetInput, ContractPut, Diagnostic, InterfacePut,
+    ItemInput, ItemRef, ItemRevised, ItemsFrom, ItemsInput, KeyChanged, PutDone, PutInput,
+    RenameInput,
 };
 use chidev_core::domain::repository::ProjectRepository;
 use chidev_core::domain::vo::name::{AssetName, ContextName};
@@ -277,7 +278,7 @@ async fn a_put_that_used_the_provider_says_how_many_declarations_it_left_out_and
         .put_interface_of("core", "stock", source, found(&[]))
         .await
         .unwrap();
-    assert_eq!(done.value.left_out, Some(3));
+    assert_eq!(done.value.items, ItemsFrom::Found { left_out: 3 });
     // none left out is said too, as 0
     let mut app = open(&dir("left-out-none").join("chidev.db"), 0)
         .await
@@ -288,13 +289,13 @@ async fn a_put_that_used_the_provider_says_how_many_declarations_it_left_out_and
         .put_interface_of("core", "stock", source, found(&[]))
         .await
         .unwrap();
-    assert_eq!(done.value.left_out, Some(0));
+    assert_eq!(done.value.items, ItemsFrom::Found { left_out: 0 });
     // Items that are written were found by no provider
     let done = app
         .put_interface("core", "stock", source, &[item("fits", 1)])
         .await
         .unwrap();
-    assert_eq!(done.value.left_out, None);
+    assert_eq!(done.value.items, ItemsFrom::Written);
 }
 
 #[tokio::test]
@@ -329,16 +330,23 @@ async fn a_change_set_says_what_the_provider_left_out_of_the_interface_it_found_
         retires: Vec::new(),
     };
     let done = app.apply_change_set(&set).await.unwrap();
-    let left_out: Vec<Option<usize>> = done
+    let kinds: Vec<AssetPutKind> = done
         .value
         .puts
         .iter()
         .map(|p| match p {
-            PutDone::Asset { left_out, .. } => *left_out,
+            PutDone::Asset { kind, .. } => *kind,
             other => panic!("not an asset: {other:?}"),
         })
         .collect();
-    assert_eq!(left_out, [None, Some(2), None]);
+    assert_eq!(
+        kinds,
+        [
+            AssetPutKind::Contract,
+            AssetPutKind::Interface(ItemsFrom::Found { left_out: 2 }),
+            AssetPutKind::Interface(ItemsFrom::Written),
+        ]
+    );
 }
 
 #[tokio::test]

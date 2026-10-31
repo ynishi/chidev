@@ -8,14 +8,14 @@ use std::path::{Component, Path};
 use chidev_core::app::ports::external::ExternalExecutor;
 use chidev_core::app::ports::{IdSource, InvocationField, InvocationSeq, Store};
 use chidev_core::app::{
-    App, AppError, AssumptionInput, AwaitingOption, BasisInput, BasisStatus, BeyondInput,
-    BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput, ClauseRef,
-    ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind, CruxStatus,
-    DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput, EvidenceStatus,
-    ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut, HarnessPutContent,
-    Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsInput, MeasureSummary,
-    MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput, ParamValue,
-    PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
+    App, AppError, AssetPutKind, AssumptionInput, AwaitingOption, BasisInput, BasisStatus,
+    BeyondInput, BeyondStatus, CaseInput, ChangeRequestInput, ChangeSetInput, Checked, ClauseInput,
+    ClauseRef, ClausesPut, Cleared, ContractPut, CorrectInput, CorrectionStatus, CruxKind,
+    CruxStatus, DecisionInput, DecisionMakerInput, DecisionStatus, Diagnostic, EvidenceInput,
+    EvidenceStatus, ExampleInput, ExampleTexts, FindingInput, Found, HarnessKind, HarnessPut,
+    HarnessPutContent, Importance, Intent, InterfacePut, ItemInput, ItemRef, ItemsFrom, ItemsInput,
+    MeasureSummary, MeasurementState, ModelSlice, ModelView, MovedPart, OpenedExpect, OptionInput,
+    ParamValue, PinState, Place, PolicyLineInput, PutDone, PutInput, RaiseCruxInput, Raised,
     RecommendationInput, RecommendedStatus, Remaining, RenameInput, ReportInput, ReportedFinding,
     ResolutionInput, ResolutionStatus, RetireInput, RetiredStatus, Retirement, RuleCard,
     RuleStanding, RuleToJudge, SubjectInput, TargetInput, TargetRef, TransitionStatus, TreeAsset,
@@ -2567,9 +2567,16 @@ enum PutOut<'a> {
         name: &'a str,
         id: String,
         revision: u64,
-        /// An Interface whose items a provider found: how many declarations it left out (0 included).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        left_out: Option<usize>,
+    },
+    /// An Interface whose items a provider found.
+    FoundInterface {
+        put: &'static str,
+        context: &'a str,
+        name: &'a str,
+        id: String,
+        revision: u64,
+        /// How many declarations the provider left out (0 included).
+        left_out: usize,
     },
 }
 
@@ -2587,19 +2594,31 @@ impl<'a> From<&'a PutDone> for PutOut<'a> {
                 revision: revision.number(),
             },
             PutDone::Asset {
-                kind,
+                kind: kind @ AssetPutKind::Interface(ItemsFrom::Found { left_out }),
                 context,
                 name,
                 id,
                 revision,
-                left_out,
-            } => PutOut::Asset {
+            } => PutOut::FoundInterface {
                 put: kind.word(),
                 context: context.as_str(),
                 name: name.as_str(),
                 id: id.to_string(),
                 revision: revision.number(),
                 left_out: *left_out,
+            },
+            PutDone::Asset {
+                kind,
+                context,
+                name,
+                id,
+                revision,
+            } => PutOut::Asset {
+                put: kind.word(),
+                context: context.as_str(),
+                name: name.as_str(),
+                id: id.to_string(),
+                revision: revision.number(),
             },
         }
     }
@@ -2615,15 +2634,21 @@ struct ChangeSetOut<'a> {
 }
 
 /// The result of a put of one asset (`contract_put`, `clauses_put`, `interface_put`, `harness_put`): the asset's id
-/// and the revision it has after the put. An `interface_put` whose items a provider found also says `left_out`, how
-/// many declarations the provider found that a caller cannot name (0 included), so that leaving them out is never
-/// silent.
+/// and the revision it has after the put.
 #[derive(Debug, Serialize)]
 struct AssetPutOut<'a> {
     id: String,
     revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    left_out: Option<usize>,
+    findings: Vec<FindingOut<'a>>,
+}
+
+/// The result of an `interface_put` whose items a provider found: as [`AssetPutOut`], and `left_out`, how many
+/// declarations the provider found that a caller cannot name (0 included), so that leaving them out is never silent.
+#[derive(Debug, Serialize)]
+struct FoundInterfacePutOut<'a> {
+    id: String,
+    revision: u64,
+    left_out: usize,
     findings: Vec<FindingOut<'a>>,
 }
 
@@ -3704,7 +3729,6 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
-                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }
@@ -3721,7 +3745,6 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
-                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }
@@ -3745,12 +3768,19 @@ where
             let done = app
                 .put_interface_of(&context, &name, &source, items)
                 .await?;
-            to_value(&AssetPutOut {
-                id: done.value.id.to_string(),
-                revision: done.value.revision.number(),
-                left_out: done.value.left_out,
-                findings: findings_out(&done.findings),
-            })?
+            match done.value.items {
+                ItemsFrom::Found { left_out } => to_value(&FoundInterfacePutOut {
+                    id: done.value.id.to_string(),
+                    revision: done.value.revision.number(),
+                    left_out,
+                    findings: findings_out(&done.findings),
+                })?,
+                ItemsFrom::Written => to_value(&AssetPutOut {
+                    id: done.value.id.to_string(),
+                    revision: done.value.revision.number(),
+                    findings: findings_out(&done.findings),
+                })?,
+            }
         }
         Op::HarnessPut {
             context,
@@ -3799,7 +3829,6 @@ where
             to_value(&AssetPutOut {
                 id: done.value.id.to_string(),
                 revision: done.value.revision.number(),
-                left_out: None,
                 findings: findings_out(&done.findings),
             })?
         }

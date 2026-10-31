@@ -14,8 +14,9 @@ use super::ports::external::ExternalExecutor;
 use super::ports::items::{FoundItem, FoundItems, ItemsError};
 use super::ports::{AssetKind, IdSource, NamedAsset, Store};
 use super::{
-    App, AppError, CaseInput, Checked, ClauseInput, ClauseRef, ItemInput, Names, Put, RenameInput,
-    RetiredStatus, Retirement, context_id, context_ids, context_of, input, refuse_retired,
+    App, AppError, CaseInput, Checked, ClauseInput, ClauseRef, InterfaceDone, ItemInput, Names,
+    Put, RenameInput, RetiredStatus, Retirement, context_id, context_ids, context_of, input,
+    refuse_retired,
 };
 use crate::domain::entity::change_request::ChangeRequestError;
 use crate::domain::entity::context::Context;
@@ -259,6 +260,20 @@ impl SettingKind {
     }
 }
 
+/// Where the Items of a put Interface came from. Only an Interface has Items, so only the kind of an Interface put
+/// holds this: a put of any other asset cannot say anything of Items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemsFrom {
+    /// The Items were written in the put; no provider was asked.
+    Written,
+    /// A provider found the Items, and left out the declarations of the code that a caller cannot name.
+    Found {
+        /// How many declarations the provider found that a caller cannot name (0 included), so that leaving them out
+        /// is never silent.
+        left_out: usize,
+    },
+}
+
 /// The kind of asset that a change set put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetPutKind {
@@ -266,8 +281,8 @@ pub enum AssetPutKind {
     Contract,
     /// Clauses put into a Contract.
     Clauses,
-    /// An Interface.
-    Interface,
+    /// An Interface, and where its Items came from.
+    Interface(ItemsFrom),
     /// A Harness.
     Harness,
 }
@@ -278,7 +293,7 @@ impl AssetPutKind {
         match self {
             AssetPutKind::Contract => "contract",
             AssetPutKind::Clauses => "clauses",
-            AssetPutKind::Interface => "interface",
+            AssetPutKind::Interface(_) => "interface",
             AssetPutKind::Harness => "harness",
         }
     }
@@ -315,9 +330,6 @@ pub enum PutDone {
         id: Uuid,
         /// The asset's revision after the change.
         revision: Revision,
-        /// For an Interface put with its Items left to a provider: how many declarations the provider found that a
-        /// caller cannot name and so left out (0 included). None for any other put.
-        left_out: Option<usize>,
     },
 }
 
@@ -582,7 +594,14 @@ impl<S: Store, G: IdSource, E: ExternalExecutor> App<S, G, E> {
             .puts
             .iter()
             .enumerate()
-            .map(|(n, put)| put_done(put, found.get(&n).map(|f| f.left_out), &p, &plan, &after))
+            .map(|(n, put)| {
+                let items = found
+                    .get(&n)
+                    .map_or(ItemsFrom::Written, |f| ItemsFrom::Found {
+                        left_out: f.left_out,
+                    });
+                put_done(put, items, &p, &plan, &after)
+            })
             .collect::<Result<Vec<PutDone>, AppError>>()?;
         // The change request the set is applied for gains the work in the state after, which is how an edit can
         // introduce a finding about its request.
@@ -1524,10 +1543,10 @@ fn target_of(kind: AssetKind, id: Uuid) -> Target {
 }
 
 /// What a put came to, from the plan and the Project after the change (`before` resolves the Context's name).
-/// `left_out` is what the provider left out of the Interface this put gave no Items, when it is that put.
+/// `items` is where the Items of the Interface came from, and is read by the put of an Interface only.
 fn put_done(
     put: &PutInput,
-    left_out: Option<usize>,
+    items: ItemsFrom,
     before: &Project,
     plan: &Plan,
     after: &Project,
@@ -1575,21 +1594,15 @@ fn put_done(
             plan,
             after,
         ),
-        PutInput::Interface(i) => {
-            let mut done = asset_put_done(
-                AssetPutKind::Interface,
-                AssetKind::Interface,
-                &i.context,
-                &i.name,
-                before,
-                plan,
-                after,
-            )?;
-            if let PutDone::Asset { left_out: slot, .. } = &mut done {
-                *slot = left_out;
-            }
-            Ok(done)
-        }
+        PutInput::Interface(i) => asset_put_done(
+            AssetPutKind::Interface(items),
+            AssetKind::Interface,
+            &i.context,
+            &i.name,
+            before,
+            plan,
+            after,
+        ),
         PutInput::Harness(h) => asset_put_done(
             AssetPutKind::Harness,
             AssetKind::Harness,
@@ -1645,7 +1658,6 @@ fn asset_put_done(
         name: name.to_string(),
         id,
         revision,
-        left_out: None,
     })
 }
 
@@ -1668,19 +1680,42 @@ pub(super) fn only_put<I>(
         .into_iter()
         .next()
         .and_then(|d| match d {
-            PutDone::Asset {
-                id,
-                revision,
-                left_out,
-                ..
-            } => Some(Put {
+            PutDone::Asset { id, revision, .. } => Some(Put {
                 id: make(id),
                 revision,
-                left_out,
             }),
             _ => None,
         })
         .ok_or_else(|| input("the change set made no asset"))?;
+    Ok(Checked {
+        value: put,
+        findings,
+    })
+}
+
+/// The one Interface a change set of one put made, and where its Items came from.
+pub(super) fn only_interface(
+    done: Checked<ChangeSetDone>,
+) -> Result<Checked<InterfaceDone>, AppError> {
+    let Checked { value, findings } = done;
+    let put = value
+        .puts
+        .into_iter()
+        .next()
+        .and_then(|d| match d {
+            PutDone::Asset {
+                kind: AssetPutKind::Interface(items),
+                id,
+                revision,
+                ..
+            } => Some(InterfaceDone {
+                id: InterfaceId::from_uuid(id),
+                revision,
+                items,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| input("the change set made no interface"))?;
     Ok(Checked {
         value: put,
         findings,
